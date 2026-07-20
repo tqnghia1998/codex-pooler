@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.5.1](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.5.0...codex-pooler-v0.5.1) (2026-07-20)
+
+
+### Features
+
+* **admin:** add pool model serving controls ([08eb716](https://github.com/icoretech/codex-pooler/commit/08eb716541ab2c3cba0c0647f9b32c88706bc122))
+* **admin:** compact the model serving panel into a scannable table ([0305902](https://github.com/icoretech/codex-pooler/commit/03059023a34b5da94f573a8496ac29e070b9ab23))
+* **admin:** ground the pool details step in lifecycle semantics ([5c2bec0](https://github.com/icoretech/codex-pooler/commit/5c2bec04b991aa8251d4ce15ca5f08ee3cb8b5d8))
+* **admin:** let pool assignment lists use the available dialog height ([7374d17](https://github.com/icoretech/codex-pooler/commit/7374d174e9fd91de70bf3f88e9be4c1bbf2cb110))
+* **admin:** mark selected assignment cards and inline the count chip ([09ec3e1](https://github.com/icoretech/codex-pooler/commit/09ec3e11a788f68d0494bbb3a7bbf0dcdb1f0a5d))
+* **admin:** merge pool step headings into the dialog header ([2cf7a60](https://github.com/icoretech/codex-pooler/commit/2cf7a6015538f9df18336fbe461ce5912a764319))
+* **admin:** show pool routing strategies as explained cards ([6b0277e](https://github.com/icoretech/codex-pooler/commit/6b0277efe2140f7098b5aeff662b08f7eddc5bdd))
+* **gateway:** apply pool model serving modes ([442ed39](https://github.com/icoretech/codex-pooler/commit/442ed39b20001e53199ef27d862e54d3555e5905))
+* **pools:** persist per-model serving modes ([6364692](https://github.com/icoretech/codex-pooler/commit/6364692c6399025973d82d115553f449f10414f4))
+
+
+### Bug Fixes
+
+* **admin:** sort model serving rows newest-first ([3ed523b](https://github.com/icoretech/codex-pooler/commit/3ed523b0742e7ad91c839d8a43d3bddee83e6cf9))
+
 ## [0.5.0](https://github.com/icoretech/codex-pooler/compare/codex-pooler-v0.4.33...codex-pooler-v0.5.0) (2026-07-19)
 
 
