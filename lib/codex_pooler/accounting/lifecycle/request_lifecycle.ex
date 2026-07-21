@@ -569,7 +569,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   end
 
   defp accumulate_spend_cap_credits!(
-         %Attempt{upstream_identity_id: upstream_identity_id, started_at: started_at},
+         %Attempt{
+           upstream_identity_id: upstream_identity_id,
+           pool_upstream_assignment_id: assignment_id,
+           started_at: started_at
+         },
          %LedgerEntry{} = settlement,
          previous_settlement,
          settlement_status
@@ -581,21 +585,33 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
     if is_nil(started_at) or Decimal.compare(delta, Decimal.new(0)) == :eq do
       :ok
     else
-      Repo.update_all(
-        from(identity in UpstreamIdentity,
-          where:
-            identity.id == ^upstream_identity_id and
-              identity.spend_cap_credits > 0 and not is_nil(identity.cap_started_at) and
-              identity.cap_started_at <= ^started_at,
-          update: [
-            set: [
-              spent_credits:
-                fragment("GREATEST(COALESCE(?, 0) + ?, 0)", identity.spent_credits, ^delta)
+      {updated_count, _rows} =
+        Repo.update_all(
+          from(identity in UpstreamIdentity,
+            where:
+              identity.id == ^upstream_identity_id and
+                identity.spend_cap_credits > 0 and not is_nil(identity.cap_started_at) and
+                identity.cap_started_at <= ^started_at,
+            update: [
+              set: [
+                spent_credits:
+                  fragment("GREATEST(COALESCE(?, 0) + ?, 0)", identity.spent_credits, ^delta)
+              ]
             ]
-          ]
-        ),
-        []
-      )
+          ),
+          []
+        )
+
+      if updated_count > 0 do
+        Events.broadcast_upstreams_after_commit(
+          settlement.pool_id,
+          "upstream_spend_cap_updated",
+          %{
+            pool_upstream_assignment_id: assignment_id,
+            upstream_identity_id: upstream_identity_id
+          }
+        )
+      end
 
       :ok
     end
