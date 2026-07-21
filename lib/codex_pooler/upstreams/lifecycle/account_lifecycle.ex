@@ -13,7 +13,6 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
   alias CodexPooler.Repo
 
   alias CodexPooler.Upstreams.Lifecycle.{AccountAudit, CredentialFencing}
-  alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.Secrets
 
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
@@ -112,28 +111,9 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
     end
   end
 
-  @spec validate_spend_cap_for_scope(Scope.t(), identity_ref(), map()) ::
-          :ok | {:error, lifecycle_error()}
-  def validate_spend_cap_for_scope(%Scope{} = scope, identity_or_id, attrs) when is_map(attrs) do
-    with {:ok, identity} <- authorize(scope, identity_or_id) do
-      validate_spend_cap(
-        identity,
-        spend_cap_attr(atomize_attrs(attrs), identity.spend_cap_credits || 0)
-      )
-    end
-  end
-
-  def validate_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
-    do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
-
   @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   def update_spend_cap_for_scope(%Scope{} = scope, identity_or_id, attrs) when is_map(attrs) do
-    with {:ok, identity} <- authorize(scope, identity_or_id),
-         :ok <-
-           validate_spend_cap(
-             identity,
-             spend_cap_attr(atomize_attrs(attrs), identity.spend_cap_credits || 0)
-           ) do
+    with {:ok, identity} <- authorize(scope, identity_or_id) do
       update_spend_cap(identity, attrs)
       |> AccountAudit.record_change(scope, "upstream_account.spend_cap_update",
         previous_status: identity.status,
@@ -144,39 +124,6 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
 
   def update_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
-
-  defp validate_spend_cap(_identity, 0), do: :ok
-
-  defp validate_spend_cap(identity, cap) when is_integer(cap) and cap > 0 do
-    remaining =
-      identity
-      |> Windows.list_quota_windows()
-      |> Enum.find(&(&1.quota_key == "spend_control"))
-      |> monthly_quota_remaining()
-
-    if match?(%Decimal{}, remaining) and Decimal.compare(Decimal.new(cap), remaining) == :lt do
-      :ok
-    else
-      {:error,
-       lifecycle_error(
-         :spend_cap_exceeds_monthly_quota,
-         "spending cap must be less than monthly quota remaining"
-       )}
-    end
-  end
-
-  defp validate_spend_cap(_identity, _cap), do: :ok
-
-  defp monthly_quota_remaining(%{metadata: %{"spend_cap" => cap, "spend_used" => used}}) do
-    with {cap, ""} <- Decimal.parse(to_string(cap)),
-         {used, ""} <- Decimal.parse(to_string(used)) do
-      Decimal.max(Decimal.sub(cap, used), Decimal.new(0))
-    else
-      _invalid -> nil
-    end
-  end
-
-  defp monthly_quota_remaining(_window), do: nil
 
   @spec pause_account_at_spend_threshold(Ecto.UUID.t()) :: lifecycle_result() | :ok
   def pause_account_at_spend_threshold(identity_id) when is_binary(identity_id) do

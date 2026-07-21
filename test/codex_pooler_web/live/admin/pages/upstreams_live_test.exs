@@ -3891,7 +3891,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute Repo.exists?(from job in Oban.Job, where: job.state in ["available", "scheduled"])
   end
 
-  test "mass sets spending caps for all accounts and enforces monthly quota remaining", %{
+  test "mass sets spending caps for all accounts regardless of monthly quota remaining", %{
     conn: conn,
     scope: scope
   } do
@@ -3912,18 +3912,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     })
     |> render_submit()
 
-    assert render(view) =~ "must be less than every matching account's monthly quota remaining"
-    assert Repo.reload!(first).spend_cap_credits == 0
-    assert Repo.reload!(second).spend_cap_credits == 0
-
-    view
-    |> form("#spend-cap-form", %{
-      "spend_cap" => %{"target" => "all", "spend_cap_credits" => "20"}
-    })
-    |> render_submit()
-
-    assert Repo.reload!(first).spend_cap_credits == 500
-    assert Repo.reload!(second).spend_cap_credits == 500
+    assert Repo.reload!(first).spend_cap_credits == 750
+    assert Repo.reload!(second).spend_cap_credits == 750
   end
 
   test "mass spending-cap targets reached and uncapped accounts", %{conn: conn, scope: scope} do

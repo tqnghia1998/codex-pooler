@@ -122,59 +122,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
     end
   end
 
-  defp validated_changeset(socket, identity, params) do
-    changeset = changeset(identity, credit_params(params), :validate)
-
-    if changeset.valid? do
-      attrs = %{spend_cap_credits: Ecto.Changeset.get_field(changeset, :spend_cap_credits)}
-
-      case Upstreams.validate_spend_cap_for_scope(
-             socket.assigns.current_scope,
-             identity.id,
-             attrs
-           ) do
-        :ok ->
-          changeset
-
-        {:error, reason} ->
-          Ecto.Changeset.add_error(changeset, :spend_cap_credits, WorkflowError.message(reason))
-      end
-    else
-      changeset
-    end
-  end
+  defp validated_changeset(_socket, identity, params),
+    do: changeset(identity, credit_params(params), :validate)
 
   defp bulk_changeset(socket, params) do
-    accounts = bulk_accounts(socket, params["target"])
     changeset = raw_bulk_changeset(params, :validate)
 
-    cond do
-      accounts == [] ->
-        Ecto.Changeset.add_error(changeset, :spend_cap_credits, "no accounts match this target")
-
-      not changeset.valid? ->
-        changeset
-
-      true ->
-        attrs = %{spend_cap_credits: Ecto.Changeset.get_field(changeset, :spend_cap_credits)}
-
-        case Enum.find(accounts, fn identity ->
-               Upstreams.validate_spend_cap_for_scope(
-                 socket.assigns.current_scope,
-                 identity.id,
-                 attrs
-               ) != :ok
-             end) do
-          nil ->
-            changeset
-
-          _identity ->
-            Ecto.Changeset.add_error(
-              changeset,
-              :spend_cap_credits,
-              "must be less than every matching account's monthly quota remaining"
-            )
-        end
+    if bulk_accounts(socket, params["target"]) == [] do
+      Ecto.Changeset.add_error(changeset, :spend_cap_credits, "no accounts match this target")
+    else
+      changeset
     end
   end
 

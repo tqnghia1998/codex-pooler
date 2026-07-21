@@ -160,10 +160,6 @@ defmodule CodexPooler.Upstreams do
   @spec rename_account_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate rename_account_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
 
-  @spec validate_spend_cap_for_scope(Scope.t(), identity_ref(), map()) ::
-          :ok | {:error, lifecycle_error()}
-  defdelegate validate_spend_cap_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
-
   @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate update_spend_cap_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
 

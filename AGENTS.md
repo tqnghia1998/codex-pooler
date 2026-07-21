@@ -75,7 +75,7 @@ Migrations:
 
 The second migration is intentionally defensive for databases with divergent migration history; do not casually remove it.
 
-Scoped operations are `Upstreams.validate_spend_cap_for_scope/3` and `Upstreams.update_spend_cap_for_scope/3`. Setting a cap resets `spent_credits` and starts a new period. A positive cap must be strictly below provider-reported remaining `spend_control` quota; `0` is always allowed.
+The scoped operation is `Upstreams.update_spend_cap_for_scope/3`. Setting a cap resets `spent_credits` and starts a new period. Spending caps are not constrained by provider-reported remaining `spend_control` quota; `0` means uncapped.
 
 Provider parsing treats `payload["spend_control"]["individual_limit"]` as a dedicated `spend_control` quota window. Keep `CodexParsers` and `UsageProbe` aligned if this payload changes. This fork replaced upstream's generic `additional_rate_limits` parsing with explicit spend-control evidence, so future upstream parser changes need manual reconciliation.
 

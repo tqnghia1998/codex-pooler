@@ -1146,8 +1146,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
             {if @account[:bulk], do: "Set spending caps", else: "Spend cap"}
           </h2>
           <p class="mt-2 text-sm leading-6 text-base-content/70">
-            Set the maximum spend in USD before routing is excluded. A positive cap must be less
-            than the monthly quota remaining. Set to 0 for unlimited. Saving resets cap usage.
+            Set the maximum spend in USD before routing is excluded. Set to 0 for unlimited.
+            Saving resets cap usage.
           </p>
         </div>
 
