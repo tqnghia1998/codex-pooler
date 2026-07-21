@@ -46,6 +46,9 @@ defmodule CodexPooler.Upstreams.Schemas.UpstreamIdentity do
     field :saved_reset_auto_redeem_quota_threshold_percent, :integer, default: 95
     field :saved_reset_first_seen_ledger, :map, default: %{"version" => 1, "entries" => []}
 
+    field :spend_cap_credits, :integer, default: 0
+    field :spent_credits, :decimal, default: 0
+    field :cap_started_at, :utc_datetime_usec
     field :disabled_at, :utc_datetime_usec
     field :created_by_user_id, :binary_id
     field :created_at, :utc_datetime_usec
@@ -78,6 +81,9 @@ defmodule CodexPooler.Upstreams.Schemas.UpstreamIdentity do
       :saved_reset_auto_redeem_keep_credits,
       :saved_reset_auto_redeem_trigger_mode,
       :saved_reset_auto_redeem_quota_threshold_percent,
+      :spend_cap_credits,
+      :spent_credits,
+      :cap_started_at,
       :disabled_at,
       :created_by_user_id,
       :created_at,
@@ -113,6 +119,8 @@ defmodule CodexPooler.Upstreams.Schemas.UpstreamIdentity do
       greater_than_or_equal_to: 1,
       less_than_or_equal_to: 100
     )
+    |> validate_number(:spend_cap_credits, greater_than_or_equal_to: 0)
+    |> validate_number(:spent_credits, greater_than_or_equal_to: 0)
     |> validate_inclusion(:status, @statuses)
     |> validate_inclusion(:onboarding_method, @onboarding_methods)
     |> validate_format(:plan_family, @plan_family_format)

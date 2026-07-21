@@ -153,6 +153,58 @@ defmodule CodexPooler.AccountingTest do
              ] == "[REDACTED]"
     end
 
+    test "finalized settlements accumulate spend-cap credits exactly once" do
+      setup = accounting_setup()
+
+      started_at =
+        DateTime.utc_now() |> DateTime.add(-5, :second) |> DateTime.truncate(:microsecond)
+
+      setup.identity
+      |> Ecto.Changeset.change(%{
+        spend_cap_credits: 250,
+        spent_credits: Decimal.new(0),
+        cap_started_at: DateTime.add(started_at, -5, :second)
+      })
+      |> Repo.update!()
+
+      assert {:ok, reserved} =
+               Accounting.reserve(
+                 setup.auth,
+                 setup.model,
+                 %{
+                   "model" => setup.model.exposed_model_id,
+                   "input" => "meter spend cap",
+                   "max_output_tokens" => 5
+                 },
+                 %{
+                   endpoint: "/backend-api/codex/responses",
+                   transport: "http_json",
+                   correlation_id: "corr-spend-cap-metering"
+                 }
+               )
+
+      assert {:ok, attempt} =
+               Accounting.create_attempt(reserved.request, setup.assignment, %{now: started_at})
+
+      usage = %{status: "usage_known", input_tokens: 7, output_tokens: 3, total_tokens: 10}
+
+      assert {:ok, finalized} =
+               Accounting.finalize_success(reserved.request, attempt, usage, %{
+                 response_status_code: 200
+               })
+
+      identity = Repo.get!(CodexPooler.Upstreams.Schemas.UpstreamIdentity, setup.identity.id)
+      assert Decimal.equal?(identity.spent_credits, Decimal.new("0.00325"))
+
+      assert {:ok, _finalized_again} =
+               Accounting.finalize_success(finalized.request, finalized.attempt, usage, %{
+                 response_status_code: 200
+               })
+
+      identity = Repo.get!(CodexPooler.Upstreams.Schemas.UpstreamIdentity, setup.identity.id)
+      assert Decimal.equal?(identity.spent_credits, Decimal.new("0.00325"))
+    end
+
     test "accumulates request metadata in memory before explicit persistence" do
       setup = accounting_setup()
 

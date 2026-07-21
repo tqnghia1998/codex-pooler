@@ -6,8 +6,8 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Routing.{CircuitState, ModelMetadata, SessionContinuity}
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
-  alias CodexPooler.Gateway.Routing.{CircuitState, ModelMetadata}
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
@@ -339,6 +339,155 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
 
   @spec quota_unavailable_error(FilterInput.t(), [map()], boolean()) :: {:error, gateway_error()}
   defdelegate quota_unavailable_error(input, exclusions, refresh_attempted?), to: Quota
+
+  @spec filter_spend_cap_eligible_candidates(FilterInput.t()) ::
+          {:ok, [candidate()]} | {:error, gateway_error()}
+  def filter_spend_cap_eligible_candidates(%FilterInput{} = input) do
+    %{candidates: candidates, request_options: request_options, model: model} = input
+    session_assignment_id = session_assignment_id(request_options)
+    hard_pin_metadata = SessionContinuity.hard_pin_metadata(request_options, model)
+
+    {eligible, exclusions} =
+      Enum.reduce(candidates, {[], []}, fn {assignment, identity} = candidate,
+                                           {eligible, excluded} ->
+        case spend_cap_reason(identity, assignment.id == session_assignment_id) do
+          nil ->
+            {[candidate | eligible], excluded}
+
+          reason_code ->
+            {eligible,
+             [
+               %{
+                 pool_upstream_assignment_id: assignment.id,
+                 upstream_identity_id: identity.id,
+                 account_label: spend_cap_account_label(identity),
+                 reasons: [
+                   %{
+                     "code" => reason_code,
+                     "cap_credits" => identity.spend_cap_credits
+                   }
+                 ]
+               }
+               | excluded
+             ]}
+        end
+      end)
+
+    case Enum.reverse(eligible) do
+      [] ->
+        spend_cap_unavailable_error(
+          Enum.reverse(exclusions),
+          hard_pin_metadata,
+          session_assignment_id
+        )
+
+      eligible ->
+        {:ok, eligible}
+    end
+  end
+
+  defp spend_cap_reason(%UpstreamIdentity{} = identity, continuing_session?) do
+    cap = identity.spend_cap_credits || 0
+
+    if is_integer(cap) and cap > 0 do
+      spent = identity_spend_credits(identity)
+      cap_decimal = Decimal.new(cap)
+      reserve = Decimal.mult(cap_decimal, Decimal.new("0.8"))
+
+      cond do
+        Decimal.compare(spent, cap_decimal) != :lt -> "spend_cap_reached"
+        continuing_session? -> nil
+        Decimal.compare(spent, reserve) != :lt -> "spend_cap_reserved"
+        true -> nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp session_assignment_id(%RequestOptions{
+         continuity: %{codex_session: %{pool_upstream_assignment_id: assignment_id}}
+       })
+       when is_binary(assignment_id),
+       do: assignment_id
+
+  defp session_assignment_id(%RequestOptions{}), do: nil
+
+  defp spend_cap_unavailable_error(exclusions, nil, _session_assignment_id) do
+    {:error,
+     error(
+       503,
+       "no_eligible_backend",
+       "no healthy eligible backend is currently available — upstream accounts reached their spending limit or session reserve",
+       "model",
+       %{candidate_exclusions: exclusions}
+     )}
+  end
+
+  defp spend_cap_unavailable_error(exclusions, hard_pin_metadata, session_assignment_id) do
+    case Enum.find(exclusions, fn exclusion ->
+           exclusion.pool_upstream_assignment_id == session_assignment_id and
+             Enum.any?(exclusion.reasons, &(&1["code"] == "spend_cap_reached"))
+         end) do
+      %{upstream_identity_id: upstream_identity_id, account_label: account_label} ->
+        {:error,
+         Contracts.pinned_continuation_spend_cap_reached_error(
+           account_label,
+           Map.merge(hard_pin_metadata, %{
+             "denial_family" => "pinned_continuation_spend_cap_reached",
+             "continuity_family" => "pinned_codex_session",
+             "internal_reason" => "spend_cap_reached",
+             "pool_upstream_assignment_id" => session_assignment_id,
+             "upstream_identity_id" => upstream_identity_id
+           })
+         )
+         |> Map.put(:candidate_exclusions, exclusions)}
+
+      _missing ->
+        spend_cap_unavailable_error(exclusions, nil, session_assignment_id)
+    end
+  end
+
+  defp spend_cap_account_label(%UpstreamIdentity{account_label: label}) when is_binary(label) do
+    label = String.trim(label)
+    if label == "", do: "Upstream account", else: label
+  end
+
+  defp spend_cap_account_label(_identity), do: "Upstream account"
+
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: %Decimal{} = spent}), do: spent
+
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_integer(spent),
+    do: Decimal.new(spent)
+
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_float(spent),
+    do: Decimal.from_float(spent)
+
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_binary(spent) do
+    case Decimal.parse(String.trim(spent)) do
+      {value, ""} -> value
+      _invalid -> Decimal.new(0)
+    end
+  end
+
+  defp identity_spend_credits(%UpstreamIdentity{metadata: metadata}) when is_map(metadata) do
+    metadata |> Map.get("spent_credits", 0) |> spend_cap_spent()
+  end
+
+  defp identity_spend_credits(_identity), do: Decimal.new(0)
+
+  defp spend_cap_spent(%Decimal{} = spent), do: spent
+  defp spend_cap_spent(spent) when is_integer(spent), do: Decimal.new(spent)
+  defp spend_cap_spent(spent) when is_float(spent), do: Decimal.from_float(spent)
+
+  defp spend_cap_spent(spent) when is_binary(spent) do
+    case Decimal.parse(String.trim(spent)) do
+      {value, ""} -> value
+      _invalid -> Decimal.new(0)
+    end
+  end
+
+  defp spend_cap_spent(_spent), do: Decimal.new(0)
 
   @spec filter_circuit_eligible_candidates(FilterInput.t()) ::
           {:ok, [candidate()]} | {:error, gateway_error()}

@@ -63,6 +63,28 @@ defmodule CodexPooler.Gateway.ContractsTest do
     end
   end
 
+  test "pinned spend-cap errors are retryable and do not require restart recovery" do
+    error =
+      Contracts.pinned_continuation_spend_cap_reached_error("Team Codex 01", %{
+        "pin_mode" => "hard",
+        "pin_reason" => "previous_response_id",
+        "internal_reason" => "spend_cap_reached",
+        "pool_upstream_assignment_id" => "assignment-1",
+        "upstream_identity_id" => "identity-1"
+      })
+
+    assert error.status == 503
+    assert error.code == "pinned_continuation_spend_cap_reached"
+    assert error.retryable == true
+    assert error.requires_new_upstream_session == false
+    assert error.message =~ "Team Codex 01"
+    refute error.message =~ "@"
+    assert error.continuity_denial["internal_reason"] == "spend_cap_reached"
+    assert Contracts.recovery_response_headers(error) == []
+    assert Contracts.recovery_error_fields(error) == %{}
+    refute Contracts.hard_pinned_continuation_recovery?(error)
+  end
+
   test "recovery fields are limited to hard-pinned continuation recovery errors" do
     for error <- [
           %{status: 503, code: "session_assignment_unavailable", message: "session unavailable"},

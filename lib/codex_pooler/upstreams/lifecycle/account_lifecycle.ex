@@ -82,6 +82,47 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
   def rename_account_for_scope(_scope, _identity_or_id, _attrs),
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
 
+  @spec update_spend_cap(identity_ref(), map()) :: lifecycle_result()
+  defp update_spend_cap(identity_or_id, attrs) do
+    case normalize_identity(identity_or_id) do
+      %UpstreamIdentity{} = identity ->
+        attrs = atomize_attrs(attrs)
+        timestamp = Map.get(attrs, :updated_at, now())
+        cap = spend_cap_attr(attrs, identity.spend_cap_credits || 0)
+
+        identity
+        |> UpstreamIdentity.changeset(%{
+          spend_cap_credits: cap,
+          spent_credits: Decimal.new(0),
+          cap_started_at: if(cap > 0, do: timestamp, else: nil),
+          updated_at: timestamp
+        })
+        |> Repo.update()
+        |> case do
+          {:ok, updated_identity} -> {:ok, lifecycle_result(:spend_cap_updated, updated_identity)}
+          {:error, changeset} -> {:error, changeset}
+        end
+        |> tap_upstream_change("upstream_account_spend_cap_updated")
+
+      nil ->
+        {:error, lifecycle_error(:upstream_identity_not_found, "upstream identity was not found")}
+    end
+  end
+
+  @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
+  def update_spend_cap_for_scope(%Scope{} = scope, identity_or_id, attrs) when is_map(attrs) do
+    with {:ok, identity} <- authorize(scope, identity_or_id) do
+      update_spend_cap(identity, attrs)
+      |> AccountAudit.record_change(scope, "upstream_account.spend_cap_update",
+        previous_status: identity.status,
+        previous_spend_cap_credits: identity.spend_cap_credits
+      )
+    end
+  end
+
+  def update_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
+    do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
+
   @spec pause_account(identity_ref(), map()) :: lifecycle_result()
   defp pause_account(identity_or_id, attrs) do
     case normalize_identity(identity_or_id) do
@@ -524,6 +565,23 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
       {:ok, nil} -> ""
       {:ok, value} -> value
       :error -> fallback
+    end
+  end
+
+  defp spend_cap_attr(attrs, fallback) do
+    case Map.fetch(attrs, :spend_cap_credits) do
+      {:ok, value} when is_integer(value) ->
+        value
+
+      {:ok, _value} ->
+        fallback
+
+      :error ->
+        case Map.fetch(attrs, "spend_cap_credits") do
+          {:ok, value} when is_integer(value) -> value
+          {:ok, _value} -> fallback
+          :error -> fallback
+        end
     end
   end
 

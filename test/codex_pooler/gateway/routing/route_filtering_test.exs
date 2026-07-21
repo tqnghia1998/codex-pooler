@@ -95,6 +95,51 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       assert filtered_options.routing.quota_decision == nil
     end
 
+    test "shifts new work away from accounts at the spend-cap reserve" do
+      %{pool: pool, api_key: api_key} = active_api_key_fixture()
+      reserved = upstream_assignment_fixture(pool)
+      available = upstream_assignment_fixture(pool)
+
+      model =
+        model_fixture(pool, %{
+          exposed_model_id: "gpt-route-filtering-spend-cap-#{System.unique_integer([:positive])}",
+          metadata: %{
+            "source_assignment_ids" => [reserved.assignment.id, available.assignment.id]
+          }
+        })
+
+      reserved_identity =
+        reserved.identity
+        |> Ecto.Changeset.change(%{spend_cap_credits: 100, spent_credits: Decimal.new("80")})
+        |> Repo.update!()
+
+      available_identity =
+        available.identity
+        |> Ecto.Changeset.change(%{spend_cap_credits: 100, spent_credits: Decimal.new("25")})
+        |> Repo.update!()
+
+      payload = %{"model" => model.exposed_model_id, "input" => "route filtering"}
+      request_options = RequestOptions.build(%{}, "/backend-api/codex/responses", payload)
+
+      filter_input =
+        FilterInput.new(%{
+          auth: %{pool: pool, api_key: api_key},
+          model: model,
+          endpoint: "/backend-api/codex/responses",
+          payload: payload,
+          request_options: request_options,
+          candidates: [
+            {reserved.assignment, reserved_identity},
+            {available.assignment, available_identity}
+          ]
+        })
+
+      assert {:ok, [candidate], _request_options} =
+               RouteFiltering.filter_candidates(filter_input, quota_mode: :optional)
+
+      assert elem(candidate, 0).id == available.assignment.id
+    end
+
     test "keeps missing quota evidence blocking when quota is required" do
       %{pool: pool, api_key: api_key} = active_api_key_fixture()
       upstream = upstream_assignment_fixture(pool)

@@ -11,6 +11,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
 
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Persistence.CodexSession
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Routing.CandidateEligibility.FilterInput
   alias CodexPooler.Gateway.Routing.{RoutePlanInput, RoutingSelection}
@@ -468,6 +469,81 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
                  [],
                  []
                )
+    end
+  end
+
+  describe "spend cap eligibility" do
+    test "keeps the assigned session candidate through the 80 percent reserve" do
+      reserved_identity =
+        upstream_identity("reserved-identity")
+        |> Map.put(:account_label, "Reserved Codex")
+        |> Map.put(:spend_cap_credits, 100)
+        |> Map.put(:spent_credits, Decimal.new("80"))
+
+      fresh_identity =
+        upstream_identity("fresh-identity")
+        |> Map.put(:account_label, "Fresh Codex")
+        |> Map.put(:spend_cap_credits, 100)
+        |> Map.put(:spent_credits, Decimal.new("25"))
+
+      reserved_candidate =
+        {assignment("reserved-assignment", reserved_identity), reserved_identity}
+
+      fresh_candidate = {assignment("fresh-assignment", fresh_identity), fresh_identity}
+
+      assert {:ok, [^fresh_candidate]} =
+               CandidateEligibility.filter_spend_cap_eligible_candidates(
+                 filter_input(quota_model(), %{"model" => "sample-model"}, request_options(), [
+                   reserved_candidate,
+                   fresh_candidate
+                 ])
+               )
+
+      request_options =
+        request_options()
+        |> RequestOptions.put_continuity(
+          codex_session: %CodexSession{pool_upstream_assignment_id: "reserved-assignment"}
+        )
+
+      assert {:ok, candidates} =
+               CandidateEligibility.filter_spend_cap_eligible_candidates(
+                 filter_input(quota_model(), %{"model" => "sample-model"}, request_options, [
+                   reserved_candidate,
+                   fresh_candidate
+                 ])
+               )
+
+      assert candidate_ids(candidates) == ["reserved-assignment", "fresh-assignment"]
+    end
+
+    test "hard-pinned capped session names only the account label in the error" do
+      capped_identity =
+        upstream_identity("capped-identity")
+        |> Map.put(:account_label, "Team Codex 01")
+        |> Map.put(:spend_cap_credits, 100)
+        |> Map.put(:spent_credits, Decimal.new("100"))
+
+      capped_candidate = {assignment("capped-assignment", capped_identity), capped_identity}
+
+      request_options =
+        request_options()
+        |> RequestOptions.put_continuity(
+          previous_response_id: "resp_123",
+          codex_session: %CodexSession{pool_upstream_assignment_id: "capped-assignment"}
+        )
+
+      assert {:error, error} =
+               CandidateEligibility.filter_spend_cap_eligible_candidates(
+                 filter_input(quota_model(), %{"model" => "sample-model"}, request_options, [
+                   capped_candidate
+                 ])
+               )
+
+      assert error.code == "pinned_continuation_spend_cap_reached"
+      assert error.retryable == true
+      assert error.requires_new_upstream_session == false
+      assert error.message =~ "Team Codex 01"
+      refute error.message =~ "capped-identity"
     end
   end
 

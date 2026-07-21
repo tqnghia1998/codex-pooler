@@ -41,6 +41,10 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
            CandidateEligibility.filter_circuit_eligible_candidates(filter_input, route_state),
          route_state = RouteState.put_candidates(route_state, candidates),
          filter_input = CandidateEligibility.FilterInput.put_candidates(filter_input, candidates),
+         {:ok, candidates} <-
+           CandidateEligibility.filter_spend_cap_eligible_candidates(filter_input),
+         route_state = RouteState.put_candidates(route_state, candidates),
+         filter_input = CandidateEligibility.FilterInput.put_candidates(filter_input, candidates),
          {:ok, candidates, quota_decision, route_state} <-
            filter_quota_eligible_candidates(
              filter_input,

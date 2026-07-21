@@ -132,6 +132,7 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountAudit do
       status: identity.status,
       previous_label: Keyword.get(opts, :previous_label),
       previous_status: Keyword.get(opts, :previous_status),
+      previous_spend_cap_credits: Keyword.get(opts, :previous_spend_cap_credits),
       result_status: result.status && to_string(result.status),
       assignment_count: length(assignments(result)),
       credential_status: result.secret_status && to_string(result.secret_status)

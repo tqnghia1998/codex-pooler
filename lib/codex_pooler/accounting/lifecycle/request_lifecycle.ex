@@ -29,7 +29,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Events
   alias CodexPooler.Repo
-  alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
+  alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   @usage_pending "usage_pending"
   @usage_known "usage_known"
@@ -563,8 +563,75 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
       :existing -> :ok
     end
 
+    accumulate_spend_cap_credits!(attempt, settlement, previous_settlement, settlement_status)
+
     %{settlement: settlement, release: release, status: settlement_status}
   end
+
+  defp accumulate_spend_cap_credits!(
+         %Attempt{upstream_identity_id: upstream_identity_id, started_at: started_at},
+         %LedgerEntry{} = settlement,
+         previous_settlement,
+         settlement_status
+       )
+       when is_binary(upstream_identity_id) and settlement_status in [:inserted, :replaced] do
+    started_at = started_at || settlement.occurred_at
+    delta = settlement_credit_delta(settlement, previous_settlement, settlement_status)
+
+    if is_nil(started_at) or Decimal.compare(delta, Decimal.new(0)) == :eq do
+      :ok
+    else
+      Repo.update_all(
+        from(identity in UpstreamIdentity,
+          where:
+            identity.id == ^upstream_identity_id and
+              identity.spend_cap_credits > 0 and not is_nil(identity.cap_started_at) and
+              identity.cap_started_at <= ^started_at,
+          update: [
+            set: [
+              spent_credits:
+                fragment("GREATEST(COALESCE(?, 0) + ?, 0)", identity.spent_credits, ^delta)
+            ]
+          ]
+        ),
+        []
+      )
+
+      :ok
+    end
+  end
+
+  defp accumulate_spend_cap_credits!(_attempt, _settlement, _previous_settlement, _status),
+    do: :ok
+
+  defp settlement_credit_delta(%LedgerEntry{} = settlement, previous_settlement, :replaced) do
+    settlement_credit_amount(settlement)
+    |> Decimal.sub(settlement_credit_amount(previous_settlement))
+  end
+
+  defp settlement_credit_delta(%LedgerEntry{} = settlement, _previous_settlement, :inserted),
+    do: settlement_credit_amount(settlement)
+
+  defp settlement_credit_delta(_settlement, _previous_settlement, _status), do: Decimal.new(0)
+
+  defp settlement_credit_amount(%LedgerEntry{settled_cost_micros: %Decimal{} = cost}),
+    do: Decimal.div(cost, Decimal.new(40_000))
+
+  defp settlement_credit_amount(%LedgerEntry{settled_cost_micros: cost}) when is_integer(cost),
+    do: Decimal.div(Decimal.new(cost), Decimal.new(40_000))
+
+  defp settlement_credit_amount(%LedgerEntry{settled_cost_micros: cost}) when is_float(cost),
+    do: Decimal.div(Decimal.from_float(cost), Decimal.new(40_000))
+
+  defp settlement_credit_amount(%LedgerEntry{settled_cost_micros: cost}) when is_binary(cost) do
+    case Decimal.parse(String.trim(cost)) do
+      {amount, ""} -> Decimal.div(amount, Decimal.new(40_000))
+      _invalid -> Decimal.new(0)
+    end
+  end
+
+  defp settlement_credit_amount(%LedgerEntry{}), do: Decimal.new(0)
+  defp settlement_credit_amount(_settlement), do: Decimal.new(0)
 
   defp record_settlement_fact!(settlement, :replaced),
     do: RequestLogFacts.replace_settlement_written!(settlement)

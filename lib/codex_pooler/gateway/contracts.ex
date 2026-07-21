@@ -3,6 +3,7 @@ defmodule CodexPooler.Gateway.Contracts do
 
   @pinned_continuation_reauth_required_code "pinned_continuation_reauth_required"
   @pinned_continuation_unavailable_code "pinned_continuation_unavailable"
+  @pinned_continuation_spend_cap_reached_code "pinned_continuation_spend_cap_reached"
   @restart_with_full_context_recovery_kind "restart_with_full_context"
   @continuation_anchor_body_fields ["previous_response_id"]
   @continuation_anchor_headers [
@@ -100,6 +101,27 @@ defmodule CodexPooler.Gateway.Contracts do
       retryable: false,
       requires_new_upstream_session: true,
       recovery: recovery_contract(),
+      continuity_denial: sanitize_continuity_metadata(continuity_metadata)
+    }
+  end
+
+  @spec pinned_continuation_spend_cap_reached_error(String.t(), map()) :: gateway_error()
+  def pinned_continuation_spend_cap_reached_error(account_label, continuity_metadata \\ %{}) do
+    account_label =
+      case String.trim(to_string(account_label || "")) do
+        "" -> "Upstream account"
+        label -> label
+      end
+
+    %{
+      status: 503,
+      code: @pinned_continuation_spend_cap_reached_code,
+      message:
+        "Session is pinned to upstream account \"#{account_label}\", which reached its Spending Cap. " <>
+          "Increase that account's cap, then retry.",
+      param: "model",
+      retryable: true,
+      requires_new_upstream_session: false,
       continuity_denial: sanitize_continuity_metadata(continuity_metadata)
     }
   end
