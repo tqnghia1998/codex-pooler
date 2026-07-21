@@ -347,33 +347,37 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
     session_assignment_id = session_assignment_id(request_options)
     hard_pin_metadata = SessionContinuity.hard_pin_metadata(request_options, model)
 
-    {eligible, exclusions} =
-      Enum.reduce(candidates, {[], []}, fn {assignment, identity} = candidate,
-                                           {eligible, excluded} ->
+    {eligible, reserved, exclusions} =
+      Enum.reduce(candidates, {[], [], []}, fn {assignment, identity} = candidate,
+                                               {eligible, reserved, excluded} ->
         case spend_cap_reason(identity, assignment.id == session_assignment_id) do
           nil ->
-            {[candidate | eligible], excluded}
+            {[candidate | eligible], reserved, excluded}
 
           reason_code ->
-            {eligible,
-             [
-               %{
-                 pool_upstream_assignment_id: assignment.id,
-                 upstream_identity_id: identity.id,
-                 account_label: spend_cap_account_label(identity),
-                 reasons: [
-                   %{
-                     "code" => reason_code,
-                     "cap_credits" => identity.spend_cap_credits
-                   }
-                 ]
-               }
-               | excluded
-             ]}
+            exclusion = %{
+              pool_upstream_assignment_id: assignment.id,
+              upstream_identity_id: identity.id,
+              account_label: spend_cap_account_label(identity),
+              reasons: [
+                %{
+                  "code" => reason_code,
+                  "cap_credits" => identity.spend_cap_credits
+                }
+              ]
+            }
+
+            reserved =
+              if reason_code == "spend_cap_reserved", do: [candidate | reserved], else: reserved
+
+            {eligible, reserved, [exclusion | excluded]}
         end
       end)
 
     case Enum.reverse(eligible) do
+      [] when length(reserved) == length(candidates) ->
+        {:ok, Enum.reverse(reserved)}
+
       [] ->
         spend_cap_unavailable_error(
           Enum.reverse(exclusions),
@@ -392,11 +396,12 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
     if is_integer(cap) and cap > 0 do
       spent = identity_spend_credits(identity)
       cap_decimal = Decimal.new(cap)
-      reserve = Decimal.mult(cap_decimal, Decimal.new("0.8"))
+      reserve = Decimal.mult(cap_decimal, Decimal.new("0.85"))
+      session_limit = Decimal.mult(cap_decimal, Decimal.new("1.25"))
 
       cond do
+        continuing_session? and Decimal.compare(spent, session_limit) == :lt -> nil
         Decimal.compare(spent, cap_decimal) != :lt -> "spend_cap_reached"
-        continuing_session? -> nil
         Decimal.compare(spent, reserve) != :lt -> "spend_cap_reserved"
         true -> nil
       end

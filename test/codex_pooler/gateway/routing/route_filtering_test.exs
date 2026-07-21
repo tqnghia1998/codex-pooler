@@ -110,7 +110,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
 
       reserved_identity =
         reserved.identity
-        |> Ecto.Changeset.change(%{spend_cap_credits: 100, spent_credits: Decimal.new("80")})
+        |> Ecto.Changeset.change(%{spend_cap_credits: 100, spent_credits: Decimal.new("85")})
         |> Repo.update!()
 
       available_identity =
