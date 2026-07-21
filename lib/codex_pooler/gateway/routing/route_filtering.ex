@@ -35,7 +35,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
     saved_reset_scan_at = saved_reset_scan_timestamp(opts)
     saved_reset_opts = saved_reset_options(opts)
     request_options = filter_input.request_options
-    quota_mode = Keyword.get(opts, :quota_mode, :required)
+    quota_mode = Keyword.get(opts, :quota_mode, :optional)
 
     with {:ok, candidates} <-
            CandidateEligibility.filter_circuit_eligible_candidates(filter_input, route_state),
