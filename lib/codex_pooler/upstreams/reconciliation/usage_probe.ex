@@ -680,14 +680,13 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         _unsupported -> []
       end
 
-    account_descriptors ++
-      Enum.flat_map(payload["additional_rate_limits"] || [], fn
-        %{"rate_limit" => %{} = additional_rate_limit} = limit ->
-          [{:additional, {limit, additional_rate_limit}}]
+    spend_control_descriptors =
+      case get_in(payload, ["spend_control", "individual_limit"]) do
+        %{} = individual_limit -> [{:spend_control, individual_limit}]
+        _unsupported -> []
+      end
 
-        _unsupported ->
-          []
-      end)
+    account_descriptors ++ spend_control_descriptors
   end
 
   defp raw_descriptors(_payload), do: []
@@ -698,21 +697,12 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
     end)
   end
 
-  defp parsed_descriptor_windows(:additional, {limit, _rate_limit}, observed_at) do
-    payload = %{
-      "rate_limit" => %{
-        "primary_window" => %{
-          "used_percent" => 0,
-          "limit_window_seconds" => 18_000,
-          "reset_after_seconds" => 60
-        }
-      },
-      "additional_rate_limits" => [limit]
-    }
-
-    parse_isolated_descriptor(payload, observed_at, fn window ->
-      Map.get(window, :quota_key) != @account_quota_key
-    end)
+  defp parsed_descriptor_windows(:spend_control, individual_limit, observed_at) do
+    parse_isolated_descriptor(
+      %{"spend_control" => %{"individual_limit" => individual_limit}},
+      observed_at,
+      fn window -> Map.get(window, :quota_key) == "spend_control" end
+    )
   end
 
   defp parse_isolated_descriptor(payload, observed_at, filter) do
@@ -729,8 +719,9 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
       Enum.all?(supported, fn {_field, window} -> valid_supported_window?(window) end)
   end
 
-  defp present_supported_windows({limit, rate_limit}) when is_map(limit),
-    do: present_supported_windows(rate_limit)
+  defp present_supported_windows(%{"used_percent" => used_percent}) do
+    [{"used_percent", used_percent}]
+  end
 
   # While the provider's anchored 5h windows are suspended (announced as
   # temporary on 2026-07-13), the usage payload declares the missing window as
@@ -746,12 +737,26 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         do: {field, Map.get(rate_limit, field)}
   end
 
+  defp valid_supported_window?({_field, value}), do: valid_percent?(value)
+
   defp valid_supported_window?(%{} = window) do
     isolated_rate_limit = %{"primary_window" => window}
     parsed_descriptor_windows(:account, isolated_rate_limit, now()) != []
   end
 
   defp valid_supported_window?(_window), do: false
+
+  defp valid_percent?(value) when is_integer(value), do: value >= 0 and value <= 100
+  defp valid_percent?(value) when is_float(value), do: value >= 0 and value <= 100
+
+  defp valid_percent?(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {percent, ""} -> percent >= 0 and percent <= 100
+      _invalid -> false
+    end
+  end
+
+  defp valid_percent?(_value), do: false
 
   # Only a reset-bearing 5h account primary window halts multi-path probing.
   # A weekly-primary result must NOT halt: paths can diverge, and a later path

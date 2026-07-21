@@ -4291,7 +4291,7 @@ defmodule CodexPooler.UpstreamsTest do
                ]
     end
 
-    test "parses Codex usage payload with generic additional model limits" do
+    test "uses spend control instead of additional model limits" do
       synced_at = ~U[2026-04-27 10:00:00Z]
 
       assert {:ok, windows} =
@@ -4312,16 +4312,6 @@ defmodule CodexPooler.UpstreamsTest do
                    },
                    "additional_rate_limits" => [
                      %{
-                       "limit_name" => "codex_other",
-                       "metered_feature" => "codex_bengalfox",
-                       "rate_limit" => %{
-                         "primary_window" => %{
-                           "used_percent" => 55,
-                           "limit_window_seconds" => 18_000
-                         }
-                       }
-                     },
-                     %{
                        "limit_name" => "GPT-5.3-Codex-Spark",
                        "metered_feature" => "codex_bengalfox",
                        "rate_limit" => %{
@@ -4331,7 +4321,15 @@ defmodule CodexPooler.UpstreamsTest do
                          }
                        }
                      }
-                   ]
+                   ],
+                   "spend_control" => %{
+                     "reached" => false,
+                     "individual_limit" => %{
+                       "used_percent" => 15,
+                       "reset_after_seconds" => 927_829,
+                       "reset_at" => 1_785_542_400
+                     }
+                   }
                  },
                  synced_at
                )
@@ -4339,7 +4337,7 @@ defmodule CodexPooler.UpstreamsTest do
       assert Enum.map(windows, &{&1.quota_key, &1.window_kind, &1.used_percent}) == [
                {"account", "primary", Decimal.from_float(67.0)},
                {"account", "secondary", Decimal.from_float(21.0)},
-               {"codex_spark", "primary", Decimal.from_float(61.0)}
+               {"spend_control", "primary", Decimal.from_float(15.0)}
              ]
 
       account_primary =
@@ -4356,17 +4354,12 @@ defmodule CodexPooler.UpstreamsTest do
       assert DateTime.compare(account_primary.reset_at, DateTime.add(synced_at, 900, :second)) ==
                :eq
 
-      spark = Enum.find(windows, &(&1.quota_key == "codex_spark"))
-      assert spark.display_label == "GPT-5.3-Codex-Spark"
-      assert spark.limit_name == "GPT-5.3-Codex-Spark"
-      assert spark.metered_feature == "codex_bengalfox"
-      assert spark.quota_scope == "model"
-      assert spark.quota_family == "codex_model"
-      assert spark.model == "gpt-5.3-codex-spark"
-      assert spark.raw_limit_id == "codex_bengalfox"
-      assert spark.raw_limit_name == "GPT-5.3-Codex-Spark"
-      assert spark.raw_metered_feature == "codex_bengalfox"
-      assert spark.reset_at == nil
+      spend = Enum.find(windows, &(&1.quota_key == "spend_control"))
+      assert spend.display_label == "Spend"
+      assert spend.quota_scope == "feature"
+      assert spend.quota_family == "spend_control"
+      assert spend.window_minutes == 300
+      assert spend.reset_at == DateTime.from_unix!(1_785_542_400)
     end
 
     test "preserves explicit zero credit balances when usage percent still leaves capacity" do
