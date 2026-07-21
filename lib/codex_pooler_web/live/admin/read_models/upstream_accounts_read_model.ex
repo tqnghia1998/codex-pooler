@@ -522,15 +522,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     do: Enum.sort_by(accounts, &{&1.identity.status, String.downcase(&1.label), &1.identity.id})
 
   defp sort_accounts(accounts, "quota_remaining"),
-    do: Enum.sort_by(accounts, &{quota_rank(&1.quota_remaining), String.downcase(&1.label)})
+    do: Enum.sort_by(accounts, &quota_sort_key/1)
 
   defp sort_accounts(accounts, _recent), do: Enum.sort_by(accounts, &last_used_sort_key/1)
 
-  defp quota_rank("plenty"), do: 0
-  defp quota_rank("moderate"), do: 1
-  defp quota_rank("low"), do: 2
-  defp quota_rank("exhausted"), do: 3
-  defp quota_rank(_unknown), do: 4
+  defp quota_sort_key(account) do
+    monthly_used =
+      case Enum.find(account.quota_limits, &(&1.key == :monthly_quota)) do
+        %{percent: percent} -> percent
+        nil -> nil
+      end
+
+    case monthly_used do
+      nil -> {1, 0, String.downcase(account.label), account.identity.id}
+      used -> {0, Decimal.to_float(used), String.downcase(account.label), account.identity.id}
+    end
+  end
 
   defp last_used_sort_key(%{last_used_at: %DateTime{} = last_used_at} = account),
     do: {0, -DateTime.to_unix(last_used_at, :microsecond), String.downcase(account.label)}

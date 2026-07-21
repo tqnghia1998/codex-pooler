@@ -10,12 +10,61 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
   alias CodexPooler.Admin.UpstreamCircuitReadiness
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Schemas.PoolUpstreamAssignment
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.TokenBurnProjection
   alias CodexPoolerWeb.Admin.UpstreamCockpitReadModel
 
   setup :register_and_log_in_user
+
+  test "most quota sorts by monthly remaining quota and puts unknown last", %{scope: scope} do
+    pool = pool_fixture()
+    %{identity: more_monthly} = upstream_assignment_fixture(pool, %{account_label: "Zulu"})
+    %{identity: less_monthly} = upstream_assignment_fixture(pool, %{account_label: "Alpha"})
+    upstream_assignment_fixture(pool, %{account_label: "Unknown"})
+    now = DateTime.utc_now()
+
+    for {identity, monthly_used, other_30d_used} <-
+          [{more_monthly, 10, 90}, {less_monthly, 20, 5}] do
+      assert {:ok, [_monthly, _other_30d]} =
+               QuotaWindows.upsert_quota_windows(identity, [
+                 %{
+                   quota_key: "spend_control",
+                   quota_family: "spend_control",
+                   quota_scope: "feature",
+                   window_kind: "primary",
+                   window_minutes: 43_200,
+                   used_percent: Decimal.new(monthly_used),
+                   reset_at: DateTime.add(now, 30, :day),
+                   source: "codex_usage_api",
+                   source_precision: "observed",
+                   freshness_state: "fresh",
+                   observed_at: now
+                 },
+                 %{
+                   quota_key: "account",
+                   quota_family: "account",
+                   quota_scope: "account",
+                   window_kind: "primary",
+                   window_minutes: 43_200,
+                   used_percent: Decimal.new(other_30d_used),
+                   reset_at: DateTime.add(now, 30, :day),
+                   source: "codex_usage_api",
+                   source_precision: "observed",
+                   freshness_state: "fresh",
+                   observed_at: now
+                 }
+               ])
+    end
+
+    accounts =
+      UpstreamAccountsReadModel.list_visible_accounts(scope, [pool], %{
+        "sort" => "quota_remaining"
+      })
+
+    assert Enum.map(accounts, & &1.label) == ["Zulu", "Alpha", "Unknown"]
+  end
 
   test "owner snapshot attaches sorted observed and preserved model rows",
        %{conn: conn, scope: scope} do
