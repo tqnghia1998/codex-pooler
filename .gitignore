@@ -24,7 +24,6 @@ erl_crash.dump
 /tmp/mcp-smoke/
 
 # Local automation artifacts.
-AGENTS.md
 CLAUDE.md
 PRODUCT.md
 RUNBOOK.md
