@@ -4,12 +4,13 @@ PORT ?= 4000
 POSTGRES_PORT ?= 5433
 POSTGRES_WAIT_TIMEOUT ?= 60
 POSTGRES_WAIT_ATTEMPTS ?= 30
+COMPOSE_BIN ?= podman-compose
 DEV_POSTGRES_DB := codex_pooler_dev
 DEV_POSTGRES_USER := postgres
 DEV_POSTGRES_PASSWORD := postgres
 DEV_PID := tmp/dev-server.pid
 DEV_LOG := tmp/dev-server.log
-DEV_COMPOSE := POSTGRES_PORT=$(POSTGRES_PORT) docker compose -f docker-compose.dev.yml
+DEV_COMPOSE := POSTGRES_PORT=$(POSTGRES_PORT) $(COMPOSE_BIN) -f docker-compose.dev.yml
 DEV_DB_ENV := POSTGRES_HOST=localhost POSTGRES_PORT=$(POSTGRES_PORT) POSTGRES_DB=$(DEV_POSTGRES_DB) POSTGRES_USER=$(DEV_POSTGRES_USER) POSTGRES_PASSWORD=$(DEV_POSTGRES_PASSWORD)
 DEV_SECRET_ENV := if [ -f .env ]; then while IFS= read -r line; do case "$$line" in CODEX_POOLER_UPSTREAM_SECRET_KEY=*|CODEX_POOLER_UPSTREAM_SECRET_KEY_VERSION=*) export "$$line";; esac; done < .env; fi;
 N ?= 4
@@ -27,7 +28,13 @@ dev: dev-db dev-compile dev-migrate dev-pricing dev-stop
 	@$(MAKE) --no-print-directory dev-status
 
 dev-db:
-	@$(DEV_COMPOSE) up -d --wait --wait-timeout $(POSTGRES_WAIT_TIMEOUT) db
+	@$(DEV_COMPOSE) up -d db
+	@for _ in $$(seq 1 $(POSTGRES_WAIT_TIMEOUT)); do \
+		if (: > /dev/tcp/127.0.0.1/$(POSTGRES_PORT)) >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 1; \
+	done
 	@printf "ALTER ROLE $(DEV_POSTGRES_USER) WITH PASSWORD :'dev_password';\n" | $(DEV_COMPOSE) exec -T db psql --username=$(DEV_POSTGRES_USER) --dbname=postgres --set=ON_ERROR_STOP=1 --set=dev_password=$(DEV_POSTGRES_PASSWORD) >/dev/null
 	@for attempt in 1 2; do \
 		for _ in $$(seq 1 $(POSTGRES_WAIT_ATTEMPTS)); do \
@@ -38,7 +45,7 @@ dev-db:
 		done; \
 		if [ $$attempt -eq 1 ]; then \
 			echo "Postgres container is healthy but localhost:$(POSTGRES_PORT) is not accepting TCP connections; recreating dev db container without deleting volume"; \
-			$(DEV_COMPOSE) up -d --force-recreate --wait --wait-timeout $(POSTGRES_WAIT_TIMEOUT) db; \
+			$(DEV_COMPOSE) up -d --force-recreate db; \
 		fi; \
 	done; \
 	echo "Postgres is not reachable on 127.0.0.1:$(POSTGRES_PORT)"; \
