@@ -4640,7 +4640,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     })
 
     assert_redirect(view, ~p"/admin/upstreams")
-    assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
+    refute Repo.get(UpstreamIdentity, identity.id)
   end
 
   @tag :cockpit_actions_error

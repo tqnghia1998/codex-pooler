@@ -11,6 +11,7 @@ defmodule CodexPooler.Upstreams do
   alias CodexPooler.Repo
 
   alias CodexPooler.Upstreams.{
+    AccountTestEnqueue,
     Assignments,
     Import,
     OAuth,
@@ -159,8 +160,15 @@ defmodule CodexPooler.Upstreams do
   @spec rename_account_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate rename_account_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
 
+  @spec validate_spend_cap_for_scope(Scope.t(), identity_ref(), map()) ::
+          :ok | {:error, lifecycle_error()}
+  defdelegate validate_spend_cap_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
+
   @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate update_spend_cap_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
+
+  @spec pause_account_at_spend_threshold(Ecto.UUID.t()) :: lifecycle_result() | :ok
+  defdelegate pause_account_at_spend_threshold(identity_id), to: AccountLifecycle
 
   @spec pause_account_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate pause_account_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
@@ -178,6 +186,12 @@ defmodule CodexPooler.Upstreams do
   defdelegate enqueue_token_refresh_for_scope(scope, identity_or_id, opts \\ []),
     to: TokenRefreshEnqueue,
     as: :enqueue_for_scope
+
+  @spec test_account_for_scope(Scope.t(), identity_ref()) ::
+          {:ok, map()} | {:error, lifecycle_error() | Ecto.Changeset.t()}
+  defdelegate test_account_for_scope(scope, identity_or_id),
+    to: AccountTestEnqueue,
+    as: :test_for_scope
 
   @spec update_saved_reset_policy_for_scope(Scope.t(), identity_ref(), map()) ::
           lifecycle_result()

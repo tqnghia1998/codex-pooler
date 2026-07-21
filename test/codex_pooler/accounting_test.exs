@@ -205,6 +205,51 @@ defmodule CodexPooler.AccountingTest do
       assert Decimal.equal?(identity.spent_credits, Decimal.new("0.00325"))
     end
 
+    test "pauses an active upstream after spending exceeds 125 percent of its cap" do
+      setup =
+        accounting_setup(%{
+          input_token_micros: Decimal.new(1_000_000),
+          output_token_micros: Decimal.new(1_000_000),
+          reasoning_token_micros: Decimal.new(1_000_000)
+        })
+
+      started_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+      setup.identity
+      |> Ecto.Changeset.change(%{
+        spend_cap_credits: 100,
+        spent_credits: Decimal.new(0),
+        cap_started_at: DateTime.add(started_at, -1, :second)
+      })
+      |> Repo.update!()
+
+      assert {:ok, reserved} =
+               Accounting.reserve(
+                 setup.auth,
+                 setup.model,
+                 %{"model" => setup.model.exposed_model_id, "input" => "pause capped account"},
+                 %{correlation_id: "corr-auto-pause-spend-cap"}
+               )
+
+      assert {:ok, attempt} =
+               Accounting.create_attempt(reserved.request, setup.assignment, %{now: started_at})
+
+      assert {:ok, _finalized} =
+               Accounting.finalize_success(
+                 reserved.request,
+                 attempt,
+                 %{status: "usage_known", input_tokens: 6, output_tokens: 0, total_tokens: 6},
+                 %{response_status_code: 200}
+               )
+
+      identity = Repo.reload!(setup.identity)
+      assignment = Repo.reload!(setup.assignment)
+      assert Decimal.compare(identity.spent_credits, Decimal.new(125)) == :gt
+      assert identity.status == "paused"
+      assert assignment.status == "paused"
+      assert assignment.eligibility_status == "ineligible"
+    end
+
     test "accumulates request metadata in memory before explicit persistence" do
       setup = accounting_setup()
 

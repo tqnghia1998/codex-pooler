@@ -4,13 +4,16 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
   import Ecto.Query
   require Logger
 
+  alias CodexPooler.Accounting.{Attempt, LedgerEntry}
   alias CodexPooler.Accounts.Scope
   alias CodexPooler.Events
+  alias CodexPooler.Gateway.Persistence.CodexTurn
   alias CodexPooler.Jobs
   alias CodexPooler.Pools
   alias CodexPooler.Repo
 
   alias CodexPooler.Upstreams.Lifecycle.{AccountAudit, CredentialFencing}
+  alias CodexPooler.Upstreams.Quota.Windows
   alias CodexPooler.Upstreams.Secrets
 
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
@@ -109,9 +112,28 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
     end
   end
 
+  @spec validate_spend_cap_for_scope(Scope.t(), identity_ref(), map()) ::
+          :ok | {:error, lifecycle_error()}
+  def validate_spend_cap_for_scope(%Scope{} = scope, identity_or_id, attrs) when is_map(attrs) do
+    with {:ok, identity} <- authorize(scope, identity_or_id) do
+      validate_spend_cap(
+        identity,
+        spend_cap_attr(atomize_attrs(attrs), identity.spend_cap_credits || 0)
+      )
+    end
+  end
+
+  def validate_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
+    do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
+
   @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   def update_spend_cap_for_scope(%Scope{} = scope, identity_or_id, attrs) when is_map(attrs) do
-    with {:ok, identity} <- authorize(scope, identity_or_id) do
+    with {:ok, identity} <- authorize(scope, identity_or_id),
+         :ok <-
+           validate_spend_cap(
+             identity,
+             spend_cap_attr(atomize_attrs(attrs), identity.spend_cap_credits || 0)
+           ) do
       update_spend_cap(identity, attrs)
       |> AccountAudit.record_change(scope, "upstream_account.spend_cap_update",
         previous_status: identity.status,
@@ -122,6 +144,57 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
 
   def update_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
+
+  defp validate_spend_cap(_identity, 0), do: :ok
+
+  defp validate_spend_cap(identity, cap) when is_integer(cap) and cap > 0 do
+    remaining =
+      identity
+      |> Windows.list_quota_windows()
+      |> Enum.find(&(&1.quota_key == "spend_control"))
+      |> monthly_quota_remaining()
+
+    if match?(%Decimal{}, remaining) and Decimal.compare(Decimal.new(cap), remaining) == :lt do
+      :ok
+    else
+      {:error,
+       lifecycle_error(
+         :spend_cap_exceeds_monthly_quota,
+         "spending cap must be less than monthly quota remaining"
+       )}
+    end
+  end
+
+  defp validate_spend_cap(_identity, _cap), do: :ok
+
+  defp monthly_quota_remaining(%{metadata: %{"spend_cap" => cap, "spend_used" => used}}) do
+    with {cap, ""} <- Decimal.parse(to_string(cap)),
+         {used, ""} <- Decimal.parse(to_string(used)) do
+      Decimal.max(Decimal.sub(cap, used), Decimal.new(0))
+    else
+      _invalid -> nil
+    end
+  end
+
+  defp monthly_quota_remaining(_window), do: nil
+
+  @spec pause_account_at_spend_threshold(Ecto.UUID.t()) :: lifecycle_result() | :ok
+  def pause_account_at_spend_threshold(identity_id) when is_binary(identity_id) do
+    case Repo.get(UpstreamIdentity, identity_id) do
+      %UpstreamIdentity{status: @active, spend_cap_credits: cap, spent_credits: spent} = identity
+      when is_integer(cap) and cap > 0 and not is_nil(spent) ->
+        if Decimal.compare(spent, Decimal.mult(Decimal.new(cap), Decimal.new("1.25"))) == :gt do
+          pause_account(identity, %{reason: "spending cap exceeded 125%"})
+        else
+          :ok
+        end
+
+      _identity ->
+        :ok
+    end
+  end
+
+  def pause_account_at_spend_threshold(_identity_id), do: :ok
 
   @spec pause_account(identity_ref(), map()) :: lifecycle_result()
   defp pause_account(identity_or_id, attrs) do
@@ -264,34 +337,41 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
 
   @spec soft_delete_account(identity_ref(), map()) :: lifecycle_result()
-  defp soft_delete_account(identity_or_id, attrs) do
+  defp soft_delete_account(identity_or_id, _attrs) do
     case normalize_identity(identity_or_id) do
       %UpstreamIdentity{} = identity ->
-        attrs = atomize_attrs(attrs)
-        timestamp = Map.get(attrs, :deleted_at, now())
-
         Repo.transaction(fn ->
-          deleted_identity =
-            identity
-            |> UpstreamIdentity.changeset(%{
-              status: @deleted,
-              disabled_at: timestamp,
-              updated_at: timestamp,
-              metadata: lifecycle_metadata(identity.metadata, "deleted", attrs, timestamp)
-            })
-            |> Repo.update!()
+          assignments = assignments_for_identity(identity.id)
+          assignment_ids = Enum.map(assignments, & &1.id)
 
-          Secrets.revoke_active_secrets(identity.id, timestamp)
+          attempt_ids =
+            Repo.all(
+              from a in Attempt,
+                where: a.pool_upstream_assignment_id in ^assignment_ids,
+                select: a.id
+            )
 
-          update_assignments_for_identity(identity.id, %{
-            status: @assignment_deleted,
-            health_status: @health_disabled,
-            eligibility_status: @ineligible,
-            disabled_at: timestamp,
-            updated_at: timestamp
-          })
+          Repo.update_all(from(t in CodexTurn, where: t.final_attempt_id in ^attempt_ids),
+            set: [final_attempt_id: nil]
+          )
 
-          lifecycle_result(:deleted, deleted_identity)
+          Repo.update_all(
+            from(l in LedgerEntry,
+              where:
+                l.upstream_identity_id == ^identity.id or
+                  l.pool_upstream_assignment_id in ^assignment_ids or l.attempt_id in ^attempt_ids
+            ),
+            set: [upstream_identity_id: nil, pool_upstream_assignment_id: nil, attempt_id: nil]
+          )
+
+          Repo.delete!(identity)
+
+          %{
+            status: :deleted,
+            identity: %{identity | status: @deleted},
+            assignments: assignments,
+            secret_status: :missing
+          }
         end)
         |> tap_upstream_change("upstream_account_deleted")
 

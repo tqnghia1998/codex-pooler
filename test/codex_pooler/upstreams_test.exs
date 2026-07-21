@@ -2836,7 +2836,7 @@ defmodule CodexPooler.UpstreamsTest do
     end
 
     @tag :lifecycle_soft_delete
-    test "soft delete revokes active routing secrets while preserving historical rows" do
+    test "delete physically removes the account and routing records" do
       pool = pool_fixture()
       identity = active_identity_fixture(%{chatgpt_account_id: "acct_soft_delete"})
       configure_upstream_secret_key!()
@@ -2862,24 +2862,23 @@ defmodule CodexPooler.UpstreamsTest do
                })
 
       assert result.status == :deleted
-      assert result.identity.status == "deleted"
+      assert result.identity.id == identity.id
       assert result.secret_status == :missing
-
-      assert [%PoolUpstreamAssignment{status: "deleted", eligibility_status: "ineligible"}] =
-               result.assignments
+      assert [%PoolUpstreamAssignment{id: assignment_id}] = result.assignments
+      assert assignment_id == assignment.id
 
       refute inspect(result) =~ token
 
-      assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
-      assert Repo.get!(PoolUpstreamAssignment, assignment.id).status == "deleted"
-      assert Repo.get!(EncryptedSecret, secret.id).status == "revoked"
+      refute Repo.get(UpstreamIdentity, identity.id)
+      refute Repo.get(PoolUpstreamAssignment, assignment.id)
+      refute Repo.get(EncryptedSecret, secret.id)
 
       assert {:error, %{code: :upstream_secret_not_found}} =
                Secrets.decrypt_active_secret(identity, "access_token")
 
       assert Upstreams.list_eligible_pool_assignments(pool) == []
 
-      assert {:error, %{code: :pool_assignment_not_found}} =
+      assert {:error, %{code: :upstream_identity_not_found}} =
                Upstreams.reactivate_account_for_scope(scope, identity, %{})
     end
 

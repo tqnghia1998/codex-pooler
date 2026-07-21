@@ -449,9 +449,11 @@ defmodule CodexPooler.Upstreams.Reconciliation.PoolReconciliation do
         {:windows, windows, %{}, CredentialFencing.credential_epoch(identity)}
 
       true ->
-        identity
-        |> codex_usage_quota_windows(assignment, opts)
-        |> maybe_reuse_persisted_quota_windows(identity, persisted_window_reuse_at)
+        source = codex_usage_quota_windows(identity, assignment, opts)
+
+        if Keyword.get(opts, :allow_persisted_fallback?, true),
+          do: maybe_reuse_persisted_quota_windows(source, identity, persisted_window_reuse_at),
+          else: source
     end
   end
 

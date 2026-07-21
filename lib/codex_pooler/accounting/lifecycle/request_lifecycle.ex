@@ -29,6 +29,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
   alias CodexPooler.Catalog.Model
   alias CodexPooler.Events
   alias CodexPooler.Repo
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   @usage_pending "usage_pending"
@@ -603,6 +604,8 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
         )
 
       if updated_count > 0 do
+        Upstreams.pause_account_at_spend_threshold(upstream_identity_id)
+
         Events.broadcast_upstreams_after_commit(
           settlement.pool_id,
           "upstream_spend_cap_updated",
