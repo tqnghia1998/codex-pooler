@@ -59,9 +59,9 @@ defmodule CodexPooler.MCP.UpstreamsToolsTest do
     assert result["isError"] == false
     assert [%{"type" => "text", "text" => text}] = result["content"]
     assert text =~ "1 upstream metadata records returned"
-    assert text =~ "label=TA***@example.com"
+    assert text =~ "label=#{CodexPoolerWeb.Admin.Format.censor_email(email)}"
     assert text =~ "status=active"
-    assert text =~ "account=ta***@example.com"
+    assert text =~ "account=#{CodexPoolerWeb.Admin.Format.censor_email(String.downcase(email))}"
     assert text =~ "plan=unknown"
     assert text =~ "assignments=1 active of 1 Pool assignments"
 
@@ -74,8 +74,11 @@ defmodule CodexPooler.MCP.UpstreamsToolsTest do
 
     assert [presented] = result["structuredContent"]["items"]
     assert presented["id"] == identity.id
-    assert presented["account_label"] == "TA***@example.com"
-    assert presented["account_email"] == "ta***@example.com"
+    assert presented["account_label"] == CodexPoolerWeb.Admin.Format.censor_email(email)
+
+    assert presented["account_email"] ==
+             CodexPoolerWeb.Admin.Format.censor_email(String.downcase(email))
+
     assert presented["assignment_summary"]["count"] == 1
     assert presented["metadata"]["summary"] == "metadata keys omitted"
 

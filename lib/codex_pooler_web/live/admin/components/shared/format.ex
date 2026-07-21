@@ -160,4 +160,50 @@ defmodule CodexPoolerWeb.Admin.Format do
 
     sign <> Enum.join([grouped | rest], ".")
   end
+
+  @doc """
+  Censors email strings by removing the email domain part and replacing
+  alphanumeric characters in the local part with pseudo-random characters while
+  preserving non-alphanumeric characters (such as `.`, `-`, `_`, `+`). First character
+  is retained. Non-email binaries are returned unchanged.
+
+  Example:
+    "quangnghia.trinh@shopee.com" -> "q..." (domain removed)
+  """
+  @spec censor_email(term()) :: term()
+  def censor_email(value) when is_binary(value) do
+    case String.split(value, "@", parts: 2) do
+      [local, domain] when local != "" and domain != "" ->
+        censor_local_part(local, value)
+
+      _other ->
+        value
+    end
+  end
+
+  def censor_email(value), do: value
+
+  defp censor_local_part(local, seed_source) do
+    alphabet = ~c"abcdefghijklmnopqrstuvwxyz0123456789"
+    alphabet_len = length(alphabet)
+
+    local
+    |> String.graphemes()
+    |> Enum.with_index()
+    |> Enum.map(fn
+      {grapheme, 0} ->
+        grapheme
+
+      {grapheme, idx} ->
+        if String.match?(grapheme, ~r/^[A-Za-z0-9]$/) do
+          hash = :crypto.hash(:sha256, "#{seed_source}:#{idx}")
+          <<num::unsigned-big-integer-32, _rest::binary>> = hash
+          char_code = Enum.at(alphabet, rem(num, alphabet_len))
+          <<char_code::utf8>>
+        else
+          grapheme
+        end
+    end)
+    |> Enum.join()
+  end
 end

@@ -35,6 +35,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     UpstreamIdentity
   }
 
+  alias CodexPoolerWeb.Admin.Format
+
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard
@@ -5569,7 +5571,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, "#upstream-account-#{identity.id}", "realtime@example.com")
+    assert has_element?(
+             view,
+             "#upstream-account-#{identity.id}",
+             Format.censor_email("realtime@example.com")
+           )
+
     refute has_element?(view, "#upstream-account-#{identity.id}", "acct_realtime")
   end
 
@@ -6495,7 +6502,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert identity.metadata["auth_json_imported"] == true
     assert assignment.pool_id == pool.id
     assert assignment.status == "active"
-    assert has_element?(view, "#upstream-account-#{identity.id}", "fixture-user@example.com")
+
+    assert has_element?(
+             view,
+             "#upstream-account-#{identity.id}",
+             Format.censor_email("fixture-user@example.com")
+           )
+
     refute has_element?(view, "#upstream-account-#{identity.id}", "acct_fixture_auth_json")
     refute has_element?(view, "#upstream-account-#{identity.id}", "auth.json import")
     refute has_element?(view, "#upstream-account-#{identity.id}", "stored account id")
@@ -6545,7 +6558,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     identity = Repo.one!(UpstreamIdentity)
     assert identity.metadata["auth_json_imported"] == true
-    assert has_element?(view, "#upstream-account-#{identity.id}", "fixture-user@example.com")
+
+    assert has_element?(
+             view,
+             "#upstream-account-#{identity.id}",
+             Format.censor_email("fixture-user@example.com")
+           )
+
     refute has_element?(view, "#auth-json-import-dialog")
 
     html = render(view)
@@ -6675,7 +6694,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert Repo.aggregate(UpstreamIdentity, :count) == 1
     assert Repo.aggregate(PoolUpstreamAssignment, :count) == 2
-    assert has_element?(view, "#upstream-account-#{identity.id}", "fixture-user@example.com")
+
+    assert has_element?(
+             view,
+             "#upstream-account-#{identity.id}",
+             Format.censor_email("fixture-user@example.com")
+           )
+
     assert has_element?(view, "#upstream-account-#{identity.id}", "2 Pools")
 
     assert has_element?(

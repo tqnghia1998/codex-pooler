@@ -2,7 +2,6 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Common do
   @moduledoc false
 
   alias CodexPooler.Accounts.Scope
-  alias CodexPooler.MCP.PrivacyMatrix
   alias CodexPooler.MCP.Tools.DetailEnvelope
   alias CodexPooler.Pools
   alias CodexPooler.Pools.Pool
@@ -190,11 +189,7 @@ defmodule CodexPooler.MCP.Tools.PoolMetadata.Common do
 
   @spec safe_label(term()) :: term()
   def safe_label(value) when is_binary(value) do
-    if String.match?(value, ~r/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/) do
-      PrivacyMatrix.project!(:operators, %{email: value})[:email]
-    else
-      value
-    end
+    CodexPoolerWeb.Admin.Format.censor_email(value)
   end
 
   def safe_label(value), do: value

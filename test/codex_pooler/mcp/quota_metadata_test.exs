@@ -107,7 +107,7 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     assert %{items: [account], count: 1, limit: 50, offset: 0} = ReadModel.list_accounts(scope)
 
     assert account.id == identity.id
-    assert account.label == "TA***@example.com"
+    assert account.label == CodexPoolerWeb.Admin.Format.censor_email(raw_email)
     assert account.stored_account_id == "acct-quota-fresh"
     assert String.starts_with?(account.workspace_ref, "ws:")
     assert account.workspace_label == "Quota alpha"
@@ -623,7 +623,7 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     assert structured["status"] == "ok"
     account = structured["item"]
     assert account["id"] == identity.id
-    assert account["label"] == "TA***@example.com"
+    assert account["label"] == CodexPoolerWeb.Admin.Format.censor_email(raw_email)
     assert account["stored_account_id"] == "acct-quota-redaction"
     assert account["status"] == "active"
     assert account["plan_family"] == "team"
@@ -645,7 +645,7 @@ defmodule CodexPooler.MCP.QuotaMetadataTest do
     assert window["source_precision"] == "observed"
 
     assert text =~
-             "account TA***@example.com status active account acct-quota-redaction plan team"
+             "account #{CodexPoolerWeb.Admin.Format.censor_email(raw_email)} status active account acct-quota-redaction plan team"
 
     assert text =~ "account_primary: 42/100 remaining, 58.0% used"
     assert text =~ "fresh, routing usable"

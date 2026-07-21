@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
+  alias CodexPoolerWeb.Admin.Format
   alias CodexPoolerWeb.Admin.PoolEventSubscriptions
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.Admin.RequestLogDetailDrawer
@@ -580,8 +581,10 @@ defmodule CodexPoolerWeb.Admin.RequestLogsLive do
   end
 
   defp upstream_account_option(identity) do
+    label = identity.account_label || identity.chatgpt_account_id || "upstream account"
+
     %{
-      label: identity.account_label || identity.chatgpt_account_id || "upstream account",
+      label: Format.censor_email(label),
       value: identity.id,
       icon: "hero-cloud-arrow-up"
     }

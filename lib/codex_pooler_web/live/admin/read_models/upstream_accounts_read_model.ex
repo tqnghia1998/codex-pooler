@@ -24,6 +24,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
+  alias CodexPoolerWeb.Admin.Format
+
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.{
     Filter,
     Formatting,
@@ -579,12 +581,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   end
 
   defp mask_email_like(value) do
-    if String.match?(value, ~r/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/) do
-      [local, domain] = String.split(value, "@", parts: 2)
-      String.slice(local, 0, min(2, String.length(local))) <> "***@" <> domain
-    else
-      value
-    end
+    Format.censor_email(value)
   end
 
   defp workspace_ref(nil), do: "legacy"
@@ -615,9 +612,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   end
 
   defp account_label(identity) do
-    Formatting.present_string(identity.account_label) ||
-      Formatting.present_string(identity.chatgpt_account_id) ||
-      "Upstream account"
+    label =
+      Formatting.present_string(identity.account_label) ||
+        Formatting.present_string(identity.chatgpt_account_id) ||
+        "Upstream account"
+
+    Format.censor_email(label)
   end
 
   defp account_plan_label(%{plan_label: label}) when is_binary(label) and label != "", do: label

@@ -2,7 +2,6 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
   @moduledoc false
 
   alias CodexPooler.Accounts.Scope
-  alias CodexPooler.MCP.PrivacyMatrix
   alias CodexPooler.Pools
   alias CodexPooler.Quotas.WindowClassifier
   alias CodexPooler.Upstreams
@@ -345,13 +344,9 @@ defmodule CodexPooler.MCP.Tools.QuotaMetadata.ReadModel do
   defp workspace_ref(_workspace_id), do: "legacy"
 
   defp safe_label(value) when is_binary(value) do
-    value = String.trim(value)
-
-    if String.match?(value, ~r/^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$/) do
-      PrivacyMatrix.project!(:operators, %{email: value})[:email]
-    else
-      value
-    end
+    value
+    |> String.trim()
+    |> CodexPoolerWeb.Admin.Format.censor_email()
   end
 
   defp safe_label(_value), do: nil

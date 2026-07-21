@@ -147,7 +147,7 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
 
     assert PrivacyMatrix.project!(:operators, source) == %{
              id: "op_123",
-             email: "op***@example.com",
+             email: CodexPoolerWeb.Admin.Format.censor_email(source.email),
              display_name: "Sample Operator"
            }
   end
@@ -175,7 +175,10 @@ defmodule CodexPooler.MCP.PrivacyMatrixTest do
     assert projected.user_agent == "Codex CLI/1.2.3"
     assert projected.client_ip == "203.0.113.xxx"
     assert projected.correlation_id == "corr-task5-safe"
-    assert projected.upstream_account_email == "up***@example.com"
+
+    assert projected.upstream_account_email ==
+             CodexPoolerWeb.Admin.Format.censor_email("upstream.account@example.com")
+
     refute Map.has_key?(projected, :query)
     refute inspect(projected) =~ "raw-query-secret"
     refute inspect(projected) =~ "raw-header-token"

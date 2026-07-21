@@ -265,7 +265,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         <select
           id="upstream-quota-filter"
           name="filters[quota]"
-          class="select select-bordered select-sm w-full text-xs"
+          class="select select-bordered select-sm w-full text-sm font-normal"
         >
           <option
             :for={{label, value} <- @quota_options}
@@ -281,7 +281,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         <select
           id="upstream-sort-filter"
           name="filters[sort]"
-          class="select select-bordered select-sm w-full text-xs font-normal"
+          class="select select-bordered select-sm w-full text-sm font-normal"
         >
           <option
             :for={{label, value} <- @sort_options}

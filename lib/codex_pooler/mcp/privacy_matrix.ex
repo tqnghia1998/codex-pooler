@@ -545,8 +545,7 @@ defmodule CodexPooler.MCP.PrivacyMatrix do
   defp mask_email(value) when is_binary(value) do
     case String.split(value, "@", parts: 2) do
       [local, domain] when local != "" and domain != "" ->
-        visible = local |> String.slice(0, min(2, String.length(local)))
-        visible <> "***@" <> domain
+        CodexPoolerWeb.Admin.Format.censor_email(value)
 
       _other ->
         "[MASKED]"

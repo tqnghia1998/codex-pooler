@@ -13,6 +13,7 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
   alias CodexPoolerWeb.Admin.BadgeComponents, as: AdminBadges
+  alias CodexPoolerWeb.Admin.Format
   alias CodexPoolerWeb.Admin.OptionLoaderFallback
 
   @pool_statuses ["active", "disabled", "archived"]
@@ -595,7 +596,8 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
   end
 
   defp upstream_identity_label(identity) do
-    identity.account_label || identity.chatgpt_account_id || "Upstream account"
+    label = identity.account_label || identity.chatgpt_account_id || "Upstream account"
+    Format.censor_email(label)
   end
 
   defp upstream_identity_option(identity) do

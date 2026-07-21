@@ -24,23 +24,23 @@ defmodule CodexPoolerWeb.Admin.RequestLogsDisplay do
         upstream_identity_label: identity_label
       })
       when is_binary(label) and label != "" and is_binary(identity_label) and identity_label != "",
-      do: identity_label
+      do: Format.censor_email(identity_label)
 
   def format_upstream_account_label(%{upstream_account_label: label})
       when is_binary(label) and label != "",
-      do: label
+      do: Format.censor_email(label)
 
   def format_upstream_account_label(%{assignment_label: label})
       when is_binary(label) and label != "",
-      do: label
+      do: Format.censor_email(label)
 
   def format_upstream_account_label(%{upstream_account_email: email})
       when is_binary(email) and email != "",
-      do: email
+      do: Format.censor_email(email)
 
   def format_upstream_account_label(%{upstream_identity_label: label})
       when is_binary(label) and label != "",
-      do: label
+      do: Format.censor_email(label)
 
   def format_upstream_account_label(_log), do: "—"
 

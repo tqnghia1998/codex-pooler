@@ -7,6 +7,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   alias CodexPooler.Pools
   alias CodexPooler.Upstreams.SavedResets
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
+  alias CodexPoolerWeb.Admin.Format
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.DateTimeDisplay
 
@@ -230,7 +231,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
       plan_reported?: account.plan_reported?,
       safe_account_id_label: safe_account_id_label(identity.chatgpt_account_id),
       subject_ref: account.subject_ref,
-      account_email: identity.account_email,
+      account_email: Format.censor_email(identity.account_email),
       workspace_ref: account.workspace_ref,
       workspace_label: account.workspace_label,
       saved_resets: saved_resets(account),
