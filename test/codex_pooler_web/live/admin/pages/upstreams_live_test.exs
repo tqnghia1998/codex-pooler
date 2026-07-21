@@ -2501,6 +2501,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(view, "#upstream-account-#{beta_identity.id}")
     assert has_element?(view, "#upstream-account-#{paused_identity.id}")
 
+    assert has_element?(
+             view,
+             "#upstream-account-#{paused_identity.id}-limits-summary.text-warning.w-fit",
+             "Paused"
+           )
+
     view
     |> element("#upstream-filter-form")
     |> render_change(%{
@@ -2955,11 +2961,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "#upstream-account-#{identity.id} header #upstream-account-#{identity.id}-routing-readiness"
            )
 
-    assert has_element?(view, "#upstream-account-#{identity.id}", "Status")
-
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limits-summary.text-xs",
+             "#upstream-account-#{identity.id}-limits-summary.text-success",
              "Active"
            )
 
@@ -3046,7 +3050,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     refute has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "5h remaining")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "64%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "36%")
 
     assert has_element?(
              view,
@@ -3062,7 +3066,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     refute has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "Weekly remaining")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "90%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "10%")
 
     assert has_element?(
              view,
@@ -3072,7 +3076,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-weekly-progress.admin-live-progress[value='90']"
+             "#upstream-account-#{identity.id}-limit-weekly-progress.admin-live-progress[value='10']"
            )
 
     assert has_element?(
@@ -3084,12 +3088,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "45%"
+             "55%"
            )
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300-progress[value='45']"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300-progress[value='55']"
            )
 
     assert has_element?(
@@ -3105,10 +3109,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-progress[value='90']"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-progress[value='10']"
            )
 
-    assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "75%")
+    assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "25%")
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limits.grid.gap-3")
     refute has_element?(view, "#upstream-account-#{browser_identity.id}-limits.md\\:grid-cols-2")
 
@@ -3118,7 +3122,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{browser_identity.id}-limit-weekly-progress[value='75']"
+             "#upstream-account-#{browser_identity.id}-limit-weekly-progress[value='25']"
            )
   end
 
@@ -3217,13 +3221,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "100%"
+             "0%"
            )
 
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-upstream_model-provider_codex_spark-primary-300",
-             "100%"
+             "0%"
            )
   end
 
@@ -3435,8 +3439,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     selector = "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
 
-    assert has_element?(view, selector, "100%")
-    assert has_element?(view, "#{selector}-progress[value='100']")
+    assert has_element?(view, selector, "0%")
+    assert has_element?(view, "#{selector}-progress[value='0']")
 
     headers_observed_at = DateTime.add(now, 60, :second)
 
@@ -3459,8 +3463,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, selector, "100%")
-    assert has_element?(view, "#{selector}-progress[value='100']")
+    assert has_element?(view, selector, "0%")
+    assert has_element?(view, "#{selector}-progress[value='0']")
 
     usage_observed_at = DateTime.add(now, 120, :second)
 
@@ -3483,12 +3487,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, selector, "100%")
-    assert has_element?(view, "#{selector}-progress[value='100']")
+    assert has_element?(view, selector, "0%")
+    assert has_element?(view, "#{selector}-progress[value='0']")
   end
 
   @tag :upstream_quota_dashboard_regression
-  test "usage API observed zero-use evidence renders the account quota as fully remaining",
+  test "usage API observed zero-use evidence renders the account quota as zero used",
        %{
          conn: conn,
          scope: scope
@@ -3539,12 +3543,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     primary = Enum.find(account.quota_limits, &(&1.key == :primary_5h))
     weekly = Enum.find(account.quota_limits, &(&1.key == :weekly))
 
-    assert Decimal.equal?(primary.percent, Decimal.new("100"))
-    assert primary.percent_value == 100
-    assert primary.percent_label == "100%"
-    assert weekly.percent == Decimal.new("85.000")
-    assert weekly.percent_value == 85
-    assert weekly.percent_label == "85%"
+    assert Decimal.equal?(primary.percent, Decimal.new("0"))
+    assert primary.percent_value == 0
+    assert primary.percent_label == "0%"
+    assert weekly.percent == Decimal.new("15.000")
+    assert weekly.percent_value == 15
+    assert weekly.percent_label == "15%"
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
@@ -3567,18 +3571,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         has_element?(
           view,
           "#upstream-account-#{identity.id}-limit-primary_5h",
-          "100%"
+          "0%"
         ) ||
-          "expected observed zero-use account evidence to render the 5h quota as 100% remaining",
+          "expected observed zero-use account evidence to render the 5h quota as 0% used",
         has_element?(
           view,
-          "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='100']"
+          "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='0']"
         ) ||
-          "expected observed zero-use account evidence to render a full 5h quota meter",
+          "expected observed zero-use account evidence to render an empty 5h quota meter",
         has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h-reset") ||
           "expected observed zero-use account evidence to retain the provider reset countdown",
-        has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "85%") ||
-          "expected nonzero weekly usage API account evidence to render 85% remaining",
+        has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "15%") ||
+          "expected nonzero weekly usage API account evidence to render 15% used",
         not has_element?(
           view,
           "#upstream-account-#{identity.id}-routing-readiness [data-role='upstream-routing-cell']",
@@ -3625,9 +3629,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
     weekly = Enum.find(account.quota_limits, &(&1.key == :weekly))
 
-    assert Decimal.equal?(weekly.percent, Decimal.new("100"))
-    assert weekly.percent_value == 100
-    assert weekly.percent_label == "100%"
+    assert Decimal.equal?(weekly.percent, Decimal.new("0"))
+    assert weekly.percent_value == 0
+    assert weekly.percent_label == "0%"
   end
 
   @tag :upstream_quota_dashboard_regression
@@ -3695,18 +3699,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     first_weekly = accounts |> Map.fetch!(first_identity.id) |> quota_limit!(:weekly)
     second_weekly = accounts |> Map.fetch!(second_identity.id) |> quota_limit!(:weekly)
 
-    assert first_weekly.percent == Decimal.new("83.000")
-    assert first_weekly.percent_value == 83
-    assert first_weekly.percent_label == "83%"
+    assert first_weekly.percent == Decimal.new("17.000")
+    assert first_weekly.percent_value == 17
+    assert first_weekly.percent_label == "17%"
 
-    assert second_weekly.percent == Decimal.new("85.000")
-    assert second_weekly.percent_value == 85
-    assert second_weekly.percent_label == "85%"
+    assert second_weekly.percent == Decimal.new("15.000")
+    assert second_weekly.percent_value == 15
+    assert second_weekly.percent_label == "15%"
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{first_identity.id}-limit-weekly", "83%")
-    assert has_element?(view, "#upstream-account-#{second_identity.id}-limit-weekly", "85%")
+    assert has_element?(view, "#upstream-account-#{first_identity.id}-limit-weekly", "17%")
+    assert has_element?(view, "#upstream-account-#{second_identity.id}-limit-weekly", "15%")
   end
 
   @tag :upstream_quota_evidence_stability
@@ -3756,15 +3760,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         is_binary(key) and String.starts_with?(key, "model-codex_spark-primary-300")
       end)
 
-    assert Decimal.equal?(spark.percent, Decimal.new("100"))
-    assert spark.percent_value == 100
-    assert spark.percent_label == "100%"
+    assert Decimal.equal?(spark.percent, Decimal.new("0"))
+    assert spark.percent_value == 0
+    assert spark.percent_label == "0%"
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     selector = "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
 
-    assert has_element?(view, selector, "100%")
-    assert has_element?(view, "#{selector}-progress[value='100']")
+    assert has_element?(view, selector, "0%")
+    assert has_element?(view, "#{selector}-progress[value='0']")
     assert has_element?(view, "#{selector}-reset")
   end
 
@@ -5202,7 +5206,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limits-summary",
+             "#upstream-account-#{identity.id}-limits-summary.text-warning",
              "Refresh due"
            )
 
@@ -5507,7 +5511,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "100%"
+             "0%"
            )
 
     assert {:ok, [_window]} =
@@ -5606,8 +5610,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     weekly_selector =
       "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080"
 
-    assert has_element?(view, primary_selector, "99%")
-    assert has_element?(view, weekly_selector, "85%")
+    assert has_element?(view, primary_selector, "1%")
+    assert has_element?(view, weekly_selector, "15%")
 
     assert {:ok, [_primary, _weekly]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -5649,8 +5653,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, primary_selector, "99%")
-    assert has_element?(view, weekly_selector, "85%")
+    assert has_element?(view, primary_selector, "1%")
+    assert has_element?(view, weekly_selector, "15%")
     refute has_element?(view, primary_selector, "not reported")
     refute has_element?(view, weekly_selector, "not reported")
   end
@@ -5698,7 +5702,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "89%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "11%")
 
     assert {:ok, [_merged]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -5721,7 +5725,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "89%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "11%")
 
     refute has_element?(
              view,
@@ -5768,7 +5772,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "100%"
+             "0%"
            )
 
     later_reset = DateTime.add(now, 7, :hour)

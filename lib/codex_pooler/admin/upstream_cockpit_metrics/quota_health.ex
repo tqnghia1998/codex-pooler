@@ -93,7 +93,7 @@ defmodule CodexPooler.Admin.UpstreamCockpitMetrics.QuotaHealth do
     |> Map.put(:used_percent_value, Common.decimal_to_float(measurements.used_percent))
     |> Map.put(:remaining_percent, measurements.remaining_percent)
     |> Map.put(:remaining_percent_value, Common.decimal_to_float(measurements.remaining_percent))
-    |> Map.put(:bar_value, Common.decimal_to_float(measurements.remaining_percent) || 0.0)
+    |> Map.put(:bar_value, Common.decimal_to_float(measurements.used_percent) || 0.0)
     |> Map.put(:primary_5h, quota_window_contract(primary_5h, as_of))
     |> Map.put(:primary_30d, quota_window_contract(primary_30d, as_of))
     |> Map.put(:weekly, quota_window_contract(weekly, as_of))

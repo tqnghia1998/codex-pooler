@@ -2249,7 +2249,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert fresh_item.pool_label =~ "Quota fresh"
     assert fresh_item.remaining_percent_value == 80.0
     assert fresh_item.used_percent_value == 20.0
-    assert fresh_item.bar_value == 80.0
+    assert fresh_item.bar_value == 20.0
     assert fresh_item.routing_usable? == true
     assert fresh_item.reason_codes == []
     assert fresh_item.primary_5h.routing_usable? == true
@@ -2321,7 +2321,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert "exhausted" in exhausted_item.reason_codes
     assert exhausted_item.reason_codes == ["quota_window_unusable", "exhausted"]
     assert exhausted_item.routing_usable? == false
-    assert exhausted_item.bar_value == 0.0
+    assert exhausted_item.bar_value == 100.0
     assert exhausted_item.primary_5h.routing_usable? == false
     assert exhausted_item.primary_5h.reason_codes == ["exhausted"]
     assert exhausted_item.weekly == nil
@@ -2482,8 +2482,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
            )
 
     assert has_element?(view, "#upstream-cockpit-presence[data-status='refresh_failed']")
-    assert has_element?(view, "#upstream-quota-limit-primary_5h", "88%")
-    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='88'][max='100']")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h", "12%")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='12'][max='100']")
 
     assert has_element?(
              view,
@@ -2525,7 +2525,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert monthly_item.used == nil
     assert monthly_item.remaining_percent_value == 57.5
     assert monthly_item.used_percent_value == 42.5
-    assert monthly_item.bar_value == 57.5
+    assert monthly_item.bar_value == 42.5
     assert monthly_item.reason_codes == []
     assert monthly_item.primary_5h == nil
     assert monthly_item.primary_30d.routing_usable? == true
@@ -3134,12 +3134,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(
              view,
              "#upstream-quota-limit-primary_5h[data-role='upstream-limit-chart']",
-             "65%"
+             "35%"
            )
 
     assert has_element?(
              view,
-             "#upstream-quota-limit-primary_5h-progress[value='65'][max='100']"
+             "#upstream-quota-limit-primary_5h-progress[value='35'][max='100']"
            )
 
     assert has_element?(view, "#request-health-chart")
@@ -3211,7 +3211,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
 
     assert {:ok, cockpit} = UpstreamCockpitReadModel.load_visible(scope, identity.id)
 
-    assert [%{bar_value: 91.0, remaining_percent_value: 91.0, used_percent_value: 9.0}] =
+    assert [%{bar_value: 9.0, remaining_percent_value: 91.0, used_percent_value: 9.0}] =
              cockpit.charts.quota_health.items
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
@@ -3221,12 +3221,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(
              view,
              "#upstream-quota-limit-primary_5h[data-role='upstream-limit-chart']",
-             "91%"
+             "9%"
            )
 
     assert has_element?(
              view,
-             "#upstream-quota-limit-primary_5h-progress[value='91'][max='100']"
+             "#upstream-quota-limit-primary_5h-progress[value='9'][max='100']"
            )
 
     assert has_element?(
@@ -4455,7 +4455,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     })
 
     _ = :sys.get_state(view.pid)
-    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='64'][max='100']")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='36'][max='100']")
 
     request_health_request_fixture(pool, assignment, %{
       status: "succeeded",

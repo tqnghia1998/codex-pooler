@@ -142,7 +142,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
                 <p class="text-xs font-semibold uppercase text-primary">Status</p>
                 <p
                   id={"upstream-account-#{@account.identity.id}-limits-summary"}
-                  class="truncate text-xs text-base-content/60"
+                  class={[AdminBadges.status_chip_class(@account.identity.status), "w-fit"]}
                 >
                   {account_status_label(@account)}
                 </p>
