@@ -16,7 +16,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     AccountLifecycleWorkflow,
     AuthJsonWorkflow,
     OAuthWorkflow,
-    SavedResetWorkflow
+    SavedResetWorkflow,
+    SpendCapWorkflow
   }
 
   alias CodexPoolerWeb.DateTimeDisplay
@@ -57,6 +58,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         editing_saved_reset_policy: nil,
         saved_reset_policy_form: saved_reset_policy_form(%{}),
         confirming_saved_reset_redemption: nil,
+        editing_spend_cap: nil,
+        spend_cap_form: nil,
         account_panel_views: %{},
         subscribed_pool_ids: MapSet.new(),
         upstreams_reload_timer: nil
@@ -332,6 +335,49 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     end
   end
 
+  def handle_event("open_spend_cap", %{"id" => identity_id}, socket) do
+    {:noreply, SpendCapWorkflow.open(socket, identity_id)}
+  end
+
+  def handle_event("cancel_spend_cap", _params, socket) do
+    {:noreply, SpendCapWorkflow.close(socket)}
+  end
+
+  def handle_event(
+        "validate_spend_cap",
+        %{"spend_cap" => params},
+        socket
+      ) do
+    case socket.assigns.editing_spend_cap do
+      %{identity: %UpstreamIdentity{} = identity} ->
+        {:noreply, SpendCapWorkflow.validate(socket, identity, params)}
+
+      nil ->
+        {:noreply, put_flash(socket, :error, "Upstream account was not found")}
+    end
+  end
+
+  def handle_event(
+        "save_spend_cap",
+        %{"spend_cap" => params},
+        socket
+      ) do
+    case socket.assigns.editing_spend_cap do
+      %{identity: %UpstreamIdentity{} = identity} ->
+        {:noreply,
+         SpendCapWorkflow.save(
+           socket,
+           identity,
+           params,
+           &SpendCapWorkflow.close/1,
+           &reload_upstreams/1
+         )}
+
+      nil ->
+        {:noreply, put_flash(socket, :error, "Upstream account was not found")}
+    end
+  end
+
   def handle_event("pause_account", %{"id" => identity_id}, socket) do
     {:noreply, AccountLifecycleWorkflow.pause(socket, identity_id, &reload_upstreams/1)}
   end
@@ -393,6 +439,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         editing_saved_reset_policy={@editing_saved_reset_policy}
         saved_reset_policy_form={@saved_reset_policy_form}
         confirming_saved_reset_redemption={@confirming_saved_reset_redemption}
+        editing_spend_cap={@editing_spend_cap}
+        spend_cap_form={@spend_cap_form}
         account_panel_views={@account_panel_views}
         upstream_accounts={@upstream_accounts}
         uploads={@uploads}
@@ -534,6 +582,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     |> AccountLifecycleWorkflow.close_delete()
     |> OAuthWorkflow.close()
     |> close_saved_reset_policy_dialog()
+    |> SpendCapWorkflow.close()
   end
 
   defp close_rename_account_dialog(socket) do

@@ -29,6 +29,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     codex_response_headers
     codex_rate_limit_error
   )
+  @credits_per_dollar Decimal.new(25)
 
   @type quota_limit_row :: %{
           required(:key) => atom() | String.t(),
@@ -42,6 +43,35 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
           required(:reset_label) => String.t() | nil,
           required(:reset_title) => String.t() | nil
         }
+
+  @spec spend_cap_row(map()) :: quota_limit_row() | nil
+  def spend_cap_row(%{spend_cap_credits: cap} = identity) when is_integer(cap) and cap > 0 do
+    spent = spend_cap_spent(identity)
+    cap = Decimal.new(cap)
+
+    remaining_percent =
+      cap
+      |> Decimal.sub(spent)
+      |> Decimal.mult(Decimal.new(100))
+      |> Decimal.div(cap)
+      |> decimal_clamp_percent()
+
+    %{
+      key: :spending_cap,
+      label: "Spending Cap",
+      percent: remaining_percent,
+      percent_value: quota_percent_value(remaining_percent),
+      percent_label: quota_percent_label(remaining_percent),
+      count_label: "#{format_dollars(spent)} / #{format_dollars(cap)}",
+      credit_backed: false,
+      reset_semantics: :unknown,
+      reset_at: nil,
+      reset_label: cap_started_label(identity.cap_started_at),
+      reset_title: cap_started_title(identity.cap_started_at)
+    }
+  end
+
+  def spend_cap_row(_identity), do: nil
 
   @spec readiness([Quota.AccountQuotaWindow.t()], DateTime.t()) :: UpstreamQuotaReadiness.t()
   def readiness(windows, %DateTime{} = snapshot_at) when is_list(windows) do
@@ -115,6 +145,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     additional_limits =
       windows
       |> Enum.reject(&account_quota_window?/1)
+      |> Enum.reject(&spend_control_window?/1)
       |> Enum.filter(&informative_additional_quota_window?/1)
       |> Enum.sort_by(&quota_limit_sort_key/1)
       |> quota_limit_presentations()
@@ -149,6 +180,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
         quota_account_window(windows, "secondary", snapshot_at),
         datetime_preferences,
         snapshot_at
+      ),
+      quota_limit_row(
+        :monthly_quota,
+        "Montly Quota Left",
+        Enum.find(WindowSelector.logical_windows(windows), &(&1.quota_key == "spend_control")),
+        datetime_preferences,
+        snapshot_at
       )
     ] ++ additional_limits
   end
@@ -167,6 +205,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
   defp account_quota_window?(%Quota.AccountQuotaWindow{}), do: false
 
+  defp spend_control_window?(%Quota.AccountQuotaWindow{quota_key: "spend_control"}), do: true
+  defp spend_control_window?(%Quota.AccountQuotaWindow{}), do: false
+
   defp informative_additional_quota_window?(%Quota.AccountQuotaWindow{} = window) do
     not is_nil(quota_remaining_percent(window)) or not is_nil(quota_count_label(window))
   end
@@ -178,6 +219,44 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   defp quota_account_window(windows, descriptor, snapshot_at) do
     WindowSelector.best_account_window(windows, descriptor, snapshot_at)
   end
+
+  defp spend_cap_spent(%{spent_credits: value}) when not is_nil(value), do: credit_amount(value)
+
+  defp spend_cap_spent(%{metadata: metadata}) when is_map(metadata),
+    do: credit_amount(Map.get(metadata, "spent_credits", 0))
+
+  defp spend_cap_spent(_identity), do: Decimal.new(0)
+
+  defp credit_amount(value) when is_integer(value), do: Decimal.new(value)
+  defp credit_amount(value) when is_float(value), do: Decimal.from_float(value)
+
+  defp credit_amount(value) when is_binary(value) do
+    case Decimal.parse(value) do
+      {amount, ""} -> amount
+      _invalid -> Decimal.new(0)
+    end
+  end
+
+  defp credit_amount(_value), do: Decimal.new(0)
+
+  defp format_dollars(credits) do
+    credits
+    |> Decimal.div(@credits_per_dollar)
+    |> Decimal.round(2)
+    |> Decimal.to_string(:normal)
+    |> then(&"$#{&1}")
+  end
+
+  defp cap_started_label(%DateTime{} = started_at) do
+    "active #{Formatting.format_reset_duration(DateTime.diff(DateTime.utc_now(), started_at, :second))} ago"
+  end
+
+  defp cap_started_label(_started_at), do: nil
+
+  defp cap_started_title(%DateTime{} = started_at),
+    do: "started #{DateTime.to_iso8601(started_at)}"
+
+  defp cap_started_title(_started_at), do: nil
 
   defp quota_limit_sort_key(%Quota.AccountQuotaWindow{} = window) do
     {

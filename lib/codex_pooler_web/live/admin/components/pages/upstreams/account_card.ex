@@ -123,7 +123,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         </div>
       </header>
 
-      <div class="grid gap-4 p-4">
+      <div class="grid gap-3 p-3">
         <div
           id={"upstream-account-#{@account.identity.id}-panel-switcher"}
           data-role="upstream-account-panel-switcher"
@@ -624,6 +624,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             icon="hero-battery-100"
             label="Saved resets"
             phx-click="open_saved_reset_policy"
+            phx-value-id={@account.identity.id}
+            disabled={@account.identity.status == "deleted"}
+          />
+        </li>
+        <li>
+          <AdminComponents.dropdown_action_item
+            id={"spend-cap-upstream-account-#{@account.identity.id}"}
+            icon="hero-currency-dollar"
+            label="Spend cap"
+            phx-click="open_spend_cap"
             phx-value-id={@account.identity.id}
             disabled={@account.identity.status == "deleted"}
           />

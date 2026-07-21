@@ -42,6 +42,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :editing_saved_reset_policy, :map, default: nil
   attr :saved_reset_policy_form, :any, required: true
   attr :confirming_saved_reset_redemption, :map, default: nil
+  attr :editing_spend_cap, :map, default: nil
+  attr :spend_cap_form, :any, default: nil
   attr :account_panel_views, :map, required: true
   attr :upstream_accounts, :list, required: true
   attr :uploads, :map, required: true
@@ -96,6 +98,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         form={@saved_reset_policy_form}
         confirming_saved_reset_redemption={@confirming_saved_reset_redemption}
         datetime_preferences={@datetime_preferences}
+      />
+
+      <.spend_cap_dialog
+        account={@editing_spend_cap}
+        form={@spend_cap_form}
       />
 
       <section id="upstream-account-surface" class="grid min-w-0 gap-4">
@@ -990,4 +997,65 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
        do: account_id
 
   defp oauth_target_label(_account), do: "selected account"
+
+  attr :account, :map, default: nil
+  attr :form, :any, default: nil
+
+  defp spend_cap_dialog(assigns) do
+    ~H"""
+    <dialog :if={@account && @form} id="spend-cap-dialog" class="modal" open>
+      <div class="modal-box max-w-xl border border-base-300 bg-base-100 p-0 shadow-2xl">
+        <div class="border-b border-base-300 px-6 py-5">
+          <p class="text-sm font-semibold uppercase tracking-wide text-primary">
+            Upstream account
+          </p>
+          <h2 class="mt-1 text-2xl font-bold text-base-content">Spend cap</h2>
+          <p class="mt-2 text-sm leading-6 text-base-content/70">
+            Set the maximum spend in USD before this account is excluded from routing. Set to 0 for
+            unlimited. The cap resets when you save a new value.
+          </p>
+        </div>
+
+        <.form
+          id="spend-cap-form"
+          for={@form}
+          phx-change="validate_spend_cap"
+          phx-submit="save_spend_cap"
+          autocomplete="off"
+          class="grid gap-5 p-6"
+        >
+          <.input
+            field={@form[:spend_cap_credits]}
+            type="number"
+            label="Spend cap (USD)"
+            placeholder="0 (unlimited)"
+            min="0"
+          />
+        </.form>
+
+        <AdminComponents.dialog_footer id="spend-cap-dialog-footer">
+          <:actions>
+            <AdminComponents.action_button
+              id="spend-cap-cancel"
+              label="Cancel"
+              variant={:ghost}
+              phx-click="cancel_spend_cap"
+            />
+            <AdminComponents.action_button
+              id="spend-cap-submit"
+              icon="hero-check"
+              label="Save cap"
+              type="submit"
+              form="spend-cap-form"
+              variant={:primary}
+            />
+          </:actions>
+        </AdminComponents.dialog_footer>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button type="button" phx-click="cancel_spend_cap">close</button>
+      </form>
+    </dialog>
+    """
+  end
 end
