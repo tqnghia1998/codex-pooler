@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Filter do
   def apply(accounts, filters) when is_list(accounts) and is_map(filters) do
     accounts
     |> filter_by_status(Map.get(filters, "status"))
+    |> filter_by_quota(Map.get(filters, "quota"))
     |> filter_by_query(Map.get(filters, "query"))
   end
 
@@ -13,6 +14,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Filter do
   end
 
   defp filter_by_status(accounts, _status), do: accounts
+
+  defp filter_by_quota(accounts, quota) when is_binary(quota) and quota != "",
+    do: Enum.filter(accounts, &(&1.quota_remaining == quota))
+
+  defp filter_by_quota(accounts, _quota), do: accounts
 
   defp filter_by_query(accounts, query) when is_binary(query) do
     query = String.downcase(String.trim(query))

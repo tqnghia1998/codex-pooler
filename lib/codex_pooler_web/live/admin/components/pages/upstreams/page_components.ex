@@ -24,6 +24,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :filter_values, :map, required: true
   attr :pool_filter_options, :list, required: true
   attr :status_options, :list, required: true
+  attr :sort_options, :list, required: true
+  attr :quota_options, :list, required: true
+  attr :upstream_stats, :map, required: true
   attr :auth_json_form, :any, required: true
   attr :auth_json_upload_limit_label, :string, required: true
   attr :importing_auth_json, :boolean, required: true
@@ -46,6 +49,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :spend_cap_form, :any, default: nil
   attr :account_panel_views, :map, required: true
   attr :upstream_accounts, :list, required: true
+  attr :testing_account_ids, :any, required: true
   attr :uploads, :map, required: true
   attr :datetime_preferences, :map, required: true
 
@@ -106,11 +110,90 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
       />
 
       <section id="upstream-account-surface" class="grid min-w-0 gap-4">
+        <AdminComponents.metric_strip
+          id="upstream-account-stats"
+          desktop_columns={:five}
+          compact_mobile
+          class="grid w-full grid-cols-9 gap-1.5"
+        >
+          <AdminComponents.metric_card
+            id="upstream-stat-total"
+            icon="hero-users"
+            label="Total"
+            value={@upstream_stats.total}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-active"
+            icon="hero-check-circle"
+            label="Active"
+            value={@upstream_stats.active}
+            tone={:success}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-reauth"
+            icon="hero-key"
+            label="Reauth required"
+            value={@upstream_stats.reauth_required}
+            tone={:error}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-attention"
+            icon="hero-exclamation-triangle"
+            label="Needs attention"
+            value={@upstream_stats.needs_attention}
+            tone={:warning}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-quota-plenty"
+            icon="hero-battery-100"
+            label="Quota ≥70%"
+            value={@upstream_stats.quota_plenty}
+            tone={:success}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-quota-moderate"
+            icon="hero-battery-50"
+            label="Quota 30–69%"
+            value={@upstream_stats.quota_moderate}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-quota-low"
+            icon="hero-battery-0"
+            label="Quota <30%"
+            value={@upstream_stats.quota_low}
+            tone={:warning}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-quota-exhausted"
+            icon="hero-no-symbol"
+            label="Exhausted"
+            value={@upstream_stats.quota_exhausted}
+            tone={:error}
+            compact_mobile
+          />
+          <AdminComponents.metric_card
+            id="upstream-stat-quota-unknown"
+            icon="hero-question-mark-circle"
+            label="Quota unknown"
+            value={@upstream_stats.quota_unknown}
+            compact_mobile
+          />
+        </AdminComponents.metric_strip>
+
         <.upstream_filter_form
           form={@filter_form}
           filter_values={@filter_values}
           pool_filter_options={@pool_filter_options}
           status_options={@status_options}
+          sort_options={@sort_options}
+          quota_options={@quota_options}
         />
 
         <AdminComponents.empty_state
@@ -137,6 +220,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
 
         <.upstream_account_grid
           accounts={@upstream_accounts}
+          testing_account_ids={@testing_account_ids}
           account_panel_views={@account_panel_views}
           datetime_preferences={@datetime_preferences}
         />
@@ -149,6 +233,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :filter_values, :map, required: true
   attr :pool_filter_options, :list, required: true
   attr :status_options, :list, required: true
+  attr :sort_options, :list, required: true
+  attr :quota_options, :list, required: true
 
   defp upstream_filter_form(assigns) do
     ~H"""
@@ -158,6 +244,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
       phx-change="filter"
       phx-submit="filter"
       autocomplete="off"
+      compact
+      single_row
+      fields_class="grid w-full flex-1 grid-cols-[minmax(0,2fr)_repeat(4,minmax(0,1fr))] items-stretch gap-1.5 [&>*]:h-8 [&_.fieldset]:mb-0 [&_.input]:!h-8 [&_.input]:!min-h-8 [&_.label]:sr-only [&_.select]:!h-8 [&_.select]:!min-h-8 [&_.select]:select-sm"
     >
       <.upstream_query_filter_input field={@form[:query]} />
       <PoolFilterComponents.pool_filter_dropdown
@@ -171,6 +260,38 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         selected={UpstreamFilterForm.selected_status_option(@filter_values["status"])}
         options={@status_options}
       />
+      <label>
+        <span class="sr-only">Quota remaining</span>
+        <select
+          id="upstream-quota-filter"
+          name="filters[quota]"
+          class="select select-bordered select-sm w-full text-xs"
+        >
+          <option
+            :for={{label, value} <- @quota_options}
+            value={value}
+            selected={@filter_values["quota"] == value}
+          >
+            {label}
+          </option>
+        </select>
+      </label>
+      <label>
+        <span class="sr-only">Sort accounts</span>
+        <select
+          id="upstream-sort-filter"
+          name="filters[sort]"
+          class="select select-bordered select-sm w-full text-xs font-normal"
+        >
+          <option
+            :for={{label, value} <- @sort_options}
+            value={value}
+            selected={@filter_values["sort"] == value}
+          >
+            {label}
+          </option>
+        </select>
+      </label>
     </AdminComponents.filter_form>
     """
   end
@@ -271,7 +392,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
     ~H"""
     <div
       id="upstream-page-actions"
-      class="grid w-full grid-cols-1 gap-2 sm:grid-cols-3 lg:flex lg:w-auto lg:flex-wrap lg:justify-end"
+      class="grid w-full grid-cols-1 gap-2 sm:grid-cols-4 lg:flex lg:w-auto lg:flex-wrap lg:justify-end"
     >
       <button
         id="upstream-page-oauth-link-action"
@@ -292,6 +413,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         <.icon name="hero-user-plus" class="size-4 shrink-0" />
         <span class="truncate">Invite</span>
       </.link>
+      <button
+        id="upstream-page-bulk-spend-cap-action"
+        type="button"
+        phx-click="open_bulk_spend_cap"
+        aria-label="Set spending caps"
+        class="btn btn-secondary min-w-0 justify-center gap-2 px-4"
+      >
+        <.icon name="hero-banknotes" class="size-4 shrink-0" />
+        <span class="truncate">Spending caps</span>
+      </button>
       <button
         id="upstream-page-import-auth-json-action"
         type="button"
@@ -917,6 +1048,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   defp saved_reset_redemption_title(_action), do: "Saved reset redemption unavailable"
 
   attr :accounts, :list, required: true
+  attr :testing_account_ids, :any, required: true
   attr :account_panel_views, :map, required: true
   attr :datetime_preferences, :map, required: true
 
@@ -931,6 +1063,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         :for={{account, account_index} <- Enum.with_index(@accounts)}
         account={account}
         account_index={account_index}
+        testing?={MapSet.member?(@testing_account_ids, account.identity.id)}
         panel_view={account_panel_view(@account_panel_views, account)}
         datetime_preferences={@datetime_preferences}
       />
@@ -1009,10 +1142,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           <p class="text-sm font-semibold uppercase tracking-wide text-primary">
             Upstream account
           </p>
-          <h2 class="mt-1 text-2xl font-bold text-base-content">Spend cap</h2>
+          <h2 class="mt-1 text-2xl font-bold text-base-content">
+            {if @account[:bulk], do: "Set spending caps", else: "Spend cap"}
+          </h2>
           <p class="mt-2 text-sm leading-6 text-base-content/70">
-            Set the maximum spend in USD before this account is excluded from routing. Set to 0 for
-            unlimited. The cap resets when you save a new value.
+            Set the maximum spend in USD before routing is excluded. A positive cap must be less
+            than the monthly quota remaining. Set to 0 for unlimited. Saving resets cap usage.
           </p>
         </div>
 
@@ -1024,6 +1159,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           autocomplete="off"
           class="grid gap-5 p-6"
         >
+          <.input
+            :if={@account[:bulk]}
+            field={@form[:target]}
+            type="select"
+            label="Accounts"
+            options={[
+              {"All accounts", "all"},
+              {"All accounts that reached spending cap", "reached"},
+              {"All accounts that have no spending cap", "none"}
+            ]}
+          />
           <.input
             field={@form[:spend_cap_credits]}
             type="number"

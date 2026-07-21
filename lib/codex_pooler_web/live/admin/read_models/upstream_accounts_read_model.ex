@@ -1,17 +1,21 @@
 defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   @moduledoc false
 
+  import Ecto.Query
+
+  alias CodexPooler.Accounting.Attempt
+
   alias CodexPooler.Admin.{
     UpstreamCircuitReadiness,
     UpstreamQuotaReadiness,
     UpstreamRoutingReadiness
   }
-
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.AssignmentModelSummaries
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Jobs
   alias CodexPooler.Pools
+  alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
   alias CodexPooler.Upstreams.Auth.TokenRefresh
@@ -94,6 +98,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           required(:plan_label) => String.t(),
           required(:plan_reported?) => boolean(),
           required(:refresh_status) => String.t(),
+          required(:last_used_at) => DateTime.t() | nil,
+          required(:last_used_label) => String.t(),
           required(:token_refresh_label) => String.t(),
           required(:refresh_job_state) => String.t() | nil,
           required(:quota_refresh_status) => String.t(),
@@ -155,6 +161,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
         ]
   def list_visible_accounts(scope, pools, filters, datetime_preferences)
       when is_list(pools) and is_map(filters) and is_map(datetime_preferences) do
+    list_visible_account_page(scope, pools, filters, datetime_preferences).accounts
+  end
+
+  @spec list_visible_account_page(term(), [term()], map(), DateTimeDisplay.preferences()) :: map()
+  def list_visible_account_page(scope, pools, filters, datetime_preferences)
+      when is_list(pools) and is_map(filters) and is_map(datetime_preferences) do
     # :identity_id narrows the projection to one account BEFORE the expensive
     # per-identity snapshot work; detail pages must not pay fleet cost.
     {identity_id, filters} = Map.pop(filters, :identity_id)
@@ -184,10 +196,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       attach_assignment_circuit_readiness(assignments, circuit_readiness_by_assignment_id)
 
     token_burns = TokenBurnProjection.summaries(identities)
+    last_used = last_used_by_identity(identities)
 
-    identities
-    |> Enum.map(&account_snapshot(&1, assignments, token_burns, datetime_preferences))
-    |> Filter.apply(filters)
+    projected =
+      Enum.map(
+        identities,
+        &account_snapshot(&1, assignments, token_burns, last_used, datetime_preferences)
+      )
+
+    projected = Enum.map(projected, &Map.put(&1, :quota_remaining, quota_remaining(&1)))
+
+    %{
+      accounts:
+        projected
+        |> Filter.apply(filters)
+        |> sort_accounts(Map.get(filters, "sort")),
+      stats: account_stats(projected)
+    }
   end
 
   defp narrow_to_identity(identities, nil), do: identities
@@ -350,7 +375,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     end
   end
 
-  defp account_snapshot(identity, assignments, token_burns, datetime_preferences) do
+  defp account_snapshot(identity, assignments, token_burns, last_used, datetime_preferences) do
     # one explicit snapshot instant for the effective window load so the
     # readiness and card projections below reason about the same view
     snapshot_at = DateTime.utc_now()
@@ -388,6 +413,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       plan_label: account_plan_label(identity),
       plan_reported?: account_plan_reported?(identity),
       refresh_status: refresh_status_label(identity),
+      last_used_at: Map.get(last_used, identity.id),
+      last_used_label:
+        case Map.get(last_used, identity.id) do
+          %DateTime{} = timestamp ->
+            Formatting.timestamp_status_label("last used", timestamp, datetime_preferences)
+
+          nil ->
+            "never used"
+        end,
       token_refresh_label: token_refresh_label(identity, datetime_preferences),
       refresh_job_state: refresh_job_state(refresh_job),
       quota_refresh_status:
@@ -419,7 +453,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       routing_readiness: routing_readiness,
       quota_limits:
         QuotaProjection.quota_limit_rows(quota_windows, datetime_preferences, snapshot_at) ++
-          Enum.reject([QuotaProjection.spend_cap_row(identity)], &is_nil/1),
+          [QuotaProjection.spend_cap_row(identity)],
       identity_observability: identity_observability
     }
 
@@ -429,6 +463,77 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       SavedResetProjection.redemption_action(account)
     )
   end
+
+  defp last_used_by_identity(identities) do
+    identity_ids = Enum.map(identities, & &1.id)
+
+    Repo.all(
+      from attempt in Attempt,
+        where: attempt.upstream_identity_id in ^identity_ids,
+        group_by: attempt.upstream_identity_id,
+        select: {attempt.upstream_identity_id, max(attempt.started_at)}
+    )
+    |> Map.new()
+  end
+
+  defp account_stats(accounts) do
+    %{
+      total: length(accounts),
+      active: Enum.count(accounts, &(&1.identity.status == "active")),
+      reauth_required: Enum.count(accounts, &(&1.identity.status == "reauth_required")),
+      needs_attention:
+        Enum.count(accounts, &(&1.identity.status in ~w(refresh_failed errored disabled))),
+      quota_plenty: Enum.count(accounts, &(&1.quota_remaining == "plenty")),
+      quota_moderate: Enum.count(accounts, &(&1.quota_remaining == "moderate")),
+      quota_low: Enum.count(accounts, &(&1.quota_remaining == "low")),
+      quota_exhausted: Enum.count(accounts, &(&1.quota_remaining == "exhausted")),
+      quota_unknown: Enum.count(accounts, &(&1.quota_remaining == "unknown"))
+    }
+  end
+
+  defp quota_remaining(account) do
+    percents =
+      account.quota_limits
+      |> Enum.reject(&(&1.key == :spending_cap))
+      |> Enum.map(& &1.percent)
+      |> Enum.reject(&is_nil/1)
+
+    case percents do
+      [] -> "unknown"
+      values -> values |> Enum.max_by(&Decimal.to_float/1) |> remaining_band()
+    end
+  end
+
+  defp remaining_band(used) do
+    cond do
+      Decimal.compare(used, Decimal.new(100)) != :lt -> "exhausted"
+      Decimal.compare(used, Decimal.new(70)) != :lt -> "low"
+      Decimal.compare(used, Decimal.new(30)) != :lt -> "moderate"
+      true -> "plenty"
+    end
+  end
+
+  defp sort_accounts(accounts, "name"),
+    do: Enum.sort_by(accounts, &{String.downcase(&1.label), &1.identity.id})
+
+  defp sort_accounts(accounts, "status"),
+    do: Enum.sort_by(accounts, &{&1.identity.status, String.downcase(&1.label), &1.identity.id})
+
+  defp sort_accounts(accounts, "quota_remaining"),
+    do: Enum.sort_by(accounts, &{quota_rank(&1.quota_remaining), String.downcase(&1.label)})
+
+  defp sort_accounts(accounts, _recent), do: Enum.sort_by(accounts, &last_used_sort_key/1)
+
+  defp quota_rank("plenty"), do: 0
+  defp quota_rank("moderate"), do: 1
+  defp quota_rank("low"), do: 2
+  defp quota_rank("exhausted"), do: 3
+  defp quota_rank(_unknown), do: 4
+
+  defp last_used_sort_key(%{last_used_at: %DateTime{} = last_used_at} = account),
+    do: {0, -DateTime.to_unix(last_used_at, :microsecond), String.downcase(account.label)}
+
+  defp last_used_sort_key(account), do: {1, 0, String.downcase(account.label)}
 
   defp identity_assignments(identity, assignments, quota_readiness) do
     assignments

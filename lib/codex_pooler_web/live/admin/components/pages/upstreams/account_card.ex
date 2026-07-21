@@ -29,11 +29,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
   attr :account, :map, required: true
   attr :account_index, :integer, required: true
+  attr :testing?, :boolean, default: false
   attr :panel_view, :atom, default: :usage, values: [:usage, :tokens, :pools]
 
   attr :datetime_preferences, :map, default: nil
 
   def account_card(assigns) do
+    assigns = assign_new(assigns, :testing?, fn -> false end)
+
     datetime_preferences =
       Map.get(assigns, :datetime_preferences) || DateTimeDisplay.preferences_for_user(nil)
 
@@ -118,8 +121,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             saved_resets={@saved_resets}
             saved_reset_policy={@saved_reset_policy}
           />
-          <.upstream_plan_indicator account={@account} account_index={@account_index} />
-          <.upstream_account_actions account={@account} />
+          <p
+            id={"upstream-account-#{@account.identity.id}-status"}
+            class={AdminBadges.status_chip_class(@account.identity.status)}
+          >
+            {account_status_label(@account)}
+          </p>
+          <.upstream_account_actions account={@account} testing?={@testing?} />
         </div>
       </header>
 
@@ -137,16 +145,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             inert={@panel_view != :usage}
             class={account_panel_class(@panel_view == :usage)}
           >
-            <div class="grid grid-cols-[minmax(0,1fr)_auto] items-start gap-3">
-              <div class="min-w-0">
-                <p class="text-xs font-semibold uppercase text-primary">Status</p>
-                <p
-                  id={"upstream-account-#{@account.identity.id}-limits-summary"}
-                  class={[AdminBadges.status_chip_class(@account.identity.status), "w-fit"]}
-                >
-                  {account_status_label(@account)}
-                </p>
-              </div>
+            <div class="flex justify-end">
               <div
                 id={"upstream-account-#{@account.identity.id}-token-burn"}
                 data-role="upstream-token-burn-summary"
@@ -510,6 +509,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   defp aria_bool(false), do: "false"
 
   attr :account, :map, required: true
+  attr :testing?, :boolean, default: false
 
   defp upstream_account_actions(assigns) do
     assigns =
@@ -610,6 +610,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         </li>
         <li>
           <AdminComponents.dropdown_action_item
+            id={"test-upstream-account-#{@account.identity.id}"}
+            icon={if @testing?, do: "hero-arrow-path", else: "hero-signal"}
+            label={if @testing?, do: "Testing…", else: "Test connection"}
+            phx-click="test_account"
+            phx-value-id={@account.identity.id}
+            disabled={@testing? || !testable?(@account.identity.status)}
+          />
+        </li>
+        <li>
+          <AdminComponents.dropdown_action_item
             id={"refresh-upstream-account-#{@account.identity.id}"}
             icon="hero-arrow-path"
             label="Refresh token"
@@ -651,29 +661,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         </li>
       </ul>
     </div>
-    """
-  end
-
-  attr :account, :map, required: true
-  attr :account_index, :integer, required: true
-
-  defp upstream_plan_indicator(assigns) do
-    ~H"""
-    <AdminBadges.plan_badge
-      :if={@account.plan_reported?}
-      id={account_plan_label_id(@account, @account_index)}
-      label={@account.plan_label}
-      class="self-center"
-      aria-label={"Account plan: #{@account.plan_label}"}
-    />
-    <AdminComponents.diagnostic_popover
-      :if={!@account.plan_reported?}
-      id={account_plan_label_id(@account, @account_index)}
-      label="Account did not report plan or quota details"
-      title="Plan and quota not reported"
-      description="This account did not report plan or quota details. Routing still depends on separate quota evidence before dispatch."
-      placement={:end}
-    />
     """
   end
 
@@ -890,9 +877,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   defp saved_reset_meter_grid_class([_single_limit]), do: nil
   defp saved_reset_meter_grid_class(_limits), do: "md:col-span-2"
 
-  defp account_plan_label_id(account, _index),
-    do: "upstream-account-#{account.identity.id}-plan-label"
-
   defp assignment_count_label([]), do: "No Pools"
   defp assignment_count_label([_assignment]), do: "1 Pool"
   defp assignment_count_label(assignments), do: "#{length(assignments)} Pools"
@@ -1021,5 +1005,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
   defp reactivatable?(status), do: status in @reactivatable_statuses
 
+  defp testable?(status), do: status in ["active", "refresh_due", "refresh_failed"]
   defp refreshable?(status), do: status in ["active", "refresh_due", "refresh_failed"]
 end

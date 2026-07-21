@@ -5,14 +5,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
 
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
 
-  @filter_keys ~w(query pool_id status)
+  @filter_keys ~w(query pool_id status quota sort)
+  @sorts ~w(recent name status quota_remaining)
+  @quotas ~w(plenty moderate low exhausted unknown)
 
   @spec query_params(map()) :: map()
   def query_params(filter_params) do
     filter_params
     |> filter_values()
     |> Map.take(@filter_keys)
-    |> Enum.reject(fn {_key, value} -> blank?(value) end)
+    |> Enum.reject(fn
+      {"sort", "recent"} -> true
+      {_key, value} -> blank?(value)
+    end)
     |> Map.new()
   end
 
@@ -23,7 +28,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
     %{
       "query" => values["query"],
       "pool_id" => normalize_pool_id(values["pool_id"], pools),
-      "status" => normalize_status(values["status"])
+      "status" => normalize_status(values["status"]),
+      "quota" => normalize_quota(values["quota"]),
+      "sort" => normalize_sort(values["sort"])
     }
   end
 
@@ -44,11 +51,33 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
     Enum.find(status_options(), &(&1.value == (status || ""))) || any_status_option()
   end
 
+  @spec sort_options() :: [{String.t(), String.t()}]
+  def sort_options,
+    do: [
+      {"Recently used", "recent"},
+      {"Most quota", "quota_remaining"},
+      {"Name A–Z", "name"},
+      {"Status", "status"}
+    ]
+
+  @spec quota_options() :: [{String.t(), String.t()}]
+  def quota_options,
+    do: [
+      {"Any quota", ""},
+      {"Plenty (≥70%)", "plenty"},
+      {"Moderate (30–69%)", "moderate"},
+      {"Low (<30%)", "low"},
+      {"Exhausted", "exhausted"},
+      {"Unknown", "unknown"}
+    ]
+
   defp filter_values(params) when is_map(params) do
     %{
       "query" => string_param(params, "query"),
       "pool_id" => string_param(params, "pool_id"),
-      "status" => string_param(params, "status")
+      "status" => string_param(params, "status"),
+      "quota" => normalize_quota(string_param(params, "quota")),
+      "sort" => normalize_sort(string_param(params, "sort"))
     }
   end
 
@@ -62,6 +91,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
 
   defp normalize_status(""), do: ""
   defp normalize_status(status), do: if(status in visible_statuses(), do: status, else: "")
+
+  defp normalize_quota(quota) when quota in @quotas, do: quota
+  defp normalize_quota(_quota), do: ""
+
+  defp normalize_sort(sort) when sort in @sorts, do: sort
+  defp normalize_sort(_sort), do: "recent"
 
   defp visible_statuses do
     Enum.reject(UpstreamIdentity.statuses(), &(&1 == UpstreamIdentity.deleted_status()))

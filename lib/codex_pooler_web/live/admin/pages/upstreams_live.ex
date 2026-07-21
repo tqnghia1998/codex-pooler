@@ -3,6 +3,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   alias CodexPooler.Events
   alias CodexPooler.Pools
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.PoolEventSubscriptions
@@ -37,7 +38,21 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         filter_form: UpstreamFilterForm.filter_form(),
         filter_values: UpstreamFilterForm.filter_values(%{}, []),
         status_options: UpstreamFilterForm.status_options(),
+        sort_options: UpstreamFilterForm.sort_options(),
+        quota_options: UpstreamFilterForm.quota_options(),
+        upstream_stats: %{
+          total: 0,
+          active: 0,
+          reauth_required: 0,
+          needs_attention: 0,
+          quota_plenty: 0,
+          quota_moderate: 0,
+          quota_low: 0,
+          quota_exhausted: 0,
+          quota_unknown: 0
+        },
         upstream_accounts: [],
+        testing_account_ids: MapSet.new(),
         auth_json_form: UpstreamAuthJsonImport.empty_form(),
         auth_json_upload_limit_label: UpstreamAuthJsonImport.upload_limit_label(),
         importing_auth_json: false,
@@ -130,6 +145,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   def handle_event("select_status_filter", %{"status" => status}, socket) do
     params = Map.put(socket.assigns.filter_values, "status", status)
+
+    {:noreply,
+     push_patch(socket, to: ~p"/admin/upstreams?#{UpstreamFilterForm.query_params(params)}")}
+  end
+
+  def handle_event("select_sort", %{"sort" => sort}, socket) do
+    params = Map.put(socket.assigns.filter_values, "sort", sort)
 
     {:noreply,
      push_patch(socket, to: ~p"/admin/upstreams?#{UpstreamFilterForm.query_params(params)}")}
@@ -339,6 +361,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     {:noreply, SpendCapWorkflow.open(socket, identity_id)}
   end
 
+  def handle_event("open_bulk_spend_cap", _params, socket) do
+    {:noreply, SpendCapWorkflow.open_bulk(socket)}
+  end
+
   def handle_event("cancel_spend_cap", _params, socket) do
     {:noreply, SpendCapWorkflow.close(socket)}
   end
@@ -351,6 +377,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     case socket.assigns.editing_spend_cap do
       %{identity: %UpstreamIdentity{} = identity} ->
         {:noreply, SpendCapWorkflow.validate(socket, identity, params)}
+
+      %{bulk: true} ->
+        {:noreply, SpendCapWorkflow.validate_bulk(socket, params)}
 
       nil ->
         {:noreply, put_flash(socket, :error, "Upstream account was not found")}
@@ -373,6 +402,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
            &reload_upstreams/1
          )}
 
+      %{bulk: true} ->
+        {:noreply,
+         SpendCapWorkflow.save_bulk(
+           socket,
+           params,
+           &SpendCapWorkflow.close/1,
+           &reload_upstreams/1
+         )}
+
       nil ->
         {:noreply, put_flash(socket, :error, "Upstream account was not found")}
     end
@@ -388,6 +426,45 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   def handle_event("refresh_account", %{"id" => identity_id}, socket) do
     {:noreply, AccountLifecycleWorkflow.refresh(socket, identity_id, &reload_upstreams/1)}
+  end
+
+  def handle_event("test_account", %{"id" => identity_id}, socket) do
+    scope = socket.assigns.current_scope
+
+    {:noreply,
+     socket
+     |> update(:testing_account_ids, &MapSet.put(&1, identity_id))
+     |> start_async({:test_account, identity_id}, fn ->
+       Upstreams.test_account_for_scope(scope, identity_id)
+     end)}
+  end
+
+  @impl true
+  def handle_async({:test_account, identity_id}, {:ok, {:ok, %{result: result}}}, socket) do
+    passed? = result.status in [:succeeded, :partial]
+
+    {:noreply,
+     socket
+     |> update(:testing_account_ids, &MapSet.delete(&1, identity_id))
+     |> put_flash(
+       if(passed?, do: :info, else: :error),
+       if(passed?, do: "Account works", else: "Account test failed")
+     )
+     |> reload_upstreams()}
+  end
+
+  def handle_async({:test_account, identity_id}, {:ok, {:error, reason}}, socket) do
+    {:noreply,
+     socket
+     |> update(:testing_account_ids, &MapSet.delete(&1, identity_id))
+     |> put_flash(:error, "Account test failed: #{Map.get(reason, :message, inspect(reason))}")}
+  end
+
+  def handle_async({:test_account, identity_id}, {:exit, _reason}, socket) do
+    {:noreply,
+     socket
+     |> update(:testing_account_ids, &MapSet.delete(&1, identity_id))
+     |> put_flash(:error, "Account test failed")}
   end
 
   defp refresh_editing_saved_reset_policy(socket, identity_id) do
@@ -421,6 +498,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         filter_values={@filter_values}
         pool_filter_options={@pool_filter_options}
         status_options={@status_options}
+        sort_options={@sort_options}
+        quota_options={@quota_options}
+        upstream_stats={@upstream_stats}
         auth_json_form={@auth_json_form}
         auth_json_upload_limit_label={@auth_json_upload_limit_label}
         importing_auth_json={@importing_auth_json}
@@ -443,6 +523,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         spend_cap_form={@spend_cap_form}
         account_panel_views={@account_panel_views}
         upstream_accounts={@upstream_accounts}
+        testing_account_ids={@testing_account_ids}
         uploads={@uploads}
         datetime_preferences={@datetime_preferences}
       />
@@ -457,13 +538,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
     datetime_preferences = DateTimeDisplay.preferences_for_user(socket.assigns.current_scope.user)
 
-    upstream_accounts =
-      UpstreamAccountsReadModel.list_visible_accounts(
+    account_page =
+      UpstreamAccountsReadModel.list_visible_account_page(
         socket.assigns.current_scope,
         filtered_pools,
         filter_values,
         datetime_preferences
       )
+
+    upstream_accounts = account_page.accounts
 
     socket =
       socket
@@ -478,6 +561,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
       filter_values: filter_values,
       filter_form: UpstreamFilterForm.filter_form(filter_values),
       status_options: UpstreamFilterForm.status_options(),
+      sort_options: UpstreamFilterForm.sort_options(),
+      quota_options: UpstreamFilterForm.quota_options(),
+      upstream_stats: account_page.stats,
       upstream_accounts: upstream_accounts,
       account_panel_views:
         prune_account_panel_views(socket.assigns.account_panel_views, upstream_accounts)

@@ -1766,10 +1766,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert active_pools_trigger_class =~ "border-transparent"
     assert active_pools_trigger_class =~ "hover:border-primary/25"
 
-    assert upstream_header_badge_order(active_card) == [
-             active_badge_id,
-             "upstream-account-#{active_identity.id}-plan-label"
-           ]
+    assert upstream_header_badge_order(active_card) == [active_badge_id]
 
     view |> element(active_pools_trigger_selector) |> render_click()
 
@@ -1933,10 +1930,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute inactive_badge_class =~ "border-dashed"
     assert inactive_saved_meter_segment_1_class =~ "bg-(--color-reset-bank)/80"
 
-    assert upstream_header_badge_order(inactive_card) == [
-             inactive_badge_id,
-             "upstream-account-#{inactive_identity.id}-plan-label"
-           ]
+    assert upstream_header_badge_order(inactive_card) == [inactive_badge_id]
 
     refute has_element?(view, "#upstream-account-#{empty_identity.id}-saved-reset-count")
     refute has_element?(view, "#upstream-account-#{empty_identity.id}-saved-reset-panel")
@@ -2459,6 +2453,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(view, "#upstream-status-filter button[data-status='']", "Any status")
     assert has_element?(view, "#upstream-status-filter button[data-status='active']", "Active")
     assert has_element?(view, "#upstream-status-filter button[data-status='paused']", "Paused")
+
+    assert has_element?(
+             view,
+             "#upstream-sort-filter[name='filters[sort]'] option[value='recent'][selected]"
+           )
+
+    assert has_element?(view, "#upstream-account-stats")
+    assert has_element?(view, "#upstream-stat-total", "1")
+    assert has_element?(view, "#upstream-stat-active", "1")
     refute has_element?(view, "select#filters_pool_id")
     refute has_element?(view, "select#filters_status")
   end
@@ -2503,7 +2506,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{paused_identity.id}-limits-summary.text-warning.w-fit",
+             "#upstream-account-#{paused_identity.id}-status.text-warning",
              "Paused"
            )
 
@@ -2854,7 +2857,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#upstream-account-#{identity.id}.min-w-0")
     assert has_element?(view, "[data-role='upstream-account-card']")
-    assert has_element?(view, "#upstream-account-#{identity.id}-plan-label", "Team")
+    refute has_element?(view, "#upstream-account-#{identity.id}-plan-label")
 
     assert has_element?(
              view,
@@ -2916,8 +2919,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-header-actions.items-center.self-center #upstream-account-#{identity.id}-plan-label.self-center",
-             "Team"
+             "#upstream-account-#{identity.id}-header-actions.items-center.self-center #upstream-account-#{identity.id}-status.text-success",
+             "Active"
            )
 
     assert has_element?(
@@ -2961,11 +2964,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "#upstream-account-#{identity.id} header #upstream-account-#{identity.id}-routing-readiness"
            )
 
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limits-summary.text-success",
-             "Active"
-           )
+    refute has_element?(view, "#upstream-account-#{identity.id}-limits-summary")
 
     assert has_element?(
              view,
@@ -3832,6 +3831,143 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            )
   end
 
+  test "sorts upstream accounts by most recently used", %{scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "last-used-order", name: "Last Used Order"})
+    %{pool: ^pool} = auth = active_api_key_fixture(pool, %{scope: scope})
+    older = upstream_assignment_fixture(pool, %{account_label: "Older"})
+    newer = upstream_assignment_fixture(pool, %{account_label: "Newer"})
+    never = upstream_assignment_fixture(pool, %{account_label: "Never"})
+
+    older_request = request_fixture(auth, %{correlation_id: "last-used-older"})
+    newer_request = request_fixture(auth, %{correlation_id: "last-used-newer"})
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    attempt_fixture(older_request, older.assignment)
+    |> Ecto.Changeset.change(%{started_at: DateTime.add(now, -60, :second)})
+    |> Repo.update!()
+
+    attempt_fixture(newer_request, newer.assignment)
+    |> Ecto.Changeset.change(%{started_at: now})
+    |> Repo.update!()
+
+    accounts = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
+
+    assert Enum.map(accounts, & &1.identity.id) == [
+             newer.identity.id,
+             older.identity.id,
+             never.identity.id
+           ]
+
+    assert Enum.at(accounts, 0).last_used_at == now
+    assert Enum.at(accounts, 2).last_used_label == "never used"
+
+    named =
+      UpstreamAccountsReadModel.list_visible_accounts(scope, [pool], %{"sort" => "name"})
+
+    assert Enum.map(named, & &1.label) == ["Never", "Newer", "Older"]
+  end
+
+  test "uncapped account renders a neutral spending cap meter and can queue a connection test", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "account-test", name: "Account Test"})
+    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Testable"})
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    selector = "#upstream-account-#{identity.id}-limit-spending_cap"
+
+    assert has_element?(view, selector, "Not set")
+    assert has_element?(view, "#{selector}-progress.progress-neutral[value='0']")
+
+    view
+    |> element("#test-upstream-account-#{identity.id}")
+    |> render_click()
+
+    assert has_element?(view, "#test-upstream-account-#{identity.id}[disabled]", "Testing…")
+    assert render_async(view) =~ "Account works"
+    refute has_element?(view, "#test-upstream-account-#{identity.id}[disabled]")
+
+    refute Repo.exists?(from job in Oban.Job, where: job.state in ["available", "scheduled"])
+  end
+
+  test "mass sets spending caps for all accounts and enforces monthly quota remaining", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-all", name: "Bulk Cap All"})
+    first = upstream_assignment_fixture(pool, %{account_label: "Bulk first"}).identity
+    second = upstream_assignment_fixture(pool, %{account_label: "Bulk second"}).identity
+    insert_monthly_spend_quota(first, 1_000, 250)
+    insert_monthly_spend_quota(second, 1_000, 250)
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    assert has_element?(view, "#spend_cap_target")
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{"target" => "all", "spend_cap_credits" => "30"}
+    })
+    |> render_submit()
+
+    assert render(view) =~ "must be less than every matching account's monthly quota remaining"
+    assert Repo.reload!(first).spend_cap_credits == 0
+    assert Repo.reload!(second).spend_cap_credits == 0
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{"target" => "all", "spend_cap_credits" => "20"}
+    })
+    |> render_submit()
+
+    assert Repo.reload!(first).spend_cap_credits == 500
+    assert Repo.reload!(second).spend_cap_credits == 500
+  end
+
+  test "mass spending-cap targets reached and uncapped accounts", %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-targets", name: "Bulk Cap Targets"})
+    reached = upstream_assignment_fixture(pool, %{account_label: "Reached"}).identity
+    uncapped = upstream_assignment_fixture(pool, %{account_label: "Uncapped"}).identity
+    below = upstream_assignment_fixture(pool, %{account_label: "Below"}).identity
+
+    for identity <- [reached, uncapped, below], do: insert_monthly_spend_quota(identity, 2_000, 0)
+
+    reached
+    |> Ecto.Changeset.change(%{spend_cap_credits: 250, spent_credits: Decimal.new(250)})
+    |> Repo.update!()
+
+    below
+    |> Ecto.Changeset.change(%{spend_cap_credits: 250, spent_credits: Decimal.new(100)})
+    |> Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{"target" => "reached", "spend_cap_credits" => "20"}
+    })
+    |> render_submit()
+
+    assert Repo.reload!(reached).spend_cap_credits == 500
+    assert Repo.reload!(uncapped).spend_cap_credits == 0
+    assert Repo.reload!(below).spend_cap_credits == 250
+
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{"target" => "none", "spend_cap_credits" => "10"}
+    })
+    |> render_submit()
+
+    assert Repo.reload!(uncapped).spend_cap_credits == 250
+    assert Repo.reload!(reached).spend_cap_credits == 500
+    assert Repo.reload!(below).spend_cap_credits == 250
+  end
+
   test "renames upstream account labels from the account actions menu", %{
     conn: conn,
     scope: scope
@@ -3915,7 +4051,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     })
 
     refute has_element?(view, "#delete-upstream-account-dialog")
-    assert Repo.get!(UpstreamIdentity, identity.id).status == "deleted"
+    refute Repo.get(UpstreamIdentity, identity.id)
   end
 
   test "keeps rename dialog open when the label is blank", %{
@@ -5206,7 +5342,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limits-summary.text-warning",
+             "#upstream-account-#{identity.id}-status.text-warning",
              "Refresh due"
            )
 
@@ -6152,7 +6288,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "token refresh failed: token refresh failed: codex_oauth_refresh_failed"
   end
 
-  test "renders reported account plan metadata as read-only", %{
+  test "does not render reported account plan metadata", %{
     conn: conn,
     scope: scope
   } do
@@ -6166,13 +6302,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-plan-label", "Team")
-
+    refute has_element?(view, "#upstream-account-#{identity.id}-plan-label")
     refute has_element?(view, "[name='account[plan_label]']")
     refute has_element?(view, "[name='account[plan_family]']")
   end
 
-  test "renders account plan labels from upstream metadata", %{conn: conn, scope: scope} do
+  test "hides account plan labels from upstream metadata", %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "colored-plans", name: "Colored Plans"})
 
     %{identity: free_identity} =
@@ -6183,8 +6318,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{free_identity.id}-plan-label", "Free")
-    assert has_element?(view, "#upstream-account-#{pro_identity.id}-plan-label", "Pro")
+    refute has_element?(view, "#upstream-account-#{free_identity.id}-plan-label")
+    refute has_element?(view, "#upstream-account-#{pro_identity.id}-plan-label")
   end
 
   test "renders missing account plan metadata without persisting fallback copy", %{
@@ -6198,23 +6333,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     refute render(view) =~ "Not reported by account"
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-plan-label")
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-plan-label.dropdown-end.dropdown-bottom"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-plan-label-button[aria-label='Account did not report plan or quota details']"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-plan-label-content",
-             "This account did not report plan or quota details"
-           )
+    refute has_element?(view, "#upstream-account-#{identity.id}-plan-label")
 
     refute has_element?(view, "[name='account[plan_label]']")
     refute has_element?(view, "[name='account[plan_family]']")
@@ -7246,6 +7365,27 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     |> Repo.insert!()
   end
 
+  defp insert_monthly_spend_quota(identity, cap, used) do
+    now = DateTime.utc_now()
+
+    QuotaWindows.upsert_quota_windows(identity, [
+      %{
+        quota_key: "spend_control",
+        quota_family: "spend_control",
+        quota_scope: "feature",
+        window_kind: "primary",
+        window_minutes: 43_200,
+        used_percent: Decimal.mult(Decimal.div(Decimal.new(used), Decimal.new(cap)), 100),
+        reset_at: DateTime.add(now, 30, :day),
+        source: "codex_usage_api",
+        source_precision: "observed",
+        freshness_state: "fresh",
+        observed_at: now,
+        metadata: %{"spend_cap" => to_string(cap), "spend_used" => to_string(used)}
+      }
+    ])
+  end
+
   defp maybe_insert_quota_window(identity, "known") do
     QuotaWindows.upsert_quota_windows(identity, [
       %{
@@ -7543,7 +7683,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   defp upstream_header_badge_order(html) do
-    ~r/id="(upstream-account-[^"]+-(?:saved-reset-count|plan-label))"/
+    ~r/id="(upstream-account-[^"]+-saved-reset-count)"/
     |> Regex.scan(html, capture: :all_but_first)
     |> List.flatten()
   end

@@ -70,7 +70,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     }
   end
 
-  def spend_cap_row(_identity), do: nil
+  def spend_cap_row(_identity) do
+    %{
+      key: :spending_cap,
+      label: "Spending Cap",
+      percent: nil,
+      percent_value: 0,
+      percent_label: "Not set",
+      count_label: nil,
+      credit_backed: false,
+      reset_label: nil,
+      reset_title: nil
+    }
+  end
 
   @spec readiness([Quota.AccountQuotaWindow.t()], DateTime.t()) :: UpstreamQuotaReadiness.t()
   def readiness(windows, %DateTime{} = snapshot_at) when is_list(windows) do
