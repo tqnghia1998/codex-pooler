@@ -5,7 +5,7 @@ defmodule CodexPooler.InstanceSettings.Cache do
 
   require Logger
 
-  alias CodexPooler.InstanceSettings.Settings
+  alias CodexPooler.InstanceSettings.{Logging, Settings}
   alias Phoenix.PubSub
 
   @pubsub CodexPooler.PubSub
@@ -44,7 +44,16 @@ defmodule CodexPooler.InstanceSettings.Cache do
   @impl true
   def init(_state) do
     _ = subscribe()
-    {:ok, %{cached: nil}}
+
+    case load_settings(nil) do
+      {:ok, settings} ->
+        Logging.apply(settings)
+        {:ok, %{cached: settings}}
+
+      {:fallback, settings} ->
+        Logging.apply(settings)
+        {:ok, %{cached: settings}}
+    end
   end
 
   @impl true
@@ -60,6 +69,7 @@ defmodule CodexPooler.InstanceSettings.Cache do
   end
 
   def handle_call({:put, %Settings{} = settings}, _from, state) do
+    Logging.apply(settings)
     {:reply, :ok, publish(state, settings)}
   end
 
@@ -78,8 +88,12 @@ defmodule CodexPooler.InstanceSettings.Cache do
 
   def handle_info({@message_tag, {:updated, _lock_version}}, state) do
     case load_settings(state.cached) do
-      {:ok, settings} -> {:noreply, publish(state, settings)}
-      {:fallback, _settings} -> {:noreply, state}
+      {:ok, settings} ->
+        Logging.apply(settings)
+        {:noreply, publish(state, settings)}
+
+      {:fallback, _settings} ->
+        {:noreply, state}
     end
   end
 

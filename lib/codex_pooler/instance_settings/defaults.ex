@@ -14,6 +14,7 @@ defmodule CodexPooler.InstanceSettings.Defaults do
     settings = %OperationalSettings{}
 
     %{
+      "logging_mode" => "error",
       "gateway_debug" => settings.gateway_debug?,
       "sse_keepalive_interval_ms" => settings.sse_keepalive_interval_ms,
       "websocket_idle_timeout_ms" => settings.websocket_idle_timeout_ms,

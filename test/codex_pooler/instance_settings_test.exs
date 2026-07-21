@@ -59,12 +59,14 @@ defmodule CodexPooler.InstanceSettingsTest do
 
   setup do
     previous = Application.get_env(:codex_pooler, InstanceSettings, [])
+    previous_logger_level = Logger.level()
     Application.put_env(:codex_pooler, InstanceSettings, Keyword.delete(previous, :repo))
     Repo.delete_all(Settings)
     InstanceSettings.reset_cache_for_test()
 
     on_exit(fn ->
       Application.put_env(:codex_pooler, InstanceSettings, previous)
+      Logger.configure(level: previous_logger_level)
       InstanceSettings.reset_cache_for_test()
     end)
 
@@ -79,6 +81,7 @@ defmodule CodexPooler.InstanceSettingsTest do
     assert settings.source == :database
     assert settings.db_available? == true
     assert settings.secrets_available? == true
+    assert settings.gateway.logging_mode == "error"
     assert settings.gateway.gateway_debug == false
     assert settings.gateway.circuit_failure_threshold == 3
     assert settings.gateway.circuit_open_seconds == 60
@@ -97,6 +100,25 @@ defmodule CodexPooler.InstanceSettingsTest do
     assert settings.metrics.bearer_token_status == :intentionally_unset
     assert settings.smtp.password_status == :intentionally_unset
     assert Repo.aggregate(Settings, :count) == 1
+  end
+
+  test "update_system_settings validates and applies logging mode" do
+    settings = InstanceSettings.ensure_singleton!()
+
+    assert {:ok, updated} =
+             InstanceSettings.update_system_settings(settings, %{
+               "gateway" => %{"logging_mode" => "off"}
+             })
+
+    assert updated.gateway.logging_mode == "off"
+    assert Logger.level() == :none
+
+    assert {:error, changeset} =
+             InstanceSettings.update_system_settings(updated, %{
+               "gateway" => %{"logging_mode" => "loud"}
+             })
+
+    assert "is invalid" in errors_on(changeset).gateway.logging_mode
   end
 
   test "baseline characterization preserves downstream websocket idle timeout and persistence round-trip" do
@@ -548,6 +570,8 @@ defmodule CodexPooler.InstanceSettingsTest do
 
   @tag :failure_modes
   test "warm-cache DB failure returns last-known-good settings" do
+    Logger.configure(level: :warning)
+
     settings = InstanceSettings.current()
     assert settings.source == :database
     assert settings.mcp.enabled == false
@@ -571,6 +595,8 @@ defmodule CodexPooler.InstanceSettingsTest do
 
   @tag :failure_modes
   test "cold-cache DB failure returns fallback defaults with unavailable secret statuses" do
+    Logger.configure(level: :warning)
+
     Application.put_env(:codex_pooler, InstanceSettings, repo: FailingRepo)
     InstanceSettings.reset_cache_for_test()
 

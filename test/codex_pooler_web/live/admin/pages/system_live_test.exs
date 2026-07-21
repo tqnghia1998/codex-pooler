@@ -24,12 +24,14 @@ defmodule CodexPoolerWeb.Admin.SystemLiveTest do
 
   setup do
     previous_dev_features_enabled = Application.get_env(:codex_pooler, :dev_features_enabled)
+    previous_logger_level = Logger.level()
 
     Repo.delete_all(Settings)
     InstanceSettings.reset_cache_for_test()
 
     on_exit(fn ->
       restore_env(:dev_features_enabled, previous_dev_features_enabled)
+      Logger.configure(level: previous_logger_level)
       InstanceSettings.reset_cache_for_test()
     end)
 
@@ -759,6 +761,28 @@ defmodule CodexPoolerWeb.Admin.SystemLiveTest do
         ] do
       assert html =~ hint
     end
+  end
+
+  test "saves logging mode from the gateway card", %{conn: conn} do
+    {:ok, view, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
+
+    assert has_element?(view, "#instance-settings-logging-mode option[selected][value='error']")
+
+    saved_html =
+      view
+      |> element("#instance-settings-gateway-form")
+      |> render_submit(%{
+        "instance_settings" => %{
+          "gateway" => %{"logging_mode" => "all"}
+        }
+      })
+
+    assert saved_html =~ "Gateway controls saved"
+    assert InstanceSettings.get!().gateway.logging_mode == "all"
+    assert Logger.level() == :info
+
+    {:ok, reloaded_view, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
+    assert has_element?(reloaded_view, "#instance-settings-logging-mode option[selected][value='all']")
   end
 
   test "saves and reloads owner retention independently from downstream websocket idle timeout",

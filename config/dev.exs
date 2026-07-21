@@ -51,6 +51,7 @@ config :codex_pooler, dev_features_build_enabled: true
 config :codex_pooler, dev_features_enabled: true
 config :codex_pooler, dev_seeds_enabled: true
 
+config :logger, level: :error
 config :logger, :default_formatter, format: "[$level] $message\n"
 
 config :phoenix, :stacktrace_depth, 20

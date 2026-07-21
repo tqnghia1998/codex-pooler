@@ -236,6 +236,17 @@ defmodule CodexPoolerWeb.Admin.SystemPageComponents.Gateway do
   defp gateway_scalar_controls do
     [
       %{
+        type: :select,
+        id: "instance-settings-logging-mode",
+        field: :logging_mode,
+        label: "Application logging",
+        options: [
+          {"Off", "off"},
+          {"Errors only", "error"},
+          {"All", "all"}
+        ]
+      },
+      %{
         type: :toggle,
         id: "instance-settings-gateway-debug",
         field: :gateway_debug,

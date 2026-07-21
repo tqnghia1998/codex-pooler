@@ -265,6 +265,16 @@ defmodule CodexPooler.InstanceSettings.Classification do
         "Multipart audio upload limit should apply to new transcription requests without restart."
     },
     %{
+      key: :logging_mode,
+      bucket: :db_runtime_live,
+      group: :gateway,
+      label: "Application logging mode",
+      env_names: [],
+      storage: :database,
+      reloadability: :live,
+      notes: "Logger threshold and request logging can be updated live from the system settings UI."
+    },
+    %{
       key: :gateway_debug,
       bucket: :db_runtime_live,
       group: :gateway,

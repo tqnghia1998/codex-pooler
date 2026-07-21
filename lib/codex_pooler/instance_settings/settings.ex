@@ -12,11 +12,13 @@ defmodule CodexPooler.InstanceSettings.Settings do
   @foreign_key_type :binary_id
 
   @tls_values ~w(always if_available never)
+  @logging_modes ~w(off error all)
   @decompression_algorithms ~w(gzip deflate zstd)
   @default_openai_pricing_url StaticDefaults.catalog()["openai_pricing_url"]
   @default_development StaticDefaults.development()
 
   @gateway_embed_fields [
+    :logging_mode,
     :gateway_debug,
     :sse_keepalive_interval_ms,
     :websocket_idle_timeout_ms,
@@ -39,6 +41,7 @@ defmodule CodexPooler.InstanceSettings.Settings do
 
   schema "instance_settings" do
     embeds_one :gateway, Gateway, on_replace: :update, primary_key: false do
+      field :logging_mode, :string
       field :gateway_debug, :boolean
       field :sse_keepalive_interval_ms, :integer
       field :websocket_idle_timeout_ms, :integer
@@ -218,6 +221,7 @@ defmodule CodexPooler.InstanceSettings.Settings do
   defp gateway_changeset(gateway, attrs) do
     gateway
     |> cast(attrs, [
+      :logging_mode,
       :gateway_debug,
       :sse_keepalive_interval_ms,
       :websocket_idle_timeout_ms,
@@ -236,6 +240,7 @@ defmodule CodexPooler.InstanceSettings.Settings do
       :model_context_window_overrides
     ])
     |> validate_required([
+      :logging_mode,
       :gateway_debug,
       :sse_keepalive_interval_ms,
       :websocket_idle_timeout_ms,
@@ -253,6 +258,7 @@ defmodule CodexPooler.InstanceSettings.Settings do
       :bulkheads,
       :model_context_window_overrides
     ])
+    |> validate_inclusion(:logging_mode, @logging_modes)
     |> validate_number(:sse_keepalive_interval_ms, greater_than_or_equal_to: 0)
     |> validate_number(:websocket_idle_timeout_ms,
       greater_than_or_equal_to: 60_000,

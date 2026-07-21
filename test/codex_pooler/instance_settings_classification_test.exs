@@ -61,6 +61,7 @@ defmodule CodexPooler.InstanceSettingsClassificationTest do
   test "classifies runtime live settings from the migration plan" do
     assert Classification.bucket_for!(:file_lifecycle) == :db_runtime_live
     assert Classification.bucket_for!(:transcription_upload_max) == :db_runtime_live
+    assert Classification.bucket_for!(:logging_mode) == :db_runtime_live
     assert Classification.bucket_for!(:gateway_debug) == :db_runtime_live
     assert Classification.bucket_for!(:sse_keepalive_interval) == :db_runtime_live
     assert Classification.bucket_for!(:upstream_timeouts) == :db_runtime_live

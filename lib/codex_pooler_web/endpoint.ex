@@ -2,6 +2,8 @@ defmodule CodexPoolerWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :codex_pooler
   use Plug.ErrorHandler
 
+  alias CodexPooler.InstanceSettings.Logging, as: InstanceSettingsLogging
+
   alias CodexPoolerWeb.Plugs.{
     BackendFilesMultipartGuard,
     RuntimeIngress,
@@ -87,10 +89,11 @@ defmodule CodexPoolerWeb.Endpoint do
     end
   end
 
-  def request_log_level(%Plug.Conn{path_info: [path]}) when path in ["healthz", "readyz"],
-    do: false
+  def request_log_level(%Plug.Conn{path_info: [path]}) when path in ["healthz", "readyz"], do: false
 
-  def request_log_level(_conn), do: :info
+  def request_log_level(_conn) do
+    if InstanceSettingsLogging.all?(), do: :info, else: false
+  end
 
   @impl Plug.ErrorHandler
   def handle_errors(conn, %{reason: %Plug.Parsers.ParseError{}}) do
