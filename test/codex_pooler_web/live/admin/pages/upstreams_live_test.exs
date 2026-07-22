@@ -2854,7 +2854,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-grid.\\[\\@media\\(width\\>\\=112rem\\)\\]\\:grid-cols-4"
+             "#upstream-account-grid.\\[\\@media\\(width\\>\\=112rem\\)\\]\\:grid-cols-3"
            )
 
     assert has_element?(view, "#upstream-account-#{identity.id}.min-w-0")
