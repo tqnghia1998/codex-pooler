@@ -311,6 +311,9 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
             set: [upstream_identity_id: nil, pool_upstream_assignment_id: nil, attempt_id: nil]
           )
 
+          # Avoid competing direct and assignment-cascade FK paths to attempts.
+          Repo.delete_all(from(a in Attempt, where: a.id in ^attempt_ids))
+
           Repo.delete!(identity)
 
           %{

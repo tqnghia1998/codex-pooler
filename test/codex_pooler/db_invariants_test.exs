@@ -225,7 +225,7 @@ defmodule CodexPooler.DBInvariantsTest do
     end)
   end
 
-  test "soft deleting an upstream account preserves historical references" do
+  test "deleting an upstream account removes routing history while preserving ledger accounting" do
     fixture = create_execution_fixture!("soft-delete-preserve")
     attempt_id = create_attempt!(fixture)
 
@@ -244,21 +244,17 @@ defmodule CodexPooler.DBInvariantsTest do
 
     assert result.status == :deleted
 
-    assert count_rows("upstream_identities", fixture.upstream_identity_id) == 1
-    assert count_rows("pool_upstream_assignments", fixture.assignment_id) == 1
-    assert count_rows("attempts", attempt_id) == 1
+    assert count_rows("upstream_identities", fixture.upstream_identity_id) == 0
+    assert count_rows("pool_upstream_assignments", fixture.assignment_id) == 0
+    assert count_rows("attempts", attempt_id) == 0
+    assert count_rows("codex_sessions", fixture.codex_session_id) == 0
     assert count_rows("ledger_entries", ledger_entry_id) == 1
-    assert count_rows("codex_sessions", fixture.codex_session_id) == 1
 
-    assert [["deleted"]] =
-             Repo.query!("SELECT status FROM upstream_identities WHERE id = $1", [
-               fixture.upstream_identity_id
-             ]).rows
-
-    assert [["deleted"]] =
-             Repo.query!("SELECT status FROM pool_upstream_assignments WHERE id = $1", [
-               fixture.assignment_id
-             ]).rows
+    assert [[nil, nil, nil]] =
+             Repo.query!(
+               "SELECT attempt_id, pool_upstream_assignment_id, upstream_identity_id FROM ledger_entries WHERE id = $1",
+               [ledger_entry_id]
+             ).rows
   end
 
   test "database rejects duplicate active operator pool assignments by status predicate" do

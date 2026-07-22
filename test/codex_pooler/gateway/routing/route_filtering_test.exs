@@ -167,7 +167,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
               %{
                 code: "quota_evidence_unavailable",
                 quota_refresh_attempted: false
-              }} = RouteFiltering.filter_candidates(filter_input)
+              }} = RouteFiltering.filter_candidates(filter_input, quota_mode: :required)
     end
 
     test "route-state filtering excludes a post-snapshot observation until the snapshot advances" do
@@ -344,7 +344,9 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
 
       filter_input = filter_input(pool, api_key, assignment, identity, "spark-blocked")
 
-      assert {:error, %{code: code}} = RouteFiltering.filter_candidates(filter_input)
+      assert {:error, %{code: code}} =
+               RouteFiltering.filter_candidates(filter_input, quota_mode: :required)
+
       assert code in ["quota_exhausted", "quota_evidence_unavailable"]
     end
 

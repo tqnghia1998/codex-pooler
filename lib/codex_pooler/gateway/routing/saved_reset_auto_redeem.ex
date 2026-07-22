@@ -54,7 +54,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   def maybe_redeem_after_quota_exhaustion(
         {:error, %{code: code} = error} = result,
         refresh_plan,
-        :required,
+        _quota_mode,
         %DateTime{} = timestamp,
         opts
       )
@@ -110,7 +110,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   def maybe_redeem_before_quota_exhaustion(
         {:ok, _candidates, _decision} = result,
         refresh_plan,
-        :required,
+        _quota_mode,
         %DateTime{} = timestamp,
         opts
       )
@@ -121,7 +121,7 @@ defmodule CodexPooler.Gateway.Routing.SavedResetAutoRedeem do
   def maybe_redeem_before_quota_exhaustion(
         {:ok, _candidates, _decision, %RouteState{}} = result,
         refresh_plan,
-        :required,
+        _quota_mode,
         %DateTime{} = timestamp,
         opts
       )
