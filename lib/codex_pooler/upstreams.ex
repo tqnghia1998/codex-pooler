@@ -163,9 +163,6 @@ defmodule CodexPooler.Upstreams do
   @spec update_spend_cap_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate update_spend_cap_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
 
-  @spec pause_account_at_spend_threshold(Ecto.UUID.t()) :: lifecycle_result() | :ok
-  defdelegate pause_account_at_spend_threshold(identity_id), to: AccountLifecycle
-
   @spec pause_account_for_scope(Scope.t(), identity_ref(), map()) :: lifecycle_result()
   defdelegate pause_account_for_scope(scope, identity_or_id, attrs), to: AccountLifecycle
 

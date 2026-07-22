@@ -94,7 +94,7 @@ Routing policy:
 - at or above 100%: excluded from new sessions
 - pinned continuation may proceed below 125%
 - pinned continuation at or above 125% returns 503 `pinned_continuation_spend_cap_reached`
-- active accounts are automatically paused only when spend is strictly greater than 125%
+- accounts are not automatically paused when they exceed their spending cap; routing eligibility enforces the cap
 
 Spend-cap eligibility runs before quota eligibility. This fork also defaults routing `quota_mode` to `:optional`; missing provider quota evidence does not block routing unless a caller explicitly requests `:required`.
 

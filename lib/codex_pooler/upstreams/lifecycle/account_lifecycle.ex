@@ -125,24 +125,6 @@ defmodule CodexPooler.Upstreams.Lifecycle.AccountLifecycle do
   def update_spend_cap_for_scope(_scope, _identity_or_id, _attrs),
     do: {:error, lifecycle_error(:invalid_request, "user scope is required")}
 
-  @spec pause_account_at_spend_threshold(Ecto.UUID.t()) :: lifecycle_result() | :ok
-  def pause_account_at_spend_threshold(identity_id) when is_binary(identity_id) do
-    case Repo.get(UpstreamIdentity, identity_id) do
-      %UpstreamIdentity{status: @active, spend_cap_credits: cap, spent_credits: spent} = identity
-      when is_integer(cap) and cap > 0 and not is_nil(spent) ->
-        if Decimal.compare(spent, Decimal.mult(Decimal.new(cap), Decimal.new("1.25"))) == :gt do
-          pause_account(identity, %{reason: "spending cap exceeded 125%"})
-        else
-          :ok
-        end
-
-      _identity ->
-        :ok
-    end
-  end
-
-  def pause_account_at_spend_threshold(_identity_id), do: :ok
-
   @spec pause_account(identity_ref(), map()) :: lifecycle_result()
   defp pause_account(identity_or_id, attrs) do
     case normalize_identity(identity_or_id) do

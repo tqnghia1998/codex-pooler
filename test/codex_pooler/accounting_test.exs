@@ -205,7 +205,7 @@ defmodule CodexPooler.AccountingTest do
       assert Decimal.equal?(identity.spent_credits, Decimal.new("0.00325"))
     end
 
-    test "pauses an active upstream after spending exceeds 125 percent of its cap" do
+    test "keeps an active upstream active after spending exceeds 125 percent of its cap" do
       setup =
         accounting_setup(%{
           input_token_micros: Decimal.new(1_000_000),
@@ -227,8 +227,8 @@ defmodule CodexPooler.AccountingTest do
                Accounting.reserve(
                  setup.auth,
                  setup.model,
-                 %{"model" => setup.model.exposed_model_id, "input" => "pause capped account"},
-                 %{correlation_id: "corr-auto-pause-spend-cap"}
+                 %{"model" => setup.model.exposed_model_id, "input" => "settle capped account"},
+                 %{correlation_id: "corr-settle-spend-cap"}
                )
 
       assert {:ok, attempt} =
@@ -245,9 +245,9 @@ defmodule CodexPooler.AccountingTest do
       identity = Repo.reload!(setup.identity)
       assignment = Repo.reload!(setup.assignment)
       assert Decimal.compare(identity.spent_credits, Decimal.new(125)) == :gt
-      assert identity.status == "paused"
-      assert assignment.status == "paused"
-      assert assignment.eligibility_status == "ineligible"
+      assert identity.status == "active"
+      assert assignment.status == "active"
+      assert assignment.eligibility_status == "eligible"
     end
 
     test "accumulates request metadata in memory before explicit persistence" do
