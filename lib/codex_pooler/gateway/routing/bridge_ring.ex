@@ -36,6 +36,14 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   @default_strategy "bridge_ring"
   @default_ring_size 3
   @demotion_seconds 60
+  # Provider-reported 429s ("upstream_rate_limited") mean the account is
+  # actually exhausted, not just briefly flaky. The flat 60s demotion used for
+  # ordinary failures reshuffles it straight back into the ring before real
+  # quota evidence can exclude it, so least-recent-success (which favors
+  # never-succeeded/exhausted accounts) keeps re-selecting it every retry.
+  # ponytail: flat 15-minute demotion, not the account's actual reset_at;
+  # revisit if quota resets routinely outlast this window.
+  @rate_limited_demotion_seconds 900
   @prompt_cache_affinity_kind "prompt_cache"
   @affinity_conflict_target {:unsafe_fragment,
                              "(pool_id, api_key_id, model_identifier, affinity_kind, affinity_key_hash) WHERE status = 'active'"}
@@ -627,7 +635,7 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
 
   defp upsert_demotion!(plan, assignment, identity, reason_code, request_id, now) do
     metadata = %{"source" => "gateway_failure"}
-    demoted_until = DateTime.add(now, @demotion_seconds, :second)
+    demoted_until = DateTime.add(now, demotion_duration_seconds(reason_code), :second)
 
     attrs = %{
       reason_code: reason_code,
@@ -671,6 +679,9 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
       conflict_target: @demotion_conflict_target
     )
   end
+
+  defp demotion_duration_seconds("upstream_rate_limited"), do: @rate_limited_demotion_seconds
+  defp demotion_duration_seconds(_reason_code), do: @demotion_seconds
 
   defp resolve_demotions!(plan, assignment, now) do
     active_status = BridgeDemotion.active_status()

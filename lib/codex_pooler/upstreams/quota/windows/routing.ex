@@ -350,6 +350,21 @@ defmodule CodexPooler.Upstreams.Quota.Windows.Routing do
     end
   end
 
+  # No account-scoped window at all (for example only a feature-scoped
+  # spend_control window synced) — report the real exhausted window instead
+  # of the generic "primary missing" message, which previously hid provider
+  # spend-cap exhaustion behind a misleading exclusion reason.
+  defp quota_routing_exclusions(
+         %{primary: nil, secondary: nil, blocked_windows: [_ | _] = blocked_windows},
+         timestamp,
+         false
+       ) do
+    case Enum.filter(blocked_windows, &exhausted?/1) do
+      [] -> quota_primary_missing_exclusion()
+      windows -> Enum.map(windows, &window_exclusion(&1, timestamp))
+    end
+  end
+
   defp quota_routing_exclusions(%{primary: nil, routing_windows: [_ | _]}, _timestamp, false) do
     quota_primary_missing_exclusion()
   end
