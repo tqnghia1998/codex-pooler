@@ -1159,18 +1159,61 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           autocomplete="off"
           class="grid gap-5 p-6"
         >
+          <div :if={@account[:bulk]} class="grid gap-3">
+            <div class="grid grid-cols-[1fr_1fr_2.75rem] gap-3">
+              <span class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                If monthly quota left &gt; (USD)
+              </span>
+              <span class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
+                Set cap (USD)
+              </span>
+              <span></span>
+            </div>
+            <.inputs_for :let={rule_form} field={@form[:rules]} default={[]}>
+              <div
+                id={"spend-cap-rule-#{rule_form.index}"}
+                class="grid grid-cols-[1fr_1fr_2.75rem] items-center gap-3"
+              >
+                <input
+                  type="number"
+                  name={rule_form[:monthly_quota].name}
+                  id={rule_form[:monthly_quota].id}
+                  value={Form.normalize_value("number", rule_form[:monthly_quota].value)}
+                  min="0"
+                  step="any"
+                  placeholder="e.g. 1000"
+                  class="input input-bordered w-full"
+                />
+                <input
+                  type="number"
+                  name={rule_form[:spend_cap].name}
+                  id={rule_form[:spend_cap].id}
+                  value={Form.normalize_value("number", rule_form[:spend_cap].value)}
+                  min="0"
+                  step="any"
+                  placeholder="e.g. 25"
+                  class="input input-bordered w-full"
+                />
+                <button
+                  type="button"
+                  class="btn btn-ghost btn-square"
+                  aria-label="Remove rule"
+                  phx-click="remove_spend_cap_rule"
+                  phx-value-id={rule_form.index}
+                >
+                  <.icon name="hero-trash" class="size-4" />
+                </button>
+              </div>
+            </.inputs_for>
+            <p :for={error <- Keyword.get_values(@form.errors, :rules)} class="text-sm text-error">
+              {translate_error(error)}
+            </p>
+            <button type="button" class="btn btn-ghost w-fit" phx-click="add_spend_cap_rule">
+              <.icon name="hero-plus" class="size-4" /> Add rule
+            </button>
+          </div>
           <.input
-            :if={@account[:bulk]}
-            field={@form[:target]}
-            type="select"
-            label="Accounts"
-            options={[
-              {"All accounts", "all"},
-              {"All accounts that reached spending cap", "reached"},
-              {"All accounts that have no spending cap", "none"}
-            ]}
-          />
-          <.input
+            :if={!@account[:bulk]}
             field={@form[:spend_cap_credits]}
             type="number"
             label="Spend cap (USD)"

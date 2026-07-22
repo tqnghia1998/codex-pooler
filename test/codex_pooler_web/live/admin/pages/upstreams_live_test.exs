@@ -3880,6 +3880,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     selector = "#upstream-account-#{identity.id}-limit-spending_cap"
 
     assert has_element?(view, selector, "Not set")
+    assert has_element?(view, "#{selector}-count", "$0.00 left of $0.00")
     assert has_element?(view, "#{selector}-progress.progress-neutral[value='0']")
 
     view
@@ -3893,7 +3894,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute Repo.exists?(from job in Oban.Job, where: job.state in ["available", "scheduled"])
   end
 
-  test "mass sets spending caps for all accounts regardless of monthly quota remaining", %{
+  test "mass sets spending caps for accounts whose monthly quota left exceeds a threshold", %{
     conn: conn,
     scope: scope
   } do
@@ -3901,63 +3902,129 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     first = upstream_assignment_fixture(pool, %{account_label: "Bulk first"}).identity
     second = upstream_assignment_fixture(pool, %{account_label: "Bulk second"}).identity
     insert_monthly_spend_quota(first, 1_000, 250)
-    insert_monthly_spend_quota(second, 1_000, 250)
+    insert_monthly_spend_quota(second, 300, 259)
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
 
-    assert has_element?(view, "#spend_cap_target")
+    assert has_element?(view, "#spend-cap-rule-0")
 
     view
     |> form("#spend-cap-form", %{
-      "spend_cap" => %{"target" => "all", "spend_cap_credits" => "30"}
+      "spend_cap" => %{"rules" => %{"0" => %{"monthly_quota" => "600", "spend_cap" => "30"}}}
     })
     |> render_submit()
 
     assert Repo.reload!(first).spend_cap_credits == 750
-    assert Repo.reload!(second).spend_cap_credits == 750
+    assert Repo.reload!(second).spend_cap_credits == 125
   end
 
-  test "mass spending-cap targets reached and uncapped accounts", %{conn: conn, scope: scope} do
+  test "prefills the bulk dialog with the default quota-threshold rules", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "bulk-cap-defaults", name: "Bulk Cap Defaults"})
+
+    upstream_assignment_fixture(pool, %{account_label: "Default rows"})
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    html = view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-5")
+
+    for {quota, cap} <- [{"1000", "100"}, {"500", "50"}, {"200", "20"}, {"100", "10"}, {"0", "5"}] do
+      assert html =~ ~s(value="#{quota}")
+      assert html =~ ~s(value="#{cap}")
+    end
+  end
+
+  test "applies the highest matching quota-threshold rule and skips accounts without monthly quota evidence",
+       %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-targets", name: "Bulk Cap Targets"})
-    reached = upstream_assignment_fixture(pool, %{account_label: "Reached"}).identity
-    uncapped = upstream_assignment_fixture(pool, %{account_label: "Uncapped"}).identity
-    below = upstream_assignment_fixture(pool, %{account_label: "Below"}).identity
+    low = upstream_assignment_fixture(pool, %{account_label: "Low quota"}).identity
+    high = upstream_assignment_fixture(pool, %{account_label: "High quota"}).identity
+    unknown = upstream_assignment_fixture(pool, %{account_label: "No quota evidence"}).identity
 
-    for identity <- [reached, uncapped, below], do: insert_monthly_spend_quota(identity, 2_000, 0)
-
-    reached
-    |> Ecto.Changeset.change(%{spend_cap_credits: 250, spent_credits: Decimal.new(250)})
-    |> Repo.update!()
-
-    below
-    |> Ecto.Changeset.change(%{spend_cap_credits: 250, spent_credits: Decimal.new(100)})
-    |> Repo.update!()
+    insert_monthly_spend_quota(low, 1_000, 0)
+    insert_monthly_spend_quota(high, 2_000, 0)
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
 
     view
     |> form("#spend-cap-form", %{
-      "spend_cap" => %{"target" => "reached", "spend_cap_credits" => "20"}
+      "spend_cap" => %{
+        "rules" => %{
+          "0" => %{"monthly_quota" => "500", "spend_cap" => "10"},
+          "1" => %{"monthly_quota" => "1500", "spend_cap" => "20"}
+        }
+      }
     })
     |> render_submit()
 
-    assert Repo.reload!(reached).spend_cap_credits == 500
-    assert Repo.reload!(uncapped).spend_cap_credits == 0
-    assert Repo.reload!(below).spend_cap_credits == 250
+    assert Repo.reload!(low).spend_cap_credits == 250
+    assert Repo.reload!(high).spend_cap_credits == 500
+    assert Repo.reload!(unknown).spend_cap_credits == 0
+  end
 
+  test "adds and removes spending-cap rule rows in the bulk dialog", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-rows", name: "Bulk Cap Rows"})
+    upstream_assignment_fixture(pool, %{account_label: "Row account"})
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
 
-    view
-    |> form("#spend-cap-form", %{
-      "spend_cap" => %{"target" => "none", "spend_cap_credits" => "10"}
-    })
-    |> render_submit()
+    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-5")
 
-    assert Repo.reload!(uncapped).spend_cap_credits == 250
-    assert Repo.reload!(reached).spend_cap_credits == 500
-    assert Repo.reload!(below).spend_cap_credits == 250
+    view |> element("button", "Add rule") |> render_click()
+
+    assert has_element?(view, "#spend-cap-rule-5")
+
+    view
+    |> element("#spend-cap-rule-0 button[aria-label='Remove rule']")
+    |> render_click()
+
+    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-5")
+
+    render_click(view, "remove_spend_cap_rule", %{"id" => "invalid"})
+
+    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+  end
+
+  test "shows a validation message instead of crashing while a spending-cap rule is incomplete",
+       %{conn: conn, scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-typing", name: "Bulk Cap Typing"})
+    upstream_assignment_fixture(pool, %{account_label: "Typing account"})
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    change_html =
+      view
+      |> form("#spend-cap-form", %{
+        "spend_cap" => %{"rules" => %{"0" => %{"monthly_quota" => "500", "spend_cap" => ""}}}
+      })
+      |> render_change()
+
+    refute change_html =~ "Enter non-negative numbers for every quota and cap"
+    assert has_element?(view, "#spend-cap-rule-0")
+
+    submit_html =
+      view
+      |> form("#spend-cap-form", %{
+        "spend_cap" => %{"rules" => %{"0" => %{"monthly_quota" => "500", "spend_cap" => ""}}}
+      })
+      |> render_submit()
+
+    assert submit_html =~ "Enter non-negative numbers for every quota and cap"
+    assert has_element?(view, "#spend-cap-rule-0")
   end
 
   test "renames upstream account labels from the account actions menu", %{
@@ -7389,14 +7456,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         quota_family: "spend_control",
         quota_scope: "feature",
         window_kind: "primary",
-        window_minutes: 43_200,
+        window_minutes: 300,
         used_percent: Decimal.mult(Decimal.div(Decimal.new(used), Decimal.new(cap)), 100),
         reset_at: DateTime.add(now, 30, :day),
         source: "codex_usage_api",
         source_precision: "observed",
         freshness_state: "fresh",
         observed_at: now,
-        metadata: %{"spend_cap" => to_string(cap), "spend_used" => to_string(used)}
+        metadata: %{
+          "spend_cap" => to_string(cap * 25),
+          "spend_used" => to_string(used * 25)
+        }
       }
     ])
   end

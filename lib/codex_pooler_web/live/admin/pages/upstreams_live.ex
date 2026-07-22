@@ -369,6 +369,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     {:noreply, SpendCapWorkflow.close(socket)}
   end
 
+  def handle_event("add_spend_cap_rule", _params, socket) do
+    {:noreply, SpendCapWorkflow.add_bulk_rule(socket)}
+  end
+
+  def handle_event("remove_spend_cap_rule", %{"id" => id}, socket) do
+    {:noreply, SpendCapWorkflow.remove_bulk_rule(socket, id)}
+  end
+
   def handle_event(
         "validate_spend_cap",
         %{"spend_cap" => params},

@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
   import Phoenix.LiveView, only: [put_flash: 3]
 
   alias CodexPooler.Upstreams
+  alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Schemas.UpstreamIdentity
   alias CodexPoolerWeb.Admin.UpstreamsLive.WorkflowError
 
@@ -28,11 +29,60 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
   end
 
   @spec open_bulk(Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
+  @default_bulk_rules [
+    {1000, 100},
+    {500, 50},
+    {200, 20},
+    {100, 10},
+    {0, 5}
+  ]
+
   def open_bulk(socket) do
+    rules =
+      @default_bulk_rules
+      |> Enum.with_index()
+      |> Map.new(fn {{quota, cap}, index} ->
+        {Integer.to_string(index), %{"monthly_quota" => quota, "spend_cap" => cap}}
+      end)
+
     assign(socket,
       editing_spend_cap: %{bulk: true},
-      spend_cap_form: bulk_form(%{"spend_cap_credits" => "0", "target" => "all"}, nil)
+      spend_cap_form: bulk_form(%{"rules" => rules})
     )
+  end
+
+  # ponytail: rule keys are always the rendered 0..N-1 sequence (see
+  # Phoenix.HTML.FormData for Map), so the next key is just the current count.
+  def add_bulk_rule(socket) do
+    params = current_bulk_params(socket)
+    rules = params["rules"] || %{}
+    params = put_in(params, ["rules", Integer.to_string(map_size(rules))], empty_rule())
+    assign(socket, :spend_cap_form, bulk_form(params))
+  end
+
+  # ponytail: rendered rule_form.index is a rendering position, not the map
+  # key, so removal must reorder by position then renumber keys back to a
+  # contiguous 0..N-1 range (matching add_bulk_rule's assumption) instead of
+  # deleting the map entry at `id` directly.
+  def remove_bulk_rule(socket, id) do
+    params = current_bulk_params(socket)
+    rules = params["rules"] || %{}
+
+    case Integer.parse(id) do
+      {index, ""} when index >= 0 and index < map_size(rules) ->
+        remaining =
+          rules
+          |> Enum.sort_by(fn {key, _value} -> String.to_integer(key) end)
+          |> Enum.map(fn {_key, value} -> value end)
+          |> List.delete_at(index)
+          |> Enum.with_index()
+          |> Map.new(fn {value, idx} -> {Integer.to_string(idx), value} end)
+
+        assign(socket, :spend_cap_form, bulk_form(Map.put(params, "rules", remaining)))
+
+      _invalid ->
+        socket
+    end
   end
 
   @spec close(Phoenix.LiveView.Socket.t()) :: Phoenix.LiveView.Socket.t()
@@ -50,8 +100,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
   end
 
   def validate_bulk(socket, params) do
-    changeset = bulk_changeset(socket, params)
-    assign(socket, :spend_cap_form, to_form(changeset, as: :spend_cap))
+    assign(socket, :spend_cap_form, bulk_form(params))
   end
 
   @spec save(
@@ -92,74 +141,119 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
   end
 
   def save_bulk(socket, params, close_fun, reload_fun) do
-    changeset = bulk_changeset(socket, params)
+    case parse_rules(params) do
+      {:ok, rules} ->
+        accounts = matching_bulk_accounts(socket, rules)
 
-    if changeset.valid? do
-      attrs = %{spend_cap_credits: Ecto.Changeset.get_field(changeset, :spend_cap_credits)}
-      accounts = bulk_accounts(socket, params["target"])
+        case Enum.reduce_while(accounts, :ok, fn {identity, cap}, :ok ->
+               attrs = %{spend_cap_credits: dollars_to_credits(cap)}
 
-      case Enum.reduce_while(accounts, :ok, fn identity, :ok ->
-             case Upstreams.update_spend_cap_for_scope(
-                    socket.assigns.current_scope,
-                    identity.id,
-                    attrs
-                  ) do
-               {:ok, _result} -> {:cont, :ok}
-               {:error, reason} -> {:halt, {:error, reason}}
-             end
-           end) do
-        :ok ->
-          socket
-          |> put_flash(:info, "Spend cap updated for #{length(accounts)} accounts")
-          |> close_fun.()
-          |> reload_fun.()
+               case Upstreams.update_spend_cap_for_scope(
+                      socket.assigns.current_scope,
+                      identity.id,
+                      attrs
+                    ) do
+                 {:ok, _result} -> {:cont, :ok}
+                 {:error, reason} -> {:halt, {:error, reason}}
+               end
+             end) do
+          :ok ->
+            socket
+            |> put_flash(:info, "Spend cap updated for #{length(accounts)} accounts")
+            |> close_fun.()
+            |> reload_fun.()
 
-        {:error, reason} ->
-          put_flash(socket, :error, WorkflowError.message(reason))
-      end
-    else
-      assign(socket, :spend_cap_form, to_form(changeset, as: :spend_cap))
+          {:error, reason} ->
+            put_flash(socket, :error, WorkflowError.message(reason))
+        end
+
+      {:error, errors} ->
+        assign(socket, :spend_cap_form, bulk_form(params, errors))
     end
   end
 
   defp validated_changeset(_socket, identity, params),
     do: changeset(identity, credit_params(params), :validate)
 
-  defp bulk_changeset(socket, params) do
-    changeset = raw_bulk_changeset(params, :validate)
+  defp current_bulk_params(socket), do: socket.assigns.spend_cap_form.params
 
-    if bulk_accounts(socket, params["target"]) == [] do
-      Ecto.Changeset.add_error(changeset, :spend_cap_credits, "no accounts match this target")
+  defp bulk_form(params, errors \\ []),
+    do: to_form(params, as: :spend_cap, errors: errors)
+
+  defp parse_rules(%{"rules" => rules}) when is_map(rules) and map_size(rules) > 0 do
+    parsed =
+      rules
+      |> Map.values()
+      |> Enum.map(fn rule ->
+        with {quota, ""} <- Decimal.parse(to_string(rule["monthly_quota"] || "")),
+             {cap, ""} <- Decimal.parse(to_string(rule["spend_cap"] || "")),
+             true <- Decimal.compare(quota, 0) != :lt,
+             true <- Decimal.compare(cap, 0) != :lt do
+          {:ok, {quota, cap}}
+        else
+          _invalid -> :error
+        end
+      end)
+
+    if Enum.all?(parsed, &match?({:ok, _}, &1)) do
+      {:ok, Enum.map(parsed, fn {:ok, rule} -> rule end)}
     else
-      changeset
+      {:error, rules: {"Enter non-negative numbers for every quota and cap", []}}
     end
   end
 
-  defp bulk_form(params, action),
-    do: params |> raw_bulk_changeset(action) |> to_form(as: :spend_cap)
+  defp parse_rules(_params), do: {:error, rules: {"Add at least one rule", []}}
 
-  defp raw_bulk_changeset(params, action) do
-    {%{}, %{spend_cap_credits: :integer, target: :string}}
-    |> Ecto.Changeset.cast(credit_params(params), [:spend_cap_credits, :target])
-    |> Ecto.Changeset.validate_required([:spend_cap_credits, :target])
-    |> Ecto.Changeset.validate_number(:spend_cap_credits, greater_than_or_equal_to: 0)
-    |> Map.put(:action, action)
+  defp matching_bulk_accounts(socket, rules) do
+    identities = Upstreams.list_visible_upstream_identities(socket.assigns.current_scope)
+
+    windows =
+      identities
+      |> Enum.map(& &1.id)
+      |> QuotaWindows.list_quota_windows_by_identity_ids()
+
+    Enum.flat_map(identities, fn identity ->
+      with %Decimal{} = quota_left <- monthly_quota_left(windows[identity.id] || []),
+           {_threshold, cap} <-
+             rules
+             |> Enum.filter(fn {threshold, _cap} ->
+               Decimal.compare(quota_left, threshold) == :gt
+             end)
+             |> Enum.max_by(
+               fn {threshold, _cap} -> threshold end,
+               fn left, right -> Decimal.compare(left, right) != :lt end,
+               fn -> nil end
+             ) do
+        [{identity, cap}]
+      else
+        _no_match -> []
+      end
+    end)
   end
 
-  defp bulk_accounts(socket, target) do
-    socket.assigns.current_scope
-    |> Upstreams.list_visible_upstream_identities()
-    |> Enum.filter(&matches_target?(&1, target))
+  defp monthly_quota_left(windows) do
+    Enum.find_value(windows, fn
+      %{quota_key: "spend_control", metadata: metadata} when is_map(metadata) ->
+        with {quota, ""} <- Decimal.parse(to_string(metadata["spend_cap"] || "")),
+             {used, ""} <- Decimal.parse(to_string(metadata["spend_used"] || "")) do
+          quota
+          |> Decimal.sub(used)
+          |> Decimal.max(Decimal.new(0))
+          |> Decimal.div(@credits_per_dollar)
+        else
+          _invalid -> nil
+        end
+
+      _window ->
+        nil
+    end)
   end
 
-  defp matches_target?(_identity, "all"), do: true
-  defp matches_target?(%{spend_cap_credits: cap}, "none"), do: cap in [nil, 0]
+  defp dollars_to_credits(dollars) do
+    dollars |> Decimal.mult(@credits_per_dollar) |> Decimal.round(0) |> Decimal.to_integer()
+  end
 
-  defp matches_target?(%{spend_cap_credits: cap, spent_credits: spent}, "reached")
-       when is_integer(cap) and cap > 0 and not is_nil(spent),
-       do: Decimal.compare(spent, Decimal.new(cap)) != :lt
-
-  defp matches_target?(_identity, _target), do: false
+  defp empty_rule, do: %{"monthly_quota" => "", "spend_cap" => ""}
 
   defp credit_params(%{"spend_cap_credits" => dollars} = params) do
     case Decimal.parse(to_string(dollars)) do
