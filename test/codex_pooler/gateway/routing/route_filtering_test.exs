@@ -95,6 +95,44 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       assert filtered_options.routing.quota_decision == nil
     end
 
+    test "optional quota excludes confirmed exhaustion while allowing missing evidence" do
+      %{pool: pool, api_key: api_key} = active_api_key_fixture()
+      missing = upstream_assignment_fixture(pool)
+      exhausted = upstream_assignment_fixture(pool)
+
+      upsert_primary_quota!(exhausted.identity, Decimal.new("100"))
+
+      model =
+        model_fixture(pool, %{
+          exposed_model_id: "gpt-route-filtering-mixed-#{System.unique_integer([:positive])}",
+          metadata: %{
+            "source_assignment_ids" => [missing.assignment.id, exhausted.assignment.id]
+          }
+        })
+
+      filter_input =
+        filter_input(pool, api_key, model, [
+          {missing.assignment, missing.identity},
+          {exhausted.assignment, exhausted.identity}
+        ])
+
+      assert {:ok, [{assignment, _identity}], _request_options} =
+               RouteFiltering.filter_candidates(filter_input, quota_mode: :optional)
+
+      assert assignment.id == missing.assignment.id
+
+      route_state = route_state(filter_input)
+
+      assert {:ok, [{route_state_assignment, _identity}], _request_options, _route_state} =
+               RouteFiltering.filter_candidates_with_route_state(
+                 filter_input,
+                 route_state,
+                 quota_mode: :optional
+               )
+
+      assert route_state_assignment.id == missing.assignment.id
+    end
+
     test "shifts new work away from accounts at the spend-cap reserve" do
       %{pool: pool, api_key: api_key} = active_api_key_fixture()
       reserved = upstream_assignment_fixture(pool)

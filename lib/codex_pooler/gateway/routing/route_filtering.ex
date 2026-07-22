@@ -107,13 +107,19 @@ defmodule CodexPooler.Gateway.Routing.RouteFiltering do
   end
 
   defp maybe_allow_missing_quota(
-         {:error, %{code: code}},
+         {:error, %{code: code, candidate_exclusions: exclusions}},
          %CandidateEligibility.FilterInput{} = filter_input,
          :optional,
          %RouteState{} = route_state
        )
        when code in ["quota_evidence_unavailable", :quota_evidence_unavailable] do
-    {:ok, filter_input.candidates, nil, route_state}
+    candidates =
+      CandidateEligibility.drop_confirmed_exhausted_candidates(
+        filter_input.candidates,
+        exclusions
+      )
+
+    {:ok, candidates, nil, RouteState.put_candidates(route_state, candidates)}
   end
 
   defp maybe_allow_missing_quota(

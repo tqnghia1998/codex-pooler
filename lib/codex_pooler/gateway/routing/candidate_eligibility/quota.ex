@@ -53,6 +53,20 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
     end
   end
 
+  @spec drop_confirmed_exhausted_candidates([FilterInput.candidate()], [map()]) ::
+          [FilterInput.candidate()]
+  def drop_confirmed_exhausted_candidates(candidates, exclusions)
+      when is_list(candidates) and is_list(exclusions) do
+    exhausted_identity_ids =
+      exclusions
+      |> Enum.filter(&exclusion_exhausted?/1)
+      |> MapSet.new(&Map.get(&1, :upstream_identity_id))
+
+    Enum.reject(candidates, fn {_assignment, identity} ->
+      MapSet.member?(exhausted_identity_ids, identity.id)
+    end)
+  end
+
   @spec quota_unavailable_error([map()], boolean()) ::
           {:error, CodexPooler.Gateway.Routing.CandidateEligibility.gateway_error()}
   def quota_unavailable_error(exclusions, refresh_attempted?) when is_list(exclusions) do

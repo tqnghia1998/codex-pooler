@@ -334,6 +334,9 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
   @spec filter_quota_eligible_candidates(FilterInput.t(), RouteState.t()) :: quota_filter_result()
   defdelegate filter_quota_eligible_candidates(input, route_state), to: Quota
 
+  @spec drop_confirmed_exhausted_candidates([candidate()], [map()]) :: [candidate()]
+  defdelegate drop_confirmed_exhausted_candidates(candidates, exclusions), to: Quota
+
   @spec quota_unavailable_error([map()], boolean()) :: {:error, gateway_error()}
   defdelegate quota_unavailable_error(exclusions, refresh_attempted?), to: Quota
 
