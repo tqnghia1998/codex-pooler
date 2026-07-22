@@ -25,8 +25,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
     upstream_assignment_fixture(pool, %{account_label: "Unknown"})
     now = DateTime.utc_now()
 
-    for {identity, monthly_used, other_30d_used} <-
-          [{more_monthly, 10, 90}, {less_monthly, 20, 5}] do
+    for {identity, monthly_used, monthly_cap, other_30d_used} <-
+          [{more_monthly, 10, 100, 90}, {less_monthly, 200, 1_000, 5}] do
       assert {:ok, [_monthly, _other_30d]} =
                QuotaWindows.upsert_quota_windows(identity, [
                  %{
@@ -35,8 +35,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
                    quota_scope: "feature",
                    window_kind: "primary",
                    window_minutes: 43_200,
-                   used_percent: Decimal.new(monthly_used),
+                   used_percent:
+                     Decimal.mult(Decimal.new(monthly_used), Decimal.new(100))
+                     |> Decimal.div(Decimal.new(monthly_cap)),
                    reset_at: DateTime.add(now, 30, :day),
+                   metadata: %{
+                     "spend_used" => Integer.to_string(monthly_used),
+                     "spend_cap" => Integer.to_string(monthly_cap)
+                   },
                    source: "codex_usage_api",
                    source_precision: "observed",
                    freshness_state: "fresh",
@@ -63,7 +69,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
         "sort" => "quota_remaining"
       })
 
-    assert Enum.map(accounts, & &1.label) == ["Zulu", "Alpha", "Unknown"]
+    assert Enum.map(accounts, & &1.label) == ["Alpha", "Zulu", "Unknown"]
   end
 
   test "owner snapshot attaches sorted observed and preserved model rows",

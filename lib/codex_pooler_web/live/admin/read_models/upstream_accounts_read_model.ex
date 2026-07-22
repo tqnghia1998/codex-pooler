@@ -527,15 +527,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   defp sort_accounts(accounts, _recent), do: Enum.sort_by(accounts, &last_used_sort_key/1)
 
   defp quota_sort_key(account) do
-    monthly_used =
+    monthly_remaining =
       case Enum.find(account.quota_limits, &(&1.key == :monthly_quota)) do
-        %{percent: percent} -> percent
+        %{remaining_amount: remaining} -> remaining
         nil -> nil
       end
 
-    case monthly_used do
-      nil -> {1, 0, String.downcase(account.label), account.identity.id}
-      used -> {0, Decimal.to_float(used), String.downcase(account.label), account.identity.id}
+    case monthly_remaining do
+      nil ->
+        {1, 0, String.downcase(account.label), account.identity.id}
+
+      remaining ->
+        {0, -Decimal.to_float(remaining), String.downcase(account.label), account.identity.id}
     end
   end
 

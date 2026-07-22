@@ -40,6 +40,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
           required(:count_label) => String.t() | nil,
           required(:reset_semantics) => :anchored | :floating | :unknown,
           required(:reset_at) => DateTime.t() | nil,
+          required(:remaining_amount) => Decimal.t() | nil,
           required(:reset_label) => String.t() | nil,
           required(:reset_title) => String.t() | nil
         }
@@ -62,6 +63,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_value: Decimal.to_float(used_percent),
       percent_label: quota_percent_label(used_percent),
       count_label: "#{format_dollars(spent)} / #{format_dollars(cap)}",
+      remaining_amount: nil,
       credit_backed: false,
       reset_semantics: :unknown,
       reset_at: nil,
@@ -78,6 +80,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_value: 0,
       percent_label: "Not set",
       count_label: nil,
+      remaining_amount: nil,
       credit_backed: false,
       reset_label: nil,
       reset_title: nil
@@ -482,6 +485,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_value: quota_percent_value(used_percent),
       percent_label: quota_percent_label(used_percent),
       count_label: quota_count_label(window),
+      remaining_amount: quota_remaining_amount(window),
       credit_backed: credit_backed_window?(window),
       reset_semantics: reset_semantics,
       reset_at: reset_at,
@@ -498,6 +502,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       percent_value: 0,
       percent_label: "not reported",
       count_label: nil,
+      remaining_amount: nil,
       credit_backed: false,
       reset_semantics: :unknown,
       reset_at: nil,
@@ -652,6 +657,28 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
   defp anchored_reset_presentation(_reset_at, _datetime_preferences, _snapshot_at),
     do: {:unknown, nil, nil, nil}
+
+  defp quota_remaining_amount(%Quota.AccountQuotaWindow{
+         quota_key: "spend_control",
+         metadata: %{"spend_used" => used, "spend_cap" => cap}
+       })
+       when is_binary(used) and is_binary(cap) do
+    with {used, ""} <- Decimal.parse(used),
+         {cap, ""} <- Decimal.parse(cap) do
+      Decimal.sub(cap, used)
+    else
+      _invalid -> nil
+    end
+  end
+
+  defp quota_remaining_amount(_window), do: nil
+
+  defp format_monthly_dollars(value) do
+    case Decimal.parse(value) do
+      {credits, ""} -> format_dollars(credits)
+      _invalid -> value
+    end
+  end
 
   defp quota_reset_label(%DateTime{} = reset_at, %DateTime{} = snapshot_at) do
     seconds_until_reset = RelativeTime.seconds_until(reset_at, snapshot_at)
