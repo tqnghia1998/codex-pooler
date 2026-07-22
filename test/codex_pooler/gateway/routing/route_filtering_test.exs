@@ -405,7 +405,7 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       assert {:error, %{code: "quota_exhausted"}} = RouteFiltering.filter_candidates(filter_input)
     end
 
-    test "does not ordinarily route a claimed pending reset probe with otherwise usable quota" do
+    test "routes a claimed pending reset probe when quota defaults to optional" do
       %{pool: pool, api_key: api_key} = active_api_key_fixture()
 
       consumed_at =
@@ -425,10 +425,11 @@ defmodule CodexPooler.Gateway.Routing.RouteFilteringTest do
       upsert_primary_quota!(identity, Decimal.new("15"))
       filter_input = filter_input(pool, api_key, assignment, identity, "reset-probe-claimed")
 
-      assert {:error, %{code: "quota_evidence_unavailable", candidate_exclusions: exclusions}} =
+      assert {:ok, [{filtered_assignment, _identity}], request_options} =
                RouteFiltering.filter_candidates(filter_input)
 
-      assert [%{reasons: [%{"code" => "saved_reset_probe_pending"}]}] = exclusions
+      assert filtered_assignment.id == assignment.id
+      assert request_options.routing.quota_decision == nil
     end
 
     test "does not route an exhausted account whose reset-probe window has elapsed" do
