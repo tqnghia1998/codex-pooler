@@ -347,18 +347,21 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         data-role="upstream-account-card-footer"
       >
         <:fact role="upstream-token-burn-summary">
-          <AdminComponents.card_fact_label
-            id={"upstream-account-#{@account.identity.id}-token-burn-label"}
+          <div
+            id={"upstream-account-#{@account.identity.id}-token-burn"}
+            data-usage-state={token_burn_usage_state(@account)}
           >
-            Token burn
-          </AdminComponents.card_fact_label>
-          <AdminComponents.card_fact_value>
-            <TokenBurnPopover.token_burn_popover
-              id={"upstream-account-#{@account.identity.id}-token-burn-value"}
-              content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
-              token_burn={@account.token_burn}
-            />
-          </AdminComponents.card_fact_value>
+            <AdminComponents.card_fact_label id={"upstream-account-#{@account.identity.id}-token-burn-label"}>
+              Token burn
+            </AdminComponents.card_fact_label>
+            <AdminComponents.card_fact_value>
+              <TokenBurnPopover.token_burn_popover
+                id={"upstream-account-#{@account.identity.id}-token-burn-value"}
+                content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
+                token_burn={@account.token_burn}
+              />
+            </AdminComponents.card_fact_value>
+          </div>
         </:fact>
         <:fact role="upstream-pool-count-cell" interactive>
           <AdminComponents.card_fact_label
