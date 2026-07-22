@@ -30,6 +30,7 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
     evidences =
       payload
       |> account_usage_evidence(credits, observed_at)
+      |> Kernel.++(additional_usage_evidence(payload, observed_at))
       |> Kernel.++(spend_control_evidence(payload, observed_at))
       |> normalize_many(observed_at)
       |> dedupe_by_identity()
@@ -124,6 +125,61 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
 
   defp account_usage_evidence(_payload, _credits, _observed_at), do: []
 
+  # Reason: an explicit spend-control window already reports the account's
+  # effective monthly usage; keeping additional per-model limits alongside it
+  # would double-report the same underlying cap.
+  defp additional_usage_evidence(
+         %{"spend_control" => %{"individual_limit" => %{}}},
+         _observed_at
+       ),
+       do: []
+
+  defp additional_usage_evidence(%{"additional_rate_limits" => limits}, observed_at)
+       when is_list(limits) do
+    limits
+    |> Enum.flat_map(&additional_limit_evidence(&1, observed_at))
+    |> keep_highest_percent_per_identity()
+    |> Enum.sort_by(&{&1.quota_key, &1.window_kind})
+  end
+
+  defp additional_usage_evidence(_payload, _observed_at), do: []
+
+  # Reason: additional limits combine model, feature, reset, and usage hints.
+  # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
+  defp additional_limit_evidence(%{"rate_limit" => %{} = rate_limit} = limit, observed_at) do
+    limit_id =
+      present_string(limit["metered_feature"]) || present_string(limit["limit_id"]) ||
+        present_string(limit["limit_name"]) || present_string(limit["model"]) ||
+        present_string(limit["model_id"]) || present_string(limit["model_identifier"]) ||
+        "additional"
+
+    limit_name =
+      present_string(limit["limit_name"]) || present_string(limit["model"]) ||
+        present_string(limit["model_id"]) || present_string(limit["model_identifier"])
+
+    descriptor =
+      Descriptors.limit_descriptor(limit_id, limit_name, %{
+        display_label: Descriptors.additional_display_label(limit, limit_id),
+        raw_limit_id: limit_id,
+        raw_metered_feature: present_string(limit["metered_feature"])
+      })
+
+    primary_window = rate_limit["primary_window"] || rate_limit["primary"]
+    secondary_window = rate_limit["secondary_window"] || rate_limit["secondary"]
+
+    if weekly_window?(primary_window) do
+      [usage_window_attrs("secondary", primary_window, nil, observed_at, descriptor)]
+    else
+      [
+        usage_window_attrs("primary", primary_window, nil, observed_at, descriptor),
+        usage_window_attrs("secondary", secondary_window, nil, observed_at, descriptor)
+      ]
+    end
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp additional_limit_evidence(_limit, _observed_at), do: []
+
   defp spend_control_evidence(
          %{"spend_control" => %{"individual_limit" => %{} = limit}},
          observed_at
@@ -149,6 +205,23 @@ defmodule CodexPooler.Quotas.Evidence.CodexParsers do
   end
 
   defp spend_control_evidence(_payload, _observed_at), do: []
+
+  defp keep_highest_percent_per_identity(attrs_list) do
+    attrs_list
+    |> Enum.reduce(%{}, fn attrs, acc ->
+      key = {
+        Map.get(attrs, :quota_key),
+        Map.get(attrs, :window_kind)
+      }
+
+      Map.update(acc, key, attrs, fn existing ->
+        # Reason: reduce callback keeps the highest observed usage percent.
+        # credo:disable-for-next-line Credo.Check.Refactor.Nesting
+        if quota_used_percent(attrs) >= quota_used_percent(existing), do: attrs, else: existing
+      end)
+    end)
+    |> Map.values()
+  end
 
   defp usage_window_attrs(_kind, nil, _credits, _observed_at, _descriptor), do: nil
 

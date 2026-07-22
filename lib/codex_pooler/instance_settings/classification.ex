@@ -272,7 +272,8 @@ defmodule CodexPooler.InstanceSettings.Classification do
       env_names: [],
       storage: :database,
       reloadability: :live,
-      notes: "Logger threshold and request logging can be updated live from the system settings UI."
+      notes:
+        "Logger threshold and request logging can be updated live from the system settings UI."
     },
     %{
       key: :gateway_debug,

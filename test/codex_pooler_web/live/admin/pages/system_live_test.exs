@@ -782,7 +782,11 @@ defmodule CodexPoolerWeb.Admin.SystemLiveTest do
     assert Logger.level() == :info
 
     {:ok, reloaded_view, _html} = live(conn, ~p"/admin/system?#{%{"tab" => "gateway"}}")
-    assert has_element?(reloaded_view, "#instance-settings-logging-mode option[selected][value='all']")
+
+    assert has_element?(
+             reloaded_view,
+             "#instance-settings-logging-mode option[selected][value='all']"
+           )
   end
 
   test "saves and reloads owner retention independently from downstream websocket idle timeout",

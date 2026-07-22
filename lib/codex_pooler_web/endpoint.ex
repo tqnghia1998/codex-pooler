@@ -89,7 +89,8 @@ defmodule CodexPoolerWeb.Endpoint do
     end
   end
 
-  def request_log_level(%Plug.Conn{path_info: [path]}) when path in ["healthz", "readyz"], do: false
+  def request_log_level(%Plug.Conn{path_info: [path]}) when path in ["healthz", "readyz"],
+    do: false
 
   def request_log_level(_conn) do
     if InstanceSettingsLogging.all?(), do: :info, else: false
