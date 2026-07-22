@@ -365,9 +365,13 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
   end
 
   defp quota_unavailable_error_details(exclusions) do
-    reasons = Enum.flat_map(exclusions, &Map.get(&1, :reasons, []))
-
-    if Enum.any?(reasons, &quota_exhaustion_reason?/1) do
+    # "quota_exhausted" is a hard block (never bypassed under :optional mode),
+    # so it must only fire when every excluded candidate is confirmed
+    # exhausted. A mixed batch (a few genuinely exhausted accounts alongside
+    # many merely missing quota evidence) should still fall back to
+    # "quota_evidence_unavailable" so the optional-mode bypass can route to
+    # the accounts that aren't actually known to be exhausted.
+    if exclusions != [] and Enum.all?(exclusions, &exclusion_exhausted?/1) do
       %{
         code: "quota_exhausted",
         message: "upstream quota is exhausted until its reset time"
@@ -392,6 +396,15 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
     do: "exhausted" in reason_codes
 
   defp quota_exhaustion_reason?(_reason), do: false
+
+  defp exclusion_exhausted?(exclusion) do
+    exclusion
+    |> Map.get(:reasons, [])
+    |> case do
+      [] -> false
+      reasons -> Enum.any?(reasons, &quota_exhaustion_reason?/1)
+    end
+  end
 
   defp quota_decision(
          candidates,
