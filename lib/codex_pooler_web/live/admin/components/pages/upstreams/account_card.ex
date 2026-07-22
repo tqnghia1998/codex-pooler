@@ -145,43 +145,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             inert={@panel_view != :usage}
             class={account_panel_class(@panel_view == :usage)}
           >
-            <div class="flex justify-end">
-              <div
-                id={"upstream-account-#{@account.identity.id}-token-burn"}
-                data-role="upstream-token-burn-summary"
-                data-usage-state={token_burn_usage_state(@account)}
-                class="text-right"
-              >
-                <p
-                  id={"upstream-account-#{@account.identity.id}-token-burn-label"}
-                  class="text-xs font-semibold uppercase text-primary"
-                >
-                  TOKEN BURN
-                </p>
-                <TokenBurnPopover.token_burn_popover
-                  id={"upstream-account-#{@account.identity.id}-token-burn-value"}
-                  content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
-                  token_burn={@account.token_burn}
-                />
-              </div>
-            </div>
-            <div
-              id={"upstream-account-#{@account.identity.id}-token-burn"}
-              data-role="upstream-token-burn-summary"
-              class="text-right"
-            >
-              <p
-                id={"upstream-account-#{@account.identity.id}-token-burn-label"}
-                class="text-xs font-semibold uppercase text-primary"
-              >
-                TOKEN BURN
-              </p>
-              <TokenBurnPopover.token_burn_popover
-                id={"upstream-account-#{@account.identity.id}-token-burn-value"}
-                content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
-                token_burn={@account.token_burn}
-              />
-            </div>
             <div
               id={"upstream-account-#{@account.identity.id}-limits"}
               class={quota_limits_grid_class(@reported_quota_limits)}
@@ -383,10 +346,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         id={"upstream-account-#{@account.identity.id}-routing-readiness"}
         data-role="upstream-account-card-footer"
       >
-        <:fact role="upstream-routing-cell">
-          <AdminComponents.card_fact_label>Routing</AdminComponents.card_fact_label>
-          <AdminComponents.card_fact_value title={@routing_readiness.reason}>
-            {@routing_readiness.label}
+        <:fact role="upstream-token-burn-summary">
+          <AdminComponents.card_fact_label
+            id={"upstream-account-#{@account.identity.id}-token-burn-label"}
+          >
+            Token burn
+          </AdminComponents.card_fact_label>
+          <AdminComponents.card_fact_value>
+            <TokenBurnPopover.token_burn_popover
+              id={"upstream-account-#{@account.identity.id}-token-burn-value"}
+              content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
+              token_burn={@account.token_burn}
+            />
           </AdminComponents.card_fact_value>
         </:fact>
         <:fact role="upstream-pool-count-cell" interactive>
