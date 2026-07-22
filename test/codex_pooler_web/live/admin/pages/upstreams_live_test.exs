@@ -1751,7 +1751,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert active_usage_panel_class =~ "transition-opacity"
     refute active_usage_panel_class =~ "translate-y"
     refute active_usage_panel_class =~ "transition-[max-height"
-    assert active_saved_meter_class =~ "md:col-span-2"
+    refute active_saved_meter_class =~ "md:col-span-2"
     assert active_saved_meter_segment_1_class =~ "bg-(--color-reset-bank)/80"
     assert active_saved_meter_segment_2_class =~ "bg-(--color-reset-bank)/80"
     assert active_saved_meter_segment_3_class =~ "bg-base-300/70"
@@ -3115,7 +3115,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "25%")
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limits.grid.gap-3")
-    refute has_element?(view, "#upstream-account-#{browser_identity.id}-limits.md\\:grid-cols-2")
+    assert has_element?(view, "#upstream-account-#{browser_identity.id}-limits.md\\:grid-cols-2")
 
     refute has_element?(view, "#upstream-account-#{browser_identity.id}-limit-primary_5h")
     refute has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly-count")
@@ -5669,7 +5669,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "80%"
+             "20%"
            )
   end
 
@@ -5936,7 +5936,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert has_element?(
              view,
              "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "80%"
+             "20%"
            )
   end
 
@@ -7510,7 +7510,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     [assignment] = account.assignments
     assert assignment.quota_priming_status == Keyword.fetch!(opts, :priming_status)
     assert assignment.quota_priming_label == Keyword.fetch!(opts, :priming_label)
-    assert Enum.map(account.quota_limits, & &1.label) == ["5h", "30d", "Weekly"]
+
+    assert Enum.map(account.quota_limits, & &1.label) == [
+             "5h",
+             "30d",
+             "Weekly",
+             "Monthly Usage",
+             "Spending Cap"
+           ]
   end
 
   defp runtime_secret(label),

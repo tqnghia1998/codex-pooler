@@ -166,6 +166,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
               </div>
             </div>
             <div
+              id={"upstream-account-#{@account.identity.id}-token-burn"}
+              data-role="upstream-token-burn-summary"
+              class="text-right"
+            >
+              <p
+                id={"upstream-account-#{@account.identity.id}-token-burn-label"}
+                class="text-xs font-semibold uppercase text-primary"
+              >
+                TOKEN BURN
+              </p>
+              <TokenBurnPopover.token_burn_popover
+                id={"upstream-account-#{@account.identity.id}-token-burn-value"}
+                content_id={"upstream-account-#{@account.identity.id}-token-burn-content"}
+                token_burn={@account.token_burn}
+              />
+            </div>
+            <div
               id={"upstream-account-#{@account.identity.id}-limits"}
               class={quota_limits_grid_class(@reported_quota_limits)}
             >
@@ -862,6 +879,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   defp reported_quota_limits(_quota_limits), do: []
 
   defp reported_quota_limit?(%{percent: %Decimal{}}), do: true
+
+  defp reported_quota_limit?(%{key: :spending_cap}), do: true
 
   defp reported_quota_limit?(%{reset_label: reset_label}) when is_binary(reset_label),
     do: true

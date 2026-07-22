@@ -16,6 +16,10 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
   alias CodexPoolerWeb.Admin.PoolFilterComponents
 
   @page_size 50
+  @email_like_regex ~r/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/
+  @jwt_like_regex ~r/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/
+  @sensitive_identity_regex ~r/(?i)\b(authorization|bearer|cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|prompt|secret|token)\b/
+  @uuid_regex ~r/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/i
 
   @type filter_error :: %{required(:field) => atom(), required(:message) => String.t()}
   @type option :: %{
@@ -514,12 +518,27 @@ defmodule CodexPoolerWeb.Admin.AlertIncidentsReadModel do
   end
 
   defp upstream_account_label(identity) do
-    label =
-      present_string(identity.account_label) ||
-        present_string(identity.chatgpt_account_id) ||
-        "Upstream account"
+    safe_account_identifier(identity.account_label) ||
+      safe_account_identifier(identity.chatgpt_account_id) ||
+      "Upstream account"
+  end
 
-    CodexPoolerWeb.Admin.Format.censor_email(label)
+  defp safe_account_identifier(value) do
+    case present_string(value) do
+      nil -> nil
+      label -> if account_identifier_safe?(label), do: label
+    end
+  end
+
+  defp account_identifier_safe?(label) do
+    cond do
+      label == "[redacted]" -> false
+      String.match?(label, @email_like_regex) -> false
+      String.match?(label, @uuid_regex) -> false
+      String.match?(label, @jwt_like_regex) -> false
+      String.match?(label, @sensitive_identity_regex) -> false
+      true -> true
+    end
   end
 
   defp reason_title(%{rule_kind: "pool_no_usable_assignments"}), do: "No usable assignments"
