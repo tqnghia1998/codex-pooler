@@ -122,6 +122,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           required(:identity_observability) => identity_observability()
         }
 
+  @credits_per_dollar Decimal.new(25)
   @terminal_reconciliation_statuses ~w(succeeded partial failed)
   @safe_reconciliation_messages %{
     "catalog_refreshed" => "catalog refreshed",
@@ -479,15 +480,26 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   end
 
   defp account_stats(accounts) do
+    {spending_cap_left, spending_cap_spent} =
+      Enum.reduce(accounts, {Decimal.new(0), Decimal.new(0)}, fn account, {left, spent} ->
+        cap = Decimal.new(account.identity.spend_cap_credits || 0)
+        account_spent = account.identity.spent_credits || Decimal.new(0)
+
+        {
+          Decimal.add(left, Decimal.max(Decimal.sub(cap, account_spent), Decimal.new(0))),
+          Decimal.add(spent, account_spent)
+        }
+      end)
+
     %{
       total: length(accounts),
       active: Enum.count(accounts, &(&1.identity.status == "active")),
       reauth_required: Enum.count(accounts, &(&1.identity.status == "reauth_required")),
       needs_attention:
         Enum.count(accounts, &(&1.identity.status in ~w(refresh_failed errored disabled))),
-      quota_plenty: Enum.count(accounts, &(&1.quota_remaining == "plenty")),
-      quota_moderate: Enum.count(accounts, &(&1.quota_remaining == "moderate")),
-      quota_low: Enum.count(accounts, &(&1.quota_remaining == "low")),
+      spending_cap_left: spending_cap_left |> Decimal.div(@credits_per_dollar) |> Format.money(),
+      spending_cap_spent:
+        spending_cap_spent |> Decimal.div(@credits_per_dollar) |> Format.money(),
       quota_exhausted: Enum.count(accounts, &(&1.quota_remaining == "exhausted")),
       quota_unknown: Enum.count(accounts, &(&1.quota_remaining == "unknown"))
     }

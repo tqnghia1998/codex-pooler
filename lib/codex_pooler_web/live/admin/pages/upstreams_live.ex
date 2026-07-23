@@ -45,9 +45,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
           active: 0,
           reauth_required: 0,
           needs_attention: 0,
-          quota_plenty: 0,
-          quota_moderate: 0,
-          quota_low: 0,
+          spending_cap_left: "$0.00",
+          spending_cap_spent: "$0.00",
           quota_exhausted: 0,
           quota_unknown: 0
         },

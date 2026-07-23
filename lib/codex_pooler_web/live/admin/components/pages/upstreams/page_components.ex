@@ -114,7 +114,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           id="upstream-account-stats"
           desktop_columns={:five}
           compact_mobile
-          class="grid w-full grid-cols-9 gap-1.5"
+          class="grid w-full grid-cols-8 gap-1.5"
         >
           <AdminComponents.metric_card
             id="upstream-stat-total"
@@ -148,26 +148,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
             compact_mobile
           />
           <AdminComponents.metric_card
-            id="upstream-stat-quota-plenty"
-            icon="hero-battery-100"
-            label="Quota ≥70%"
-            value={@upstream_stats.quota_plenty}
+            id="upstream-stat-spending-cap-left"
+            icon="hero-banknotes"
+            label="Spending cap left"
+            value={@upstream_stats.spending_cap_left}
             tone={:success}
             compact_mobile
           />
           <AdminComponents.metric_card
-            id="upstream-stat-quota-moderate"
-            icon="hero-battery-50"
-            label="Quota 30–69%"
-            value={@upstream_stats.quota_moderate}
-            compact_mobile
-          />
-          <AdminComponents.metric_card
-            id="upstream-stat-quota-low"
-            icon="hero-battery-0"
-            label="Quota <30%"
-            value={@upstream_stats.quota_low}
-            tone={:warning}
+            id="upstream-stat-spending-cap-spent"
+            icon="hero-credit-card"
+            label="Spending cap spent"
+            value={@upstream_stats.spending_cap_spent}
             compact_mobile
           />
           <AdminComponents.metric_card

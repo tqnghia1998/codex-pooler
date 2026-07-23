@@ -2468,6 +2468,32 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute has_element?(view, "select#filters_status")
   end
 
+  test "replaces quota-band metrics with aggregate spending-cap metrics", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "spending-metrics", name: "Spending Metrics"})
+
+    %{identity: first} = upstream_assignment_fixture(pool)
+    %{identity: second} = upstream_assignment_fixture(pool)
+
+    first
+    |> Ecto.Changeset.change(spend_cap_credits: 2_500, spent_credits: Decimal.new(625))
+    |> Repo.update!()
+
+    second
+    |> Ecto.Changeset.change(spend_cap_credits: 1_000, spent_credits: Decimal.new(1_250))
+    |> Repo.update!()
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    assert has_element?(view, "#upstream-stat-spending-cap-left", "$75.00")
+    assert has_element?(view, "#upstream-stat-spending-cap-spent", "$75.00")
+    refute has_element?(view, "#upstream-stat-quota-plenty")
+    refute has_element?(view, "#upstream-stat-quota-moderate")
+    refute has_element?(view, "#upstream-stat-quota-low")
+  end
+
   @tag :upstream_filters
   test "filters upstream cards through search submit, Pool dropdown, and status dropdown", %{
     conn: conn,
