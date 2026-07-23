@@ -862,8 +862,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
   defp account_status_label(_account), do: "Unknown"
 
+  # Per-model/family quota windows remain in the account projection for fleet
+  # metrics and filtering, but the card intentionally shows only the fixed
+  # account-level meters.
   defp reported_quota_limits(quota_limits) when is_list(quota_limits) do
-    Enum.filter(quota_limits, &reported_quota_limit?/1)
+    quota_limits
+    |> Enum.filter(&is_atom(&1.key))
+    |> Enum.filter(&reported_quota_limit?/1)
   end
 
   defp reported_quota_limits(_quota_limits), do: []

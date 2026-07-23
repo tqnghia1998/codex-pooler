@@ -3373,8 +3373,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     for limit <- additional_limits do
       selector = "#upstream-account-#{identity.id}-limit-#{limit.key}"
 
-      assert has_element?(view, selector)
-      assert has_element?(view, "#{selector} [data-role='upstream-limit-title']", limit.label)
+      refute has_element?(view, selector)
     end
   end
 

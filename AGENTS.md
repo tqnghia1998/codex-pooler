@@ -39,6 +39,8 @@ Do not invert this without updating calculations, labels, filters, sorting, metr
 
 Account cards no longer render “last used” text. Last-used data is still needed for the default recent sort. Quota progress bars represent used percentage. Accounts without a spending cap receive a neutral gray `Spending Cap` row labeled `Not set`.
 
+Per-model/family additional quota windows remain in the account projection for fleet metrics and filtering, but are intentionally hidden from account-card UI. Cards render only the fixed atom-keyed account meters (`5h`, `30d`, `Weekly`, `Monthly Usage`, and `Spending Cap`). Preserve this card-level filter when reconciling upstream quota-projection changes; do not reintroduce additional-limit progress bars.
+
 ## Immediate account connection test
 
 Entry point: `Upstreams.test_account_for_scope/2`.
