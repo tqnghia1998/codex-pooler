@@ -2458,10 +2458,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
+             "#upstream-status-filter button[data-status='exhausted']",
+             "Exhausted"
+           )
+
+    assert has_element?(
+             view,
              "#upstream-sort-filter[name='filters[sort]'] option[value='recent'][selected]"
            )
 
     assert has_element?(view, "#upstream-account-stats")
+    assert has_element?(view, "#upstream-stat-reauth + #upstream-stat-quota-exhausted")
     assert has_element?(view, "#upstream-stat-total", "1")
     assert has_element?(view, "#upstream-stat-active", "1")
     refute has_element?(view, "select#filters_pool_id")
@@ -2489,6 +2496,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#upstream-stat-spending-cap-left", "$75.00")
     assert has_element?(view, "#upstream-stat-spending-cap-spent", "$75.00")
+    refute has_element?(view, "#upstream-stat-attention")
+    refute has_element?(view, "#upstream-stat-quota-unknown")
     refute has_element?(view, "#upstream-stat-quota-plenty")
     refute has_element?(view, "#upstream-stat-quota-moderate")
     refute has_element?(view, "#upstream-stat-quota-low")
@@ -3893,6 +3902,50 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       UpstreamAccountsReadModel.list_visible_accounts(scope, [pool], %{"sort" => "name"})
 
     assert Enum.map(named, & &1.label) == ["Never", "Newer", "Older"]
+  end
+
+  test "spending cap shows last upstream activity rather than cap start", %{scope: scope} do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "cap-last-active", name: "Cap Last Active"})
+    %{identity: identity, assignment: assignment} = upstream_assignment_fixture(pool)
+    auth = active_api_key_fixture(pool, %{scope: scope})
+
+    last_active_at =
+      DateTime.utc_now() |> DateTime.add(-2, :hour) |> DateTime.truncate(:microsecond)
+
+    identity
+    |> Ecto.Changeset.change(%{spend_cap_credits: 100, cap_started_at: DateTime.utc_now()})
+    |> Repo.update!()
+
+    auth
+    |> request_fixture(%{correlation_id: "cap-last-active"})
+    |> attempt_fixture(assignment)
+    |> Ecto.Changeset.change(%{started_at: last_active_at})
+    |> Repo.update!()
+
+    [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
+    cap = quota_limit!(account, :spending_cap)
+
+    assert cap.reset_label == "active 2h ago"
+    assert cap.reset_title == "last active #{DateTime.to_iso8601(last_active_at)}"
+  end
+
+  test "exhausted metric includes a zero-left monthly quota", %{conn: conn, scope: scope} do
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "exhausted-monthly", name: "Exhausted Monthly"})
+
+    %{identity: identity} = upstream_assignment_fixture(pool)
+    insert_monthly_spend_quota(identity, 1_000, 1_000)
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    assert has_element?(view, "#upstream-stat-quota-exhausted", "1")
+
+    view
+    |> element("#upstream-status-filter [data-status='exhausted']")
+    |> render_click()
+
+    assert_patch(view, ~p"/admin/upstreams?status=exhausted")
+    assert has_element?(view, "#upstream-account-#{identity.id}")
   end
 
   test "uncapped account renders a neutral spending cap meter and can queue a connection test", %{
@@ -6251,7 +6304,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{future_identity.id}-auth-expiration[title]",
+             "#upstream-account-#{future_identity.id}-auth-expiration[title].text-warning",
              "Auth expires"
            )
 

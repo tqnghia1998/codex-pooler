@@ -104,7 +104,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
           <p
             id={"upstream-account-#{@account.identity.id}-auth-expiration"}
             data-role="upstream-auth-expiration"
-            class="truncate text-xs leading-4 text-base-content/55"
+            class={[
+              "truncate text-xs leading-4",
+              if(auth_expiring_soon?(@account),
+                do: "font-semibold text-warning",
+                else: "text-base-content/55"
+              )
+            ]}
             title={@auth_expiration.title}
           >
             {@auth_expiration.label}
@@ -464,6 +470,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   end
 
   defp auth_expiration(_account, _preferences), do: %{label: "Expiration unavailable", title: nil}
+
+  defp auth_expiring_soon?(%{
+         identity_observability: %{
+           credential_expiry: %{state: "known_future", expires_at: %DateTime{} = expires_at}
+         }
+       }) do
+    DateTime.diff(expires_at, DateTime.utc_now(), :second) <= 24 * 60 * 60
+  end
+
+  defp auth_expiring_soon?(_account), do: false
 
   @spec credential_expiry_label(map()) :: String.t()
   defp credential_expiry_label(%{age: age}) when is_binary(age) and age != "", do: age

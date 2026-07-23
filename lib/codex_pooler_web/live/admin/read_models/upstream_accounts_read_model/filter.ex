@@ -9,6 +9,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Filter do
     |> filter_by_query(Map.get(filters, "query"))
   end
 
+  defp filter_by_status(accounts, "exhausted") do
+    Enum.filter(accounts, &(&1.quota_remaining == "exhausted"))
+  end
+
   defp filter_by_status(accounts, status) when is_binary(status) and status != "" do
     Enum.filter(accounts, &(&1.identity.status == status))
   end

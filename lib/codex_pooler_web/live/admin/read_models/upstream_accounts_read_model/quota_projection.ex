@@ -45,8 +45,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
           required(:reset_title) => String.t() | nil
         }
 
-  @spec spend_cap_row(map()) :: quota_limit_row() | nil
-  def spend_cap_row(%{spend_cap_credits: cap} = identity) when is_integer(cap) and cap > 0 do
+  @spec spend_cap_row(map(), DateTime.t() | nil) :: quota_limit_row() | nil
+  def spend_cap_row(identity, last_active_at \\ nil)
+
+  def spend_cap_row(%{spend_cap_credits: cap} = identity, last_active_at)
+      when is_integer(cap) and cap > 0 do
     spent = spend_cap_spent(identity)
     cap = Decimal.new(cap)
 
@@ -69,12 +72,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       credit_backed: false,
       reset_semantics: :unknown,
       reset_at: nil,
-      reset_label: cap_started_label(identity.cap_started_at),
-      reset_title: cap_started_title(identity.cap_started_at)
+      reset_label: last_active_label(last_active_at),
+      reset_title: last_active_title(last_active_at)
     }
   end
 
-  def spend_cap_row(_identity) do
+  def spend_cap_row(_identity, _last_active_at) do
     zero = Decimal.new(0)
 
     %{
@@ -86,6 +89,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       count_label: "#{format_dollars(zero)} left of #{format_dollars(zero)}",
       remaining_amount: nil,
       credit_backed: false,
+      reset_semantics: :unknown,
+      reset_at: nil,
       reset_label: nil,
       reset_title: nil
     }
@@ -266,16 +271,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     |> then(&"$#{&1}")
   end
 
-  defp cap_started_label(%DateTime{} = started_at) do
-    "active #{Formatting.format_reset_duration(DateTime.diff(DateTime.utc_now(), started_at, :second))} ago"
+  defp last_active_label(%DateTime{} = last_active_at) do
+    "active #{Formatting.format_reset_duration(DateTime.diff(DateTime.utc_now(), last_active_at, :second))} ago"
   end
 
-  defp cap_started_label(_started_at), do: nil
+  defp last_active_label(_last_active_at), do: nil
 
-  defp cap_started_title(%DateTime{} = started_at),
-    do: "started #{DateTime.to_iso8601(started_at)}"
+  defp last_active_title(%DateTime{} = last_active_at),
+    do: "last active #{DateTime.to_iso8601(last_active_at)}"
 
-  defp cap_started_title(_started_at), do: nil
+  defp last_active_title(_last_active_at), do: nil
 
   defp quota_limit_sort_key(%Quota.AccountQuotaWindow{} = window) do
     {

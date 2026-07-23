@@ -456,7 +456,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       routing_readiness: routing_readiness,
       quota_limits:
         QuotaProjection.quota_limit_rows(quota_windows, datetime_preferences, snapshot_at) ++
-          [QuotaProjection.spend_cap_row(identity)],
+          [QuotaProjection.spend_cap_row(identity, Map.get(last_used, identity.id))],
       identity_observability: identity_observability
     }
 
@@ -495,24 +495,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       total: length(accounts),
       active: Enum.count(accounts, &(&1.identity.status == "active")),
       reauth_required: Enum.count(accounts, &(&1.identity.status == "reauth_required")),
-      needs_attention:
-        Enum.count(accounts, &(&1.identity.status in ~w(refresh_failed errored disabled))),
       spending_cap_left: spending_cap_left |> Decimal.div(@credits_per_dollar) |> Format.money(),
       spending_cap_spent:
         spending_cap_spent |> Decimal.div(@credits_per_dollar) |> Format.money(),
-      quota_exhausted: Enum.count(accounts, &(&1.quota_remaining == "exhausted")),
-      quota_unknown: Enum.count(accounts, &(&1.quota_remaining == "unknown"))
+      quota_exhausted: Enum.count(accounts, &(&1.quota_remaining == "exhausted"))
     }
   end
 
   defp quota_remaining(account) do
-    percents =
+    used_percents =
       account.quota_limits
       |> Enum.reject(&(&1.key == :spending_cap))
       |> Enum.map(& &1.percent)
       |> Enum.reject(&is_nil/1)
+      |> Enum.map(&Decimal.sub(Decimal.new(100), &1))
 
-    case percents do
+    case used_percents do
       [] -> "unknown"
       values -> values |> Enum.max_by(&Decimal.to_float/1) |> remaining_band()
     end

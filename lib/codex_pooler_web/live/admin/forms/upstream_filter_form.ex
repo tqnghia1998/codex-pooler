@@ -8,6 +8,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   @filter_keys ~w(query pool_id status quota sort)
   @sorts ~w(recent name status quota_remaining)
   @quotas ~w(plenty moderate low exhausted unknown)
+  @exhausted_status "exhausted"
 
   @spec query_params(map()) :: map()
   def query_params(filter_params) do
@@ -99,7 +100,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   defp normalize_sort(_sort), do: "recent"
 
   defp visible_statuses do
-    Enum.reject(UpstreamIdentity.statuses(), &(&1 == UpstreamIdentity.deleted_status()))
+    Enum.reject(UpstreamIdentity.statuses(), &(&1 == UpstreamIdentity.deleted_status())) ++
+      [@exhausted_status]
   end
 
   defp any_status_option do
@@ -120,6 +122,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
     }
   end
 
+  defp status_label(@exhausted_status), do: "Exhausted"
+
   defp status_label(status) do
     status
     |> String.replace("_", " ")
@@ -134,6 +138,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   defp status_icon("reauth_required"), do: "hero-key"
   defp status_icon("disabled"), do: "hero-no-symbol"
   defp status_icon("errored"), do: "hero-exclamation-circle"
+  defp status_icon(@exhausted_status), do: "hero-no-symbol"
   defp status_icon(_status), do: "hero-circle-stack"
 
   defp status_tone("active"), do: :success
@@ -144,6 +149,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamFilterForm do
   defp status_tone("reauth_required"), do: :error
   defp status_tone("disabled"), do: :neutral
   defp status_tone("errored"), do: :error
+  defp status_tone(@exhausted_status), do: :error
   defp status_tone(_status), do: :neutral
 
   defp string_param(params, key) do
