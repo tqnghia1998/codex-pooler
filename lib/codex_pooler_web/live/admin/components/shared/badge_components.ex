@@ -46,10 +46,6 @@ defmodule CodexPoolerWeb.Admin.BadgeComponents do
     "least_recent_success" => %{
       label: "Least recent success",
       icon: "hero-clock"
-    },
-    "quota_first" => %{
-      label: "Quota first",
-      icon: "hero-chart-bar-square"
     }
   }
 

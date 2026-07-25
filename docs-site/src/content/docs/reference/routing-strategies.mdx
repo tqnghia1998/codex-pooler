@@ -101,10 +101,6 @@ After eligibility, Codex Pooler orders the remaining accounts. The Pool's strate
       <td>Least recent success</td>
       <td>Prefers accounts that haven&#x27;t recently completed successful work, which can help spread successful turns across the Pool</td>
     </tr>
-    <tr>
-      <td>Quota first</td>
-      <td>Prefers eligible accounts with more usable remaining quota evidence for the requested model</td>
-    </tr>
   </tbody>
 </table>
 
@@ -201,7 +197,7 @@ If no saved reset can be applied, or the redemption result does not change quota
 
 Saved-reset observations and redemption attempt state are stored on `upstream_identities.metadata`; routing and redemption metadata stores bounded status, result codes, timestamps, HTTP status, and before/after counts only. It does not store raw provider payloads, credit identifiers, redemption request identifiers, client or provider credentials, prompts, request bodies, or response bodies. The internal one-shot lease token is the sole non-secret token in the redemption lifecycle, and it remains non-renderable and absent from public metadata.
 
-Saved reset counts do not boost ranking. `quota_first` still orders only already-eligible candidates by usable remaining quota; saved reset metadata only determines whether an opt-in quota recovery attempt is allowed.
+Saved reset counts do not boost ranking. Routing strategy still orders only already-eligible candidates; saved reset metadata only determines whether an opt-in quota recovery attempt is allowed.
 
 ## What Operators Configure
 

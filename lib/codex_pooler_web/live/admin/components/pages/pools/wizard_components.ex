@@ -531,9 +531,6 @@ defmodule CodexPoolerWeb.Admin.PoolWizardComponents do
   defp pool_strategy_description("least_recent_success"),
     do: "Prefers the upstream that has waited longest since its last successful request."
 
-  defp pool_strategy_description("quota_first"),
-    do: "Prefers the upstream with the most remaining quota for the requested model."
-
   defp pool_strategy_description(_strategy), do: nil
 
   defp sort_selected_first(options, field) do

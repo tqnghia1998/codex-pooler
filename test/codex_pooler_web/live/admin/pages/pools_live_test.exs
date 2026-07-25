@@ -990,7 +990,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert has_element?(view, "#pool_routing_strategy", "Bridge ring")
     assert has_element?(view, "#pool_routing_strategy", "Deterministic rotation")
     assert has_element?(view, "#pool_routing_strategy", "Least recent success")
-    assert has_element?(view, "#pool_routing_strategy", "Quota first")
+    refute has_element?(view, "#pool_routing_strategy", "Quota first")
     view |> element("#pool-create-dialog-tab-upstreams") |> render_click()
 
     assert has_element?(view, "#pool-create-dialog-tab-upstreams[aria-selected='true']")
@@ -1278,7 +1278,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     |> render_submit(%{
       "pool" => %{
         "name" => "Duplicate Routed Pool!!!",
-        "routing_strategy" => "quota_first",
+        "routing_strategy" => "deterministic_rotation",
         "prompt_cache_affinity_enabled" => "false",
         "v1_compatibility_enabled" => "false",
         "request_compression_enabled" => "true",
@@ -1287,7 +1287,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     })
 
     assert has_element?(view, "#pool-create-dialog[open]")
-    assert has_element?(view, "#pool_routing_strategy_quota_first[checked]")
+    assert has_element?(view, "#pool_routing_strategy_deterministic_rotation[checked]")
 
     assert has_element?(
              view,
@@ -1424,7 +1424,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert {:ok, _settings} =
              PoolRouting.update_routing_settings(scope, pool, %{
-               "routing_strategy" => "quota_first"
+               "routing_strategy" => "deterministic_rotation"
              })
 
     view
@@ -1447,7 +1447,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              )
 
     assert Repo.get!(Pool, pool.id).name == "Concurrently renamed"
-    assert PoolRouting.get_routing_settings(pool).routing_strategy == "quota_first"
+    assert PoolRouting.get_routing_settings(pool).routing_strategy == "deterministic_rotation"
     assert Repo.get!(PoolUpstreamAssignment, assignment.id).status == "active"
     assert Repo.get!(APIKey, api_key.id).pool_id == pool.id
     assert has_element?(view, "#pool-edit-dialog[open]")
@@ -2542,7 +2542,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "id" => pool.id,
         "name" => "Editable Routing",
         "status" => "active",
-        "routing_strategy" => "quota_first",
+        "routing_strategy" => "deterministic_rotation",
         "bridge_ring_size" => "5",
         "sticky_websocket_sessions" => "false",
         "sticky_http_sessions" => "true",
@@ -2555,7 +2555,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     })
 
     settings = Pools.get_routing_settings(pool)
-    assert settings.routing_strategy == "quota_first"
+    assert settings.routing_strategy == "deterministic_rotation"
     assert settings.bridge_ring_size == 5
     assert settings.sticky_websocket_sessions == false
     assert settings.sticky_http_sessions == true
@@ -2998,7 +2998,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "id" => pool.id,
         "name" => "Preserved Routing",
         "status" => "active",
-        "routing_strategy" => "quota_first",
+        "routing_strategy" => "least_recent_success",
         "prompt_cache_affinity_enabled" => "false",
         "v1_compatibility_enabled" => "false",
         "request_compression_enabled" => "false",
@@ -3009,7 +3009,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     settings = pool |> Pools.get_routing_settings() |> Repo.reload!()
 
-    assert settings.routing_strategy == "quota_first"
+    assert settings.routing_strategy == "least_recent_success"
     assert settings.bridge_ring_size == 7
     assert settings.sticky_websocket_sessions == false
     assert settings.sticky_http_sessions == true
@@ -3052,7 +3052,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
         "id" => pool.id,
         "name" => "Partially Updated Pool",
         "status" => "active",
-        "routing_strategy" => "quota_first",
+        "routing_strategy" => "least_recent_success",
         "upstream_identity_ids" => [assignment.upstream_identity_id, Ecto.UUID.generate()]
       }
     })

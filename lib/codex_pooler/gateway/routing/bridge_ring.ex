@@ -30,7 +30,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   alias CodexPooler.Pools.{Pool, RoutingSettings}
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPooler.Repo
-  alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
   @default_strategy "bridge_ring"
@@ -275,15 +274,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     Enum.sort_by(candidates, fn {assignment, _identity} ->
       {
         latest_success_sort_key(Map.get(latest_success, assignment.id)),
-        -rendezvous_score(seed, assignment.id)
-      }
-    end)
-  end
-
-  defp strategy_order("quota_first", candidates, %Model{} = model, seed, route_state) do
-    Enum.sort_by(candidates, fn {assignment, identity} ->
-      {
-        -quota_capacity_score(identity, model, route_state),
         -rendezvous_score(seed, assignment.id)
       }
     end)
@@ -718,72 +708,11 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
     tail ++ head
   end
 
-  defp quota_capacity_score(identity, %Model{} = model) do
-    identity
-    |> QuotaWindows.quota_window_selection_data(quota_scope_opts(model))
-    |> Map.get(:routing_windows, [])
-    |> Enum.filter(&QuotaWindows.usable_window?/1)
-    |> Enum.map(&remaining_percent/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.min(fn -> 0 end)
-  end
-
-  defp quota_capacity_score(
-         identity,
-         %Model{} = model,
-         %RouteState{quota_snapshot_at: %DateTime{} = snapshot_at} = route_state
-       ) do
-    route_state
-    |> RouteState.quota_windows_for_identity(identity)
-    |> QuotaWindows.quota_window_selection_data_from_windows(
-      Keyword.put(quota_scope_opts(model), :at, snapshot_at)
-    )
-    |> Map.get(:routing_windows, [])
-    |> Enum.filter(&QuotaWindows.usable_window?(&1, snapshot_at))
-    |> Enum.map(&remaining_percent/1)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.min(fn -> 0 end)
-  end
-
-  defp quota_capacity_score(
-         _identity,
-         %Model{},
-         %RouteState{quota_window_snapshots: snapshots, quota_snapshot_at: nil}
-       )
-       when snapshots == %{},
-       do: 0
-
-  defp quota_capacity_score(_identity, %Model{}, %RouteState{}) do
-    raise ArgumentError, "route state quota snapshot timestamp is missing"
-  end
-
-  defp quota_capacity_score(identity, %Model{} = model, nil),
-    do: quota_capacity_score(identity, model)
-
   defp routing_settings(_auth, %RouteState{routing_settings: %RoutingSettings{} = settings}),
     do: settings
 
   defp routing_settings(auth, _route_state),
     do: PoolRouting.routing_settings_with_defaults(auth.pool) || default_settings(auth.pool.id)
-
-  defp quota_scope_opts(%Model{} = model) do
-    [
-      model: model.exposed_model_id,
-      requested_model: model.exposed_model_id,
-      catalog_model: model.exposed_model_id,
-      exposed_model_id: model.exposed_model_id,
-      upstream_model: model.upstream_model_id,
-      upstream_model_id: model.upstream_model_id
-    ]
-  end
-
-  defp remaining_percent(%{used_percent: %Decimal{} = used_percent}) do
-    Decimal.new(100)
-    |> Decimal.sub(used_percent)
-    |> Decimal.to_float()
-  end
-
-  defp remaining_percent(_window), do: nil
 
   defp rendezvous_score(seed, assignment_id) do
     :crypto.hash(:sha256, [to_string(seed), ?:, assignment_id])

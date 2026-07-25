@@ -28,7 +28,9 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLiveTest do
     hidden_pool = pool_fixture(%{slug: "hidden-audit", name: "Hidden Audit", status: "disabled"})
 
     assert {:ok, _settings} =
-             Pools.update_routing_settings(scope, pool, %{"routing_strategy" => "quota_first"})
+             Pools.update_routing_settings(scope, pool, %{
+               "routing_strategy" => "deterministic_rotation"
+             })
 
     assert %{items: [pool_routing_event]} =
              Audit.list_events(pool, filters: [action: "pool.routing_update"])
@@ -105,7 +107,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLiveTest do
     assert has_element?(
              view,
              "#audit-log-pool-filter button[data-pool-id='#{pool.id}']",
-             "Quota first"
+             "Deterministic rotation"
            )
 
     assert has_element?(

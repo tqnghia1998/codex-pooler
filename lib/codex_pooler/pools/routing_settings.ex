@@ -6,7 +6,7 @@ defmodule CodexPooler.Pools.RoutingSettings do
   @type t :: %__MODULE__{}
   @type attrs :: map()
 
-  @routing_strategies ~w(bridge_ring deterministic_rotation least_recent_success quota_first)
+  @routing_strategies ~w(bridge_ring deterministic_rotation least_recent_success)
 
   @primary_key {:pool_id, :binary_id, autogenerate: false}
   @foreign_key_type :binary_id
@@ -18,7 +18,7 @@ defmodule CodexPooler.Pools.RoutingSettings do
     field :sticky_http_sessions, :boolean
     field :prompt_cache_affinity_enabled, :boolean, default: true
     field :v1_compatibility_enabled, :boolean, default: true
-    field :request_compression_enabled, :boolean, default: false
+    field :request_compression_enabled, :boolean, default: true
     field :allow_image_generation, :boolean, default: true
     field :metadata, :map
     field :created_at, :utc_datetime_usec

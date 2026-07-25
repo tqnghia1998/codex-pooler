@@ -284,7 +284,9 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
         Pools.create_pool(scope, %{slug: "stats-live-other", name: "Stats Other"})
 
       assert {:ok, _settings} =
-               Pools.update_routing_settings(scope, pool, %{"routing_strategy" => "quota_first"})
+               Pools.update_routing_settings(scope, pool, %{
+                 "routing_strategy" => "deterministic_rotation"
+               })
 
       assert {:ok, _settings} =
                Pools.update_routing_settings(scope, other_pool, %{
@@ -324,7 +326,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
       assert has_element?(
                view,
                "#stats-pool-filter-control [data-role='pool-filter-trigger']",
-               "Quota first"
+               "Deterministic rotation"
              )
 
       assert has_element?(
@@ -347,7 +349,7 @@ defmodule CodexPoolerWeb.Admin.StatsLiveTest do
       assert has_element?(
                view,
                "#stats-pool-filter-control [data-role='pool-filter-menu'] button[data-pool-id='#{pool.id}']",
-               "Quota first"
+               "Deterministic rotation"
              )
 
       assert has_element?(
