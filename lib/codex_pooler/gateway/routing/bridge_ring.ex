@@ -32,7 +32,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
 
-  @default_strategy "bridge_ring"
   @default_ring_size 3
   @demotion_seconds 60
   # Provider-reported 429s ("upstream_rate_limited") mean the account is
@@ -731,10 +730,10 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing do
   defp default_settings(pool_id) do
     %RoutingSettings{
       pool_id: pool_id,
-      routing_strategy: @default_strategy,
+      routing_strategy: "least_recent_success",
       bridge_ring_size: @default_ring_size,
       sticky_websocket_sessions: true,
-      sticky_http_sessions: false,
+      sticky_http_sessions: true,
       prompt_cache_affinity_enabled: true,
       metadata: %{}
     }

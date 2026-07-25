@@ -165,13 +165,13 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
 
     assert has_element?(view, "#pool-row-#{pool.id}-compat-panel", "Request compression")
     assert has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle")
-    refute has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
+    assert has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
 
     html = view |> element("#pool-row-#{pool.id}-compat-compression-toggle") |> render_click()
 
-    assert html =~ "Request compression enabled on Compat Panel Pool"
-    assert PoolRouting.get_routing_settings(pool.id).request_compression_enabled
-    assert has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
+    assert html =~ "Request compression disabled on Compat Panel Pool"
+    refute PoolRouting.get_routing_settings(pool.id).request_compression_enabled
+    refute has_element?(view, "#pool-row-#{pool.id}-compat-compression-toggle[checked]")
     assert has_element?(view, "#pool-row-#{pool.id}-compat-panel", "Request compression")
 
     view |> element("#pool-row-#{pool.id}-compat-v1") |> render_click()
@@ -325,7 +325,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
              settled_cost_micros: 0,
              traffic_window: "24h",
              traffic_window_label: "24h",
-             routing_strategy: "bridge_ring"
+             routing_strategy: "least_recent_success"
            } = Enum.find(state.socket.assigns.pools, &(&1.pool.id == other_pool_id))
 
     assert has_element?(view, "#pool-row-#{pool.id}-upstream-account-count", "1")
@@ -455,7 +455,13 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert has_element?(view, "#pool-row-#{other_pool.id}-request-count", "0")
     assert has_element?(view, "#pool-row-#{other_pool.id}-tokens-per-sec", "0")
     assert has_element?(view, "#pool-row-#{other_pool.id}-settled-cost", "$0.00")
-    assert has_element?(view, "#pool-row-#{other_pool.id}-routing-strategy", "Bridge ring")
+
+    assert has_element?(
+             view,
+             "#pool-row-#{other_pool.id}-routing-strategy",
+             "Least recent success"
+           )
+
     assert has_element?(view, "#pool-row-#{other_pool.id}-status", "disabled")
     assert has_element?(view, "#pool-row-#{other_pool.id}-activity")
     refute has_element?(view, "#pool-row-#{other_pool.id}-quota-remaining")
@@ -943,7 +949,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert has_element?(view, "#pool_sticky_http_sessions")
     assert has_element?(view, "#pool_prompt_cache_affinity_enabled[checked]")
     assert has_element?(view, "#pool_v1_compatibility_enabled")
-    refute has_element?(view, "#pool_request_compression_enabled[checked]")
+    assert has_element?(view, "#pool_request_compression_enabled[checked]")
 
     assert has_element?(
              view,
@@ -1095,7 +1101,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert created_pool.name == "Generated Slug Pool"
     assert settings.prompt_cache_affinity_enabled == true
     assert settings.v1_compatibility_enabled == true
-    assert settings.request_compression_enabled == false
+    assert settings.request_compression_enabled == true
     assert has_element?(view, "#pool-row-#{created_pool.id}", "Generated Slug Pool")
     refute has_element?(view, "#pool-row-#{created_pool.id}", "generated-slug-pool")
     refute has_element?(view, "#pool-create-dialog")
@@ -2411,7 +2417,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     assert has_element?(view, "#pool_edit_sticky_http_sessions")
     assert has_element?(view, "#pool_edit_prompt_cache_affinity_enabled[checked]")
     assert has_element?(view, "#pool_edit_v1_compatibility_enabled")
-    refute has_element?(view, "#pool_edit_request_compression_enabled[checked]")
+    assert has_element?(view, "#pool_edit_request_compression_enabled[checked]")
 
     assert has_element?(
              view,
@@ -2733,7 +2739,7 @@ defmodule CodexPoolerWeb.Admin.PoolsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/admin/pools")
     _ = await_pool_traffic(view)
 
-    assert has_element?(view, "#pool-row-#{pool.id}-routing-strategy", "Bridge ring")
+    assert has_element?(view, "#pool-row-#{pool.id}-routing-strategy", "Least recent success")
     refute has_element?(view, "#pool-inspector")
 
     assert {:ok, _settings} =

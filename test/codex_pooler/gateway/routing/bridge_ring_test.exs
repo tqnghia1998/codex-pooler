@@ -694,7 +694,12 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
     test "prompt-cache locality is not persisted as durable affinity" do
       setup = routing_setup(3)
       prompt_cache_key = "synthetic-cache-key-stateless"
-      plan = plan_for_prompt_cache(setup, "bridge_ring", "stateless-request", prompt_cache_key)
+
+      plan =
+        plan_for_prompt_cache(setup, "bridge_ring", "stateless-request", prompt_cache_key,
+          sticky_http_sessions: false
+        )
+
       {assignment, identity} = hd(plan.candidates)
 
       assert plan.affinity.status == "disabled"
@@ -897,6 +902,12 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingTest do
     attrs =
       case Keyword.fetch(opts, :prompt_cache_affinity_enabled) do
         {:ok, value} -> Map.put(attrs, :prompt_cache_affinity_enabled, value)
+        :error -> attrs
+      end
+
+    attrs =
+      case Keyword.fetch(opts, :sticky_http_sessions) do
+        {:ok, value} -> Map.put(attrs, :sticky_http_sessions, value)
         :error -> attrs
       end
 

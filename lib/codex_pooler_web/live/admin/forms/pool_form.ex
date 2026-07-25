@@ -272,13 +272,13 @@ defmodule CodexPoolerWeb.Admin.PoolForm do
   defp create_form_attrs(attrs) do
     %{
       "name" => "",
-      "routing_strategy" => "bridge_ring",
+      "routing_strategy" => "least_recent_success",
       "bridge_ring_size" => 3,
       "sticky_websocket_sessions" => true,
-      "sticky_http_sessions" => false,
+      "sticky_http_sessions" => true,
       "prompt_cache_affinity_enabled" => true,
       "v1_compatibility_enabled" => true,
-      "request_compression_enabled" => false,
+      "request_compression_enabled" => true,
       "allow_image_generation" => true,
       "upstream_identity_ids" => [],
       "api_key_ids" => []

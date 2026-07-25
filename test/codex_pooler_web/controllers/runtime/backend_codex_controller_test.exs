@@ -2783,6 +2783,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
       )
 
     setup = gateway_setup(upstream)
+    disable_request_compression!(setup.pool)
     original_output = compression_log_fixture("disabled backend sentinel")
 
     conn =
@@ -12089,6 +12090,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     |> Pools.ensure_routing_settings()
     |> Ecto.Changeset.change(%{
       request_compression_enabled: true,
+      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.update!()
+  end
+
+  defp disable_request_compression!(pool) do
+    pool
+    |> Pools.ensure_routing_settings()
+    |> Ecto.Changeset.change(%{
+      request_compression_enabled: false,
       updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
     })
     |> Repo.update!()

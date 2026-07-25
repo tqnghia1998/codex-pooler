@@ -200,13 +200,13 @@ defmodule CodexPooler.Pools.Routing do
 
     %RoutingSettings{
       pool_id: pool_id,
-      routing_strategy: "bridge_ring",
+      routing_strategy: "least_recent_success",
       bridge_ring_size: 3,
       sticky_websocket_sessions: true,
-      sticky_http_sessions: false,
+      sticky_http_sessions: true,
       prompt_cache_affinity_enabled: true,
       v1_compatibility_enabled: true,
-      request_compression_enabled: false,
+      request_compression_enabled: true,
       allow_image_generation: true,
       metadata: %{},
       created_at: now,

@@ -155,13 +155,13 @@ defmodule CodexPooler.PoolsTest do
 
       assert %RoutingSettings{
                pool_id: pool_id,
-               routing_strategy: "bridge_ring",
+               routing_strategy: "least_recent_success",
                bridge_ring_size: 3,
                sticky_websocket_sessions: true,
-               sticky_http_sessions: false,
+               sticky_http_sessions: true,
                prompt_cache_affinity_enabled: true,
                v1_compatibility_enabled: true,
-               request_compression_enabled: false,
+               request_compression_enabled: true,
                allow_image_generation: true
              } = Pools.routing_settings_with_defaults(pool)
 
@@ -169,10 +169,10 @@ defmodule CodexPooler.PoolsTest do
       refute Repo.get(RoutingSettings, pool.id)
 
       assert %RoutingSettings{
-               routing_strategy: "bridge_ring",
+               routing_strategy: "least_recent_success",
                prompt_cache_affinity_enabled: true,
                v1_compatibility_enabled: true,
-               request_compression_enabled: false,
+               request_compression_enabled: true,
                allow_image_generation: true
              } =
                Pools.ensure_routing_settings(pool)
@@ -291,10 +291,10 @@ defmodule CodexPooler.PoolsTest do
 
       assert %{
                ^pool_id => %RoutingSettings{
-                 routing_strategy: "bridge_ring",
+                 routing_strategy: "least_recent_success",
                  prompt_cache_affinity_enabled: true,
                  v1_compatibility_enabled: true,
-                 request_compression_enabled: false,
+                 request_compression_enabled: true,
                  allow_image_generation: true
                },
                ^routed_pool_id => %RoutingSettings{
@@ -305,10 +305,10 @@ defmodule CodexPooler.PoolsTest do
                  allow_image_generation: false
                },
                ^missing_pool_id => %RoutingSettings{
-                 routing_strategy: "bridge_ring",
+                 routing_strategy: "least_recent_success",
                  prompt_cache_affinity_enabled: true,
                  v1_compatibility_enabled: true,
-                 request_compression_enabled: false,
+                 request_compression_enabled: true,
                  allow_image_generation: true
                }
              } = settings_by_pool_id

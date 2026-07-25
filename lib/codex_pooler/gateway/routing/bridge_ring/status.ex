@@ -9,7 +9,6 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing.Status do
   alias CodexPooler.Pools.Routing, as: PoolRouting
   alias CodexPooler.Repo
 
-  @default_strategy "bridge_ring"
   @default_ring_size 3
 
   @spec routing_status(Pool.t() | Ecto.UUID.t() | term()) :: BridgeRing.routing_status()
@@ -74,10 +73,10 @@ defmodule CodexPooler.Gateway.Routing.BridgeRing.Status do
   defp default_settings(pool_id) do
     %RoutingSettings{
       pool_id: pool_id,
-      routing_strategy: @default_strategy,
+      routing_strategy: "least_recent_success",
       bridge_ring_size: @default_ring_size,
       sticky_websocket_sessions: true,
-      sticky_http_sessions: false,
+      sticky_http_sessions: true,
       metadata: %{}
     }
   end
