@@ -15,5 +15,8 @@ defmodule CodexPooler.InstanceSettings.Logging do
 
   defp level("off"), do: :none
   defp level("all"), do: :info
-  defp level(_error), do: :error
+  # "error" (and any other/legacy value) keeps warnings audible: upstream's
+  # WebSocket/streaming diagnostics log at :warning, and :error would silently
+  # swallow them since Logger orders debug < info < warning < error.
+  defp level(_mode), do: :warning
 end

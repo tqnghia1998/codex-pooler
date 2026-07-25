@@ -242,7 +242,7 @@ defmodule CodexPoolerWeb.Admin.SystemPageComponents.Gateway do
         label: "Application logging",
         options: [
           {"Off", "off"},
-          {"Errors only", "error"},
+          {"Warnings and errors", "error"},
           {"All", "all"}
         ]
       },
