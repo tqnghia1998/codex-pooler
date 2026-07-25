@@ -8,7 +8,7 @@ defmodule CodexPooler.Gateway.Routing.QuotaRefresh.Plan do
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
 
-  @max_sync_quota_refresh_candidates 2
+  @max_sync_quota_refresh_candidates 1
 
   @spec filter_eligible_candidates(CandidateEligibility.FilterInput.t()) ::
           CandidateEligibility.quota_filter_result()
