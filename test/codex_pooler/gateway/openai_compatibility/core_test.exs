@@ -3025,6 +3025,51 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
   end
 
   @tag :responses_coercion
+  test "Responses accepts the tool_search deferred-tool-discovery builtin tool" do
+    payload = %{
+      "model" => "gpt-fixture-text",
+      "input" => "synthetic input",
+      "tools" => [
+        %{
+          "type" => "tool_search",
+          "description" => "Searches over deferred tool metadata.",
+          "execution" => "client",
+          "parameters" => %{
+            "type" => "object",
+            "properties" => %{"query" => %{"type" => "string"}},
+            "required" => ["query"],
+            "additionalProperties" => false
+          }
+        }
+      ]
+    }
+
+    assert {:ok, result} = Responses.coerce(payload)
+    assert result.payload["tools"] == payload["tools"]
+  end
+
+  @tag :responses_coercion
+  test "Responses rejects malformed tool_search declarations" do
+    base = %{
+      "type" => "tool_search",
+      "description" => "Searches over deferred tool metadata.",
+      "execution" => "client",
+      "parameters" => %{"type" => "object", "properties" => %{}}
+    }
+
+    for tool <- [
+          Map.delete(base, "execution"),
+          Map.put(base, "execution", ""),
+          Map.put(base, "parameters", "not a schema"),
+          Map.put(base, "unexpected", true)
+        ] do
+      payload = %{"model" => "gpt-fixture-text", "input" => "synthetic input", "tools" => [tool]}
+
+      assert {:error, %{code: "invalid_request"}} = Responses.coerce(payload)
+    end
+  end
+
+  @tag :responses_coercion
   test "Responses lowers non-strict function tool schemas before validation" do
     payload = %{
       "model" => "gpt-fixture-text",
@@ -3666,6 +3711,100 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       end)
     end
 
+    test "Responses accepts custom tools and custom tool choices" do
+      custom_tool = %{
+        "type" => "custom",
+        "name" => "apply_patch",
+        "description" => "Apply a unified diff",
+        "format" => %{"type" => "text"},
+        "defer_loading" => true,
+        "allowed_callers" => ["direct", "programmatic"]
+      }
+
+      grammar_tool = %{
+        "type" => "custom",
+        "name" => "match_path",
+        "format" => %{
+          "type" => "grammar",
+          "syntax" => "regex",
+          "definition" => "[a-z]+"
+        }
+      }
+
+      namespace_tool = %{
+        "type" => "namespace",
+        "name" => "workspace",
+        "description" => "Workspace operations",
+        "tools" => [grammar_tool]
+      }
+
+      payload = %{
+        "model" => "gpt-fixture-text",
+        "input" => "synthetic input",
+        "tools" => [custom_tool, namespace_tool],
+        "tool_choice" => %{"type" => "custom", "name" => "apply_patch"}
+      }
+
+      assert {:ok, result} = Responses.coerce(payload)
+      assert result.payload["tools"] == [custom_tool, namespace_tool]
+      assert result.payload["tool_choice"] == payload["tool_choice"]
+
+      assert {:ok, result} =
+               Responses.coerce(%{
+                 payload
+                 | "tool_choice" => %{"type" => "custom", "name" => "match_path"}
+               })
+
+      assert result.payload["tool_choice"] == %{"type" => "custom", "name" => "match_path"}
+    end
+
+    test "Responses rejects malformed custom tools and custom tool choices" do
+      for tool <- [
+            %{"type" => "custom"},
+            %{"type" => "custom", "name" => ""},
+            %{"type" => "custom", "name" => "apply_patch", "description" => 1},
+            %{
+              "type" => "custom",
+              "name" => "apply_patch",
+              "format" => %{"type" => "text", "x" => true}
+            },
+            %{
+              "type" => "custom",
+              "name" => "apply_patch",
+              "format" => %{"type" => "grammar", "syntax" => "regex"}
+            },
+            %{
+              "type" => "custom",
+              "name" => "apply_patch",
+              "format" => %{"type" => "grammar", "syntax" => "json", "definition" => "x"}
+            },
+            %{"type" => "custom", "name" => "apply_patch", "defer_loading" => "true"}
+          ] do
+        assert {:error, %{status: 400, code: "invalid_request", param: "tools"}} =
+                 Responses.coerce(%{
+                   "model" => "gpt-fixture-text",
+                   "input" => "synthetic input",
+                   "tools" => [tool]
+                 })
+      end
+
+      payload = %{
+        "model" => "gpt-fixture-text",
+        "input" => "synthetic input",
+        "tools" => [%{"type" => "custom", "name" => "apply_patch"}]
+      }
+
+      for choice <- [
+            %{"type" => "custom"},
+            %{"type" => "custom", "name" => ""},
+            %{"type" => "custom", "name" => "missing"},
+            %{"type" => "custom", "name" => "apply_patch", "unexpected" => true}
+          ] do
+        assert {:error, %{status: 400, code: "invalid_request", param: "tool_choice"}} =
+                 Responses.coerce(Map.put(payload, "tool_choice", choice))
+      end
+    end
+
     test "Responses accepts only the exact programmatic hosted tool and tool choice" do
       hosted_tool = %{"type" => "programmatic_tool_calling"}
 
@@ -4013,6 +4152,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
               "type" => "web_search",
               "external_web_access" => true
             },
+            %{
+              "type" => "web_search",
+              "external_web_access" => true,
+              "search_content_types" => ["text", "image"]
+            },
             %{"type" => "image_generation"},
             %{
               "type" => "image_generation",
@@ -4056,6 +4200,12 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
         },
         %{"type" => "web_search", "index_gated_web_access" => true},
         %{"type" => "web_search", "external_web_access" => true, "filters" => %{}},
+        %{"type" => "web_search", "external_web_access" => true, "search_content_types" => []},
+        %{
+          "type" => "web_search",
+          "external_web_access" => true,
+          "search_content_types" => ["text", 1]
+        },
         %{"type" => "image_generation", "quality" => "high"},
         %{"type" => "file_search", "vector_store_ids" => ["vs_fixture"]},
         %{"type" => "code_interpreter", "container" => %{"type" => "auto"}},

@@ -96,7 +96,12 @@ assigned Pools.
   backend websocket flows working through assigned accounts
 - 🔌 **OpenAI-compatible SDK surface:** let `/v1`-only apps and agent tools use
   Codex capacity through the same Pool boundary, with supported requests
-  translated and routed to help contain API spend
+  translated and routed to help contain API spend. The maintained Responses
+  tool surface is intentionally narrow: flat function tools, namespace function
+  tools, executable `custom` tools, Codex `tool_search`, and `web_search`
+  entries with the observed `search_content_types` option are accepted; other
+  hosted/deferred tool families still reject locally with deterministic
+  OpenAI-shaped errors.
 - 🔁 **Session-aware websockets:** keep resumable Codex sessions and websocket
   reconnects attached to the right upstream account without translating backend
   websocket traffic through an HTTP compatibility layer
