@@ -26,10 +26,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
           cap_started_at: nil
         })
 
-      assert Decimal.equal?(row.percent, Decimal.new("0.0026"))
-      assert row.percent_value == 0.0026
-      assert row.percent_label == "0%"
-      assert row.count_label == "$0.00 / $5.00"
+      assert Decimal.equal?(row.percent, Decimal.new("99.9974"))
+      assert row.percent_value == 99.9974
+      assert row.percent_label == "100%"
+      assert row.count_label == "$5.00 left of $5.00"
     end
   end
 
@@ -442,9 +442,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), observed_at)
       |> Enum.find(&(&1.key == :primary_5h))
 
-    assert Decimal.equal?(primary.percent, Decimal.new("6"))
-    assert primary.percent_value == 6
-    assert primary.percent_label == "6%"
+    assert Decimal.equal?(primary.percent, Decimal.new("94"))
+    assert primary.percent_value == 94
+    assert primary.percent_label == "94%"
   end
 
   @tag :quota_account_projection
@@ -465,9 +465,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil), observed_at)
       |> Enum.find(&(&1.key == :primary_5h))
 
-    assert Decimal.equal?(primary.percent, Decimal.new("0"))
-    assert primary.percent_value == 0
-    assert primary.percent_label == "0%"
+    assert Decimal.equal?(primary.percent, Decimal.new("100"))
+    assert primary.percent_value == 100
+    assert primary.percent_label == "100%"
     assert String.starts_with?(primary.reset_label, "in ")
   end
 
@@ -493,9 +493,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         )
         |> Enum.find(&(&1.key == :primary_5h))
 
-      assert Decimal.equal?(primary.percent, Decimal.new("0")), source
-      assert primary.percent_value == 0, source
-      assert primary.percent_label == "0%", source
+      assert Decimal.equal?(primary.percent, Decimal.new("100")), source
+      assert primary.percent_value == 100, source
+      assert primary.percent_label == "100%", source
       assert String.starts_with?(primary.reset_label, "in "), source
     end
   end
@@ -538,16 +538,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
 
     assert primary = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
     assert primary.label == "GPT-5.3-Codex-Spark 5h"
-    assert Decimal.equal?(primary.percent, Decimal.new("0"))
-    assert primary.percent_value == 0
-    assert primary.percent_label == "0%"
+    assert Decimal.equal?(primary.percent, Decimal.new("100"))
+    assert primary.percent_value == 100
+    assert primary.percent_label == "100%"
     assert String.starts_with?(primary.reset_label, "in ")
 
     assert secondary = Enum.find(rows, &(&1.key == "model-codex_spark-secondary-10080"))
     assert secondary.label == "GPT-5.3-Codex-Spark Weekly"
-    assert Decimal.equal?(secondary.percent, Decimal.new("0"))
-    assert secondary.percent_value == 0
-    assert secondary.percent_label == "0%"
+    assert Decimal.equal?(secondary.percent, Decimal.new("100"))
+    assert secondary.percent_value == 100
+    assert secondary.percent_label == "100%"
     assert secondary.reset_semantics == :unknown
     assert secondary.reset_at == nil
     assert secondary.reset_label == nil
@@ -567,9 +567,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
         )
 
       assert primary = Enum.find(rows, &(&1.key == "model-codex_spark-primary-300"))
-      assert Decimal.equal?(primary.percent, Decimal.new("0")), source
-      assert primary.percent_value == 0, source
-      assert primary.percent_label == "0%", source
+      assert Decimal.equal?(primary.percent, Decimal.new("100")), source
+      assert primary.percent_value == 100, source
+      assert primary.percent_label == "100%", source
       assert String.starts_with?(primary.reset_label, "in "), source
     end
   end
