@@ -5,7 +5,7 @@ This repository is a customized fork of `icoretech/codex-pooler`.
 ## Upstream baseline
 
 - The canonical upstream remote is `upstream`, not `origin`.
-- This document was last reviewed after rebasing onto `upstream/main` at `6c1ea911` (`codex-pooler 0.5.1`).
+- This document was last reviewed against `upstream/main` at `ce58b8cf` (`codex-pooler 0.5.8`).
 - Always inspect the complete fork delta with `git diff upstream/main`; it includes committed branch changes and current working-tree changes.
 - Preserve the behavior below when rebasing. Resolve conflicts intentionally rather than accepting either side wholesale.
 
@@ -40,6 +40,31 @@ Do not invert this without updating calculations, labels, filters, sorting, metr
 Account cards no longer render “last used” text. Last-used data is still needed for the default recent sort. Quota progress bars represent used percentage. Accounts without a spending cap receive a neutral gray `Spending Cap` row labeled `Not set`.
 
 Per-model/family additional quota windows remain in the account projection for fleet metrics and filtering, but are intentionally hidden from account-card UI. Cards render only the fixed atom-keyed account meters (`5h`, `30d`, `Weekly`, `Monthly Usage`, and `Spending Cap`). Preserve this card-level filter when reconciling upstream quota-projection changes; do not reintroduce additional-limit progress bars.
+
+## OAuth credential freshness and auth.json viewing
+
+This fork keeps Codex OAuth credentials current beyond upstream behavior.
+
+Initial browser/device OAuth linking stores encrypted `access_token`, `refresh_token`, and `id_token` secrets. Successful refreshes always replace the access token and also replace refresh/id tokens when the provider returns rotated values. `id_token` requires the fork migration `priv/repo/migrations/20260726000001_add_id_token_secret_kind_to_encrypted_secrets.exs`.
+
+`metadata["access_token_expires_at"]` is derived from the provider's positive `expires_in` first, then from the access-token JWT `exp` claim. A successful refresh with neither source clears any stale expiry instead of preserving a false deadline. Admin labels read this stored metadata; they do not decode the JWT on every render. Reauth-required accounts intentionally show `Reauth required` instead of a future access-token countdown.
+
+`TokenRefreshRecovery` adds active identities to the normal scheduled refresh fanout when all of these hold:
+
+- `access_token_expires_at` is within 12 hours or already past
+- an active refresh-token secret exists
+- the identity has an active assignment in an active Pool
+- no incomplete `TokenRefreshWorker` job already exists
+
+Keep the 12-hour selection bounded in the database; do not load every active identity and filter it in Elixir. This refreshes access credentials proactively but cannot prevent provider-side refresh-token/session revocation.
+
+Operators can open a read-only Current auth.json dialog from the upstream list or cockpit. `Upstreams.export_auth_json_for_scope/2` authorizes through `AccountLifecycle`, decrypts the currently active token secrets, and audits `upstream_account.auth_json_view` without recording secret values. It renders the credentials currently stored; missing access, refresh, or id tokens appear as JSON `null` rather than blocking the dialog. Therefore partial output is inspectable but is not guaranteed to be importable as a complete Codex auth.json.
+
+## Compass upstream support
+
+This fork also supports Compass project-key upstreams, which upstream does not. The admin upstream page can import a Compass project into encrypted storage. Identity metadata uses provider `compass`, its project ID, and a Compass base URL; the project key is the active `access_token`. Project-detail quota reads additionally require a separate gateway token stored as secret kind `other`; the current import dialog does not collect it, so those reads remain unavailable until that secret is provisioned separately.
+
+Compass requests bypass ChatGPT-specific translation and headers for `/v1/chat/completions` and `/v1/responses`, routing directly to `/chat/completions` and `/responses`. Model discovery uses `/models`. Quota reconciliation calls `/open_project/detail/:project_id`, converts the project balance into an authoritative account quota window, and treats recurring budgets as calendar-month windows. Keep these transport, discovery, import, and quota paths aligned when changing provider detection or secret conventions.
 
 ## Immediate account connection test
 
