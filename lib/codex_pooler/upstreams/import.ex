@@ -106,7 +106,7 @@ defmodule CodexPooler.Upstreams.Import do
         |> import_value(:account_label)
         |> Kernel.||(attrs |> import_value(:project_name))
         |> present_string()
-        |> Kernel.||(project_id && "Compass #{project_id}"),
+        |> Kernel.||(project_id),
       pool_id: attrs |> import_value(:pool_id) |> present_string(),
       token:
         attrs

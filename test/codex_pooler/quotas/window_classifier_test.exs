@@ -39,6 +39,20 @@ defmodule CodexPooler.Quotas.WindowClassifierTest do
       assert WindowClassifier.monthly_primary?(window)
     end
 
+    test "describes calendar-month account primary 44640-minute evidence as monthly primary" do
+      window =
+        account_window(%{
+          window_kind: "primary",
+          window_minutes: 44_640,
+          freshness_state: "fresh",
+          reset_at: "2026-08-01T00:00:00Z",
+          used_percent: Decimal.new("0")
+        })
+
+      assert WindowClassifier.classify(window) == :monthly_primary
+      assert WindowClassifier.monthly_primary?(window)
+    end
+
     test "describes unknown long account primary duration as unknown account primary" do
       window = account_window(%{window_kind: "primary", window_minutes: 20_160})
 

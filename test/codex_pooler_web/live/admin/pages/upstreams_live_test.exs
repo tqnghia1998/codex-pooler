@@ -3874,6 +3874,51 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            )
   end
 
+  test "renders Compass monthly quota in dollars", %{conn: conn, scope: scope} do
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "compass-monthly-usd", name: "Compass Monthly USD"})
+
+    %{identity: identity} =
+      upstream_assignment_fixture(pool, %{
+        account_label: "project-usd",
+        identity_metadata: %{"provider" => "compass"}
+      })
+
+    now = DateTime.utc_now()
+
+    assert {:ok, [_window]} =
+             QuotaWindows.upsert_quota_windows(identity, [
+               %{
+                 quota_key: "account",
+                 quota_scope: "account",
+                 quota_family: "account",
+                 window_kind: "primary",
+                 window_minutes: 44_640,
+                 active_limit: 100,
+                 used_percent: Decimal.new("25.5"),
+                 reset_at: DateTime.add(now, 6, :day),
+                 source: "compass_project_api",
+                 source_precision: "authoritative",
+                 freshness_state: "fresh",
+                 observed_at: now,
+                 metadata: %{"balance" => "74.5", "applied_balance" => "100.0"}
+               }
+             ])
+
+    [account] = UpstreamAccountsReadModel.list_visible_accounts(scope, [pool])
+    monthly = Enum.find(account.quota_limits, &(&1.key == :primary_30d))
+
+    assert monthly.count_label == "$74.50 left of $100.00"
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    assert has_element?(
+             view,
+             "#upstream-account-#{identity.id}-limit-primary_30d-count",
+             "$74.50 left of $100.00"
+           )
+  end
+
   test "sorts upstream accounts by most recently used", %{scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "last-used-order", name: "Last Used Order"})
     %{pool: ^pool} = auth = active_api_key_fixture(pool, %{scope: scope})
@@ -6306,6 +6351,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         metadata: %{"access_token_expires_at" => "not-a-timestamp"}
       })
 
+    %{identity: compass_identity} =
+      active_upstream_assignment_fixture(pool, %{
+        account_label: "Compass Auth Expiration",
+        metadata: %{"provider" => "compass"}
+      })
+
     %{identity: reauth_identity} =
       upstream_assignment_fixture(pool, %{
         account_label: "Reauth Required Expiration",
@@ -6340,6 +6391,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       refute has_element?(view, "#{selector}[title]")
       refute has_element?(view, selector, "No expiration")
     end
+
+    compass_selector = "#upstream-account-#{compass_identity.id}-auth-expiration"
+
+    assert has_element?(view, compass_selector, "No expiry")
+    assert has_element?(view, "#{compass_selector}[title]")
 
     reauth_selector = "#upstream-account-#{reauth_identity.id}-auth-expiration"
 
@@ -6746,7 +6802,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert identity.chatgpt_account_id == "compass:#{project_id}"
     assert identity.account_email == nil
-    assert identity.account_label == "Compass #{project_id}"
+    assert identity.account_label == project_id
     assert identity.metadata["provider"] == "compass"
     assert identity.metadata["project_id"] == project_id
     assert assignment.pool_id == pool.id
@@ -6754,7 +6810,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert {:ok, ^project_key} = Secrets.decrypt_active_secret(identity, "access_token")
 
     refute has_element?(view, "#compass-import-dialog")
-    assert has_element?(view, "#upstream-account-#{identity.id}", "Compass #{project_id}")
+    assert has_element?(view, "#upstream-account-#{identity.id}", project_id)
 
     html = render(view)
     refute html =~ project_key

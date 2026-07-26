@@ -586,6 +586,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     end
   end
 
+  defp quota_count_label(%Quota.AccountQuotaWindow{
+         source: "compass_project_api",
+         metadata: %{"balance" => balance, "applied_balance" => cap}
+       })
+       when is_binary(balance) and is_binary(cap) do
+    with {balance, ""} <- Decimal.parse(balance),
+         {cap, ""} <- Decimal.parse(cap) do
+      "#{format_dollar_amount(decimal_non_negative(balance))} left of #{format_dollar_amount(cap)}"
+    else
+      _invalid -> nil
+    end
+  end
+
   defp quota_count_label(%Quota.AccountQuotaWindow{credits: credits, active_limit: active_limit})
        when is_integer(credits) and is_integer(active_limit) and active_limit > 0 do
     "#{Formatting.format_integer(credits)} / #{Formatting.format_integer(active_limit)} credits"

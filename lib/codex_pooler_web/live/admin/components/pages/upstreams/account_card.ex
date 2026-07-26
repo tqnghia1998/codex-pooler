@@ -451,7 +451,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   end
 
   defp auth_expiration(
-         %{identity_observability: %{credential_expiry: credential_expiry}},
+         %{identity_observability: %{credential_expiry: credential_expiry}} = account,
          preferences
        )
        when is_map(credential_expiry) do
@@ -469,11 +469,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         }
 
       _unavailable ->
-        %{label: "Expiration unavailable", title: nil}
+        auth_expiration_unavailable(account)
     end
   end
 
-  defp auth_expiration(_account, _preferences), do: %{label: "Expiration unavailable", title: nil}
+  defp auth_expiration(account, _preferences), do: auth_expiration_unavailable(account)
+
+  defp auth_expiration_unavailable(%{identity: %{metadata: %{"provider" => "compass"}}}) do
+    %{label: "No expiry", title: "Compass project keys do not report an expiration"}
+  end
+
+  defp auth_expiration_unavailable(_account), do: %{label: "Expiration unavailable", title: nil}
 
   defp auth_expiring_soon?(%{
          identity_observability: %{

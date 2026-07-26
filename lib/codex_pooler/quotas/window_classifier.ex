@@ -14,7 +14,7 @@ defmodule CodexPooler.Quotas.WindowClassifier do
   @secondary_kind "secondary"
   @primary_5h_minutes 300
   @weekly_minutes 10_080
-  @monthly_minutes 43_200
+  @calendar_month_minutes [40_320, 41_760, 43_200, 44_640]
 
   @type descriptor ::
           :primary_5h
@@ -34,7 +34,7 @@ defmodule CodexPooler.Quotas.WindowClassifier do
       account_secondary_window?(window, @weekly_minutes) ->
         :weekly_secondary
 
-      account_primary_window?(window, @monthly_minutes) ->
+      account_primary_monthly_window?(window) ->
         :monthly_primary
 
       account_primary_window?(window) ->
@@ -70,6 +70,12 @@ defmodule CodexPooler.Quotas.WindowClassifier do
     account_window?(window) and kind(window) == @secondary_kind and
       window_minutes(window) == minutes
   end
+
+  defp account_primary_monthly_window?(window) do
+    account_primary_window?(window) and calendar_month_minutes?(window_minutes(window))
+  end
+
+  defp calendar_month_minutes?(minutes), do: minutes in @calendar_month_minutes
 
   defp account_window?(window) do
     token(window, :quota_key) == @account_quota_key and
