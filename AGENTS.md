@@ -62,7 +62,7 @@ Operators can open a read-only Current auth.json dialog from the upstream list o
 
 ## Compass upstream support
 
-This fork also supports Compass project-key upstreams, which upstream does not. The admin upstream page can import a Compass project into encrypted storage. Identity metadata uses provider `compass`, its project ID, and a Compass base URL; the project key is the active `access_token`. Project-detail quota reads additionally require a separate gateway token stored as secret kind `other`; the current import dialog does not collect it, so those reads remain unavailable until that secret is provisioned separately.
+This fork also supports Compass project-key upstreams, which upstream does not. The admin upstream page can import a Compass project into encrypted storage. Identity metadata uses provider `compass`, its project ID, and a Compass base URL; the project key is the active `access_token`. Project-detail quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`; configure it once for the server rather than attaching it to individual Compass accounts.
 
 Compass requests bypass ChatGPT-specific translation and headers for `/v1/chat/completions` and `/v1/responses`, routing directly to `/chat/completions` and `/responses`. Model discovery uses `/models`. Quota reconciliation calls `/open_project/detail/:project_id`, converts the project balance into an authoritative account quota window, and treats recurring budgets as calendar-month windows. Keep these transport, discovery, import, and quota paths aligned when changing provider detection or secret conventions.
 

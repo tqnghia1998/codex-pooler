@@ -15,7 +15,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   alias CodexPooler.Upstreams.Secrets
 
   @account_quota_key "account"
-  @compass_gateway_secret_kind "other"
+  @compass_gateway_token_unavailable :compass_gateway_token_unavailable
   @usage_auth_refresh_skew_seconds 5 * 60
   @chatgpt_usage_paths [
     "/backend-api/wham/usage",
@@ -160,8 +160,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
   defp compass_reconciliation_source(identity, assignment, opts) do
     with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
-         {:ok, gateway_token} <-
-           Secrets.decrypt_active_secret(fenced_identity, @compass_gateway_secret_kind) do
+         gateway_token when is_binary(gateway_token) <- Compass.gateway_token() do
       case fetch_compass(fenced_identity, assignment, gateway_token, now(), opts) do
         {:ok, %Result{} = result} ->
           {:usage, fenced_identity, %{result | credential_fence: fence}}
@@ -170,19 +169,22 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
           {:usage_unavailable, reason, fence}
       end
     else
-      {:error, _reason} -> :auth_unavailable
+      _unavailable -> :auth_unavailable
     end
   end
 
   defp fetch_compass_from_identity(identity, assignment, observed_at, opts) do
-    with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
-         {:ok, gateway_token} <-
-           Secrets.decrypt_active_secret(fenced_identity, @compass_gateway_secret_kind),
-         {:ok, %Result{} = result} <-
-           fetch_compass(fenced_identity, assignment, gateway_token, observed_at, opts) do
-      {:ok, %{result | credential_fence: fence}}
-    else
-      {:error, reason} -> {:error, reason}
+    with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity) do
+      case Compass.gateway_token() do
+        gateway_token when is_binary(gateway_token) ->
+          case fetch_compass(fenced_identity, assignment, gateway_token, observed_at, opts) do
+            {:ok, %Result{} = result} -> {:ok, %{result | credential_fence: fence}}
+            {:error, reason} -> {:error, reason}
+          end
+
+        _unavailable ->
+          {:error, @compass_gateway_token_unavailable}
+      end
     end
   end
 

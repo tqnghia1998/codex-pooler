@@ -7,13 +7,25 @@ defmodule CodexPooler.Upstreams.Compass do
 
   @provider "compass"
   @quota_source "compass_project_api"
+  @gateway_token_env "CODEX_POOLER_COMPASS_GATEWAY_TOKEN"
+
+  @spec gateway_token() :: String.t() | nil
+  def gateway_token do
+    @gateway_token_env
+    |> System.get_env()
+    |> present_string()
+  end
 
   @spec enabled?(UpstreamIdentity.t(), PoolUpstreamAssignment.t()) :: boolean()
   def enabled?(identity, assignment), do: provider(identity, assignment) == @provider
 
   @spec direct_endpoint(String.t() | nil) :: String.t() | nil
   def direct_endpoint("/v1/chat/completions"), do: "/chat/completions"
-  def direct_endpoint("/v1/responses"), do: "/responses"
+
+  def direct_endpoint(endpoint)
+      when endpoint in ["/v1/responses", "/backend-api/codex/responses"],
+      do: "/responses"
+
   def direct_endpoint(_source_endpoint), do: nil
 
   @spec project_detail_url(UpstreamIdentity.t(), PoolUpstreamAssignment.t()) ::

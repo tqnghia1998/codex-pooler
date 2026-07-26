@@ -5,8 +5,14 @@ cd "$(dirname "$0")"
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
 
+if [ -f .env.dev ]; then
+  set -a
+  . ./.env.dev
+  set +a
+fi
+
 APP_PORT="${PORT:-4000}"
-DB_PORT="${POSTGRES_PORT:-}"
+DB_PORT="${CODEX_POOLER_DEV_POSTGRES_PORT:-${POSTGRES_PORT:-}}"
 PIDS="$(lsof -ti tcp:"$APP_PORT" 2>/dev/null || true)"
 
 if [ -n "$PIDS" ]; then

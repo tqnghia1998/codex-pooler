@@ -5,9 +5,13 @@ defmodule CodexPooler.Upstreams.CompassTest do
 
   alias CodexPooler.Catalog.Sync.Discovery
   alias CodexPooler.FakeUpstream
-  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Compass
   alias CodexPooler.Upstreams.Reconciliation.UsageProbe
+
+  test "routes public and backend Responses endpoints directly to Compass" do
+    assert Compass.direct_endpoint("/v1/responses") == "/responses"
+    assert Compass.direct_endpoint("/backend-api/codex/responses") == "/responses"
+  end
 
   test "project_detail_url path-encodes the project id" do
     identity = %CodexPooler.Upstreams.Schemas.UpstreamIdentity{
@@ -84,7 +88,7 @@ defmodule CodexPooler.Upstreams.CompassTest do
     assert model["id"] == "gpt-4o"
   end
 
-  test "fetch_from_identity reads Compass project quota with separate gateway token" do
+  test "fetch_from_identity reads Compass project quota with the shared gateway token" do
     {:ok, fake} =
       FakeUpstream.start_link(
         {:path_json,
@@ -108,6 +112,7 @@ defmodule CodexPooler.Upstreams.CompassTest do
       )
 
     on_exit(fn -> FakeUpstream.stop(fake) end)
+    put_compass_gateway_token("gateway-token")
 
     %{identity: identity, assignment: assignment} =
       active_upstream_assignment_fixture(pool_fixture(), %{
@@ -120,12 +125,6 @@ defmodule CodexPooler.Upstreams.CompassTest do
         }
       })
 
-    assert {:ok, _secret} =
-             Upstreams.store_encrypted_secret(identity, %{
-               secret_kind: "other",
-               plaintext: "gateway-token"
-             })
-
     observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     assert {:ok, %UsageProbe.Result{windows: [window]}} =
@@ -133,5 +132,51 @@ defmodule CodexPooler.Upstreams.CompassTest do
 
     assert window.source == "compass_project_api"
     assert Decimal.eq?(window.used_percent, Decimal.new("25.5"))
+  end
+
+  test "fetch_from_identity preserves Compass project quota fetch errors" do
+    {:ok, fake} =
+      FakeUpstream.start_link(
+        {:path_json,
+         %{
+           "/compass-api/v1/open_project/detail/project-id" =>
+             {503, %{"retcode" => -1, "message" => "unavailable"}}
+         }}
+      )
+
+    on_exit(fn -> FakeUpstream.stop(fake) end)
+    put_compass_gateway_token("gateway-token")
+
+    %{identity: identity, assignment: assignment} =
+      active_upstream_assignment_fixture(pool_fixture(), %{
+        chatgpt_account_id: nil,
+        account_email: "compass+quota-error@compass.local",
+        metadata: %{
+          "provider" => "compass",
+          "base_url" => FakeUpstream.url(fake) <> "/compass-api/v1",
+          "project_id" => "project-id"
+        }
+      })
+
+    assert {:error, {:upstream_status, 503}} =
+             UsageProbe.fetch_from_identity(
+               identity,
+               assignment,
+               DateTime.utc_now() |> DateTime.truncate(:microsecond),
+               []
+             )
+  end
+
+  defp put_compass_gateway_token(value) do
+    previous = System.get_env("CODEX_POOLER_COMPASS_GATEWAY_TOKEN")
+    System.put_env("CODEX_POOLER_COMPASS_GATEWAY_TOKEN", value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        System.delete_env("CODEX_POOLER_COMPASS_GATEWAY_TOKEN")
+      else
+        System.put_env("CODEX_POOLER_COMPASS_GATEWAY_TOKEN", previous)
+      end
+    end)
   end
 end

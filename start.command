@@ -5,6 +5,12 @@ cd "$(dirname "$0")"
 export PATH="$HOME/.local/bin:$PATH"
 eval "$(mise activate bash)"
 
+if [ -f .env.dev ]; then
+  set -a
+  . ./.env.dev
+  set +a
+fi
+
 APP_PORT="${PORT:-4000}"
 DB_PORT="${POSTGRES_PORT:-5433}"
 DB_WAIT_TIMEOUT="${POSTGRES_WAIT_TIMEOUT:-60}"
