@@ -859,7 +859,67 @@ defmodule CodexPooler.UpstreamsTest do
       assert event.details["credential_status"] == "present"
       refute inspect(event) =~ access_token
       refute inspect(event) =~ refresh_token
+      refute inspect(event) =~ id_token
       refute inspect(event) =~ auth_json
+    end
+
+    test "exports full auth.json from currently stored encrypted tokens" do
+      scope = fixture_owner_scope()
+
+      {:ok, pool} =
+        Pools.create_pool(scope, %{slug: "auth-json-export", name: "auth.json Export"})
+
+      access_token = jwt_token(%{"exp" => future_unix()})
+      refresh_token = runtime_secret("auth-json-export-refresh")
+      id_token = id_token_fixture()
+
+      auth_json =
+        auth_json_fixture(
+          access_token: access_token,
+          refresh_token: refresh_token,
+          id_token: id_token
+        )
+
+      assert {:ok, %{identity: identity}} =
+               Upstreams.import_codex_auth_json(scope, pool, auth_json)
+
+      assert {:ok, %{content: content}} = Upstreams.export_auth_json_for_scope(scope, identity.id)
+
+      assert {:ok, exported} = Jason.decode(content)
+      assert exported["tokens"]["access_token"] == access_token
+      assert exported["tokens"]["refresh_token"] == refresh_token
+      assert exported["tokens"]["id_token"] == id_token
+      assert exported["tokens"]["account_id"] == identity.chatgpt_account_id
+      assert exported["auth_mode"] == "chatgpt"
+      assert exported["last_refresh"]
+
+      assert [event] = audit_events("upstream_account.auth_json_view", identity.id)
+      refute inspect(event) =~ access_token
+      refute inspect(event) =~ refresh_token
+      refute inspect(event) =~ id_token
+    end
+
+    test "exports partial auth.json when some stored tokens are missing" do
+      scope = fixture_owner_scope()
+
+      {:ok, pool} =
+        Pools.create_pool(scope, %{slug: "auth-json-partial", name: "auth.json Partial"})
+
+      access_token = jwt_token(%{"exp" => future_unix()})
+
+      %{identity: identity} =
+        active_upstream_assignment_fixture(pool, %{
+          account_label: "Partial Auth JSON",
+          access_token: access_token
+        })
+
+      assert {:ok, %{content: content}} = Upstreams.export_auth_json_for_scope(scope, identity.id)
+
+      assert {:ok, exported} = Jason.decode(content)
+      assert exported["tokens"]["access_token"] == access_token
+      assert exported["tokens"]["refresh_token"] == nil
+      assert exported["tokens"]["id_token"] == nil
+      assert exported["tokens"]["account_id"] == identity.chatgpt_account_id
     end
 
     @tag :subject_plumbing

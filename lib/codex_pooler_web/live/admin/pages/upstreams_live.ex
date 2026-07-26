@@ -10,15 +10,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel
   alias CodexPoolerWeb.Admin.UpstreamAuthJsonImport
+  alias CodexPoolerWeb.Admin.UpstreamCompassImport
   alias CodexPoolerWeb.Admin.UpstreamFilterForm
   alias CodexPoolerWeb.Admin.UpstreamPageComponents
 
   alias CodexPoolerWeb.Admin.UpstreamsLive.{
     AccountLifecycleWorkflow,
     AuthJsonWorkflow,
+    CompassImportWorkflow,
     OAuthWorkflow,
     SavedResetWorkflow,
-    SpendCapWorkflow
+    SpendCapWorkflow,
+    WorkflowError
   }
 
   alias CodexPoolerWeb.DateTimeDisplay
@@ -53,6 +56,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         auth_json_form: UpstreamAuthJsonImport.empty_form(),
         auth_json_upload_limit_label: UpstreamAuthJsonImport.upload_limit_label(),
         importing_auth_json: false,
+        current_auth_json: nil,
+        compass_form: UpstreamCompassImport.empty_form(),
+        importing_compass: false,
         oauth_linking: false,
         oauth_link_mode: :link,
         oauth_link_target_account: nil,
@@ -161,6 +167,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     {:noreply, AuthJsonWorkflow.import(socket, auth_json_params, pool, &reload_upstreams/1)}
   end
 
+  def handle_event("import_compass", %{"compass_import" => compass_params}, socket) do
+    pool = selected_pool(socket.assigns.pools, compass_params["pool_id"])
+
+    {:noreply, CompassImportWorkflow.import(socket, compass_params, pool, &reload_upstreams/1)}
+  end
+
   def handle_event("open_import_auth_json", params, socket) do
     {:noreply,
      socket
@@ -173,6 +185,40 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   def handle_event("cancel_import_auth_json", _params, socket) do
     {:noreply, AuthJsonWorkflow.close(socket)}
+  end
+
+  def handle_event("open_view_auth_json", %{"id" => identity_id}, socket) do
+    socket = close_account_workflow_dialogs(socket)
+
+    case Upstreams.export_auth_json_for_scope(socket.assigns.current_scope, identity_id) do
+      {:ok, %{identity: identity, content: content}} ->
+        {:noreply,
+         assign(socket, :current_auth_json, %{
+           identity_label: identity.account_label,
+           content: content
+         })}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, WorkflowError.message(reason))}
+    end
+  end
+
+  def handle_event("close_view_auth_json", _params, socket) do
+    {:noreply, assign(socket, :current_auth_json, nil)}
+  end
+
+  def handle_event("open_import_compass", params, socket) do
+    {:noreply,
+     socket
+     |> close_account_workflow_dialogs()
+     |> assign(
+       importing_compass: true,
+       compass_form: CompassImportWorkflow.form_for_open(socket.assigns.pools, params)
+     )}
+  end
+
+  def handle_event("cancel_import_compass", _params, socket) do
+    {:noreply, CompassImportWorkflow.close(socket)}
   end
 
   def handle_event("open_oauth_link", params, socket) do
@@ -205,6 +251,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
 
   def handle_event("validate_auth_json_import", %{"auth_json" => auth_json_params}, socket) do
     {:noreply, AuthJsonWorkflow.validate(socket, auth_json_params)}
+  end
+
+  def handle_event("validate_compass_import", %{"compass_import" => compass_params}, socket) do
+    {:noreply, CompassImportWorkflow.validate(socket, compass_params)}
   end
 
   def handle_event("cancel_auth_json_upload", %{"ref" => ref}, socket) do
@@ -509,6 +559,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         auth_json_form={@auth_json_form}
         auth_json_upload_limit_label={@auth_json_upload_limit_label}
         importing_auth_json={@importing_auth_json}
+        current_auth_json={@current_auth_json}
+        compass_form={@compass_form}
+        importing_compass={@importing_compass}
         oauth_linking={@oauth_linking}
         oauth_link_mode={@oauth_link_mode}
         oauth_link_target_account={@oauth_link_target_account}
@@ -669,6 +722,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   defp close_account_workflow_dialogs(socket) do
     socket
     |> AuthJsonWorkflow.close()
+    |> assign(:current_auth_json, nil)
+    |> CompassImportWorkflow.close()
     |> close_rename_account_dialog()
     |> AccountLifecycleWorkflow.close_delete()
     |> OAuthWorkflow.close()

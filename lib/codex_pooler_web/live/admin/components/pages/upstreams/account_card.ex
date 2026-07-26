@@ -582,6 +582,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             disabled={!reactivatable?(@account.identity.status)}
           />
         </li>
+        <li>
+          <AdminComponents.dropdown_action_item
+            id={"view-auth-json-upstream-account-#{@account.identity.id}"}
+            icon="hero-document-text"
+            label="View auth.json"
+            phx-click="open_view_auth_json"
+            phx-value-id={@account.identity.id}
+            disabled={@account.identity.status == "deleted"}
+          />
+        </li>
         <li :if={@recovery_eligible?}>
           <AdminComponents.dropdown_action_item
             id={"replace-auth-json-upstream-account-#{@account.identity.id}"}

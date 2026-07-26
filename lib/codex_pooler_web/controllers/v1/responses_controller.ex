@@ -42,11 +42,17 @@ defmodule CodexPoolerWeb.V1.ResponsesController do
     |> maybe_mark_public_stream(params)
   end
 
-  defp maybe_mark_public_stream(opts, %{"stream" => true}),
-    do: Map.put(opts, :public_openai_responses_stream, true)
+  defp maybe_mark_public_stream(opts, %{"stream" => true} = params),
+    do:
+      opts
+      |> Map.put(:public_openai_responses_stream, true)
+      |> Map.put(:openai_responses_payload, params)
 
-  defp maybe_mark_public_stream(opts, _params),
-    do: Map.put(opts, :collect_openai_response_stream, true)
+  defp maybe_mark_public_stream(opts, params),
+    do:
+      opts
+      |> Map.put(:collect_openai_response_stream, true)
+      |> Map.put(:openai_responses_payload, params)
 
   defp normalize_response_success(decoded) do
     decoded

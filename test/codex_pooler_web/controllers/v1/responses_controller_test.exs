@@ -118,6 +118,48 @@ defmodule CodexPoolerWeb.V1.ResponsesControllerTest do
     end
   end
 
+  test "POST /v1/responses sends Compass requests directly", %{conn: conn} do
+    upstream =
+      start_upstream(
+        FakeUpstream.json_response(%{
+          "id" => "resp_compass",
+          "object" => "response",
+          "status" => "completed",
+          "output" => []
+        })
+      )
+
+    setup = gateway_setup(upstream)
+
+    for record <- [setup.identity, setup.assignment] do
+      record
+      |> Ecto.Changeset.change(metadata: Map.put(record.metadata, "provider", "compass"))
+      |> Repo.update!()
+    end
+
+    payload = %{
+      "model" => setup.model.exposed_model_id,
+      "input" => "Compass input",
+      "stream" => false
+    }
+
+    response =
+      conn
+      |> auth(setup)
+      |> post("/v1/responses", payload)
+
+    assert %{"id" => "resp_compass", "status" => "completed"} = json_response(response, 200)
+
+    assert [captured] = FakeUpstream.requests(upstream)
+    assert captured.path == "/responses"
+    assert captured.json == Map.put(payload, "model", setup.model.upstream_model_id)
+
+    headers = Map.new(captured.headers)
+    refute Map.has_key?(headers, "chatgpt-account-id")
+    refute Map.has_key?(headers, "openai-beta")
+    refute Map.has_key?(headers, "originator")
+  end
+
   test "POST /v1/responses applies canonical reasoning policies across JSON and SSE", %{
     conn: conn
   } do

@@ -119,6 +119,49 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsControllerTest do
     end
   end
 
+  test "POST /v1/chat/completions sends Compass requests directly", %{conn: conn} do
+    upstream =
+      start_upstream(
+        FakeUpstream.json_response(%{
+          "id" => "chatcmpl_compass",
+          "object" => "chat.completion",
+          "choices" => [
+            %{
+              "index" => 0,
+              "message" => %{"role" => "assistant", "content" => "Compass answer"},
+              "finish_reason" => "stop"
+            }
+          ]
+        })
+      )
+
+    setup = gateway_setup(upstream)
+
+    for record <- [setup.identity, setup.assignment] do
+      record
+      |> Ecto.Changeset.change(metadata: Map.put(record.metadata, "provider", "compass"))
+      |> Repo.update!()
+    end
+
+    payload = chat_payload(setup)
+
+    response =
+      conn
+      |> auth(setup)
+      |> post("/v1/chat/completions", payload)
+
+    assert %{"id" => "chatcmpl_compass", "choices" => [_choice]} = json_response(response, 200)
+
+    assert [captured] = FakeUpstream.requests(upstream)
+    assert captured.path == "/chat/completions"
+    assert captured.json == Map.put(payload, "model", setup.model.upstream_model_id)
+
+    headers = Map.new(captured.headers)
+    refute Map.has_key?(headers, "chatgpt-account-id")
+    refute Map.has_key?(headers, "openai-beta")
+    refute Map.has_key?(headers, "originator")
+  end
+
   test "POST /v1/chat/completions non-streaming returns OpenAI chat shape", %{conn: conn} do
     upstream =
       start_upstream(

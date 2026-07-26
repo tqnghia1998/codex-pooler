@@ -105,6 +105,8 @@ defmodule CodexPooler.Gateway.Payloads.RequestOptions do
     :openai_source_endpoint,
     :openai_translated_endpoint,
     :openai_chat_payload,
+    :openai_responses_payload,
+    :direct_upstream?,
     :owner_instance_id,
     :payload_compression,
     :pool_timeout,

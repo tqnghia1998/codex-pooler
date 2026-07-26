@@ -2,15 +2,14 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch do
   @moduledoc false
 
   alias CodexPooler.Gateway.Contracts, as: GatewayContracts
-  alias CodexPooler.Gateway.Payloads.PayloadNormalizer
+  alias CodexPooler.Gateway.Payloads.{PayloadNormalizer, RequestOptions}
   alias CodexPooler.Gateway.RequestCompression
   alias CodexPooler.Gateway.Runtime.Dispatch
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization
-  alias CodexPooler.Upstreams.EndpointMetadata
-  alias CodexPooler.Upstreams.Secrets
+  alias CodexPooler.Upstreams.{Compass, EndpointMetadata, Secrets}
 
   @secret_kind "access_token"
   @type dispatch_candidate :: (PreparedContext.t() -> dispatch_candidate_result())
@@ -37,8 +36,8 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch do
   end
 
   defp decrypt_and_dispatch_candidate(%SelectedCandidateContext{} = context, dispatch_fun) do
-    with {:ok, token} <-
-           Secrets.decrypt_active_secret(context.identity, @secret_kind),
+    with %SelectedCandidateContext{} = context <- maybe_apply_compass_routing(context),
+         {:ok, token} <- Secrets.decrypt_active_secret(context.identity, @secret_kind),
          {:ok, url} <-
            upstream_url(
              context.identity,
@@ -68,6 +67,25 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch do
     else
       {:error, reason} ->
         Finalization.handle_dispatch_error(reason, context, elapsed_ms(context.started))
+    end
+  end
+
+  defp maybe_apply_compass_routing(%SelectedCandidateContext{} = context) do
+    if Compass.enabled?(context.identity, context.assignment) do
+      case Compass.direct_endpoint(context.request_options.openai_compatibility.source_endpoint) do
+        endpoint when is_binary(endpoint) ->
+          request_options =
+            context.request_options
+            |> RequestOptions.put_transport(upstream_endpoint: endpoint)
+            |> RequestOptions.put_openai_compatibility(direct_upstream?: true)
+
+          %{context | request_options: request_options}
+
+        nil ->
+          context
+      end
+    else
+      context
     end
   end
 

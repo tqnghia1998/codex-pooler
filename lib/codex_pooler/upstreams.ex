@@ -13,6 +13,7 @@ defmodule CodexPooler.Upstreams do
   alias CodexPooler.Upstreams.{
     AccountTestEnqueue,
     Assignments,
+    AuthJsonExport,
     Import,
     OAuth,
     SavedResetPolicy,
@@ -124,6 +125,15 @@ defmodule CodexPooler.Upstreams do
 
   @spec import_codex_auth_json(term(), term(), binary()) :: import_result()
   defdelegate import_codex_auth_json(scope, pool, content), to: Import
+
+  @spec import_compass_project_key(Scope.t(), Pool.t(), map()) :: import_result()
+  defdelegate import_compass_project_key(scope, pool, attrs), to: Import
+
+  @spec export_auth_json_for_scope(Scope.t(), identity_ref()) ::
+          {:ok, map()} | {:error, lifecycle_error()}
+  defdelegate export_auth_json_for_scope(scope, identity_or_id),
+    to: AuthJsonExport,
+    as: :export_for_scope
 
   @spec start_browser_oauth(Scope.t(), Pool.t(), keyword()) :: oauth_flow_start_result()
   defdelegate start_browser_oauth(scope, pool, opts \\ []), to: OAuth

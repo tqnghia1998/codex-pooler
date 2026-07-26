@@ -40,10 +40,20 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
         endpoint,
         %RequestOptions{} = request_options
       ) do
-    if multipart_endpoint?(endpoint) do
-      multipart_payload(payload, model, request_options)
-    else
-      json_payload(payload, model, endpoint, request_options)
+    case direct_upstream_payload(request_options, model) do
+      {:ok, direct_payload} ->
+        Jason.encode(direct_payload)
+        |> case do
+          {:ok, encoded} -> {:ok, encoded, request_options}
+          {:error, reason} -> {:error, reason}
+        end
+
+      :no_direct_payload ->
+        if multipart_endpoint?(endpoint) do
+          multipart_payload(payload, model, request_options)
+        else
+          json_payload(payload, model, endpoint, request_options)
+        end
     end
   end
 
@@ -73,6 +83,26 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
   end
 
   def validate(_payload, %RequestOptions{}), do: :ok
+
+  defp direct_upstream_payload(
+         %RequestOptions{
+           openai_compatibility: %{direct_upstream?: true, openai_chat_payload: payload}
+         },
+         %Model{} = model
+       )
+       when is_map(payload),
+       do: {:ok, Map.put(payload, "model", model.upstream_model_id)}
+
+  defp direct_upstream_payload(
+         %RequestOptions{
+           openai_compatibility: %{direct_upstream?: true, openai_responses_payload: payload}
+         },
+         %Model{} = model
+       )
+       when is_map(payload),
+       do: {:ok, Map.put(payload, "model", model.upstream_model_id)}
+
+  defp direct_upstream_payload(%RequestOptions{}, %Model{}), do: :no_direct_payload
 
   defp json_payload(payload, model, endpoint, %RequestOptions{} = request_options) do
     payload =

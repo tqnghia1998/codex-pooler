@@ -4,6 +4,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
   alias CodexPooler.Accounting
   alias CodexPooler.Events
   alias CodexPooler.Pools
+  alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.OAuth, as: UpstreamOAuth
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.PoolEventSubscriptions
@@ -15,6 +16,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
   alias CodexPoolerWeb.Admin.UpstreamCockpitLive.OAuthRelinkWorkflow
   alias CodexPoolerWeb.Admin.UpstreamCockpitLive.SavedResetWorkflow
   alias CodexPoolerWeb.Admin.UpstreamCockpitReadModel
+  alias CodexPoolerWeb.Admin.UpstreamsLive.WorkflowError
   alias CodexPoolerWeb.DateTimeDisplay
 
   @type cockpit :: UpstreamCockpitReadModel.t()
@@ -31,6 +33,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
         auth_json_upload_limit_label: UpstreamAuthJsonImport.upload_limit_label(),
         dialog_pool_options: [],
         importing_auth_json: false,
+        current_auth_json: nil,
         oauth_relinking: false,
         oauth_relink_form: OAuthRelinkWorkflow.form(),
         oauth_relink_flow: nil,
@@ -142,6 +145,30 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
 
   def handle_event("cancel_import_auth_json", _params, socket) do
     {:noreply, AuthJsonImportWorkflow.close(socket)}
+  end
+
+  def handle_event("open_view_auth_json", %{"id" => identity_id}, socket) do
+    cond do
+      identity_id != socket.assigns.cockpit.identity.id ->
+        {:noreply, put_flash(socket, :error, "Upstream account was not found")}
+
+      true ->
+        case Upstreams.export_auth_json_for_scope(socket.assigns.current_scope, identity_id) do
+          {:ok, %{identity: identity, content: content}} ->
+            {:noreply,
+             assign(socket, :current_auth_json, %{
+               identity_label: identity.account_label,
+               content: content
+             })}
+
+          {:error, reason} ->
+            {:noreply, put_flash(socket, :error, WorkflowError.message(reason))}
+        end
+    end
+  end
+
+  def handle_event("close_view_auth_json", _params, socket) do
+    {:noreply, assign(socket, :current_auth_json, nil)}
   end
 
   def handle_event("open_oauth_relink", %{"id" => identity_id}, socket) do
@@ -298,6 +325,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLive do
         auth_json_upload_limit_label={@auth_json_upload_limit_label}
         dialog_pool_options={@dialog_pool_options}
         importing_auth_json={@importing_auth_json}
+        current_auth_json={@current_auth_json}
         oauth_relinking={@oauth_relinking}
         oauth_relink_form={@oauth_relink_form}
         oauth_relink_flow={@oauth_relink_flow}

@@ -22,6 +22,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
       if source == :websocket_bridge, do: Map.put(state, :bridge_committed?, true), else: state
 
     cond do
+      direct_upstream_stream?(opts) ->
+        state
+
       public_openai_chat_stream?(opts) ->
         Map.put(
           state,
@@ -54,6 +57,9 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
           {iodata(), state()}
   def normalize_data(data, endpoint, %RequestOptions{} = opts, state) do
     cond do
+      direct_upstream_stream?(opts) ->
+        {data, state}
+
       public_openai_chat_stream?(opts) ->
         normalize_public_openai_chat_stream_data(data, state)
 
@@ -289,6 +295,13 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.DownstreamStream do
        do: true
 
   defp public_openai_chat_stream?(_opts), do: false
+
+  defp direct_upstream_stream?(%RequestOptions{
+         openai_compatibility: %{direct_upstream?: true}
+       }),
+       do: true
+
+  defp direct_upstream_stream?(_opts), do: false
 
   defp openai_chat_payload(%RequestOptions{
          openai_compatibility: %{openai_chat_payload: %{} = payload}

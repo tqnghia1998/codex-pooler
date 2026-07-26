@@ -190,7 +190,14 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       when is_list(headers) and is_list(opts) do
     envelope_opts =
       opts
-      |> Keyword.put(:include_codex_identity?, true)
+      |> Keyword.put(
+        :include_codex_identity?,
+        not request_options.openai_compatibility.direct_upstream?
+      )
+      |> Keyword.put(
+        :include_account_header?,
+        not request_options.openai_compatibility.direct_upstream?
+      )
       |> Keyword.put(
         :forwarded_headers,
         regular_runtime_forwarded_metadata_headers(request_options)
@@ -272,9 +279,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
         headers:
           CloudflareCookies.request_headers(
             url,
-            upstream_headers(identity, token, [
-              {"accept", "application/json"}
-            ])
+            upstream_headers(identity, token, [{"accept", "application/json"}], opts)
           )
       ]
       |> Keyword.merge(TransportEnvelope.req_timeout_options(timeouts))
@@ -956,6 +961,13 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   defp safe_log_value(value) when is_binary(value), do: value
   defp safe_log_value(value) when is_integer(value), do: Integer.to_string(value)
   defp safe_log_value(_value), do: nil
+
+  defp upstream_headers(identity, token, headers, %RequestOptions{} = request_options) do
+    TransportEnvelope.headers(identity, token, headers,
+      include_codex_identity?: not request_options.openai_compatibility.direct_upstream?,
+      include_account_header?: not request_options.openai_compatibility.direct_upstream?
+    )
+  end
 
   defp upstream_headers(identity, token, headers) do
     TransportEnvelope.headers(identity, token, headers, include_codex_identity?: true)

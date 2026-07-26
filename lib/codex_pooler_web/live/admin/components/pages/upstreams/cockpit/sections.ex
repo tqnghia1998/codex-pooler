@@ -201,6 +201,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Sections do
           phx-value-id={@cockpit.identity.id}
         />
         <.rail_action
+          id={"cockpit-view-auth-json-upstream-account-#{@cockpit.identity.id}"}
+          icon="hero-document-text"
+          label="View auth.json"
+          action={@cockpit.actions.view_auth_json}
+          phx-click="open_view_auth_json"
+          phx-value-id={@cockpit.identity.id}
+        />
+        <.rail_action
           id={"cockpit-replace-auth-json-upstream-account-#{@cockpit.identity.id}"}
           icon="hero-document-arrow-up"
           label="Replace auth.json"

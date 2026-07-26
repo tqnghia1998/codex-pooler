@@ -3,10 +3,13 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
   Upstream model catalog discovery and payload normalization.
   """
 
-  alias CodexPooler.Upstreams.CloudflareCookies
-  alias CodexPooler.Upstreams.CodexClientIdentity
-  alias CodexPooler.Upstreams.EndpointMetadata
-  alias CodexPooler.Upstreams.Secrets
+  alias CodexPooler.Upstreams.{
+    CloudflareCookies,
+    CodexClientIdentity,
+    Compass,
+    EndpointMetadata,
+    Secrets
+  }
 
   @default_codex_upstream_base_url "https://chatgpt.com"
   @secret_kind "access_token"
@@ -53,16 +56,21 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
 
   @spec fetch_models_for_assignment(map()) :: {:ok, [map()]} | {:error, catalog_error() | term()}
   def fetch_models_for_assignment(%{assignment: assignment, identity: identity}) do
-    with {:ok, token} <-
-           Secrets.decrypt_active_secret(identity, @secret_kind),
+    with {:ok, token} <- Secrets.decrypt_active_secret(identity, @secret_kind),
          {:ok, url} <- model_catalog_url(identity, assignment) do
+      headers = model_catalog_headers(identity, assignment, token)
+
+      request_headers =
+        if Compass.enabled?(identity, assignment),
+          do: headers,
+          else: CloudflareCookies.request_headers(url, headers)
+
       case Req.get(url,
              retry: false,
              receive_timeout: 30_000,
-             headers:
-               CloudflareCookies.request_headers(url, model_catalog_headers(identity, token))
+             headers: request_headers
            )
-           |> store_cloudflare_cookies(url) do
+           |> maybe_store_cloudflare_cookies(url, identity, assignment) do
         {:ok, %{status: 200, body: %{"data" => models}}} when is_list(models) ->
           {:ok, models}
 
@@ -74,15 +82,18 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
 
         {:ok, %{status: status}} ->
           {:error,
-           catalog_error(
-             :upstream_model_list_failed,
-             "model list request failed with #{status}"
-           )}
+           catalog_error(:upstream_model_list_failed, "model list request failed with #{status}")}
 
         {:error, reason} ->
           {:error, catalog_error(:upstream_model_list_failed, Exception.message(reason))}
       end
     end
+  end
+
+  defp maybe_store_cloudflare_cookies(result, url, identity, assignment) do
+    if Compass.enabled?(identity, assignment),
+      do: result,
+      else: store_cloudflare_cookies(result, url)
   end
 
   defp store_cloudflare_cookies(result, url) do
@@ -94,7 +105,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
     case EndpointMetadata.endpoint_url(
            identity,
            assignment,
-           model_catalog_path(),
+           model_catalog_path(identity, assignment),
            @default_codex_upstream_base_url
          ) do
       {:ok, url} ->
@@ -105,21 +116,32 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
     end
   end
 
-  defp model_catalog_path do
-    "/backend-api/codex/models?client_version=" <>
-      URI.encode_www_form(CodexClientIdentity.version())
+  defp model_catalog_path(identity, assignment) do
+    if Compass.enabled?(identity, assignment) do
+      "/models"
+    else
+      "/backend-api/codex/models?client_version=" <>
+        URI.encode_www_form(CodexClientIdentity.version())
+    end
   end
 
-  defp model_catalog_headers(identity, token) do
-    headers =
+  defp model_catalog_headers(identity, assignment, token) do
+    if Compass.enabled?(identity, assignment) do
       [
         {"authorization", "Bearer #{String.trim(token)}"},
         {"accept", "application/json"}
-      ] ++ CodexClientIdentity.headers()
+      ]
+    else
+      headers =
+        [
+          {"authorization", "Bearer #{String.trim(token)}"},
+          {"accept", "application/json"}
+        ] ++ CodexClientIdentity.headers()
 
-    case present_string(identity.chatgpt_account_id) do
-      nil -> headers
-      account_id -> [{"chatgpt-account-id", account_id} | headers]
+      case present_string(identity.chatgpt_account_id) do
+        nil -> headers
+        account_id -> [{"chatgpt-account-id", account_id} | headers]
+      end
     end
   end
 

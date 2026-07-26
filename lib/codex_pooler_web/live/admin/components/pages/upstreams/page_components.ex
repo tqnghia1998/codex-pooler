@@ -9,6 +9,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   alias CodexPoolerWeb.Admin.UpstreamFilterForm
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog
+  alias CodexPoolerWeb.Admin.UpstreamPageComponents.CompassDialog
   alias CodexPoolerWeb.Admin.UpstreamPageComponents.SavedResetComponents
   alias CodexPoolerWeb.RelativeTime
   alias Phoenix.HTML.Form
@@ -30,6 +31,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :auth_json_form, :any, required: true
   attr :auth_json_upload_limit_label, :string, required: true
   attr :importing_auth_json, :boolean, required: true
+  attr :current_auth_json, :map, default: nil
+  attr :compass_form, :any, required: true
+  attr :importing_compass, :boolean, required: true
   attr :oauth_linking, :boolean, required: true
   attr :oauth_link_mode, :atom, default: :link, values: [:link, :relink]
   attr :oauth_link_target_account, :map, default: nil
@@ -81,6 +85,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         pool_options={@dialog_pool_options}
         upload={@uploads.auth_json}
         upload_limit_label={@auth_json_upload_limit_label}
+      />
+
+      <AuthJsonDialog.auth_json_view_dialog current_auth_json={@current_auth_json} />
+
+      <CompassDialog.compass_import_dialog
+        compass_form={@compass_form}
+        importing_compass={@importing_compass}
+        pool_options={@dialog_pool_options}
       />
 
       <.oauth_link_dialog
@@ -369,7 +381,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
     ~H"""
     <div
       id="upstream-page-actions"
-      class="grid w-full grid-cols-1 gap-2 sm:grid-cols-4 lg:flex lg:w-auto lg:flex-wrap lg:justify-end"
+      class="grid w-full grid-cols-1 gap-2 sm:grid-cols-5 lg:flex lg:w-auto lg:flex-wrap lg:justify-end"
     >
       <button
         id="upstream-page-oauth-link-action"
@@ -405,10 +417,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         type="button"
         phx-click="open_import_auth_json"
         aria-label="Import auth.json"
-        class="btn btn-accent min-w-0 justify-center gap-2 px-4"
+        class="btn btn-secondary min-w-0 justify-center gap-2 px-4"
       >
         <.icon name="hero-document-arrow-up" class="size-4 shrink-0" />
-        <span class="truncate">Import</span>
+        <span class="truncate">Import auth.json</span>
+      </button>
+      <button
+        id="upstream-page-import-compass-action"
+        type="button"
+        phx-click="open_import_compass"
+        aria-label="Import Compass project"
+        class="btn btn-accent min-w-0 justify-center gap-2 px-4"
+      >
+        <.icon name="hero-key" class="size-4 shrink-0" />
+        <span class="truncate">Import Compass</span>
       </button>
     </div>
     """

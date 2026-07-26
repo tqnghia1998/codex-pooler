@@ -5,6 +5,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   alias CodexPooler.Quotas.Evidence
   alias CodexPooler.Upstreams.Auth.TokenRefresh
   alias CodexPooler.Upstreams.CloudflareCookies
+  alias CodexPooler.Upstreams.Compass
   alias CodexPooler.Upstreams.EndpointMetadata
   alias CodexPooler.Upstreams.Lifecycle.CredentialFencing
   alias CodexPooler.Upstreams.Quota
@@ -14,6 +15,7 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
   alias CodexPooler.Upstreams.Secrets
 
   @account_quota_key "account"
+  @compass_gateway_secret_kind "other"
   @usage_auth_refresh_skew_seconds 5 * 60
   @chatgpt_usage_paths [
     "/backend-api/wham/usage",
@@ -68,25 +70,29 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
           | {:auth_unavailable, CredentialFencing.fence()}
           | :auth_unavailable
   def reconciliation_source(%UpstreamIdentity{} = identity, assignment, opts) do
-    with chatgpt_account_id when is_binary(chatgpt_account_id) and chatgpt_account_id != "" <-
-           identity.chatgpt_account_id,
-         {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity) do
-      case Secrets.decrypt_active_secret(fenced_identity, "access_token") do
-        {:ok, access_token} ->
-          probe_reconciliation_source(
-            fenced_identity,
-            assignment,
-            access_token,
-            now(),
-            opts,
-            fence
-          )
-
-        _unavailable ->
-          {:auth_unavailable, fence}
-      end
+    if Compass.enabled?(identity, assignment) do
+      compass_reconciliation_source(identity, assignment, opts)
     else
-      _unavailable -> :auth_unavailable
+      with chatgpt_account_id when is_binary(chatgpt_account_id) and chatgpt_account_id != "" <-
+             identity.chatgpt_account_id,
+           {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity) do
+        case Secrets.decrypt_active_secret(fenced_identity, "access_token") do
+          {:ok, access_token} ->
+            probe_reconciliation_source(
+              fenced_identity,
+              assignment,
+              access_token,
+              now(),
+              opts,
+              fence
+            )
+
+          _unavailable ->
+            {:auth_unavailable, fence}
+        end
+      else
+        _unavailable -> :auth_unavailable
+      end
     end
   end
 
@@ -118,17 +124,21 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
         %DateTime{} = observed_at,
         opts
       ) do
-    with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
-         {:ok, access_token} <- Secrets.decrypt_active_secret(fenced_identity, "access_token") do
-      case fetch(fenced_identity, assignment, access_token, observed_at, opts) do
-        {:ok, %Result{} = result} ->
-          {:ok, %{result | credential_fence: fence}}
+    if Compass.enabled?(identity, assignment) do
+      fetch_compass_from_identity(identity, assignment, observed_at, opts)
+    else
+      with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
+           {:ok, access_token} <- Secrets.decrypt_active_secret(fenced_identity, "access_token") do
+        case fetch(fenced_identity, assignment, access_token, observed_at, opts) do
+          {:ok, %Result{} = result} ->
+            {:ok, %{result | credential_fence: fence}}
 
-        {:error, :definitive_provider_auth_rejected} ->
-          {:error, {:definitive_provider_auth_rejected, fence}}
+          {:error, :definitive_provider_auth_rejected} ->
+            {:error, {:definitive_provider_auth_rejected, fence}}
 
-        {:error, reason} ->
-          {:error, reason}
+          {:error, reason} ->
+            {:error, reason}
+        end
       end
     end
   end
@@ -145,6 +155,69 @@ defmodule CodexPooler.Upstreams.Reconciliation.UsageProbe do
 
     with {:ok, result} <- do_fetch(identity, assignment, access_token, observed_at, opts) do
       {:ok, %{result | credential_fence: fence}}
+    end
+  end
+
+  defp compass_reconciliation_source(identity, assignment, opts) do
+    with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
+         {:ok, gateway_token} <-
+           Secrets.decrypt_active_secret(fenced_identity, @compass_gateway_secret_kind) do
+      case fetch_compass(fenced_identity, assignment, gateway_token, now(), opts) do
+        {:ok, %Result{} = result} ->
+          {:usage, fenced_identity, %{result | credential_fence: fence}}
+
+        {:error, reason} ->
+          {:usage_unavailable, reason, fence}
+      end
+    else
+      {:error, _reason} -> :auth_unavailable
+    end
+  end
+
+  defp fetch_compass_from_identity(identity, assignment, observed_at, opts) do
+    with {:ok, fenced_identity, fence} <- CredentialFencing.allocate_usage_probe(identity),
+         {:ok, gateway_token} <-
+           Secrets.decrypt_active_secret(fenced_identity, @compass_gateway_secret_kind),
+         {:ok, %Result{} = result} <-
+           fetch_compass(fenced_identity, assignment, gateway_token, observed_at, opts) do
+      {:ok, %{result | credential_fence: fence}}
+    else
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_compass(identity, assignment, gateway_token, observed_at, opts) do
+    timeout = Keyword.get(opts, :receive_timeout, 30_000)
+
+    with {:ok, url} <- Compass.project_detail_url(identity, assignment),
+         {:ok, %Req.Response{status: status, body: body}} <-
+           Req.get(url,
+             headers: [
+               {"authorization", "Bearer #{String.trim(gateway_token)}"},
+               {"accept", "application/json"}
+             ],
+             retry: false,
+             receive_timeout: timeout,
+             decode_body: false
+           )
+           |> decode_usage_response() do
+      case {status, Compass.quota_windows(body, observed_at)} do
+        {status, {:ok, windows}} when status in 200..299 ->
+          {:ok,
+           %Result{
+             payload: body,
+             usage_url: url,
+             usage_path: URI.parse(url).path,
+             windows: windows,
+             covered_descriptors: MapSet.new(Enum.map(windows, &Evidence.descriptor_key/1))
+           }}
+
+        {status, _result} when status not in 200..299 ->
+          {:error, {:upstream_status, status}}
+
+        {_status, {:error, reason}} ->
+          {:error, reason}
+      end
     end
   end
 

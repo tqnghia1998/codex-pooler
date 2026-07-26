@@ -26,6 +26,27 @@ defmodule CodexPooler.Upstreams.Import do
     end
   end
 
+  @spec import_compass_project_key(term(), term(), map()) :: import_result()
+  def import_compass_project_key(%Scope{} = scope, %Pool{} = pool, attrs) when is_map(attrs) do
+    attrs = normalize_compass_attrs(attrs)
+
+    case compass_validation_errors(attrs) do
+      [] ->
+        with :ok <- require_import_pool_operate(scope, pool),
+             {:ok, result} <- do_import_compass_project_key(scope, pool, attrs) do
+          {:ok, result}
+        end
+
+      errors ->
+        {:error, compass_import_changeset(attrs, errors)}
+    end
+  end
+
+  def import_compass_project_key(_scope, _pool, attrs) when is_map(attrs) do
+    attrs = normalize_compass_attrs(attrs)
+    {:error, compass_import_changeset(attrs, pool_id: "must select an active Pool")}
+  end
+
   defp import_trusted_auth_json_account(scope, %Pool{} = pool, attrs) when is_map(attrs) do
     attrs = normalize_import_attrs(attrs)
 
@@ -61,6 +82,53 @@ defmodule CodexPooler.Upstreams.Import do
       quota_trigger_kind: "account_link",
       token_refresh_trigger_kind: "auth_json_import"
     )
+  end
+
+  defp do_import_compass_project_key(%Scope{} = scope, %Pool{} = pool, attrs) do
+    TokenLinking.link_tokens(scope, pool, attrs,
+      onboarding_method: "import",
+      audit_action: "upstream_account.import",
+      broadcast_reason: "upstream_account_imported",
+      quota_trigger_kind: "account_link",
+      token_refresh_trigger_kind: "compass_api_key_import"
+    )
+  end
+
+  defp normalize_compass_attrs(attrs) do
+    project_id = attrs |> import_value(:project_id) |> present_string()
+
+    %{
+      chatgpt_account_id: if(project_id, do: "compass:#{project_id}"),
+      account_identifier: project_id,
+      account_email: nil,
+      account_label:
+        attrs
+        |> import_value(:account_label)
+        |> Kernel.||(attrs |> import_value(:project_name))
+        |> present_string()
+        |> Kernel.||(project_id && "Compass #{project_id}"),
+      pool_id: attrs |> import_value(:pool_id) |> present_string(),
+      token:
+        attrs
+        |> import_value(:token)
+        |> Kernel.||(import_value(attrs, :api_key))
+        |> Kernel.||(import_value(attrs, :project_key))
+        |> present_string(),
+      plan_label: attrs |> import_value(:plan_label) |> present_string(),
+      import_metadata:
+        attrs
+        |> import_value(:import_metadata)
+        |> normalize_import_metadata()
+        |> Map.merge(%{
+          "provider" => "compass",
+          "project_id" => project_id,
+          "base_url" =>
+            attrs
+            |> import_value(:base_url)
+            |> present_string()
+            |> Kernel.||("http://compass.llm.shopee.io/compass-api/v1")
+        })
+    }
   end
 
   defp normalize_import_attrs(attrs) do
@@ -112,6 +180,12 @@ defmodule CodexPooler.Upstreams.Import do
     |> maybe_add_error(blank?(attrs.token), :token, "is required")
   end
 
+  defp compass_validation_errors(attrs) do
+    []
+    |> maybe_add_error(blank?(attrs.account_identifier), :project_id, "is required")
+    |> maybe_add_error(blank?(attrs.token), :project_key, "is required")
+  end
+
   defp import_identity_changeset(attrs, errors) do
     data = %{
       account_identifier: attrs[:account_identifier],
@@ -143,6 +217,23 @@ defmodule CodexPooler.Upstreams.Import do
 
     {%{}, %{content: :string, pool_id: :string}}
     |> Ecto.Changeset.cast(data, [:content, :pool_id])
+    |> Map.put(:action, :insert)
+    |> then(fn changeset ->
+      Enum.reduce(errors, changeset, fn {field, message}, changeset ->
+        Ecto.Changeset.add_error(changeset, field, message)
+      end)
+    end)
+  end
+
+  defp compass_import_changeset(attrs, errors) do
+    data = %{
+      pool_id: attrs[:pool_id],
+      project_id: attrs[:account_identifier],
+      project_key: ""
+    }
+
+    {%{}, %{pool_id: :string, project_id: :string, project_key: :string}}
+    |> Ecto.Changeset.cast(data, [:pool_id, :project_id, :project_key])
     |> Map.put(:action, :insert)
     |> then(fn changeset ->
       Enum.reduce(errors, changeset, fn {field, message}, changeset ->

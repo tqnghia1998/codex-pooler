@@ -43,7 +43,7 @@ defmodule CodexPooler.Gateway.Payloads.TransportEnvelope do
       {"authorization", "Bearer #{String.trim(token)}"}
     ]
     |> Kernel.++(codex_identity_headers(opts))
-    |> Kernel.++(codex_account_headers(identity))
+    |> Kernel.++(codex_account_headers(identity, opts))
     |> Kernel.++(headers)
     |> Kernel.++(safe_forwarded_headers(Keyword.get(opts, :forwarded_headers, [])))
   end
@@ -56,7 +56,15 @@ defmodule CodexPooler.Gateway.Payloads.TransportEnvelope do
     end
   end
 
-  defp codex_account_headers(%UpstreamIdentity{chatgpt_account_id: account_id})
+  defp codex_account_headers(identity, opts) do
+    if Keyword.get(opts, :include_account_header?, true) do
+      do_codex_account_headers(identity)
+    else
+      []
+    end
+  end
+
+  defp do_codex_account_headers(%UpstreamIdentity{chatgpt_account_id: account_id})
        when is_binary(account_id) do
     account_id = String.trim(account_id)
 
@@ -68,7 +76,7 @@ defmodule CodexPooler.Gateway.Payloads.TransportEnvelope do
     end
   end
 
-  defp codex_account_headers(_identity), do: []
+  defp do_codex_account_headers(_identity), do: []
 
   defp safe_forwarded_headers(headers) when is_list(headers) do
     headers

@@ -2149,6 +2149,102 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
   end
 
   @tag :read_model_states
+  test "view auth.json dialog shows partial content instead of error when some tokens are missing",
+       %{
+         conn: conn,
+         scope: scope
+       } do
+    configure_upstream_secret_key!()
+
+    {:ok, pool} =
+      Pools.create_pool(scope, %{
+        slug: "cockpit-partial-auth-json",
+        name: "Cockpit Partial Auth JSON"
+      })
+
+    access_token = runtime_secret("cockpit-partial-auth-json-access")
+
+    %{identity: identity} =
+      active_upstream_assignment_fixture(pool, %{
+        account_label: "Cockpit Partial Auth JSON",
+        access_token: access_token
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    view
+    |> element("#cockpit-view-auth-json-upstream-account-#{identity.id}")
+    |> render_click()
+
+    assert has_element?(view, "#current-auth-json-dialog[open]")
+    assert has_element?(view, "#current-auth-json-content", "\"refresh_token\"")
+    assert has_element?(view, "#current-auth-json-content", "\"id_token\"")
+    assert has_element?(view, "#current-auth-json-content", "null")
+    assert render(view) =~ access_token
+    refute render(view) =~ "current auth.json is unavailable"
+  end
+
+  @tag :read_model_states
+  test "view auth.json dialog shows current stored tokens without leaking them outside the dialog",
+       %{
+         conn: conn,
+         scope: scope
+       } do
+    configure_upstream_secret_key!()
+
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "cockpit-auth-json", name: "Cockpit Auth JSON"})
+
+    access_token = runtime_secret("cockpit-auth-json-access")
+    refresh_token = runtime_secret("cockpit-auth-json-refresh")
+    id_token = jwt_token(%{"sub" => "cockpit-auth-json"})
+
+    %{identity: identity} =
+      active_upstream_assignment_fixture(pool, %{
+        account_label: "Cockpit Auth JSON",
+        access_token: access_token
+      })
+
+    assert {:ok, _secret} =
+             Upstreams.store_encrypted_secret(identity, %{
+               secret_kind: "refresh_token",
+               plaintext: refresh_token
+             })
+
+    assert {:ok, _secret} =
+             Upstreams.store_encrypted_secret(identity, %{
+               secret_kind: "id_token",
+               plaintext: id_token
+             })
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    refute render(view) =~ access_token
+    refute render(view) =~ refresh_token
+    refute render(view) =~ id_token
+
+    view
+    |> element("#cockpit-view-auth-json-upstream-account-#{identity.id}")
+    |> render_click()
+
+    assert has_element?(view, "#current-auth-json-dialog[open]")
+    assert has_element?(view, "#current-auth-json-account", "Cockpit Auth JSON")
+    assert has_element?(view, "#current-auth-json-content", "\"id_token\"")
+    assert render(view) =~ access_token
+    assert render(view) =~ refresh_token
+    assert render(view) =~ id_token
+
+    refute inspect(Repo.all(CodexPooler.Audit.AuditEvent)) =~ access_token
+    refute inspect(Repo.all(CodexPooler.Audit.AuditEvent)) =~ refresh_token
+    refute inspect(Repo.all(CodexPooler.Audit.AuditEvent)) =~ id_token
+
+    view |> element("#current-auth-json-close") |> render_click()
+    refute has_element?(view, "#current-auth-json-dialog")
+    refute render(view) =~ access_token
+    refute render(view) =~ refresh_token
+    refute render(view) =~ id_token
+  end
+
   test "read model and page expose disabled state safely", %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "disabled-cockpit", name: "Disabled Cockpit"})
 

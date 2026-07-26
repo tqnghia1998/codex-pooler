@@ -12,6 +12,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog do
   attr :pool_options, :list, required: true
   attr :upload, :map, required: true
   attr :upload_limit_label, :string, required: true
+  attr :current_auth_json, :map, default: nil
 
   def auth_json_import_dialog(assigns) do
     assigns = assign(assigns, :auth_json_docs_url, @auth_json_docs_url)
@@ -166,6 +167,60 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AuthJsonDialog do
       </div>
       <form method="dialog" class="modal-backdrop">
         <button type="button" phx-click="cancel_import_auth_json">close</button>
+      </form>
+    </dialog>
+    """
+  end
+
+  def auth_json_view_dialog(assigns) do
+    assigns = assign(assigns, :auth_json_docs_url, @auth_json_docs_url)
+
+    ~H"""
+    <dialog :if={@current_auth_json} id="current-auth-json-dialog" class="modal" open>
+      <div class="modal-box max-w-5xl border border-base-300 bg-base-100 p-0 shadow-2xl">
+        <div class="border-b border-base-300 px-6 py-5">
+          <p class="text-sm font-semibold uppercase tracking-wide text-primary">
+            Upstream credentials
+          </p>
+          <h2 class="mt-1 text-2xl font-bold text-base-content">Current auth.json</h2>
+          <p class="mt-2 text-sm leading-6 text-base-content/70">
+            Read-only view of the currently stored credentials for this upstream account. Missing
+            auth.json fields are shown as null.
+          </p>
+        </div>
+
+        <div class="grid gap-4 p-6">
+          <div class="rounded-box border border-base-300 bg-base-200/35 px-4 py-3 text-sm">
+            <p class="text-xs font-semibold uppercase tracking-wide text-base-content/60">Account</p>
+            <p id="current-auth-json-account" class="mt-1 font-medium text-base-content">
+              {@current_auth_json.identity_label}
+            </p>
+          </div>
+
+          <textarea
+            id="current-auth-json-content"
+            readonly
+            spellcheck="false"
+            class="textarea textarea-bordered min-h-80 w-full font-mono text-xs leading-6"
+          >{@current_auth_json.content}</textarea>
+        </div>
+
+        <AdminComponents.dialog_footer
+          id="current-auth-json-dialog-footer"
+          docs_url={@auth_json_docs_url}
+        >
+          <:actions>
+            <AdminComponents.action_button
+              id="current-auth-json-close"
+              label="Close"
+              variant={:primary}
+              phx-click="close_view_auth_json"
+            />
+          </:actions>
+        </AdminComponents.dialog_footer>
+      </div>
+      <form method="dialog" class="modal-backdrop">
+        <button type="button" phx-click="close_view_auth_json">close</button>
       </form>
     </dialog>
     """

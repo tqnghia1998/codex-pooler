@@ -10,9 +10,15 @@ defmodule CodexPoolerWeb.V1.ChatCompletionsController do
       conn,
       fn -> Chat.coerce(params, request_opts(conn, params)) end,
       fn decoded, %{chat_payload: chat_payload} ->
-        ChatCompletions.normalize_response(decoded, chat_payload)
+        normalize_response(decoded, chat_payload)
       end
     )
+  end
+
+  defp normalize_response(%{"choices" => _choices} = decoded, _chat_payload), do: decoded
+
+  defp normalize_response(decoded, chat_payload) do
+    ChatCompletions.normalize_response(decoded, chat_payload)
   end
 
   defp request_opts(conn, params) do

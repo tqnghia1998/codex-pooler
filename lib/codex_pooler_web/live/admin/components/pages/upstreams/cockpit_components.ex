@@ -14,6 +14,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
   attr :auth_json_upload_limit_label, :string, required: true
   attr :dialog_pool_options, :list, required: true
   attr :importing_auth_json, :boolean, required: true
+  attr :current_auth_json, :map, default: nil
   attr :oauth_relinking, :boolean, required: true
   attr :oauth_relink_form, :any, required: true
   attr :oauth_relink_flow, :map, default: nil
@@ -56,6 +57,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents do
             upload={@uploads.auth_json}
             upload_limit_label={@auth_json_upload_limit_label}
           />
+
+          <AuthJsonDialog.auth_json_view_dialog current_auth_json={@current_auth_json} />
 
           <Dialogs.oauth_relink_dialog
             oauth_relinking={@oauth_relinking}

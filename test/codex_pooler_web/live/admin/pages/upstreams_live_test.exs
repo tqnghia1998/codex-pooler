@@ -610,8 +610,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-page-actions > #upstream-page-import-auth-json-action[aria-label='Import auth.json'].btn.btn-accent",
-             "Import"
+             "#upstream-page-actions > #upstream-page-import-auth-json-action[aria-label='Import auth.json'].btn.btn-secondary",
+             "Import auth.json"
+           )
+
+    assert has_element?(
+             view,
+             "#upstream-page-actions > #upstream-page-import-compass-action[aria-label='Import Compass project'].btn.btn-accent",
+             "Import Compass"
            )
 
     assert has_element?(
@@ -625,7 +631,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert upstream_page_action_order(render(view)) == [
              "upstream-page-oauth-link-action",
              "upstream-page-create-invite-action",
-             "upstream-page-import-auth-json-action"
+             "upstream-page-import-auth-json-action",
+             "upstream-page-import-compass-action"
            ]
 
     refute has_element?(view, "#auth-json-import-dialog")
@@ -6582,6 +6589,96 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     refute render(view) =~ refresh_token
   end
 
+  test "view auth.json dialog shows partial content instead of error when some tokens are missing",
+       %{
+         conn: conn,
+         scope: scope
+       } do
+    configure_upstream_secret_key!()
+
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "partial-auth-json", name: "Partial Auth JSON"})
+
+    access_token = runtime_secret("partial-auth-json-access")
+
+    %{identity: identity} =
+      active_upstream_assignment_fixture(pool, %{
+        account_label: "Partial Auth JSON",
+        access_token: access_token
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    view
+    |> element("#view-auth-json-upstream-account-#{identity.id}")
+    |> render_click()
+
+    assert has_element?(view, "#current-auth-json-dialog[open]")
+    assert has_element?(view, "#current-auth-json-content", "\"refresh_token\"")
+    assert has_element?(view, "#current-auth-json-content", "\"id_token\"")
+    assert has_element?(view, "#current-auth-json-content", "null")
+    assert render(view) =~ access_token
+    refute render(view) =~ "current auth.json is unavailable"
+  end
+
+  test "view auth.json dialog shows current stored tokens without leaking them outside the dialog",
+       %{
+         conn: conn,
+         scope: scope
+       } do
+    configure_upstream_secret_key!()
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "view-auth-json", name: "View Auth JSON"})
+    access_token = runtime_secret("view-auth-json-access")
+    refresh_token = runtime_secret("view-auth-json-refresh")
+    id_token = jwt_token(%{"sub" => "view-auth-json"})
+
+    %{identity: identity} =
+      active_upstream_assignment_fixture(pool, %{
+        account_label: "Viewable Auth JSON",
+        access_token: access_token
+      })
+
+    {:ok, _secret} =
+      Upstreams.store_encrypted_secret(identity, %{
+        secret_kind: "refresh_token",
+        plaintext: refresh_token
+      })
+
+    {:ok, _secret} =
+      Upstreams.store_encrypted_secret(identity, %{
+        secret_kind: "id_token",
+        plaintext: id_token
+      })
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    refute render(view) =~ access_token
+    refute render(view) =~ refresh_token
+    refute render(view) =~ id_token
+
+    view
+    |> element("#view-auth-json-upstream-account-#{identity.id}")
+    |> render_click()
+
+    assert has_element?(view, "#current-auth-json-dialog[open]")
+    assert has_element?(view, "#current-auth-json-account", "Viewable Auth JSON")
+    assert has_element?(view, "#current-auth-json-content", "\"id_token\"")
+    assert render(view) =~ access_token
+    assert render(view) =~ refresh_token
+    assert render(view) =~ id_token
+
+    assert [event] = audit_events("upstream_account.auth_json_view", identity.id)
+    refute inspect(event) =~ access_token
+    refute inspect(event) =~ refresh_token
+    refute inspect(event) =~ id_token
+
+    view |> element("#current-auth-json-close") |> render_click()
+    refute has_element?(view, "#current-auth-json-dialog")
+    refute render(view) =~ access_token
+    refute render(view) =~ refresh_token
+    refute render(view) =~ id_token
+  end
+
   @tag :token_refresh
   test "refresh button is disabled for terminal local lifecycle states", %{
     conn: conn,
@@ -6607,6 +6704,61 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         refute has_element?(view, "#upstream-account-#{identity.id}")
       end
     end
+  end
+
+  test "renders Compass import dialog with project fields", %{conn: conn, scope: scope} do
+    {:ok, _pool} = Pools.create_pool(scope, %{slug: "compass-dialog", name: "Compass Dialog"})
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    open_compass_import_dialog(view)
+
+    assert has_element?(view, "#compass-import-dialog[open]")
+    assert has_element?(view, "#compass-import-form")
+    assert has_element?(view, "#compass_import_pool_id")
+    assert has_element?(view, "#compass_import_project_id")
+    assert has_element?(view, "#compass_import_project_key")
+    assert render(view) =~ "Import Compass project"
+  end
+
+  test "imports Compass project key through authenticated admin UI without echoing secrets", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "compass-live", name: "Compass Live"})
+    project_id = "project-live"
+    project_key = runtime_secret("compass-project-key")
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    open_compass_import_dialog(view)
+
+    view
+    |> element("#compass-import-form")
+    |> render_submit(%{
+      "compass_import" => %{
+        "pool_id" => pool.id,
+        "project_id" => project_id,
+        "project_key" => project_key
+      }
+    })
+
+    identity = Repo.one!(UpstreamIdentity)
+    assignment = Repo.one!(PoolUpstreamAssignment)
+
+    assert identity.chatgpt_account_id == "compass:#{project_id}"
+    assert identity.account_email == nil
+    assert identity.account_label == "Compass #{project_id}"
+    assert identity.metadata["provider"] == "compass"
+    assert identity.metadata["project_id"] == project_id
+    assert assignment.pool_id == pool.id
+    assert assignment.status == "active"
+    assert {:ok, ^project_key} = Secrets.decrypt_active_secret(identity, "access_token")
+
+    refute has_element?(view, "#compass-import-dialog")
+    assert has_element?(view, "#upstream-account-#{identity.id}", "Compass #{project_id}")
+
+    html = render(view)
+    refute html =~ project_key
+    refute inspect(Repo.all(AuditEvent)) =~ project_key
   end
 
   test "auth.json paste validation keeps raw content out of assigns while typing", %{
@@ -7741,6 +7893,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     |> render_click()
   end
 
+  defp open_compass_import_dialog(view) do
+    view
+    |> element("#upstream-page-import-compass-action")
+    |> render_click()
+  end
+
   defp open_oauth_link_dialog(view) do
     view
     |> element("#upstream-page-oauth-link-action")
@@ -7865,7 +8023,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   end
 
   defp upstream_page_action_order(html) do
-    ~r/id="(upstream-page-(?:create-invite|import-auth-json|oauth-link)-action)"/
+    ~r/id="(upstream-page-(?:create-invite|import-auth-json|import-compass|oauth-link)-action)"/
     |> Regex.scan(html, capture: :all_but_first)
     |> List.flatten()
   end
