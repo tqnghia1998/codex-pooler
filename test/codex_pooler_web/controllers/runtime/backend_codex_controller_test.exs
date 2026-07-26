@@ -589,6 +589,51 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     assert FakeUpstream.count(upstream) == 0
   end
 
+  test "POST /backend-api/codex/responses sends Compass requests directly", %{conn: conn} do
+    upstream =
+      start_upstream(
+        FakeUpstream.json_response(%{
+          "id" => "resp_backend_compass",
+          "object" => "response",
+          "status" => "completed",
+          "output" => []
+        })
+      )
+
+    setup = gateway_setup(upstream)
+
+    for record <- [setup.identity, setup.assignment] do
+      record
+      |> Ecto.Changeset.change(metadata: Map.put(record.metadata || %{}, "provider", "compass"))
+      |> Repo.update!()
+    end
+
+    payload = %{
+      "model" => setup.model.exposed_model_id,
+      "input" => "Compass backend input",
+      "stream" => false
+    }
+
+    response =
+      conn
+      |> auth(setup)
+      |> post("/backend-api/codex/responses", payload)
+
+    assert %{"id" => "resp_backend_compass", "status" => "completed"} =
+             json_response(response, 200)
+
+    assert [captured] = FakeUpstream.requests(upstream)
+    assert captured.path == "/responses"
+    assert captured.json["model"] == setup.model.upstream_model_id
+    assert captured.json["input"] == payload["input"]
+    assert captured.json["stream"] == false
+
+    headers = Map.new(captured.headers)
+    refute Map.has_key?(headers, "chatgpt-account-id")
+    refute Map.has_key?(headers, "openai-beta")
+    refute Map.has_key?(headers, "originator")
+  end
+
   @tag :model_serving_modes
   test "backend response aliases keep the selected Pool model mode across JSON and SSE", %{
     conn: conn

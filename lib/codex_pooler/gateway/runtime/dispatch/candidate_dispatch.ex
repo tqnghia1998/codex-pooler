@@ -72,7 +72,11 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.CandidateDispatch do
 
   defp maybe_apply_compass_routing(%SelectedCandidateContext{} = context) do
     if Compass.enabled?(context.identity, context.assignment) do
-      case Compass.direct_endpoint(context.request_options.openai_compatibility.source_endpoint) do
+      endpoint =
+        context.request_options.openai_compatibility.source_endpoint ||
+          context.request_options.transport.upstream_endpoint
+
+      case Compass.direct_endpoint(endpoint) do
         endpoint when is_binary(endpoint) ->
           request_options =
             context.request_options

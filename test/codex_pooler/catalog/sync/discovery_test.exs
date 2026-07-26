@@ -80,6 +80,63 @@ defmodule CodexPooler.Catalog.Sync.DiscoveryTest do
     refute Map.has_key?(second_headers, "cookie")
   end
 
+  test "discover_models defaults missing streaming and gpt-5.5 reasoning capabilities for Compass sources" do
+    pool = pool_fixture()
+
+    %{identity: identity, assignment: assignment} =
+      active_upstream_assignment_fixture(pool,
+        metadata: %{"provider" => "compass"}
+      )
+
+    source = %{identity: identity, assignment: assignment}
+
+    assert {:ok, [^source], [], [model]} =
+             Discovery.discover_models([source], fn ^source ->
+               {:ok, [%{"id" => "gpt-5.5", "owned_by" => "openai"}]}
+             end)
+
+    assert model.upstream_model_id == "gpt-5.5"
+    assert model.supports_streaming
+    assert model.supports_tools
+    assert model.supports_reasoning
+    assert model.upstream_model["supports_streaming"]
+    assert model.upstream_model["supports_tools"]
+    assert model.upstream_model["supports_reasoning"]
+  end
+
+  test "discover_models keeps unverified Compass models non-reasoning-capable" do
+    pool = pool_fixture()
+
+    %{identity: identity, assignment: assignment} =
+      active_upstream_assignment_fixture(pool,
+        metadata: %{"provider" => "compass"}
+      )
+
+    source = %{identity: identity, assignment: assignment}
+
+    assert {:ok, [^source], [], [model]} =
+             Discovery.discover_models([source], fn ^source ->
+               {:ok, [%{"id" => "codecompass", "owned_by" => "compass"}]}
+             end)
+
+    assert model.supports_streaming
+    refute model.supports_reasoning
+  end
+
+  test "discover_models defaults missing streaming capability to false for non-Compass sources" do
+    pool = pool_fixture()
+    %{identity: identity, assignment: assignment} = active_upstream_assignment_fixture(pool)
+    source = %{identity: identity, assignment: assignment}
+
+    assert {:ok, [^source], [], [model]} =
+             Discovery.discover_models([source], fn ^source ->
+               {:ok, [%{"id" => "gpt-example", "owned_by" => "openai"}]}
+             end)
+
+    refute model.supports_streaming
+    refute model.supports_reasoning
+  end
+
   defp assert_codex_client_identity_headers(headers) do
     version = CodexClientIdentity.version()
 

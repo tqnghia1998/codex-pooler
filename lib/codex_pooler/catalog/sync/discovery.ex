@@ -25,7 +25,9 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
       Enum.map(assignments, fn source ->
         case fetcher.(source) do
           {:ok, models} when is_list(models) ->
-            source_models = Enum.map(models, &Map.put(normalize_model_attrs(&1), :source, source))
+            source_models =
+              Enum.map(models, &Map.put(normalize_model_attrs(&1, source), :source, source))
+
             {:ok, source, source_models}
 
           {:error, reason} ->
@@ -147,7 +149,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
 
   # Reason: model imports accept multiple upstream metadata spellings.
   # credo:disable-for-next-line Credo.Check.Refactor.CyclomaticComplexity
-  defp normalize_model_attrs(attrs) when is_map(attrs) do
+  defp normalize_model_attrs(attrs, source) when is_map(attrs) do
     upstream_model_id =
       string_attr(attrs, "id") || string_attr(attrs, :id) || string_attr(attrs, "slug") ||
         string_attr(attrs, :slug)
@@ -159,6 +161,10 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
 
     owned_by = string_attr(attrs, "owned_by")
     capabilities = map_attr(attrs, "capabilities") || %{}
+
+    compass? = Compass.enabled?(source.identity, source.assignment)
+    streaming_default = compass?
+    gpt_5_5? = compass? and upstream_model_id == "gpt-5.5"
 
     %{
       upstream_model_id: upstream_model_id,
@@ -173,7 +179,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
           bool_default(
             capabilities,
             "streaming",
-            bool_default(attrs, "prefer_websockets", false)
+            bool_default(attrs, "prefer_websockets", streaming_default)
           )
         ),
       supports_tools:
@@ -183,7 +189,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
           bool_default(
             capabilities,
             "tools",
-            bool_default(attrs, "supports_parallel_tool_calls", false)
+            bool_default(attrs, "supports_parallel_tool_calls", gpt_5_5?)
           )
         ),
       supports_reasoning:
@@ -193,7 +199,7 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
           bool_default(
             capabilities,
             "reasoning",
-            match?([_ | _], Map.get(attrs, "supported_reasoning_levels"))
+            match?([_ | _], Map.get(attrs, "supported_reasoning_levels")) or gpt_5_5?
           )
         ),
       pricing_ref: string_attr(attrs, "pricing_ref"),
@@ -201,10 +207,21 @@ defmodule CodexPooler.Catalog.Sync.Discovery do
       upstream_model: attrs
     }
     |> then(fn model ->
+      Map.update!(model, :upstream_model, fn upstream_model ->
+        Map.merge(upstream_model, %{
+          "supports_responses" => model.supports_responses,
+          "supports_streaming" => model.supports_streaming,
+          "supports_tools" => model.supports_tools,
+          "supports_reasoning" => model.supports_reasoning
+        })
+      end)
+    end)
+    |> then(fn model ->
       Map.put(
         model,
         :pricing_ref,
-        model.pricing_ref || if(model.upstream_model_id, do: "openai/#{model.upstream_model_id}")
+        model.pricing_ref ||
+          if(model.upstream_model_id, do: "openai/#{model.upstream_model_id}")
       )
     end)
   end
