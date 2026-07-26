@@ -6299,6 +6299,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         metadata: %{"access_token_expires_at" => "not-a-timestamp"}
       })
 
+    %{identity: reauth_identity} =
+      upstream_assignment_fixture(pool, %{
+        account_label: "Reauth Required Expiration",
+        identity_status: "reauth_required",
+        identity_metadata: %{
+          "access_token_expires_at" => DateTime.to_iso8601(future_expires_at),
+          "token_refresh" => %{
+            "status" => "reauth_required",
+            "reason" => %{"message" => "Your session has ended. Please log in again."}
+          }
+        }
+      })
+
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
     assert has_element?(
@@ -6320,6 +6333,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
       refute has_element?(view, "#{selector}[title]")
       refute has_element?(view, selector, "No expiration")
     end
+
+    reauth_selector = "#upstream-account-#{reauth_identity.id}-auth-expiration"
+
+    assert has_element?(view, reauth_selector, "Reauth required")
+    refute has_element?(view, reauth_selector, "Auth expires")
 
     assert has_element?(
              view,

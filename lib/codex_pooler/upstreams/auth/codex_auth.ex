@@ -33,14 +33,16 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
         }
 
   @type token_result :: %{
-          access_token: String.t(),
-          refresh_token: String.t() | nil,
-          id_token: String.t()
+          required(:access_token) => String.t(),
+          required(:refresh_token) => String.t() | nil,
+          required(:id_token) => String.t(),
+          optional(:expires_in) => pos_integer() | String.t() | nil
         }
 
   @type refresh_result :: %{
           required(:access_token) => String.t(),
           optional(:refresh_token) => String.t() | nil,
+          optional(:id_token) => String.t() | nil,
           optional(:expires_in) => pos_integer() | String.t() | nil
         }
 
@@ -131,9 +133,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
 
   @spec token_info(term()) :: token_info_response()
   def token_info(id_token) when is_binary(id_token) do
-    with [_header, payload, _signature] <- String.split(id_token, "."),
-         {:ok, json} <- Base.url_decode64(payload, padding: false),
-         {:ok, claims} <- Jason.decode(json) do
+    with {:ok, claims} <- decode_token_claims(id_token) do
       auth_claims = claims["https://api.openai.com/auth"] || %{}
 
       {:ok,
@@ -154,6 +154,26 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
 
   def token_info(_id_token),
     do: {:error, %{code: :codex_id_token_invalid, message: "Codex id token is invalid"}}
+
+  @spec token_expires_at(term()) :: DateTime.t() | nil
+  def token_expires_at(token) when is_binary(token) do
+    with {:ok, claims} <- decode_token_claims(token),
+         {:ok, datetime} <- DateTime.from_unix(claims["exp"], :second) do
+      DateTime.truncate(datetime, :microsecond)
+    else
+      _invalid -> nil
+    end
+  end
+
+  def token_expires_at(_token), do: nil
+
+  @spec expires_at(term(), DateTime.t(), term()) :: DateTime.t() | nil
+  def expires_at(expires_in, %DateTime{} = observed_at, token) do
+    case parse_positive_seconds(expires_in) do
+      seconds when is_integer(seconds) -> DateTime.add(observed_at, seconds, :second)
+      nil -> token_expires_at(token)
+    end
+  end
 
   @spec client_id() :: String.t()
   def client_id, do: @client_id
@@ -221,6 +241,27 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
   end
 
   defp present_string(_value), do: nil
+
+  defp decode_token_claims(token) when is_binary(token) do
+    with [_header, payload, _signature] <- String.split(token, "."),
+         {:ok, json} <- Base.url_decode64(payload, padding: false),
+         {:ok, claims} <- Jason.decode(json) do
+      {:ok, claims}
+    else
+      _invalid -> {:error, :invalid_token}
+    end
+  end
+
+  defp parse_positive_seconds(value) when is_integer(value) and value > 0, do: value
+
+  defp parse_positive_seconds(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {seconds, ""} when seconds > 0 -> seconds
+      _invalid -> nil
+    end
+  end
+
+  defp parse_positive_seconds(_value), do: nil
 
   defp normalize_plan(nil), do: nil
 
@@ -346,7 +387,13 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
            ) do
         {:ok, %{status: status, body: %{"access_token" => access, "id_token" => id} = body}}
         when status in 200..299 ->
-          {:ok, %{access_token: access, refresh_token: body["refresh_token"], id_token: id}}
+          {:ok,
+           %{
+             access_token: access,
+             refresh_token: body["refresh_token"],
+             id_token: id,
+             expires_in: body["expires_in"]
+           }}
 
         {:ok, %{status: status}} when status >= 500 ->
           auth_error(
@@ -387,6 +434,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuth do
            %{
              access_token: access,
              refresh_token: body["refresh_token"],
+             id_token: body["id_token"],
              expires_in: body["expires_in"]
            }}
 

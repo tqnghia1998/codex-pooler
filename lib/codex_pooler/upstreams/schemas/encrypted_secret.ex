@@ -10,7 +10,7 @@ defmodule CodexPooler.Upstreams.Schemas.EncryptedSecret do
 
   import Ecto.Changeset
 
-  @secret_kinds ~w(access_token refresh_token device_code web_session api_key other)
+  @secret_kinds ~w(access_token refresh_token id_token device_code web_session api_key other)
   @statuses ~w(active superseded revoked)
 
   @type t :: %__MODULE__{}

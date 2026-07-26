@@ -27,6 +27,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuthJson do
           required(:plan_label) => String.t() | nil,
           required(:token) => String.t(),
           required(:refresh_token) => String.t(),
+          required(:id_token) => String.t(),
           required(:access_token_expires_at) => DateTime.t() | nil,
           required(:import_metadata) => map()
         }
@@ -56,6 +57,7 @@ defmodule CodexPooler.Upstreams.Auth.CodexAuthJson do
          plan_label: plan_label(id_claims),
          token: tokens["access_token"],
          refresh_token: refresh_token,
+         id_token: tokens["id_token"],
          access_token_expires_at: expires_at(access_claims),
          import_metadata: import_metadata(id_claims)
        }}

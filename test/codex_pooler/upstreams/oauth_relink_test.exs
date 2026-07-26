@@ -422,7 +422,8 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "new-missing-workspace-refresh"} =
              Secrets.decrypt_active_secret(identity, "refresh_token")
 
-    assert Repo.aggregate(EncryptedSecret, :count) == 4
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(identity, "id_token")
+    assert Repo.aggregate(EncryptedSecret, :count) == 5
   end
 
   @tag :targeted_missing_workspace_relink
@@ -527,8 +528,9 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "new-email-proof-refresh"} =
              Secrets.decrypt_active_secret(identity, "refresh_token")
 
-    assert active_secret_count(identity) == 2
-    assert Repo.aggregate(EncryptedSecret, :count) == 4
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(identity, "id_token")
+    assert active_secret_count(identity) == 3
+    assert Repo.aggregate(EncryptedSecret, :count) == 5
   end
 
   @tag :targeted_missing_workspace_relink
@@ -632,8 +634,9 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "new-subject-proof-refresh"} =
              Secrets.decrypt_active_secret(identity, "refresh_token")
 
-    assert active_secret_count(identity) == 2
-    assert Repo.aggregate(EncryptedSecret, :count) == 4
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(identity, "id_token")
+    assert active_secret_count(identity) == 3
+    assert Repo.aggregate(EncryptedSecret, :count) == 5
   end
 
   @tag :targeted_missing_workspace_relink
@@ -714,8 +717,9 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "new-legacy-nil-slot-refresh"} =
              Secrets.decrypt_active_secret(identity, "refresh_token")
 
-    assert active_secret_count(identity) == 2
-    assert Repo.aggregate(EncryptedSecret, :count) == 4
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(identity, "id_token")
+    assert active_secret_count(identity) == 3
+    assert Repo.aggregate(EncryptedSecret, :count) == 5
   end
 
   @tag :targeted_missing_workspace_relink
@@ -1416,8 +1420,9 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "matching-subject-refresh"} =
              Secrets.decrypt_active_secret(identity, "refresh_token")
 
-    assert active_secret_count(identity) == 2
-    assert Repo.aggregate(EncryptedSecret, :count) == 3
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(identity, "id_token")
+    assert active_secret_count(identity) == 3
+    assert Repo.aggregate(EncryptedSecret, :count) == 4
   end
 
   @tag :subject_relink
@@ -1500,9 +1505,10 @@ defmodule CodexPooler.Upstreams.OAuthRelinkTest do
     assert {:ok, "new-second-sibling-refresh"} =
              Secrets.decrypt_active_secret(second_identity, "refresh_token")
 
+    assert {:ok, _id_token} = Secrets.decrypt_active_secret(second_identity, "id_token")
     assert active_secret_count(first_identity) == 1
-    assert active_secret_count(second_identity) == 2
-    assert Repo.aggregate(EncryptedSecret, :count) == 4
+    assert active_secret_count(second_identity) == 3
+    assert Repo.aggregate(EncryptedSecret, :count) == 5
   end
 
   test "browser relink upgrades a unique legacy slot to the incoming workspace" do

@@ -446,6 +446,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
   @type auth_expiration :: %{label: String.t(), title: String.t() | nil}
 
   @spec auth_expiration(map(), DateTimeDisplay.preferences()) :: auth_expiration()
+  defp auth_expiration(%{reauth_required?: true, reauth_reason_message: message}, _preferences) do
+    %{label: "Reauth required", title: message}
+  end
+
   defp auth_expiration(
          %{identity_observability: %{credential_expiry: credential_expiry}},
          preferences

@@ -80,6 +80,8 @@ defmodule CodexPooler.Upstreams.OAuthBrowserLinkingTest do
 
     assert active_secret_count("access_token") == 1
     assert active_secret_count("refresh_token") == 1
+    assert active_secret_count("id_token") == 1
+    assert {:ok, ^id_token} = Upstreams.Secrets.decrypt_active_secret(identity, "id_token")
     jobs = all_enqueued(worker: AccountReconciliationWorker)
     assert job = Enum.find(jobs, &(&1.args["pool_upstream_assignment_id"] == assignment.id))
     assert job.args["pool_id"] == pool.id
@@ -187,6 +189,7 @@ defmodule CodexPooler.Upstreams.OAuthBrowserLinkingTest do
     assert length(FakeOpenAIAuthProvider.requests(provider)) == 1
     assert active_secret_count("access_token") == 1
     assert active_secret_count("refresh_token") == 1
+    assert active_secret_count("id_token") == 1
   end
 
   test "wrong-state browser callback does not create identity assignment or secret rows" do

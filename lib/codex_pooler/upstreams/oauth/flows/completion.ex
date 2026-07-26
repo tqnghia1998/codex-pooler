@@ -258,8 +258,14 @@ defmodule CodexPooler.Upstreams.OAuthFlows.Completion do
       plan_label: token_info.plan_label,
       token: tokens.access_token,
       refresh_token: tokens.refresh_token,
+      id_token: tokens.id_token,
+      access_token_expires_at: oauth_access_token_expires_at(tokens),
       identity_metadata: oauth_identity_metadata(token_info, config.identity_onboarding_method)
     }
+  end
+
+  defp oauth_access_token_expires_at(tokens) do
+    CodexAuth.expires_at(tokens[:expires_in], Lifecycle.now(), tokens.access_token)
   end
 
   defp oauth_identity_metadata(token_info, onboarding_method) do

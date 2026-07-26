@@ -198,6 +198,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
       assert subsecond_future.credential_expiry.expires_at == subsecond_future_expiry
       assert subsecond_future.credential_expiry.age == "just now"
 
+      reauth_unavailable =
+        identity
+        |> Map.put(:status, "reauth_required")
+        |> Map.put(:metadata, %{"access_token_expires_at" => DateTime.to_iso8601(future_expiry)})
+        |> UpstreamAccountsReadModel.identity_observability([], [], now)
+
+      assert reauth_unavailable.credential_expiry == %{
+               state: "unavailable",
+               expires_at: nil,
+               age: nil
+             }
+
       past =
         identity
         |> Map.put(:metadata, %{"access_token_expires_at" => DateTime.to_iso8601(past_expiry)})

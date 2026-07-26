@@ -22,14 +22,21 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
   @incomplete_job_states ~w(available scheduled executing retryable)
 
   describe "provider token refresh lifecycle" do
-    test "refresh success rotates the access token, preserves encrypted boundaries, and activates refreshable accounts" do
+    test "refresh success rotates the access token, id token, preserves encrypted boundaries, and activates refreshable accounts" do
       access_token = secret("access", "old")
       refresh_token = secret("refresh", "stable")
       new_access_token = secret("access", "new")
+      new_id_token = jwt_token(%{"sub" => "refresh-rotated-id-token"})
 
       upstream =
         start_path_upstream(%{
-          "/oauth/token" => {200, %{"access_token" => new_access_token, "expires_in" => 3600}}
+          "/oauth/token" =>
+            {200,
+             %{
+               "access_token" => new_access_token,
+               "id_token" => new_id_token,
+               "expires_in" => 3600
+             }}
         })
 
       identity =
@@ -52,6 +59,9 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       assert {:ok, ^refresh_token} =
                Secrets.decrypt_active_secret(identity, "refresh_token")
 
+      assert {:ok, ^new_id_token} =
+               Secrets.decrypt_active_secret(identity, "id_token")
+
       persisted = Repo.get!(UpstreamIdentity, identity.id)
       assert persisted.metadata["credential_epoch"] == 2
       assert persisted.metadata["usage_probe_sequence"] == 0
@@ -64,6 +74,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       refute inspect(result) =~ access_token
       refute inspect(result) =~ refresh_token
       refute inspect(result) =~ new_access_token
+      refute inspect(result) =~ new_id_token
     end
 
     test "codex refresh uses the OAuth issuer form body and client id" do
@@ -103,6 +114,61 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
       assert form["grant_type"] == "refresh_token"
       assert form["client_id"] == CodexAuth.client_id()
       assert form["refresh_token"] == refresh_token
+    end
+
+    test "refresh success falls back to access token expiry when expires_in is missing" do
+      refresh_token = secret("refresh", "jwt-expiry")
+
+      access_expires_at =
+        DateTime.utc_now() |> DateTime.add(7_200, :second) |> DateTime.truncate(:second)
+
+      new_access_token = jwt_token(%{"exp" => DateTime.to_unix(access_expires_at)})
+
+      upstream =
+        start_path_upstream(%{
+          "/oauth/token" => {200, %{"access_token" => new_access_token}}
+        })
+
+      identity =
+        refreshable_identity_fixture("active", %{"base_url" => FakeUpstream.url(upstream)})
+
+      store_secret!(identity, "refresh_token", refresh_token)
+
+      assert {:ok, %{status: :active}} =
+               TokenRefresh.refresh_access_token(identity,
+                 trigger_kind: "jwt_expiry_fallback"
+               )
+
+      persisted = Repo.get!(UpstreamIdentity, identity.id)
+
+      assert persisted.metadata["access_token_expires_at"] ==
+               DateTime.to_iso8601(access_expires_at)
+    end
+
+    test "refresh success clears stale expiry when the response has no usable expiry" do
+      refresh_token = secret("refresh", "unknown-expiry")
+      new_access_token = secret("access", "unknown-expiry")
+
+      upstream =
+        start_path_upstream(%{
+          "/oauth/token" => {200, %{"access_token" => new_access_token}}
+        })
+
+      identity =
+        refreshable_identity_fixture("active", %{
+          "base_url" => FakeUpstream.url(upstream),
+          "access_token_expires_at" =>
+            DateTime.utc_now() |> DateTime.add(300, :second) |> DateTime.to_iso8601()
+        })
+
+      store_secret!(identity, "refresh_token", refresh_token)
+
+      assert {:ok, %{status: :active}} =
+               TokenRefresh.refresh_access_token(identity,
+                 trigger_kind: "unknown_expiry"
+               )
+
+      refute Repo.get!(UpstreamIdentity, identity.id).metadata["access_token_expires_at"]
     end
 
     test "metadata refresh token URL selects local provider endpoint" do
@@ -1027,6 +1093,12 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefreshTest do
   end
 
   defp secret(kind, label), do: Enum.join(["token", kind, label, "do", "not", "leak"], "-")
+
+  defp jwt_token(payload) do
+    header = %{"alg" => "none", "typ" => "JWT"}
+    encode = &Base.url_encode64(Jason.encode!(&1), padding: false)
+    encode.(header) <> "." <> encode.(payload) <> ".signature"
+  end
 
   defp configure_upstream_secret_key! do
     previous = Application.get_env(:codex_pooler, CodexPooler.Upstreams)

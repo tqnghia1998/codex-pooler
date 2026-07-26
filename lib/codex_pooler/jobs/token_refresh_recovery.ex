@@ -8,10 +8,11 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
   alias CodexPooler.Jobs.TokenRefreshWorker
   alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
-  alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
+  alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
   alias CodexPooler.Upstreams.StatusVocabulary.Identity, as: IdentityStatus
 
+  @active IdentityStatus.active_status()
   @refresh_due IdentityStatus.refresh_due_status()
   @refreshing IdentityStatus.refreshing_status()
   @refresh_failed IdentityStatus.refresh_failed_status()
@@ -21,6 +22,7 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
   @incomplete_job_states ~w(available scheduled executing retryable)
   @default_limit 100
   @refresh_failed_cooldown_seconds 6 * 60 * 60
+  @proactive_refresh_window_seconds 12 * 60 * 60
 
   @type opts :: keyword()
 
@@ -29,7 +31,7 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
     now = normalize_now(Keyword.get(opts, :now))
     limit = normalize_limit(Keyword.get(opts, :limit))
 
-    opts
+    now
     |> candidate_query()
     |> Repo.all()
     |> Enum.reject(&fresh_token_refresh_in_progress?(&1, now))
@@ -41,8 +43,11 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
     |> Enum.map(fn {identity, _eligible_at} -> identity end)
   end
 
-  defp candidate_query(_opts) do
+  defp candidate_query(now) do
     worker = worker_name(TokenRefreshWorker)
+
+    refresh_by =
+      now |> DateTime.add(@proactive_refresh_window_seconds, :second) |> DateTime.to_iso8601()
 
     from identity in UpstreamIdentity,
       join: assignment in PoolUpstreamAssignment,
@@ -51,14 +56,33 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
           assignment.status == ^@assignment_active,
       join: pool in Pool,
       on: pool.id == assignment.pool_id and pool.status == ^@pool_active,
+      left_join: refresh_secret in EncryptedSecret,
+      on:
+        refresh_secret.upstream_identity_id == identity.id and
+          refresh_secret.secret_kind == ^"refresh_token" and
+          refresh_secret.status == ^"active",
       left_join: job in Oban.Job,
       on:
         job.worker == ^worker and job.state in ^@incomplete_job_states and
           fragment("?->>? = ?::text", job.args, ^"upstream_identity_id", identity.id),
-      where: identity.status in ^@candidate_statuses,
+      where:
+        identity.status in ^@candidate_statuses or
+          (identity.status == ^@active and not is_nil(refresh_secret.id) and
+             fragment("? <= ?", identity.metadata["access_token_expires_at"], ^refresh_by)),
       where: is_nil(job.id),
       distinct: true,
       select: identity
+  end
+
+  defp with_eligibility_timestamp(
+         %UpstreamIdentity{status: status} = identity,
+         now
+       )
+       when status == @active do
+    case proactive_refresh_due_at(identity, now) do
+      %DateTime{} = due_at -> [{identity, due_at}]
+      nil -> []
+    end
   end
 
   defp with_eligibility_timestamp(
@@ -150,6 +174,40 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
   end
 
   defp token_refresh_metadata(_metadata), do: %{}
+
+  defp proactive_refresh_due_at(%UpstreamIdentity{} = identity, now) do
+    identity.metadata
+    |> access_token_expires_at()
+    |> case do
+      %DateTime{} = expires_at ->
+        refresh_due_at = DateTime.add(expires_at, -@proactive_refresh_window_seconds, :second)
+
+        if DateTime.compare(refresh_due_at, now) in [:lt, :eq] do
+          refresh_due_at
+        end
+
+      nil ->
+        nil
+    end
+  end
+
+  defp access_token_expires_at(%{} = metadata) do
+    case Map.get(metadata, "access_token_expires_at") do
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, parsed, _offset} -> DateTime.truncate(parsed, :microsecond)
+          _invalid -> nil
+        end
+
+      %DateTime{} = value ->
+        DateTime.truncate(value, :microsecond)
+
+      _value ->
+        nil
+    end
+  end
+
+  defp access_token_expires_at(_metadata), do: nil
 
   defp normalize_now(%DateTime{} = now), do: DateTime.truncate(now, :microsecond)
   defp normalize_now(_now), do: DateTime.utc_now() |> DateTime.truncate(:microsecond)

@@ -73,6 +73,7 @@ defmodule CodexPooler.Upstreams.TokenLinking do
              plaintext: attrs.token
            }),
          {:ok, _refresh_secret} <- maybe_store_refresh_token(identity, attrs),
+         {:ok, _id_secret} <- maybe_store_id_token(identity, attrs),
          {:ok, assignment_status, assignment} <-
            upsert_link_assignment(
              scope,
@@ -282,6 +283,15 @@ defmodule CodexPooler.Upstreams.TokenLinking do
     })
   end
 
+  defp maybe_store_id_token(_identity, %{id_token: nil}), do: {:ok, nil}
+
+  defp maybe_store_id_token(identity, %{id_token: id_token}) do
+    Secrets.store_encrypted_secret(identity, %{
+      secret_kind: "id_token",
+      plaintext: id_token
+    })
+  end
+
   defp link_identity_metadata(metadata, %{access_token_expires_at: %DateTime{} = expires_at}) do
     Map.put(metadata, "access_token_expires_at", DateTime.to_iso8601(expires_at))
   end
@@ -402,6 +412,7 @@ defmodule CodexPooler.Upstreams.TokenLinking do
       plan_label: Map.get(attrs, :plan_label),
       token: Map.get(attrs, :token) || Map.get(attrs, :access_token),
       refresh_token: Map.get(attrs, :refresh_token),
+      id_token: Map.get(attrs, :id_token),
       access_token_expires_at: Map.get(attrs, :access_token_expires_at),
       identity_metadata:
         Map.get(attrs, :import_metadata) || Map.get(attrs, :identity_metadata) || %{},

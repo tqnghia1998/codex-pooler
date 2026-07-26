@@ -89,6 +89,7 @@ defmodule CodexPooler.Upstreams.Import do
         |> Kernel.||(import_value(attrs, :access_token))
         |> present_string(),
       refresh_token: attrs |> import_value(:refresh_token) |> present_string(),
+      id_token: attrs |> import_value(:id_token) |> present_string(),
       access_token_expires_at:
         attrs
         |> import_value(:access_token_expires_at)

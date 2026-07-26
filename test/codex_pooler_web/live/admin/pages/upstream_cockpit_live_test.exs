@@ -127,7 +127,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
            ) == :eq
 
     assert DateTime.compare(account.identity_observability.quota_evidence_at, observed_at) == :eq
-    assert account.identity_observability.credential_expiry.state == "known_future"
+
+    assert account.identity_observability.credential_expiry == %{
+             state: "unavailable",
+             expires_at: nil,
+             age: nil
+           }
+
     refute inspect(account.identity_observability) =~ raw_provider_message
     refute inspect(account.assignments) =~ "last_reconciliation"
 
@@ -2177,6 +2183,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
         account_label: "Reauth Codex",
         identity_status: "reauth_required",
         identity_metadata: %{
+          "access_token_expires_at" =>
+            DateTime.to_iso8601(DateTime.add(DateTime.utc_now(), 5, :day)),
           "token_refresh" => %{
             "status" => "reauth_required",
             "reason" => %{
@@ -2192,6 +2200,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert cockpit.header.reauth_required? == true
     assert cockpit.header.reauth_reason_code == "codex_oauth_refresh_failed"
     assert cockpit.header.reauth_reason_message == "credential refresh was rejected"
+    assert cockpit.header.access_token_label == "access token reauth required"
+
+    assert cockpit.header.identity_observability.credential_expiry == %{
+             state: "unavailable",
+             expires_at: nil,
+             age: nil
+           }
+
     assert cockpit.actions.refresh_token.available? == false
     assert cockpit.actions.replace_auth_json.available? == true
     assert cockpit.actions.reinvite.available? == true

@@ -114,6 +114,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           required(:reactivate) => action(),
           required(:refresh_token) => action(),
           required(:redeem_saved_reset) => action(),
+          required(:view_auth_json) => action(),
           required(:replace_auth_json) => action(),
           required(:oauth_relink) => action(),
           required(:reinvite) => action(),
@@ -626,6 +627,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
           "token refresh is unavailable"
         ),
       redeem_saved_reset: redeem_saved_reset,
+      view_auth_json: action(status != "deleted", "current auth.json is unavailable"),
       replace_auth_json: action(recovery_eligible?, "credential replacement is not needed"),
       oauth_relink:
         action(

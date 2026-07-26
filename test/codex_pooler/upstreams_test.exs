@@ -795,7 +795,14 @@ defmodule CodexPooler.UpstreamsTest do
       {:ok, pool} = Pools.create_pool(scope, %{slug: "auth-json", name: "auth.json"})
       access_token = jwt_token(%{"exp" => future_unix()})
       refresh_token = runtime_secret("auth-json-refresh")
-      auth_json = auth_json_fixture(access_token: access_token, refresh_token: refresh_token)
+      id_token = id_token_fixture()
+
+      auth_json =
+        auth_json_fixture(
+          access_token: access_token,
+          refresh_token: refresh_token,
+          id_token: id_token
+        )
 
       assert {:ok,
               %{
@@ -828,13 +835,18 @@ defmodule CodexPooler.UpstreamsTest do
       assert {:ok, ^refresh_token} =
                Secrets.decrypt_active_secret(identity, "refresh_token")
 
+      assert {:ok, ^id_token} =
+               Secrets.decrypt_active_secret(identity, "id_token")
+
       assert active_secret_count("access_token") == 1
       assert active_secret_count("refresh_token") == 1
+      assert active_secret_count("id_token") == 1
       refute inspect(identity.metadata) =~ access_token
       refute inspect(identity.metadata) =~ refresh_token
       refute inspect(identity.metadata) =~ auth_json
       refute inspect(result) =~ access_token
       refute inspect(result) =~ refresh_token
+      refute inspect(result) =~ id_token
       refute inspect(result) =~ auth_json
 
       assert [event] = audit_events("upstream_account.import", identity.id)

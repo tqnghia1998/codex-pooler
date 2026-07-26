@@ -151,6 +151,8 @@ defmodule CodexPooler.Upstreams.OAuthDeviceLinkingTest do
     assert assignment.upstream_identity_id == identity.id
     assert active_secret_count("access_token") == 1
     assert active_secret_count("refresh_token") == 1
+    assert active_secret_count("id_token") == 1
+    assert {:ok, ^id_token} = Upstreams.Secrets.decrypt_active_secret(identity, "id_token")
 
     assert [_start_request, poll_request, token_request] =
              FakeOpenAIAuthProvider.requests(provider)

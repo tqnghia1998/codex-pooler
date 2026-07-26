@@ -756,6 +756,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     end
   end
 
+  defp access_token_label(%{status: "reauth_required"}, _datetime_preferences),
+    do: "access token reauth required"
+
   defp access_token_label(%{metadata: %{} = metadata}, datetime_preferences) do
     case Formatting.parse_timestamp(metadata["access_token_expires_at"]) do
       %DateTime{} = expires_at -> access_token_expiry_label(expires_at, datetime_preferences)
@@ -915,6 +918,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     |> Enum.map(&parse_non_future(&1, now))
     |> Enum.reject(&is_nil/1)
     |> Enum.max_by(&DateTime.to_unix(&1, :microsecond), fn -> nil end)
+  end
+
+  defp credential_expiry(%UpstreamIdentity{status: "reauth_required"}, _now) do
+    %{state: "unavailable", expires_at: nil, age: nil}
   end
 
   defp credential_expiry(%UpstreamIdentity{} = identity, now) do

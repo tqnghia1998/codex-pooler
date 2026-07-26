@@ -15,6 +15,7 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
 
   setup do
     Repo.delete_all(Oban.Job)
+    configure_upstream_secret_key!()
     :ok
   end
 
@@ -92,6 +93,43 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
 
       refute Enum.any?(jobs, &(&1.args["upstream_identity_id"] == recent_failed.id))
       refute Enum.any?(jobs, &(&1.args["upstream_identity_id"] == fresh_refreshing.id))
+    end
+
+    test "enqueues active identities whose access token expires within 12 hours" do
+      due_soon =
+        recovery_identity_fixture("active",
+          metadata: %{
+            "access_token_expires_at" => DateTime.to_iso8601(DateTime.add(@now, 6, :hour))
+          }
+        )
+
+      later =
+        recovery_identity_fixture("active",
+          metadata: %{
+            "access_token_expires_at" => DateTime.to_iso8601(DateTime.add(@now, 24, :hour))
+          }
+        )
+
+      missing_refresh =
+        recovery_identity_fixture("active",
+          metadata: %{
+            "access_token_expires_at" => DateTime.to_iso8601(DateTime.add(@now, 3, :hour))
+          },
+          store_refresh_token?: false
+        )
+
+      malformed =
+        recovery_identity_fixture("active",
+          metadata: %{"access_token_expires_at" => "not-a-timestamp"}
+        )
+
+      assert {:ok, %{inserted: [job], conflicts: [], errors: []}} =
+               Jobs.enqueue_scheduled_token_refreshes(now: @now)
+
+      assert job.args["upstream_identity_id"] == due_soon.id
+      refute job.args["upstream_identity_id"] == later.id
+      refute job.args["upstream_identity_id"] == missing_refresh.id
+      refute job.args["upstream_identity_id"] == malformed.id
     end
 
     test "excludes identities without an active assignment in an active pool" do
@@ -303,6 +341,14 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
       })
       |> update_identity!(%{status: status, metadata: metadata, updated_at: updated_at})
 
+    if Keyword.get(opts, :store_refresh_token?, true) do
+      assert {:ok, _secret} =
+               CodexPooler.Upstreams.store_encrypted_secret(identity, %{
+                 secret_kind: "refresh_token",
+                 plaintext: "refresh-recovery-#{unique}"
+               })
+    end
+
     if Keyword.get(opts, :assignment?, true) do
       assignment_status = Keyword.get(opts, :assignment_status, "active")
 
@@ -316,6 +362,23 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
     end
 
     identity
+  end
+
+  defp configure_upstream_secret_key! do
+    previous = Application.get_env(:codex_pooler, CodexPooler.Upstreams)
+
+    Application.put_env(:codex_pooler, CodexPooler.Upstreams,
+      upstream_secret_key: Base.encode64(:crypto.hash(:sha256, "test-upstream-secret-key")),
+      upstream_secret_key_version: "test-v1"
+    )
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:codex_pooler, CodexPooler.Upstreams, previous)
+      else
+        Application.delete_env(:codex_pooler, CodexPooler.Upstreams)
+      end
+    end)
   end
 
   defp update_identity!(%UpstreamIdentity{} = identity, attrs) do

@@ -381,7 +381,8 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
              secret_kind: "access_token",
              plaintext: Map.fetch!(token_attrs, :access_token)
            }),
-         {:ok, _refresh_secret} <- maybe_store_rotated_refresh_token(identity, token_attrs) do
+         {:ok, _refresh_secret} <- maybe_store_rotated_refresh_token(identity, token_attrs),
+         {:ok, _id_secret} <- maybe_store_rotated_id_token(identity, token_attrs) do
       timestamp = now()
 
       active_identity =
@@ -396,7 +397,7 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
           metadata:
             identity
             |> CredentialFencing.advance_credential_epoch()
-            |> maybe_put_access_token_expiry(token_attrs, timestamp)
+            |> put_access_token_expiry(token_attrs, timestamp)
             |> put_token_refresh_metadata(
               terminal_token_refresh_metadata(attempt, trigger_kind, timestamp, %{
                 "status" => "succeeded",
@@ -661,32 +662,31 @@ defmodule CodexPooler.Upstreams.Auth.TokenRefresh do
 
   defp maybe_store_rotated_refresh_token(_identity, _token_attrs), do: {:ok, nil}
 
-  defp maybe_put_access_token_expiry(metadata, %{expires_in: expires_in}, timestamp) do
-    case integer_seconds(expires_in) do
-      seconds when is_integer(seconds) and seconds > 0 ->
-        Map.put(
-          metadata,
-          "access_token_expires_at",
-          DateTime.to_iso8601(DateTime.add(timestamp, seconds, :second))
-        )
+  defp maybe_store_rotated_id_token(identity, %{id_token: id_token})
+       when is_binary(id_token) and id_token != "" do
+    Secrets.store_encrypted_secret(identity, %{
+      secret_kind: "id_token",
+      plaintext: id_token
+    })
+  end
 
-      _value ->
-        metadata
+  defp maybe_store_rotated_id_token(_identity, _token_attrs), do: {:ok, nil}
+
+  defp put_access_token_expiry(metadata, token_attrs, timestamp) do
+    case access_token_expires_at(token_attrs, timestamp) do
+      %DateTime{} = expires_at ->
+        Map.put(metadata, "access_token_expires_at", DateTime.to_iso8601(expires_at))
+
+      nil ->
+        Map.delete(metadata, "access_token_expires_at")
     end
   end
 
-  defp maybe_put_access_token_expiry(metadata, _token_attrs, _timestamp), do: metadata
-
-  defp integer_seconds(value) when is_integer(value), do: value
-
-  defp integer_seconds(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {seconds, ""} -> seconds
-      _invalid -> nil
-    end
+  defp access_token_expires_at(token_attrs, timestamp) when is_map(token_attrs) do
+    CodexAuth.expires_at(token_attrs[:expires_in], timestamp, token_attrs[:access_token])
   end
 
-  defp integer_seconds(_value), do: nil
+  defp access_token_expires_at(_token_attrs, _timestamp), do: nil
 
   defp put_token_refresh_metadata(metadata, attrs) do
     Map.put(metadata || %{}, "token_refresh", attrs)
