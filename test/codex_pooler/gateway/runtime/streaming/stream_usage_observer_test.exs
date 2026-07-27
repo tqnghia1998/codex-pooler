@@ -243,6 +243,56 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
     end
   end
 
+  test "merges Anthropic message_start input/cache usage without output tokens with a later output-only message_delta" do
+    message_start =
+      sse_event("message_start", %{
+        "type" => "message_start",
+        "message" => %{
+          "usage" => %{
+            "input_tokens" => 25,
+            "cache_creation_input_tokens" => 50,
+            "cache_read_input_tokens" => 10
+          }
+        }
+      })
+
+    message_delta =
+      sse_event("message_delta", %{
+        "type" => "message_delta",
+        "delta" => %{"stop_reason" => "end_turn"},
+        "usage" => %{"output_tokens" => 15}
+      })
+
+    state =
+      StreamUsageObserver.new()
+      |> StreamUsageObserver.observe(message_start)
+      |> StreamUsageObserver.observe(message_delta)
+
+    assert StreamUsageObserver.usage(state) == %{
+             status: "usage_known",
+             source: "upstream_usage",
+             input_tokens: 25,
+             cached_input_tokens: 10,
+             cache_write_tokens: 50,
+             output_tokens: 15,
+             reasoning_tokens: 0,
+             total_tokens: 40,
+             service_tier: nil
+           }
+  end
+
+  test "an output-only delta cannot fabricate usage without a prior known input token count" do
+    output_only =
+      sse_event("message_delta", %{
+        "type" => "message_delta",
+        "usage" => %{"output_tokens" => 15}
+      })
+
+    state = StreamUsageObserver.observe(StreamUsageObserver.new(), output_only)
+
+    assert StreamUsageObserver.usage(state) == nil
+  end
+
   defp terminal_event(usage, tail) do
     sse_event("response.completed", %{
       "type" => "response.completed",

@@ -165,6 +165,32 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
                }
       end
     end
+
+    test "extracts Anthropic Messages usage field names from non-streaming JSON" do
+      body =
+        Jason.encode!(%{
+          "id" => "msg_01",
+          "type" => "message",
+          "usage" => %{
+            "input_tokens" => 25,
+            "cache_creation_input_tokens" => 50,
+            "cache_read_input_tokens" => 10,
+            "output_tokens" => 15
+          }
+        })
+
+      assert ResponseUsage.from_json(body) == %{
+               status: "usage_known",
+               source: "upstream_usage",
+               input_tokens: 25,
+               cached_input_tokens: 10,
+               cache_write_tokens: 50,
+               output_tokens: 15,
+               reasoning_tokens: 0,
+               total_tokens: 40,
+               service_tier: nil
+             }
+    end
   end
 
   describe "from_sse/1" do
@@ -368,6 +394,94 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
                total_tokens: 16,
                service_tier: "priority"
              } = ResponseUsage.from_sse(body)
+    end
+
+    test "merges Anthropic message_start input/cache usage with message_delta output usage" do
+      body =
+        sse_event("message_start", %{
+          "type" => "message_start",
+          "message" => %{
+            "id" => "msg_1",
+            "usage" => %{
+              "input_tokens" => 25,
+              "cache_creation_input_tokens" => 50,
+              "cache_read_input_tokens" => 10,
+              "output_tokens" => 1
+            }
+          }
+        }) <>
+          sse_event("content_block_delta", %{
+            "type" => "content_block_delta",
+            "delta" => %{"type" => "text_delta", "text" => "Hello"}
+          }) <>
+          sse_event("message_delta", %{
+            "type" => "message_delta",
+            "delta" => %{"stop_reason" => "end_turn"},
+            "usage" => %{"output_tokens" => 15}
+          }) <>
+          sse_event("message_stop", %{"type" => "message_stop"})
+
+      assert ResponseUsage.from_sse(body) == %{
+               status: "usage_known",
+               source: "upstream_usage",
+               input_tokens: 25,
+               cached_input_tokens: 10,
+               cache_write_tokens: 50,
+               output_tokens: 15,
+               reasoning_tokens: 0,
+               total_tokens: 40,
+               service_tier: nil
+             }
+    end
+
+    test "retains earlier fields after an independently complete usage event" do
+      body =
+        sse_event("message_start", %{
+          "type" => "message_start",
+          "message" => %{
+            "usage" => %{
+              "input_tokens" => 25,
+              "cache_creation_input_tokens" => 50,
+              "cache_read_input_tokens" => 10,
+              "output_tokens" => 1
+            }
+          }
+        }) <>
+          sse_event("message_delta", %{
+            "type" => "message_delta",
+            "usage" => %{"input_tokens" => 25, "output_tokens" => 10}
+          }) <>
+          sse_event("message_delta", %{
+            "type" => "message_delta",
+            "usage" => %{"output_tokens" => 15}
+          })
+
+      assert %{
+               input_tokens: 25,
+               cached_input_tokens: 10,
+               cache_write_tokens: 50,
+               output_tokens: 15,
+               total_tokens: 40
+             } = ResponseUsage.from_sse(body)
+    end
+
+    test "treats a lone Anthropic message_start as known with zero output tokens" do
+      body =
+        sse_event("message_start", %{
+          "type" => "message_start",
+          "message" => %{"usage" => %{"input_tokens" => 12, "output_tokens" => 0}}
+        })
+
+      assert ResponseUsage.from_sse(body) == %{
+               status: "usage_known",
+               source: "upstream_usage",
+               input_tokens: 12,
+               cached_input_tokens: 0,
+               output_tokens: 0,
+               reasoning_tokens: 0,
+               total_tokens: 12,
+               service_tier: nil
+             }
     end
 
     test "marks SSE without usage as unknown" do
@@ -639,6 +753,52 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
         }
       }
     }
+  end
+
+  describe "accumulate/2" do
+    test "a self-sufficient candidate normalizes standalone and ignores prior raw fields" do
+      envelope = %{
+        "usage" => %{"input_tokens" => 100, "output_tokens" => 100, "total_tokens" => 200}
+      }
+
+      assert {usage, %{"input_tokens" => 100}} =
+               ResponseUsage.accumulate(%{"input_tokens" => 2, "output_tokens" => 3}, envelope)
+
+      assert usage.input_tokens == 100
+      assert usage.output_tokens == 100
+    end
+
+    test "an output-only candidate merges onto prior raw fields (Anthropic message_delta)" do
+      prior = %{
+        "input_tokens" => 25,
+        "cache_creation_input_tokens" => 50,
+        "cache_read_input_tokens" => 10,
+        "output_tokens" => 1
+      }
+
+      envelope = %{"usage" => %{"output_tokens" => 15}}
+
+      assert {usage, merged_raw} = ResponseUsage.accumulate(prior, envelope)
+      assert usage.status == "usage_known"
+      assert usage.input_tokens == 25
+      assert usage.cached_input_tokens == 10
+      assert usage.cache_write_tokens == 50
+      assert usage.output_tokens == 15
+      assert usage.total_tokens == 40
+      assert merged_raw["output_tokens"] == 15
+    end
+
+    test "an output-only candidate without any prior fields stays unknown" do
+      envelope = %{"usage" => %{"output_tokens" => 15}}
+
+      assert {%{status: "usage_unknown"}, %{"output_tokens" => 15}} =
+               ResponseUsage.accumulate(nil, envelope)
+    end
+
+    test "an envelope without a usage map is unknown and does not touch prior raw fields" do
+      assert {%{status: "usage_unknown", source: "invalid_usage_tokens"}, %{"a" => 1}} =
+               ResponseUsage.accumulate(%{"a" => 1}, %{"not_usage" => true})
+    end
   end
 
   defp cache_write_details(:absent), do: %{"cached_tokens" => 4}

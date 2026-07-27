@@ -22,6 +22,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver do
           required(:event_type) => String.t() | nil,
           required(:marker_suffix) => binary(),
           required(:pending_service_tier?) => boolean(),
+          required(:raw_usage) => map() | nil,
           required(:service_tier) => String.t() | nil,
           required(:terminal?) => boolean(),
           required(:usage) => ResponseUsage.usage() | nil,
@@ -35,6 +36,7 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver do
       event_type: nil,
       marker_suffix: "",
       pending_service_tier?: false,
+      raw_usage: nil,
       service_tier: nil,
       terminal?: false,
       usage: nil,
@@ -146,19 +148,24 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver do
 
   defp accept_candidate(state, candidate, usage_object) do
     with {:ok, decoded_usage} <- Jason.decode(usage_object),
-         true <- is_map(decoded_usage),
-         envelope <- usage_envelope(decoded_usage, candidate.service_tier),
-         %{status: "usage_known"} = usage <- ResponseUsage.from_decoded(envelope),
-         true <- consistent_total?(usage) do
-      terminal? = terminal_event?(candidate.event_type)
+         true <- is_map(decoded_usage) do
+      envelope = usage_envelope(decoded_usage, candidate.service_tier)
+      {usage, raw_usage} = ResponseUsage.accumulate(state.raw_usage, envelope)
+      state = %{state | raw_usage: raw_usage}
 
-      %{
+      if usage.status == "usage_known" and consistent_total?(usage) do
+        terminal? = terminal_event?(candidate.event_type)
+
+        %{
+          state
+          | pending_service_tier?: is_nil(usage.service_tier),
+            terminal?: terminal?,
+            usage: usage,
+            usage_event_type: candidate.event_type
+        }
+      else
         state
-        | pending_service_tier?: is_nil(usage.service_tier),
-          terminal?: terminal?,
-          usage: usage,
-          usage_event_type: candidate.event_type
-      }
+      end
     else
       _invalid_or_unknown -> state
     end
@@ -300,18 +307,21 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserver do
          event_type: event_type,
          marker_suffix: marker_suffix,
          pending_service_tier?: pending_service_tier?,
+         raw_usage: raw_usage,
          service_tier: service_tier,
          terminal?: terminal?,
          usage: usage,
          usage_event_type: usage_event_type
        })
        when (is_nil(candidate) or is_map(candidate)) and is_binary(marker_suffix) and
-              is_boolean(pending_service_tier?) and is_boolean(terminal?) do
+              is_boolean(pending_service_tier?) and is_boolean(terminal?) and
+              (is_nil(raw_usage) or is_map(raw_usage)) do
     %{
       candidate: candidate,
       event_type: event_type,
       marker_suffix: marker_suffix,
       pending_service_tier?: pending_service_tier?,
+      raw_usage: raw_usage,
       service_tier: service_tier,
       terminal?: terminal?,
       usage: usage,

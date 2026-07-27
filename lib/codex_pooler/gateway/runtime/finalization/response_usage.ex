@@ -45,6 +45,16 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
     end
   end
 
+  @doc "Merges an incomplete streaming usage object onto previously observed fields."
+  @spec accumulate(map() | nil, map()) :: {usage(), map() | nil}
+  def accumulate(prior_raw, %{"usage" => usage} = envelope) when is_map(usage) do
+    merged_raw = Map.merge(prior_raw || %{}, usage)
+    {normalize_usage(merged_raw, envelope), merged_raw}
+  end
+
+  def accumulate(prior_raw, _envelope),
+    do: {%{status: "usage_unknown", source: "invalid_usage_tokens"}, prior_raw}
+
   defp from_sse_body(body, missing_source) do
     best_usage(usage_from_sse_lines(body), usage_from_retained_usage_fragment(body)) ||
       %{status: "usage_unknown", source: missing_source}
@@ -53,12 +63,54 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
   defp usage_from_sse_lines(body) do
     body
     |> String.split("\n")
-    |> Enum.filter(&String.starts_with?(&1, "data: "))
-    |> Enum.map(&String.replace_prefix(&1, "data: ", ""))
-    |> Enum.map(&String.trim/1)
-    |> Enum.reject(&(&1 == "[DONE]"))
-    |> usage_from_json_lines()
+    |> Enum.reduce({nil, nil, nil}, fn
+      "data: " <> line, state ->
+        case String.trim(line) do
+          "[DONE]" ->
+            state
+
+          json ->
+            case Jason.decode(json) do
+              {:ok, decoded} -> accumulate_sse_usage(decoded, state)
+              {:error, _reason} -> state
+            end
+        end
+
+      _line, state ->
+        state
+    end)
+    |> elem(0)
   end
+
+  defp accumulate_sse_usage(decoded, {best, raw, service_tier}) do
+    service_tier = service_tier_from(decoded) || service_tier
+
+    case usage_envelope(decoded) do
+      %{"usage" => usage} = envelope when is_map(usage) ->
+        envelope =
+          if service_tier, do: Map.put(envelope, "service_tier", service_tier), else: envelope
+
+        {candidate, raw} = accumulate(raw, envelope)
+        {best_usage(best, candidate), raw, service_tier}
+
+      _missing ->
+        {best, raw, service_tier}
+    end
+  end
+
+  defp usage_envelope(%{"usage" => usage} = envelope) when is_map(usage), do: envelope
+
+  defp usage_envelope(%{"message" => %{"usage" => usage}} = envelope) when is_map(usage),
+    do: Map.put(envelope, "usage", usage)
+
+  defp usage_envelope(%{"response" => %{"usage" => usage} = response}) when is_map(usage),
+    do: response
+
+  defp usage_envelope(_decoded), do: nil
+
+  defp service_tier_from(%{"service_tier" => tier}) when is_binary(tier), do: tier
+  defp service_tier_from(%{"response" => response}), do: service_tier_from(response)
+  defp service_tier_from(_decoded), do: nil
 
   defp usage_from_retained_usage_fragment(body) do
     body
@@ -359,6 +411,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
 
   defp cached_input_tokens(%{"cached_input_tokens" => tokens}), do: tokens
 
+  defp cached_input_tokens(%{"cache_read_input_tokens" => tokens}), do: tokens
+
   defp cached_input_tokens(%{"input_tokens_details" => %{"cached_tokens" => tokens}}),
     do: tokens
 
@@ -377,6 +431,7 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
 
   defp fetch_cache_write_tokens(usage) do
     with :error <- Map.fetch(usage, "cache_write_tokens"),
+         :error <- Map.fetch(usage, "cache_creation_input_tokens"),
          :error <- fetch_nested(usage, "input_tokens_details", "cache_write_tokens"),
          :error <- fetch_nested(usage, "prompt_tokens_details", "cache_write_tokens") do
       :absent
