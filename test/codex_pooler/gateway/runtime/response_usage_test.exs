@@ -182,12 +182,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
       assert ResponseUsage.from_json(body) == %{
                status: "usage_known",
                source: "upstream_usage",
-               input_tokens: 25,
+               input_tokens: 85,
                cached_input_tokens: 10,
                cache_write_tokens: 50,
                output_tokens: 15,
                reasoning_tokens: 0,
-               total_tokens: 40,
+               total_tokens: 100,
                service_tier: nil
              }
     end
@@ -424,12 +424,12 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
       assert ResponseUsage.from_sse(body) == %{
                status: "usage_known",
                source: "upstream_usage",
-               input_tokens: 25,
+               input_tokens: 85,
                cached_input_tokens: 10,
                cache_write_tokens: 50,
                output_tokens: 15,
                reasoning_tokens: 0,
-               total_tokens: 40,
+               total_tokens: 100,
                service_tier: nil
              }
     end
@@ -457,11 +457,35 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
           })
 
       assert %{
-               input_tokens: 25,
+               input_tokens: 85,
                cached_input_tokens: 10,
                cache_write_tokens: 50,
                output_tokens: 15,
-               total_tokens: 40
+               total_tokens: 100
+             } = ResponseUsage.from_sse(body)
+    end
+
+    test "normalizes a real Compass Anthropic cache-write stream into inclusive input" do
+      body =
+        """
+        event: message_start
+        data: {"type":"message_start","message":{"model":"claude-sonnet-5","usage":{"input_tokens":10,"cache_creation_input_tokens":3604,"cache_read_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":3604,"ephemeral_1h_input_tokens":0},"output_tokens":1,"service_tier":"standard","inference_geo":"global"}}}
+
+        event: message_delta
+        data: {"delta":{"stop_reason":"end_turn"},"type":"message_delta","usage":{"cache_creation_input_tokens":3604,"cache_read_input_tokens":0,"input_tokens":10,"output_tokens":4,"output_tokens_details":{"thinking_tokens":0},"price_cost_usd":"0.00907"}}
+
+        event: message_stop
+        data: {"type":"message_stop"}
+
+        """
+
+      assert %{
+               status: "usage_known",
+               input_tokens: 3614,
+               cached_input_tokens: 0,
+               cache_write_tokens: 3604,
+               output_tokens: 4,
+               total_tokens: 3618
              } = ResponseUsage.from_sse(body)
     end
 
@@ -780,11 +804,11 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
 
       assert {usage, merged_raw} = ResponseUsage.accumulate(prior, envelope)
       assert usage.status == "usage_known"
-      assert usage.input_tokens == 25
+      assert usage.input_tokens == 85
       assert usage.cached_input_tokens == 10
       assert usage.cache_write_tokens == 50
       assert usage.output_tokens == 15
-      assert usage.total_tokens == 40
+      assert usage.total_tokens == 100
       assert merged_raw["output_tokens"] == 15
     end
 

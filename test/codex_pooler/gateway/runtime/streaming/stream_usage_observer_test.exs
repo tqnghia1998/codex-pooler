@@ -271,12 +271,12 @@ defmodule CodexPooler.Gateway.Runtime.Streaming.StreamUsageObserverTest do
     assert StreamUsageObserver.usage(state) == %{
              status: "usage_known",
              source: "upstream_usage",
-             input_tokens: 25,
+             input_tokens: 85,
              cached_input_tokens: 10,
              cache_write_tokens: 50,
              output_tokens: 15,
              reasoning_tokens: 0,
-             total_tokens: 40,
+             total_tokens: 100,
              service_tier: nil
            }
   end

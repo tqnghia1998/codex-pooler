@@ -379,10 +379,17 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
   defp inherit_missing_service_tier(usage, _fallback), do: usage
 
   defp normalize_usage(usage, envelope) do
-    with {:ok, input_tokens} <-
+    with {:ok, reported_input_tokens} <-
            required_int_value(usage["input_tokens"] || usage["prompt_tokens"]),
          {:ok, cached_input_tokens} <- optional_int_value(cached_input_tokens(usage)),
          {:ok, cache_write_tokens} <- cache_write_tokens_value(usage),
+         input_tokens <-
+           inclusive_input_tokens(
+             usage,
+             reported_input_tokens,
+             cached_input_tokens,
+             cache_write_tokens
+           ),
          {:ok, output_tokens} <-
            required_int_value(usage["output_tokens"] || usage["completion_tokens"]),
          {:ok, reasoning_tokens} <- optional_int_value(usage["reasoning_tokens"]),
@@ -402,6 +409,17 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
       |> maybe_put_cache_write_tokens(cache_write_tokens)
     else
       _invalid -> %{status: "usage_unknown", source: "invalid_usage_tokens"}
+    end
+  end
+
+  # Anthropic reports uncached input separately from cache reads/writes. The accounting
+  # model stores total input with cache counters as subsets, matching OpenAI usage.
+  defp inclusive_input_tokens(usage, input_tokens, cached_input_tokens, cache_write_tokens) do
+    if Map.has_key?(usage, "cache_read_input_tokens") or
+         Map.has_key?(usage, "cache_creation_input_tokens") do
+      input_tokens + cached_input_tokens + (cache_write_tokens || 0)
+    else
+      input_tokens
     end
   end
 
