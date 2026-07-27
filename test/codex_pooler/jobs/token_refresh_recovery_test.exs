@@ -132,20 +132,32 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
       refute job.args["upstream_identity_id"] == malformed.id
     end
 
-    test "excludes identities without an active assignment in an active pool" do
-      recovery_identity_fixture("refresh_due", assignment?: false)
-      recovery_identity_fixture("refresh_due", assignment_status: "disabled")
-      recovery_identity_fixture("refresh_due", pool_status: "disabled")
-      included = recovery_identity_fixture("refresh_due")
+    test "refreshes recoverable identities regardless of pool assignment" do
+      no_assignment = recovery_identity_fixture("refresh_due", assignment?: false)
 
-      assert {:ok, %{inserted: [job], conflicts: [], errors: []}} =
+      disabled_assignment =
+        recovery_identity_fixture("refresh_due", assignment_status: "disabled")
+
+      disabled_pool = recovery_identity_fixture("refresh_due", pool_status: "disabled")
+      assigned = recovery_identity_fixture("refresh_due")
+
+      assert {:ok, %{inserted: jobs, conflicts: [], errors: []}} =
                Jobs.enqueue_scheduled_token_refreshes(now: @now)
 
-      assert job.args["upstream_identity_id"] == included.id
+      enqueued_ids = MapSet.new(jobs, & &1.args["upstream_identity_id"])
+
+      assert MapSet.equal?(
+               enqueued_ids,
+               MapSet.new([
+                 no_assignment.id,
+                 disabled_assignment.id,
+                 disabled_pool.id,
+                 assigned.id
+               ])
+             )
     end
 
-    test "refresh_failed identities become eligible only after an active assignment is added" do
-      pool = pool_fixture(%{status: "active"})
+    test "refresh_failed identities are eligible after cooldown without any assignment" do
       unique = System.unique_integer([:positive])
 
       identity =
@@ -159,17 +171,6 @@ defmodule CodexPooler.Jobs.TokenRefreshRecoveryTest do
           updated_at: DateTime.add(@now, -8, :hour),
           metadata: failed_metadata(DateTime.add(@now, -7, :hour))
         })
-
-      assert {:ok, %{inserted: [], conflicts: [], errors: []}} =
-               Jobs.enqueue_scheduled_token_refreshes(now: @now)
-
-      assert {:ok, assignment} =
-               PoolAssignments.create_pool_assignment(pool, identity, %{
-                 assignment_label: "Refresh failed transition assignment #{unique}",
-                 metadata: %{}
-               })
-
-      put_assignment_status!(assignment, "active")
 
       assert {:ok, %{inserted: [job], conflicts: [], errors: []}} =
                Jobs.enqueue_scheduled_token_refreshes(now: @now)

@@ -6,10 +6,8 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
   import Ecto.Query
 
   alias CodexPooler.Jobs.TokenRefreshWorker
-  alias CodexPooler.Pools.Pool
   alias CodexPooler.Repo
-  alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, PoolUpstreamAssignment, UpstreamIdentity}
-  alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
+  alias CodexPooler.Upstreams.Schemas.{EncryptedSecret, UpstreamIdentity}
   alias CodexPooler.Upstreams.StatusVocabulary.Identity, as: IdentityStatus
 
   @active IdentityStatus.active_status()
@@ -17,8 +15,6 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
   @refreshing IdentityStatus.refreshing_status()
   @refresh_failed IdentityStatus.refresh_failed_status()
   @candidate_statuses [@refresh_due, @refreshing, @refresh_failed]
-  @assignment_active AssignmentStatus.active_status()
-  @pool_active "active"
   @incomplete_job_states ~w(available scheduled executing retryable)
   @default_limit 100
   @refresh_failed_cooldown_seconds 6 * 60 * 60
@@ -43,6 +39,11 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
     |> Enum.map(fn {identity, _eligible_at} -> identity end)
   end
 
+  # Selection is driven by access-token expiry, not pool assignment: any
+  # refreshable identity whose token expires within the window is refreshed
+  # regardless of whether it currently has an active assignment in an active
+  # Pool. Bounded in the database by the recovery statuses and the 12h expiry
+  # predicate; do not load every identity and filter in Elixir.
   defp candidate_query(now) do
     worker = worker_name(TokenRefreshWorker)
 
@@ -50,12 +51,6 @@ defmodule CodexPooler.Jobs.TokenRefreshRecovery do
       now |> DateTime.add(@proactive_refresh_window_seconds, :second) |> DateTime.to_iso8601()
 
     from identity in UpstreamIdentity,
-      join: assignment in PoolUpstreamAssignment,
-      on:
-        assignment.upstream_identity_id == identity.id and
-          assignment.status == ^@assignment_active,
-      join: pool in Pool,
-      on: pool.id == assignment.pool_id and pool.status == ^@pool_active,
       left_join: refresh_secret in EncryptedSecret,
       on:
         refresh_secret.upstream_identity_id == identity.id and

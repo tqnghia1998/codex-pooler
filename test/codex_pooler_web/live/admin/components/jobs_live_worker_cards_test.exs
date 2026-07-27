@@ -1137,7 +1137,7 @@ defmodule CodexPoolerWeb.Admin.JobsLiveWorkerCardsTest do
     assert has_element?(
              view,
              "#{card} [data-role='schedule'] [data-role='cadence-label']",
-             "Every 15 min"
+             "Hourly"
            )
 
     assert has_element?(view, "#{card} [data-role='next-run']")

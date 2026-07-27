@@ -49,7 +49,7 @@ defmodule CodexPooler.JobsTest do
                {"0 * * * *", PricingImportWorker},
                {"* * * * *", AccountReconciliationEnqueueWorker},
                {"*/5 * * * *", AlertEvaluationEnqueueWorker},
-               {"*/15 * * * *", TokenRefreshEnqueueWorker},
+               {"0 * * * *", TokenRefreshEnqueueWorker},
                {"17 0 * * *", DailyRollupRebuildEnqueueWorker},
                {"*/15 * * * *", RuntimeStateCleanupWorker}
              ]
@@ -62,8 +62,8 @@ defmodule CodexPooler.JobsTest do
              }
 
       assert Enum.find(worker_groups, &(&1.key == :token_refresh)).cadence == %{
-               label: "Every 15 min",
-               cron: "*/15 * * * *"
+               label: "Hourly",
+               cron: "0 * * * *"
              }
 
       assert Enum.find(worker_groups, &(&1.key == :token_refresh)).workers ==

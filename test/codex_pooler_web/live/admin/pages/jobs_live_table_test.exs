@@ -45,7 +45,7 @@ defmodule CodexPoolerWeb.Admin.JobsLiveTableTest do
     assert has_element?(
              view,
              "#{worker_card_selector(:token_refresh)} [data-role='schedule'] [data-role='cadence-label']",
-             "Every 15 min"
+             "Hourly"
            )
 
     refute has_element?(

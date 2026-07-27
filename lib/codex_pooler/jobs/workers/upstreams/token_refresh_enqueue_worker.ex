@@ -10,7 +10,7 @@ defmodule CodexPooler.Jobs.TokenRefreshEnqueueWorker do
     unique: [
       fields: [:worker, :queue],
       states: :incomplete,
-      period: {15, :minutes}
+      period: {60, :minutes}
     ]
 
   alias CodexPooler.Jobs

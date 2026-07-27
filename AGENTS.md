@@ -49,14 +49,12 @@ Initial browser/device OAuth linking stores encrypted `access_token`, `refresh_t
 
 `metadata["access_token_expires_at"]` is derived from the provider's positive `expires_in` first, then from the access-token JWT `exp` claim. A successful refresh with neither source clears any stale expiry instead of preserving a false deadline. Admin labels read this stored metadata; they do not decode the JWT on every render. Reauth-required accounts intentionally show `Reauth required` instead of a future access-token countdown.
 
-`TokenRefreshRecovery` adds active identities to the normal scheduled refresh fanout when all of these hold:
+`TokenRefreshRecovery` adds identities to the scheduled refresh fanout (hourly `TokenRefreshEnqueueWorker` cron) whenever both of these hold:
 
 - `access_token_expires_at` is within 12 hours or already past
-- an active refresh-token secret exists
-- the identity has an active assignment in an active Pool
 - no incomplete `TokenRefreshWorker` job already exists
 
-Keep the 12-hour selection bounded in the database; do not load every active identity and filter it in Elixir. This refreshes access credentials proactively but cannot prevent provider-side refresh-token/session revocation.
+Refresh is driven by access-token expiry alone: it no longer requires an active Pool assignment or active pool. An expiring, refreshable identity is refreshed "no matter what," even if temporarily unassigned. Recovery-state identities (`refresh_due`, `refreshing`, `refresh_failed`) remain eligible on their existing cadence (refresh_failed keeps its 6h cooldown). Keep the 12-hour selection bounded in the database; do not load every active identity and filter it in Elixir. This refreshes access credentials proactively but cannot prevent provider-side refresh-token/session revocation.
 
 Operators can open a read-only Current auth.json dialog from the upstream list or cockpit. `Upstreams.export_auth_json_for_scope/2` authorizes through `AccountLifecycle`, decrypts the currently active token secrets, and audits `upstream_account.auth_json_view` without recording secret values. It renders the credentials currently stored; missing access, refresh, or id tokens appear as JSON `null` rather than blocking the dialog. Therefore partial output is inspectable but is not guaranteed to be importable as a complete Codex auth.json.
 

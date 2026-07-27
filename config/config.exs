@@ -78,7 +78,7 @@ jobs_schedule = [
       CodexPooler.Jobs.TokenRefreshEnqueueWorker
     ],
     scheduled_worker: CodexPooler.Jobs.TokenRefreshEnqueueWorker,
-    cadence: %{label: "Every 15 min", cron: "*/15 * * * *"}
+    cadence: %{label: "Hourly", cron: "0 * * * *"}
   },
   %{
     key: :daily_rollup_rebuild,
