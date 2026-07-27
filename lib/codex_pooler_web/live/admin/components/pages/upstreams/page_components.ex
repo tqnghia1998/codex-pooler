@@ -126,6 +126,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
       <.spend_cap_dialog
         account={@editing_spend_cap}
         form={@spend_cap_form}
+        pool_options={@dialog_pool_options}
       />
 
       <section id="upstream-account-surface" class="grid min-w-0 gap-4">
@@ -1203,6 +1204,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
 
   attr :account, :map, default: nil
   attr :form, :any, default: nil
+  attr :pool_options, :list, required: true
 
   defp spend_cap_dialog(assigns) do
     ~H"""
@@ -1230,6 +1232,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
           class="grid gap-5 p-6"
         >
           <div :if={@account[:bulk]} class="grid gap-3">
+            <.input
+              field={@form[:pool_id]}
+              type="select"
+              label="Target Pool"
+              options={@pool_options}
+            />
             <div class="grid grid-cols-[1fr_1fr_2.75rem] gap-3">
               <span class="text-xs font-semibold uppercase tracking-wide text-base-content/60">
                 If monthly quota left &gt; (USD)

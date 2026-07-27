@@ -229,6 +229,30 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjectionTest do
     end
   end
 
+  test "projects non-recurring Compass quota into the 30d slot with its own label" do
+    observed_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    rows =
+      [
+        account_window(
+          window_minutes: 1,
+          active_limit: 100,
+          used_percent: Decimal.new("25.5"),
+          reset_at: nil,
+          source: "compass_project_api",
+          source_precision: "authoritative",
+          observed_at: observed_at,
+          metadata: %{"balance" => "74.5", "applied_balance" => "100.0"}
+        )
+      ]
+      |> QuotaProjection.quota_limit_rows(DateTimeDisplay.preferences_for_user(nil))
+
+    assert quota = Enum.find(rows, &(&1.key == :primary_30d))
+    assert quota.label == "Non-recurring"
+    assert Decimal.equal?(quota.percent, Decimal.new("74.5"))
+    assert quota.count_label == "$74.50 left of $100.00"
+  end
+
   @tag :quota_spark_projection
   test "legacy weekly-duration primary Spark rows fold into one persisted Spark Weekly row" do
     identity = active_upstream_identity_fixture()

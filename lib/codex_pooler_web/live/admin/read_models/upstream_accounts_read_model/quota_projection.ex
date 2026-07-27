@@ -165,6 +165,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
         ) :: [quota_limit_row()]
   def quota_limit_rows(windows, datetime_preferences, %DateTime{} = snapshot_at)
       when is_list(windows) do
+    monthly_quota = quota_account_window(windows, :monthly_primary, snapshot_at)
+    non_recurring_compass_quota = non_recurring_compass_quota(windows, snapshot_at)
+
     additional_limits =
       windows
       |> Enum.reject(&account_quota_window?/1)
@@ -192,8 +195,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       ),
       quota_limit_row(
         :primary_30d,
-        "30d",
-        quota_account_window(windows, :monthly_primary, snapshot_at),
+        if(monthly_quota, do: "30d", else: "Non-recurring"),
+        monthly_quota || non_recurring_compass_quota,
         datetime_preferences,
         snapshot_at
       ),
@@ -207,7 +210,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       quota_limit_row(
         :monthly_quota,
         "Monthly Usage",
-        Enum.find(WindowSelector.logical_windows(windows), &(&1.quota_key == "spend_control")),
+        Enum.find(
+          WindowSelector.logical_windows(windows, snapshot_at),
+          &(&1.quota_key == "spend_control")
+        ),
         datetime_preferences,
         snapshot_at
       )
@@ -241,6 +247,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
   defp quota_account_window(windows, descriptor, snapshot_at) do
     WindowSelector.best_account_window(windows, descriptor, snapshot_at)
+  end
+
+  defp non_recurring_compass_quota(windows, snapshot_at) do
+    Enum.find(WindowSelector.logical_windows(windows, snapshot_at), fn
+      %Quota.AccountQuotaWindow{
+        source: "compass_project_api",
+        quota_key: "account",
+        quota_scope: "account",
+        quota_family: "account",
+        window_kind: "primary",
+        window_minutes: 1
+      } ->
+        true
+
+      _window ->
+        false
+    end)
   end
 
   defp spend_cap_spent(%{spent_credits: value}) when not is_nil(value), do: credit_amount(value)

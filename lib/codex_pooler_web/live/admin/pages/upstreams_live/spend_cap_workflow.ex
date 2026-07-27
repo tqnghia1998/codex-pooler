@@ -34,7 +34,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
     {500, 50},
     {200, 20},
     {100, 10},
-    {0, 5}
+    {50, 5},
+    {0, 0}
   ]
 
   def open_bulk(socket) do
@@ -47,7 +48,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
 
     assign(socket,
       editing_spend_cap: %{bulk: true},
-      spend_cap_form: bulk_form(%{"rules" => rules})
+      spend_cap_form: bulk_form(%{"pool_id" => "", "rules" => rules})
     )
   end
 
@@ -141,34 +142,36 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
   end
 
   def save_bulk(socket, params, close_fun, reload_fun) do
-    case parse_rules(params) do
-      {:ok, rules} ->
-        accounts = matching_bulk_accounts(socket, rules)
+    with {:ok, pool_id} <- validate_bulk_pool_id(params),
+         {:ok, rules} <- parse_rules(params) do
+      accounts = matching_bulk_accounts(socket, pool_id, rules)
 
-        case Enum.reduce_while(accounts, :ok, fn {identity, cap}, :ok ->
-               attrs = %{spend_cap_credits: dollars_to_credits(cap)}
+      case Enum.reduce_while(accounts, :ok, fn {identity, cap}, :ok ->
+             attrs = %{spend_cap_credits: dollars_to_credits(cap)}
 
-               case Upstreams.update_spend_cap_for_scope(
-                      socket.assigns.current_scope,
-                      identity.id,
-                      attrs
-                    ) do
-                 {:ok, _result} -> {:cont, :ok}
-                 {:error, reason} -> {:halt, {:error, reason}}
-               end
-             end) do
-          :ok ->
-            socket
-            |> put_flash(:info, "Spend cap updated for #{length(accounts)} accounts")
-            |> close_fun.()
-            |> reload_fun.()
+             case Upstreams.update_spend_cap_for_scope(
+                    socket.assigns.current_scope,
+                    identity.id,
+                    attrs
+                  ) do
+               {:ok, _result} -> {:cont, :ok}
+               {:error, reason} -> {:halt, {:error, reason}}
+             end
+           end) do
+        :ok ->
+          socket
+          |> put_flash(
+            :info,
+            "Spend cap updated for #{length(accounts)} accounts in #{pool_label(socket, pool_id)}"
+          )
+          |> close_fun.()
+          |> reload_fun.()
 
-          {:error, reason} ->
-            put_flash(socket, :error, WorkflowError.message(reason))
-        end
-
-      {:error, errors} ->
-        assign(socket, :spend_cap_form, bulk_form(params, errors))
+        {:error, reason} ->
+          put_flash(socket, :error, WorkflowError.message(reason))
+      end
+    else
+      {:error, errors} -> assign(socket, :spend_cap_form, bulk_form(params, errors))
     end
   end
 
@@ -204,8 +207,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
 
   defp parse_rules(_params), do: {:error, rules: {"Add at least one rule", []}}
 
-  defp matching_bulk_accounts(socket, rules) do
-    identities = Upstreams.list_visible_upstream_identities(socket.assigns.current_scope)
+  defp validate_bulk_pool_id(%{"pool_id" => pool_id}) when is_binary(pool_id) and pool_id != "",
+    do: {:ok, pool_id}
+
+  defp validate_bulk_pool_id(_params), do: {:error, pool_id: {"Select a Pool", []}}
+
+  defp pool_label(socket, pool_id) do
+    case Enum.find(socket.assigns.pools, &(&1.id == pool_id)) do
+      %{name: name} -> name
+      _not_found -> "selected Pool"
+    end
+  end
+
+  defp matching_bulk_accounts(socket, pool_id, rules) do
+    identities = Upstreams.list_visible_upstream_identities(socket.assigns.current_scope, pool_id)
 
     windows =
       identities
@@ -233,6 +248,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive.SpendCapWorkflow do
 
   defp monthly_quota_left(windows) do
     Enum.find_value(windows, fn
+      %{
+        source: "compass_project_api",
+        quota_key: "account",
+        metadata: %{"balance" => balance}
+      } ->
+        case Decimal.parse(to_string(balance)) do
+          {balance, ""} -> Decimal.max(balance, Decimal.new(0))
+          _invalid -> nil
+        end
+
       %{quota_key: "spend_control", metadata: metadata} when is_map(metadata) ->
         with {quota, ""} <- Decimal.parse(to_string(metadata["spend_cap"] || "")),
              {used, ""} <- Decimal.parse(to_string(metadata["spend_used"] || "")) do

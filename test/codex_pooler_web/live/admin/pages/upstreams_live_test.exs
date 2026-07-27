@@ -3950,6 +3950,43 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            )
   end
 
+  test "renders non-recurring Compass quota with its own label", %{conn: conn, scope: scope} do
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "compass-non-recurring", name: "Compass Non-recurring"})
+
+    %{identity: identity} =
+      upstream_assignment_fixture(pool, %{
+        account_label: "project-non-recurring",
+        identity_metadata: %{"provider" => "compass"}
+      })
+
+    now = DateTime.utc_now()
+
+    assert {:ok, [_window]} =
+             QuotaWindows.upsert_quota_windows(identity, [
+               %{
+                 quota_key: "account",
+                 quota_scope: "account",
+                 quota_family: "account",
+                 window_kind: "primary",
+                 window_minutes: 1,
+                 active_limit: 100,
+                 used_percent: Decimal.new("25.5"),
+                 source: "compass_project_api",
+                 source_precision: "authoritative",
+                 freshness_state: "fresh",
+                 observed_at: now,
+                 metadata: %{"balance" => "74.5", "applied_balance" => "100.0"}
+               }
+             ])
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    selector = "#upstream-account-#{identity.id}-limit-primary_30d"
+
+    assert has_element?(view, selector, "Non-recurring")
+    assert has_element?(view, "#{selector}-count", "$74.50 left of $100.00")
+  end
+
   test "sorts upstream accounts by most recently used", %{scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "last-used-order", name: "Last Used Order"})
     %{pool: ^pool} = auth = active_api_key_fixture(pool, %{scope: scope})
@@ -4080,6 +4117,105 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert Repo.reload!(second).spend_cap_credits == 125
   end
 
+  test "mass sets spending caps for Compass project balances", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-compass", name: "Bulk Cap Compass"})
+
+    %{identity: identity} =
+      upstream_assignment_fixture(pool, %{
+        account_label: "Compass project",
+        identity_metadata: %{"provider" => "compass"}
+      })
+
+    now = DateTime.utc_now()
+
+    assert {:ok, [_window]} =
+             QuotaWindows.upsert_quota_windows(identity, [
+               %{
+                 quota_key: "account",
+                 quota_scope: "account",
+                 quota_family: "account",
+                 window_kind: "primary",
+                 window_minutes: 44_640,
+                 active_limit: 1_000,
+                 used_percent: Decimal.new("25"),
+                 reset_at: DateTime.add(now, 30, :day),
+                 source: "compass_project_api",
+                 source_precision: "authoritative",
+                 freshness_state: "fresh",
+                 observed_at: now,
+                 metadata: %{"balance" => "750", "applied_balance" => "1000"}
+               }
+             ])
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{
+        "pool_id" => pool.id,
+        "rules" => %{"0" => %{"monthly_quota" => "600", "spend_cap" => "30"}}
+      }
+    })
+    |> render_submit()
+
+    assert Repo.reload!(identity).spend_cap_credits == 750
+  end
+
+  test "scopes bulk spending-cap updates to the selected Pool only", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool_a} = Pools.create_pool(scope, %{slug: "bulk-cap-pool-a", name: "Bulk Cap Pool A"})
+    {:ok, pool_b} = Pools.create_pool(scope, %{slug: "bulk-cap-pool-b", name: "Bulk Cap Pool B"})
+    in_scope = upstream_assignment_fixture(pool_a, %{account_label: "In Pool A"}).identity
+    out_of_scope = upstream_assignment_fixture(pool_b, %{account_label: "In Pool B"}).identity
+    insert_monthly_spend_quota(in_scope, 1_000, 250)
+    insert_monthly_spend_quota(out_of_scope, 1_000, 250)
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    view
+    |> form("#spend-cap-form", %{
+      "spend_cap" => %{
+        "pool_id" => pool_a.id,
+        "rules" => %{"0" => %{"monthly_quota" => "600", "spend_cap" => "30"}}
+      }
+    })
+    |> render_submit()
+
+    assert Repo.reload!(in_scope).spend_cap_credits == 750
+    assert Repo.reload!(out_of_scope).spend_cap_credits == 0
+  end
+
+  test "requires a Pool selection before applying bulk spending caps", %{
+    conn: conn,
+    scope: scope
+  } do
+    {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-no-pool", name: "Bulk Cap No Pool"})
+    identity = upstream_assignment_fixture(pool, %{account_label: "Needs Pool"}).identity
+    insert_monthly_spend_quota(identity, 1_000, 250)
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
+
+    submit_html =
+      view
+      |> render_submit("save_spend_cap", %{
+        "spend_cap" => %{
+          "pool_id" => "",
+          "rules" => %{"0" => %{"monthly_quota" => "600", "spend_cap" => "30"}}
+        }
+      })
+
+    assert submit_html =~ "Select a Pool"
+    assert Repo.reload!(identity).spend_cap_credits == 0
+  end
+
   test "prefills the bulk dialog with the default quota-threshold rules", %{
     conn: conn,
     scope: scope
@@ -4092,10 +4228,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     html = view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
 
-    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
-    refute has_element?(view, "#spend-cap-rule-5")
+    for index <- 0..5, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-6")
 
-    for {quota, cap} <- [{"1000", "100"}, {"500", "50"}, {"200", "20"}, {"100", "10"}, {"0", "5"}] do
+    for {quota, cap} <- [
+          {"1000", "100"},
+          {"500", "50"},
+          {"200", "20"},
+          {"100", "10"},
+          {"50", "5"},
+          {"0", "0"}
+        ] do
       assert html =~ ~s(value="#{quota}")
       assert html =~ ~s(value="#{cap}")
     end
@@ -4140,19 +4283,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     view |> element("#upstream-page-bulk-spend-cap-action") |> render_click()
 
-    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
-    refute has_element?(view, "#spend-cap-rule-5")
+    for index <- 0..5, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-6")
 
     view |> element("button", "Add rule") |> render_click()
 
-    assert has_element?(view, "#spend-cap-rule-5")
+    assert has_element?(view, "#spend-cap-rule-6")
 
     view
     |> element("#spend-cap-rule-0 button[aria-label='Remove rule']")
     |> render_click()
 
-    for index <- 0..4, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
-    refute has_element?(view, "#spend-cap-rule-5")
+    for index <- 0..5, do: assert(has_element?(view, "#spend-cap-rule-#{index}"))
+    refute has_element?(view, "#spend-cap-rule-6")
 
     render_click(view, "remove_spend_cap_rule", %{"id" => "invalid"})
 
