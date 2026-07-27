@@ -61,6 +61,37 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     :ok
   end
 
+  test "paginates upstream cards instead of rendering every account", %{conn: conn, scope: scope} do
+    {:ok, pool} =
+      Pools.create_pool(scope, %{slug: "paged-upstreams", name: "Paged Upstreams"})
+
+    accounts =
+      for index <- 1..13 do
+        upstream_assignment_fixture(pool, %{account_label: "Paged #{index}"})
+      end
+
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+
+    assert rendered_account_card_count(view) == 12
+    assert has_element?(view, "#upstream-account-pagination")
+    assert render(view) =~ "Page 1 of 2"
+    assert has_element?(view, "#upstream-account-page-input[value='1'][min='1'][max='2']")
+    refute has_element?(view, "#upstream-account-pagination-prev:not([disabled])")
+
+    render_submit(view, "show_upstream_account_page", %{"page" => "2"})
+
+    assert rendered_account_card_count(view) == 1
+    assert render(view) =~ "Page 2 of 2"
+    assert has_element?(view, "#upstream-account-page-input[value='2']")
+    refute has_element?(view, "#upstream-account-pagination-next:not([disabled])")
+    assert Enum.any?(accounts, &has_element?(view, "#upstream-account-#{&1.identity.id}"))
+  end
+
+  defp rendered_account_card_count(view) do
+    Regex.scan(~r/id="upstream-account-[0-9a-f-]{36}"/, render(view))
+    |> length()
+  end
+
   test "shared dropdown action item renders button and link modes" do
     button_attrs =
       Map.merge(

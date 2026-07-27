@@ -27,6 +27,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   alias CodexPoolerWeb.DateTimeDisplay
 
   @upstreams_reload_debounce_ms 1_000
+  @upstream_account_page_size 12
 
   @impl true
   def mount(_params, _session, socket) do
@@ -52,6 +53,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
           quota_exhausted: 0
         },
         upstream_accounts: [],
+        upstream_account_page: 1,
+        upstream_account_total_pages: 1,
         testing_account_ids: MapSet.new(),
         auth_json_form: UpstreamAuthJsonImport.empty_form(),
         auth_json_upload_limit_label: UpstreamAuthJsonImport.upload_limit_label(),
@@ -125,6 +128,24 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
   end
 
   @impl true
+  def handle_event("restore_upstream_filters", filter_params, socket)
+      when is_map(filter_params) do
+    {:noreply,
+     push_patch(socket,
+       to: ~p"/admin/upstreams?#{UpstreamFilterForm.query_params(filter_params)}"
+     )}
+  end
+
+  def handle_event("show_upstream_account_page", %{"page" => page}, socket) do
+    page =
+      page
+      |> to_string()
+      |> Integer.parse()
+      |> page_number(socket.assigns.upstream_account_total_pages)
+
+    {:noreply, put_upstream_account_page(socket, page)}
+  end
+
   def handle_event("filter", %{"filters" => filter_params}, socket) do
     {:noreply,
      push_patch(socket,
@@ -581,6 +602,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
         spend_cap_form={@spend_cap_form}
         account_panel_views={@account_panel_views}
         upstream_accounts={@upstream_accounts}
+        upstream_account_page_items={@upstream_account_page_items}
+        upstream_account_page={@upstream_account_page}
+        upstream_account_total_pages={@upstream_account_total_pages}
         testing_account_ids={@testing_account_ids}
         uploads={@uploads}
         datetime_preferences={@datetime_preferences}
@@ -597,21 +621,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
     datetime_preferences = DateTimeDisplay.preferences_for_user(socket.assigns.current_scope.user)
 
     account_page =
-      UpstreamAccountsReadModel.list_visible_account_page(
-        socket.assigns.current_scope,
+      UpstreamAccountsReadModel.list_account_page_for_visible_pools(
         filtered_pools,
         filter_values,
         datetime_preferences
       )
 
     upstream_accounts = account_page.accounts
+    total_pages = max(ceil(length(upstream_accounts) / @upstream_account_page_size), 1)
+
+    page =
+      if filter_values == socket.assigns.filter_values do
+        min(socket.assigns.upstream_account_page, total_pages)
+      else
+        1
+      end
 
     socket =
       socket
       |> cancel_upstreams_reload_timer()
       |> maybe_subscribe_pool_events(filtered_pools)
 
-    assign(socket,
+    socket
+    |> assign(
       pools: pools,
       pool_options: pool_options(pools),
       dialog_pool_options: dialog_pool_options(pools),
@@ -623,10 +655,29 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLive do
       quota_options: UpstreamFilterForm.quota_options(),
       upstream_stats: account_page.stats,
       upstream_accounts: upstream_accounts,
+      upstream_account_total_pages: total_pages,
       account_panel_views:
         prune_account_panel_views(socket.assigns.account_panel_views, upstream_accounts)
     )
+    |> put_upstream_account_page(page)
   end
+
+  defp put_upstream_account_page(socket, page) do
+    offset = (page - 1) * @upstream_account_page_size
+
+    page_accounts =
+      Enum.slice(socket.assigns.upstream_accounts, offset, @upstream_account_page_size)
+
+    assign(socket,
+      upstream_account_page: page,
+      upstream_account_page_items: Enum.with_index(page_accounts, offset)
+    )
+  end
+
+  defp page_number({page, _rest}, total_pages) when is_integer(page),
+    do: max(1, min(page, total_pages))
+
+  defp page_number(:error, _total_pages), do: 1
 
   defp reload_upstreams(socket), do: load_upstreams(socket, socket.assigns.filter_values)
 

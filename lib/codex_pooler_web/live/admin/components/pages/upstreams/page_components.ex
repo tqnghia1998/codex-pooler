@@ -53,13 +53,20 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
   attr :spend_cap_form, :any, default: nil
   attr :account_panel_views, :map, required: true
   attr :upstream_accounts, :list, required: true
+  attr :upstream_account_page_items, :list, required: true
+  attr :upstream_account_page, :integer, required: true
+  attr :upstream_account_total_pages, :integer, required: true
   attr :testing_account_ids, :any, required: true
   attr :uploads, :map, required: true
   attr :datetime_preferences, :map, required: true
 
   def upstreams_page(assigns) do
     ~H"""
-    <section id="admin-upstreams-live" class="grid min-w-0 gap-6">
+    <section
+      id="admin-upstreams-live"
+      phx-hook="UpstreamFilterPersistence"
+      class="grid min-w-0 gap-6"
+    >
       <AdminComponents.page_header
         id="upstream-account-page-header"
         title="Upstreams"
@@ -208,10 +215,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         </AdminComponents.empty_state>
 
         <.upstream_account_grid
-          accounts={@upstream_accounts}
+          accounts={@upstream_account_page_items}
           testing_account_ids={@testing_account_ids}
           account_panel_views={@account_panel_views}
           datetime_preferences={@datetime_preferences}
+        />
+
+        <.upstream_account_pagination
+          :if={@upstream_accounts != []}
+          page={@upstream_account_page}
+          total_pages={@upstream_account_total_pages}
         />
       </section>
     </section>
@@ -1059,7 +1072,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
       class="grid min-w-0 items-start gap-3 lg:grid-cols-2 2xl:grid-cols-3 [@media(width>=112rem)]:grid-cols-3"
     >
       <AccountCard.account_card
-        :for={{account, account_index} <- Enum.with_index(@accounts)}
+        :for={{account, account_index} <- @accounts}
         account={account}
         account_index={account_index}
         testing?={MapSet.member?(@testing_account_ids, account.identity.id)}
@@ -1067,6 +1080,64 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents do
         datetime_preferences={@datetime_preferences}
       />
     </div>
+    """
+  end
+
+  attr :page, :integer, required: true
+  attr :total_pages, :integer, required: true
+
+  defp upstream_account_pagination(assigns) do
+    ~H"""
+    <nav
+      :if={@total_pages > 1}
+      id="upstream-account-pagination"
+      class="flex items-center justify-between gap-3 border-t border-base-300/70 pt-3 text-sm"
+      aria-label="Upstream accounts pagination"
+    >
+      <p data-role="pagination-status" class="text-base-content/60">
+        Page {@page} of {@total_pages}
+      </p>
+      <form
+        id="upstream-account-page-jumper"
+        class="join"
+        phx-submit="show_upstream_account_page"
+      >
+        <label class="sr-only" for="upstream-account-page-input">Jump to page</label>
+        <input
+          id="upstream-account-page-input"
+          name="page"
+          type="number"
+          min="1"
+          max={@total_pages}
+          value={@page}
+          class="input input-sm join-item w-16 text-center"
+          aria-label="Current page"
+        />
+        <button type="submit" class="btn btn-sm join-item">Go</button>
+      </form>
+      <div class="join">
+        <button
+          type="button"
+          id="upstream-account-pagination-prev"
+          class={["btn btn-sm join-item", @page <= 1 && "btn-disabled"]}
+          disabled={@page <= 1}
+          phx-click="show_upstream_account_page"
+          phx-value-page={@page - 1}
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          id="upstream-account-pagination-next"
+          class={["btn btn-sm join-item", @page >= @total_pages && "btn-disabled"]}
+          disabled={@page >= @total_pages}
+          phx-click="show_upstream_account_page"
+          phx-value-page={@page + 1}
+        >
+          Next
+        </button>
+      </div>
+    </nav>
     """
   end
 
