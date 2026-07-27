@@ -104,6 +104,12 @@ defmodule CodexPooler.PoolerFixtures do
         status: Map.get(attrs, :identity_status, "active"),
         plan_family: Map.get(attrs, :plan_family),
         plan_label: Map.get(attrs, :plan_label),
+        # Accounts are only routable with an explicit spending cap, so the shared
+        # fixture represents a usable account. Uncapped-specific tests pass
+        # spend_cap_credits: 0.
+        spend_cap_credits: Map.get(attrs, :spend_cap_credits, 1_000),
+        spent_credits: Map.get(attrs, :spent_credits, Decimal.new(0)),
+        cap_started_at: Map.get(attrs, :cap_started_at, now),
         headers_profile_version: 1,
         created_at: now,
         updated_at: now,
@@ -146,7 +152,20 @@ defmodule CodexPooler.PoolerFixtures do
                metadata: Map.get(attrs, :metadata, %{})
              })
 
+    put_default_spend_cap(identity, attrs)
+  end
+
+  # Accounts are only routable with an explicit spending cap, so identity
+  # fixtures default to a usable cap. Uncapped-specific tests pass
+  # spend_cap_credits: 0.
+  defp put_default_spend_cap(%UpstreamIdentity{} = identity, attrs) do
     identity
+    |> Ecto.Changeset.change(%{
+      spend_cap_credits: Map.get(attrs, :spend_cap_credits, 1_000),
+      spent_credits: Map.get(attrs, :spent_credits, Decimal.new(0)),
+      cap_started_at: Map.get(attrs, :cap_started_at, now())
+    })
+    |> Repo.update!()
   end
 
   def active_upstream_identity_fixture(attrs \\ %{}) do
@@ -211,6 +230,8 @@ defmodule CodexPooler.PoolerFixtures do
 
     assert {:ok, identity} =
              IdentityLifecycle.activate_upstream_identity(identity)
+
+    identity = put_default_spend_cap(identity, attrs)
 
     assert {:ok, _secret} =
              Upstreams.store_encrypted_secret(identity, %{

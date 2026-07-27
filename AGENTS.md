@@ -99,7 +99,7 @@ When changing nested account action components, explicitly pass `testing?`. Dire
 
 Schema fields on `upstream_identities`:
 
-- `spend_cap_credits`: integer; `0` means uncapped
+- `spend_cap_credits`: integer; `0` (or unset) means **no cap configured**, which now **excludes the account from routing** (see routing policy). It no longer means "uncapped/unlimited"
 - `spent_credits`: accumulated decimal spend for the current cap period
 - `cap_started_at`: start of the current cap period
 
@@ -110,7 +110,7 @@ Migrations:
 
 The second migration is intentionally defensive for databases with divergent migration history; do not casually remove it.
 
-The scoped operation is `Upstreams.update_spend_cap_for_scope/3`. Setting a cap resets `spent_credits` and starts a new period. Spending caps are not constrained by provider-reported remaining `spend_control` quota; `0` means uncapped.
+The scoped operation is `Upstreams.update_spend_cap_for_scope/3`. Setting a cap resets `spent_credits` and starts a new period. Spending caps are not constrained by provider-reported remaining `spend_control` quota. Setting `0` clears the cap, which now makes the account unroutable rather than unlimited.
 
 Provider parsing treats `payload["spend_control"]["individual_limit"]` as a dedicated `spend_control` quota window. Keep `CodexParsers` and `UsageProbe` aligned if this payload changes. This fork replaced upstream's generic `additional_rate_limits` parsing with explicit spend-control evidence, so future upstream parser changes need manual reconciliation.
 
@@ -124,6 +124,7 @@ The operator UI accepts dollars and currently converts at 25 credits per dollar.
 
 Routing policy:
 
+- no cap configured (unset or `0`): excluded from routing entirely (`spend_cap_unset`). The goal is to avoid abusing upstreams that have no explicit budget, so an account must have a positive cap to be routable
 - below 85%: normal
 - 85% to below 100%: reserved; excluded while a less-used candidate exists
 - at or above 100%: excluded from new sessions

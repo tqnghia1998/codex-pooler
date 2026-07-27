@@ -2115,6 +2115,16 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     assert {:ok, identity} =
              IdentityLifecycle.activate_upstream_identity(identity)
 
+    # Accounts are only routable with an explicit spending cap.
+    identity =
+      identity
+      |> Ecto.Changeset.change(%{
+        spend_cap_credits: 1_000,
+        spent_credits: Decimal.new(0),
+        cap_started_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+      })
+      |> Repo.update!()
+
     assert {:ok, _secret} =
              Upstreams.store_encrypted_secret(identity, %{
                secret_kind: Enum.join(["access", "token"], "_"),

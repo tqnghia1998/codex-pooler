@@ -4072,7 +4072,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     scope: scope
   } do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "account-test", name: "Account Test"})
-    %{identity: identity} = upstream_assignment_fixture(pool, %{account_label: "Testable"})
+
+    %{identity: identity} =
+      upstream_assignment_fixture(pool, %{account_label: "Testable", spend_cap_credits: 0})
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
     selector = "#upstream-account-#{identity.id}-limit-spending_cap"
@@ -4171,8 +4173,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   } do
     {:ok, pool_a} = Pools.create_pool(scope, %{slug: "bulk-cap-pool-a", name: "Bulk Cap Pool A"})
     {:ok, pool_b} = Pools.create_pool(scope, %{slug: "bulk-cap-pool-b", name: "Bulk Cap Pool B"})
-    in_scope = upstream_assignment_fixture(pool_a, %{account_label: "In Pool A"}).identity
-    out_of_scope = upstream_assignment_fixture(pool_b, %{account_label: "In Pool B"}).identity
+
+    in_scope =
+      upstream_assignment_fixture(pool_a, %{account_label: "In Pool A", spend_cap_credits: 0}).identity
+
+    out_of_scope =
+      upstream_assignment_fixture(pool_b, %{account_label: "In Pool B", spend_cap_credits: 0}).identity
+
     insert_monthly_spend_quota(in_scope, 1_000, 250)
     insert_monthly_spend_quota(out_of_scope, 1_000, 250)
 
@@ -4197,7 +4204,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     scope: scope
   } do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-no-pool", name: "Bulk Cap No Pool"})
-    identity = upstream_assignment_fixture(pool, %{account_label: "Needs Pool"}).identity
+
+    identity =
+      upstream_assignment_fixture(pool, %{account_label: "Needs Pool", spend_cap_credits: 0}).identity
+
     insert_monthly_spend_quota(identity, 1_000, 250)
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
@@ -4247,9 +4257,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
   test "applies the highest matching quota-threshold rule and skips accounts without monthly quota evidence",
        %{conn: conn, scope: scope} do
     {:ok, pool} = Pools.create_pool(scope, %{slug: "bulk-cap-targets", name: "Bulk Cap Targets"})
-    low = upstream_assignment_fixture(pool, %{account_label: "Low quota"}).identity
-    high = upstream_assignment_fixture(pool, %{account_label: "High quota"}).identity
-    unknown = upstream_assignment_fixture(pool, %{account_label: "No quota evidence"}).identity
+
+    low =
+      upstream_assignment_fixture(pool, %{account_label: "Low quota", spend_cap_credits: 0}).identity
+
+    high =
+      upstream_assignment_fixture(pool, %{account_label: "High quota", spend_cap_credits: 0}).identity
+
+    unknown =
+      upstream_assignment_fixture(pool, %{
+        account_label: "No quota evidence",
+        spend_cap_credits: 0
+      }).identity
 
     insert_monthly_spend_quota(low, 1_000, 0)
     insert_monthly_spend_quota(high, 2_000, 0)

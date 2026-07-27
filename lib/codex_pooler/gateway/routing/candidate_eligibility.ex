@@ -411,7 +411,9 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
         true -> nil
       end
     else
-      nil
+      # No spending cap configured (unset or 0): exclude to avoid abusing the
+      # upstream. Operators must set an explicit cap to make an account routable.
+      "spend_cap_unset"
     end
   end
 
@@ -428,7 +430,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
      error(
        503,
        "no_eligible_backend",
-       "no healthy eligible backend is currently available — upstream accounts reached their spending limit or session reserve",
+       "no healthy eligible backend is currently available — upstream accounts reached their spending limit, session reserve, or have no spending cap configured",
        "model",
        %{candidate_exclusions: exclusions}
      )}

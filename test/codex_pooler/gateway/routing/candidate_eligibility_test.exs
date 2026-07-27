@@ -557,6 +557,27 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
   end
 
   describe "spend cap eligibility" do
+    test "excludes accounts with no configured spending cap" do
+      unset_identity = upstream_identity("unset-identity") |> Map.put(:spend_cap_credits, nil)
+      zero_identity = upstream_identity("zero-identity") |> Map.put(:spend_cap_credits, 0)
+
+      unset_candidate = {assignment("unset-assignment", unset_identity), unset_identity}
+      zero_candidate = {assignment("zero-assignment", zero_identity), zero_identity}
+
+      assert {:error, %{code: "no_eligible_backend", candidate_exclusions: exclusions}} =
+               CandidateEligibility.filter_spend_cap_eligible_candidates(
+                 filter_input(quota_model(), %{"model" => "sample-model"}, request_options(), [
+                   unset_candidate,
+                   zero_candidate
+                 ])
+               )
+
+      assert Enum.map(exclusions, & &1.reasons) == [
+               [%{"code" => "spend_cap_unset", "cap_credits" => nil}],
+               [%{"code" => "spend_cap_unset", "cap_credits" => 0}]
+             ]
+    end
+
     test "keeps the assigned session candidate through the 85 percent reserve" do
       reserved_identity =
         upstream_identity("reserved-identity")
