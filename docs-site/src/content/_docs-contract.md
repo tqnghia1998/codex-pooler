@@ -52,6 +52,7 @@ Allowed public claims:
 - `POST /v1/responses`
 - `GET /v1/responses`, narrow Responses websocket compatibility only
 - `POST /v1/chat/completions`
+- `POST /v1/messages`, Anthropic-native compatibility for Compass-backed models only; accepts either `Authorization: Bearer <Pool API key>` or `x-api-key: <Pool API key>`. Configure Anthropic clients with the gateway root URL (for example, `http://localhost:4000`), not a URL ending in `/v1`, because the SDK appends `/v1/messages`.
 - `GET /v1/usage`
 - `GET /v1/files`
 - `POST /v1/files`

@@ -66,6 +66,16 @@ This fork also supports Compass project-key upstreams, which upstream does not. 
 
 Compass requests bypass ChatGPT-specific translation and headers for `/v1/chat/completions` and `/v1/responses`, routing directly to `/chat/completions` and `/responses`. Model discovery uses `/models`. Quota reconciliation calls `/open_project/detail/:project_id`, converts the project balance into an authoritative account quota window, and treats recurring budgets as calendar-month windows. Keep these transport, discovery, import, and quota paths aligned when changing provider detection or secret conventions.
 
+## Anthropic `/v1/messages` compatibility (Compass only)
+
+This fork exposes Anthropic-native `POST /v1/messages` for Compass models. Clients use the gateway root URL and authenticate with the Pool API key through `x-api-key` or `Authorization: Bearer`.
+
+The request body passes through opaquely; only `model` is rewritten. Candidate routing is Compass-only and still enforces assignment streaming/tool capabilities. Forward only `anthropic-version` and `anthropic-beta`; their small allowlist is intentionally duplicated at ingress and transport boundaries.
+
+Valid Anthropic 4xx envelopes pass through unchanged. Malformed errors and 5xx responses remain redacted. Streaming pre-SSE errors must drain the bounded async response body; successful SSE remains streamed.
+
+Convert legacy `thinking: {type: "enabled", budget_tokens: N}` to adaptive thinking only for Claude 4.7+ and 5+. Claude 4.6 accepts both forms; earlier models require `enabled`. Keep the parser, comment, and tests aligned with https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#migrating-to-adaptive-thinking.
+
 ## Immediate account connection test
 
 Entry point: `Upstreams.test_account_for_scope/2`.
@@ -126,6 +136,14 @@ Routing policy:
 Spend-cap eligibility runs before quota eligibility. This fork also defaults routing `quota_mode` to `:optional`; missing provider quota evidence does not block routing unless a caller explicitly requests `:required`.
 
 Individual and bulk cap UI lives primarily in `upstreams_live/spend_cap_workflow.ex`. Bulk targets are all accounts, cap-reached accounts, or uncapped accounts. Bulk selection uses all identities visible to the scope, not only currently filtered cards. Bulk updates are sequential and not atomic; do not describe them as transactional.
+
+### Spend-cap accrual requires priced usage
+
+`spent_credits` accrues only when usage is known and pricing resolves; routing still enforces already-recorded spend independently.
+
+Anthropic pricing seeds use dateless model IDs so suffix inference covers dated variants, including both Claude Sonnet 5 introductory and post-2026-09-01 rates. Streaming usage must merge input/cache fields from `message_start` with cumulative output from `message_delta`; non-streaming extraction also recognizes Anthropic cache field names.
+
+ponytail: only the default price bucket and 5-minute cache-write rate are seeded. Add duration-specific pricing if 1-hour cache usage becomes material.
 
 ## Account deletion is physical
 
