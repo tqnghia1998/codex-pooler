@@ -2328,6 +2328,39 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
              ] = coerced["input"]
     end
 
+    test "native tool-search replay items pass through untranslated" do
+      payload = %{
+        "model" => "gpt-fixture-text",
+        "input" => [
+          %{"type" => "message", "role" => "user", "content" => "hi"},
+          %{
+            "type" => "tool_search_call",
+            "id" => "tsc_fixture",
+            "call_id" => "call_fixture",
+            "arguments" => %{"query" => "chrome devtools"},
+            "execution" => "client",
+            "status" => "completed"
+          },
+          %{
+            "type" => "tool_search_output",
+            "id" => "tso_fixture",
+            "call_id" => "call_fixture",
+            "execution" => "client",
+            "status" => "completed",
+            "tools" => [%{"name" => "mcp__chrome_devtools", "tools" => []}]
+          }
+        ]
+      }
+
+      assert {:ok, %{payload: coerced}} = Responses.coerce(payload)
+
+      assert [
+               %{"type" => "message"},
+               %{"type" => "tool_search_call", "id" => "tsc_fixture"},
+               %{"type" => "tool_search_output", "id" => "tso_fixture"}
+             ] = coerced["input"]
+    end
+
     test "opencode replay continuations reject malformed or unsupported variants locally" do
       invalid_items = [
         %{"role" => "assistant", "content" => [%{"type" => "input_text", "text" => "bad"}]},

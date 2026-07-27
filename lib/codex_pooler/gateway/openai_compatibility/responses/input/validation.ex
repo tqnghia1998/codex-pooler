@@ -105,6 +105,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Validation do
   defp validate_input_item(%{"type" => "item_reference"} = item, payload),
     do: validate_item_reference(item, payload)
 
+  # Client-side tool-discovery replay items are native Codex shape; accept and
+  # pass them through to the upstream instead of rejecting locally.
+  defp validate_input_item(%{"type" => "tool_search_call"}, _payload), do: :ok
+  defp validate_input_item(%{"type" => "tool_search_output"}, _payload), do: :ok
+
   defp validate_input_item(%{"type" => _type}, _payload),
     do: {:error, Error.invalid_request("input item shape is not translatable", "input")}
 

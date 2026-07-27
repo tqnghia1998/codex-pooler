@@ -292,6 +292,11 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.Responses.Input.Normalization 
   defp normalize_input_item(%{"type" => "input_file"} = item), do: {:ok, item}
   defp normalize_input_item(%{"type" => "item_reference"} = item), do: {:ok, item}
 
+  # Client-side tool-discovery replay items are already native Codex shape; pass
+  # them through untranslated to the upstream.
+  defp normalize_input_item(%{"type" => "tool_search_call"} = item), do: {:ok, item}
+  defp normalize_input_item(%{"type" => "tool_search_output"} = item), do: {:ok, item}
+
   defp normalize_input_item(%{} = item) do
     if ToolResultShape.tool_result?(item) do
       {:ok, item}
