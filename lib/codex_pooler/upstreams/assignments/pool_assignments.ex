@@ -205,6 +205,23 @@ defmodule CodexPooler.Upstreams.Assignments.PoolAssignments do
 
   def list_pool_assignments(_pool_id), do: []
 
+  @spec list_pool_assignments_by_pool_ids([Ecto.UUID.t()]) :: [PoolUpstreamAssignment.t()]
+  def list_pool_assignments_by_pool_ids(pool_ids) when is_list(pool_ids) do
+    pool_ids = pool_ids |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+    if pool_ids == [] do
+      []
+    else
+      Repo.all(
+        from assignment in PoolUpstreamAssignment,
+          where: assignment.pool_id in ^pool_ids,
+          order_by: [asc: assignment.created_at]
+      )
+    end
+  end
+
+  def list_pool_assignments_by_pool_ids(_pool_ids), do: []
+
   @spec count_pool_assignments_by_pool_ids([Ecto.UUID.t()]) ::
           %{optional(Ecto.UUID.t()) => non_neg_integer()}
   def count_pool_assignments_by_pool_ids(pool_ids) when is_list(pool_ids) do

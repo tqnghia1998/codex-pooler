@@ -18,7 +18,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   alias CodexPooler.Repo
   alias CodexPooler.Upstreams
   alias CodexPooler.Upstreams.Assignments, as: UpstreamAssignments
-  alias CodexPooler.Upstreams.Auth.TokenRefresh
   alias CodexPooler.Upstreams.OAuth, as: UpstreamOAuth
   alias CodexPooler.Upstreams.Quota.Windows, as: QuotaWindows
   alias CodexPooler.Upstreams.SavedResets
@@ -167,22 +166,32 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     list_visible_account_page(scope, pools, filters, datetime_preferences).accounts
   end
 
+  @spec list_account_page_for_visible_pools([term()], map(), DateTimeDisplay.preferences()) ::
+          map()
+  def list_account_page_for_visible_pools(pools, filters, datetime_preferences)
+      when is_list(pools) and is_map(filters) and is_map(datetime_preferences) do
+    account_page(pools, filters, datetime_preferences)
+  end
+
   @spec list_visible_account_page(term(), [term()], map(), DateTimeDisplay.preferences()) :: map()
   def list_visible_account_page(scope, pools, filters, datetime_preferences)
       when is_list(pools) and is_map(filters) and is_map(datetime_preferences) do
-    # :identity_id narrows the projection to one account BEFORE the expensive
-    # per-identity snapshot work; detail pages must not pay fleet cost.
-    {identity_id, filters} = Map.pop(filters, :identity_id)
+    scope
+    |> intersect_visible_pools(pools)
+    |> account_page(filters, datetime_preferences)
+  end
 
-    pools = intersect_visible_pools(scope, pools)
+  defp account_page(pools, filters, datetime_preferences) do
+    {identity_id, filters} = Map.pop(filters, :identity_id)
+    pool_ids = pool_ids(pools)
     pool_lookup = Map.new(pools, &{&1.id, &1})
-    assignments = active_assignment_snapshots(pools, pool_lookup)
+    assignments = active_assignment_snapshots(pool_ids, pool_lookup)
     model_inventory = assignment_model_inventory(assignments)
     assignments = attach_assignment_model_inventory(assignments, model_inventory)
 
     identities =
-      scope
-      |> Upstreams.list_visible_upstream_identities()
+      pool_ids
+      |> Upstreams.list_upstream_identities_for_pool_ids()
       |> Enum.filter(&Map.has_key?(assignments, &1.id))
       |> narrow_to_identity(identity_id)
 
@@ -200,11 +209,24 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
 
     token_burns = TokenBurnProjection.summaries(identities)
     last_used = last_used_by_identity(identities)
+    identity_ids = Enum.map(identities, & &1.id)
+    snapshot_at = DateTime.utc_now()
+    quota_windows = QuotaWindows.list_quota_windows_by_identity_ids(identity_ids, snapshot_at)
+    refresh_jobs = Jobs.latest_token_refresh_jobs_by_identity_ids(identity_ids)
 
     projected =
       Enum.map(
         identities,
-        &account_snapshot(&1, assignments, token_burns, last_used, datetime_preferences)
+        &account_snapshot(
+          &1,
+          assignments,
+          token_burns,
+          last_used,
+          quota_windows,
+          refresh_jobs,
+          snapshot_at,
+          datetime_preferences
+        )
       )
 
     projected = Enum.map(projected, &Map.put(&1, :quota_remaining, quota_remaining(&1)))
@@ -301,9 +323,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     |> Enum.uniq()
   end
 
-  defp active_assignment_snapshots(pools, pool_lookup) do
-    pools
-    |> Enum.flat_map(&UpstreamAssignments.list_pool_assignments/1)
+  defp active_assignment_snapshots(pool_ids, pool_lookup) do
+    pool_ids
+    |> UpstreamAssignments.list_pool_assignments_by_pool_ids()
     |> Enum.reject(&(&1.status == "deleted"))
     |> Enum.map(&assignment_snapshot(&1, pool_lookup))
     |> Enum.group_by(& &1.upstream_identity_id)
@@ -378,11 +400,17 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     end
   end
 
-  defp account_snapshot(identity, assignments, token_burns, last_used, datetime_preferences) do
-    # one explicit snapshot instant for the effective window load so the
-    # readiness and card projections below reason about the same view
-    snapshot_at = DateTime.utc_now()
-    quota_windows = QuotaWindows.list_quota_windows(identity, snapshot_at)
+  defp account_snapshot(
+         identity,
+         assignments,
+         token_burns,
+         last_used,
+         quota_windows_by_identity,
+         refresh_jobs,
+         snapshot_at,
+         datetime_preferences
+       ) do
+    quota_windows = Map.get(quota_windows_by_identity, identity.id, [])
     quota_readiness = QuotaProjection.readiness(quota_windows, snapshot_at)
     identity_assignments = identity_assignments(identity, assignments, quota_readiness)
 
@@ -405,7 +433,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       |> UpstreamRoutingReadiness.from_inputs(identity_assignments, quota_readiness)
       |> UpstreamRoutingReadiness.with_circuit_visibility(circuit_readiness)
 
-    refresh_job = identity |> Jobs.list_recent_token_refresh_jobs(limit: 1) |> List.first()
+    refresh_job = Map.get(refresh_jobs, identity.id)
 
     account = %{
       identity: identity,
@@ -661,8 +689,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     |> token_refresh_label_from_metadata(datetime_preferences)
   end
 
-  defp current_token_refresh_status(%{status: identity_status} = identity) do
-    metadata = TokenRefresh.token_refresh_status(identity)
+  defp current_token_refresh_status(%{status: identity_status, metadata: identity_metadata}) do
+    metadata =
+      case identity_metadata do
+        %{"token_refresh" => %{} = token_refresh} -> token_refresh
+        _metadata -> %{"status" => "not run"}
+      end
 
     if stale_reauth_required_token_refresh?(metadata, identity_status) do
       %{}

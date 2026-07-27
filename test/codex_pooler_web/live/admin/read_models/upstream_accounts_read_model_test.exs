@@ -1069,6 +1069,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModelTest do
         assert length(accounts) == size
         assert source_count(query_events, "models") == 1
         assert source_count(query_events, "ledger_entries") == 2
+        assert source_count(query_events, "account_quota_windows") == 1
+        assert source_count(query_events, "oban_jobs") == 1
+        assert source_count(query_events, "pool_upstream_assignments") == 1
+        assert source_count(query_events, "upstream_identities") == 1
 
         assert [
                  %{

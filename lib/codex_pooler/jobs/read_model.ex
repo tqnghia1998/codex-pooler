@@ -197,6 +197,45 @@ defmodule CodexPooler.Jobs.ReadModel do
     Query.with_attention(results, opts)
   end
 
+  def latest_token_refresh_jobs_by_identity_ids(identity_ids, opts \\ []) do
+    identity_ids = identity_ids |> Enum.filter(&is_binary/1) |> Enum.uniq()
+
+    if identity_ids == [] do
+      %{}
+    else
+      Repo.all(
+        from job in Oban.Job,
+          where:
+            job.worker == ^Query.worker_name(TokenRefreshWorker) and
+              fragment("?->>?", job.args, "upstream_identity_id") in ^identity_ids,
+          distinct: fragment("?->>?", job.args, "upstream_identity_id"),
+          order_by: [
+            asc: fragment("?->>?", job.args, "upstream_identity_id"),
+            desc:
+              fragment("COALESCE(?, ?, ?)", job.attempted_at, job.scheduled_at, job.inserted_at)
+          ],
+          select: %{
+            id: job.id,
+            state: job.state,
+            worker: job.worker,
+            queue: job.queue,
+            args: job.args,
+            errors: job.errors,
+            attempt: job.attempt,
+            max_attempts: job.max_attempts,
+            inserted_at: job.inserted_at,
+            scheduled_at: job.scheduled_at,
+            attempted_at: job.attempted_at,
+            completed_at: job.completed_at,
+            discarded_at: job.discarded_at,
+            cancelled_at: job.cancelled_at
+          }
+      )
+      |> Query.with_attention(opts)
+      |> Map.new(&{&1.args["upstream_identity_id"], &1})
+    end
+  end
+
   def list_recent_account_reconciliation_jobs(pool_or_id, opts \\ []) do
     pool_id = pool_id(pool_or_id)
     limit = opts |> Keyword.get(:limit, 10) |> max(1) |> min(50)

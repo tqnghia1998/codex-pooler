@@ -235,6 +235,11 @@ defmodule CodexPooler.Jobs do
   @spec list_recent_token_refresh_jobs(identity_ref(), keyword()) :: [job_summary()]
   defdelegate list_recent_token_refresh_jobs(identity_or_id, opts \\ []), to: ReadModel
 
+  @spec latest_token_refresh_jobs_by_identity_ids([Ecto.UUID.t()], keyword()) :: %{
+          optional(Ecto.UUID.t()) => job_summary()
+        }
+  defdelegate latest_token_refresh_jobs_by_identity_ids(identity_ids, opts \\ []), to: ReadModel
+
   @spec enqueue_account_reconciliations(pool_ref(), keyword()) ::
           batch_insert_result() | {:error, :pool_id_required}
   def enqueue_account_reconciliations(pool_or_id, opts \\ []) do

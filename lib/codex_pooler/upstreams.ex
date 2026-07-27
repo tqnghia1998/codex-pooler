@@ -75,9 +75,31 @@ defmodule CodexPooler.Upstreams do
     end
   end
 
-  @spec list_visible_upstream_identities(Scope.t()) :: [UpstreamIdentity.t()]
-  def list_visible_upstream_identities(%Scope{} = scope) do
-    pool_ids = scope |> Pools.list_visible_pools() |> Enum.map(& &1.id)
+  @spec list_visible_upstream_identities(Scope.t(), Ecto.UUID.t() | nil) :: [
+          UpstreamIdentity.t()
+        ]
+  def list_visible_upstream_identities(scope, pool_id \\ nil)
+
+  def list_visible_upstream_identities(%Scope{} = scope, pool_id) do
+    pool_ids =
+      scope
+      |> Pools.list_visible_pools()
+      |> Enum.map(& &1.id)
+      |> then(fn visible_pool_ids ->
+        case pool_id do
+          id when is_binary(id) and id != "" -> Enum.filter(visible_pool_ids, &(&1 == id))
+          _ -> visible_pool_ids
+        end
+      end)
+
+    list_upstream_identities_for_pool_ids(pool_ids)
+  end
+
+  def list_visible_upstream_identities(_scope, _pool_id), do: []
+
+  @spec list_upstream_identities_for_pool_ids([Ecto.UUID.t()]) :: [UpstreamIdentity.t()]
+  def list_upstream_identities_for_pool_ids(pool_ids) when is_list(pool_ids) do
+    pool_ids = pool_ids |> Enum.filter(&is_binary/1) |> Enum.uniq()
 
     case pool_ids do
       [] ->
@@ -101,7 +123,7 @@ defmodule CodexPooler.Upstreams do
     end
   end
 
-  def list_visible_upstream_identities(_scope), do: []
+  def list_upstream_identities_for_pool_ids(_pool_ids), do: []
 
   @spec get_upstream_identity(term()) :: UpstreamIdentity.t() | nil
   def get_upstream_identity(id) when is_binary(id), do: Repo.get(UpstreamIdentity, id)

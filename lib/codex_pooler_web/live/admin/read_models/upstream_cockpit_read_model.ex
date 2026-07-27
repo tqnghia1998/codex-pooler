@@ -157,12 +157,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitReadModel do
   def load_visible(scope, identity_id) when is_binary(identity_id) do
     pools = Pools.list_visible_pools(scope)
 
-    scope
-    |> UpstreamAccountsReadModel.list_visible_accounts(
-      pools,
+    pools
+    |> UpstreamAccountsReadModel.list_account_page_for_visible_pools(
       %{identity_id: identity_id},
       DateTimeDisplay.preferences_for_user(scope.user)
     )
+    |> Map.fetch!(:accounts)
     |> case do
       [account | _rest] -> {:ok, from_account_snapshot(account, scope)}
       [] -> :error
