@@ -14,6 +14,8 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.RequestOptions
 
+  @anthropic_forwarded_headers ~w(anthropic-version anthropic-beta)
+
   @type conn :: Plug.Conn.t()
   @type gateway_call_result ::
           {:ok, Contracts.gateway_result()} | {:error, Contracts.gateway_error()}
@@ -261,7 +263,7 @@ defmodule CodexPoolerWeb.GatewayControllerHelpers do
   defp forwarded_headers(conn) do
     Enum.filter(conn.req_headers, fn {name, _value} ->
       name == "user-agent" or String.starts_with?(name, "x-openai-") or
-        String.starts_with?(name, "x-codex-")
+        String.starts_with?(name, "x-codex-") or name in @anthropic_forwarded_headers
     end)
   end
 

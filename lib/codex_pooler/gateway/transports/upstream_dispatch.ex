@@ -42,6 +42,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     "x-openai-subagent"
   ]
   @responses_lite_header_name "x-openai-internal-codex-responses-lite"
+  @anthropic_messages_header_names ["anthropic-version", "anthropic-beta"]
   @stable_downstream_keys [:active_turn_reconnect?, :correlation_id, :epoch, :pid]
   @public_per_call_downstream_keys [:owner_turn_id | @stable_downstream_keys]
 
@@ -212,6 +213,23 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   @spec regular_runtime_forwarded_metadata_headers(RequestOptions.t()) :: [header()]
   def regular_runtime_forwarded_metadata_headers(%RequestOptions{
         transport: %{
+          upstream_endpoint: "/messages",
+          forwarded_metadata_headers: forwarded_headers
+        },
+        openai_compatibility: %{direct_upstream?: true}
+      })
+      when is_list(forwarded_headers) do
+    Enum.filter(forwarded_headers, fn
+      {name, value} when is_binary(name) and is_binary(value) ->
+        String.downcase(name) in @anthropic_messages_header_names
+
+      _other ->
+        false
+    end)
+  end
+
+  def regular_runtime_forwarded_metadata_headers(%RequestOptions{
+        transport: %{
           upstream_endpoint: endpoint,
           forwarded_metadata_headers: forwarded_headers
         },
@@ -349,6 +367,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     result = maybe_drain_rejection_body(result)
 
     result
+    |> collect_non_success_stream_response(payload, opts)
     |> normalize_upstream_transport_result(identity, opts)
   rescue
     exception in [
@@ -847,6 +866,24 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
       {"openai-beta", "responses_websockets=2026-02-06"}
     ])
   end
+
+  defp collect_non_success_stream_response(
+         {:ok, %Req.Response{status: status} = response},
+         payload,
+         %RequestOptions{
+           transport: %{upstream_endpoint: "/messages"},
+           openai_compatibility: %{direct_upstream?: true}
+         }
+       )
+       when status >= 400 do
+    if RouteClass.streaming?(payload) do
+      {:ok, BoundedResponseBody.collect_async(response, BoundedResponseBody.default_max_bytes())}
+    else
+      {:ok, response}
+    end
+  end
+
+  defp collect_non_success_stream_response(result, _payload, _opts), do: result
 
   defp normalize_upstream_transport_result(
          {:error, %Finch.TransportError{} = exception},

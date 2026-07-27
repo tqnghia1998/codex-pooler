@@ -86,6 +86,19 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
 
   defp direct_upstream_payload(
          %RequestOptions{
+           openai_compatibility: %{direct_upstream?: true, direct_payload: payload}
+         } = request_options,
+         %Model{} = model
+       )
+       when is_map(payload) do
+    payload
+    |> Map.put("model", model.upstream_model_id)
+    |> adapt_legacy_thinking_budget(model, request_options)
+    |> then(&{:ok, &1})
+  end
+
+  defp direct_upstream_payload(
+         %RequestOptions{
            openai_compatibility: %{direct_upstream?: true, openai_chat_payload: payload}
          },
          %Model{} = model
@@ -103,6 +116,41 @@ defmodule CodexPooler.Gateway.Payloads.PayloadNormalizer do
        do: {:ok, Map.put(payload, "model", model.upstream_model_id)}
 
   defp direct_upstream_payload(%RequestOptions{}, %Model{}), do: :no_direct_payload
+
+  @claude_version_regex ~r/^claude-[a-z]+-(?<major>\d+)(?:-(?<minor>\d{1,2})(?!\d))?/
+
+  defp adapt_legacy_thinking_budget(
+         %{"thinking" => %{"type" => "enabled"} = thinking} = payload,
+         %Model{upstream_model_id: upstream_model_id},
+         %RequestOptions{
+           openai_compatibility: %{direct_upstream?: true, source_endpoint: "/v1/messages"}
+         }
+       )
+       when is_binary(upstream_model_id) do
+    if requires_adaptive_thinking?(upstream_model_id) do
+      thinking = thinking |> Map.delete("budget_tokens") |> Map.put("type", "adaptive")
+      Map.put(payload, "thinking", thinking)
+    else
+      payload
+    end
+  end
+
+  defp adapt_legacy_thinking_budget(payload, _model, _request_options), do: payload
+
+  # Claude 4.7+ and 5+ reject `thinking.type: "enabled"` (400 error); 4.6 accepts
+  # both; 4.5 and earlier support only `enabled` (adaptive 400s there). See
+  # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking#migrating-to-adaptive-thinking
+  defp requires_adaptive_thinking?(upstream_model_id) do
+    case Regex.named_captures(@claude_version_regex, upstream_model_id) do
+      %{"major" => major_str, "minor" => minor_str} ->
+        major = String.to_integer(major_str)
+        minor = if minor_str == "", do: 0, else: String.to_integer(minor_str)
+        major > 4 or (major == 4 and minor >= 7)
+
+      nil ->
+        false
+    end
+  end
 
   defp json_payload(payload, model, endpoint, %RequestOptions{} = request_options) do
     payload =

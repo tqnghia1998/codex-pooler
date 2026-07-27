@@ -25,6 +25,14 @@ defmodule CodexPooler.Gateway.Transports.BoundedResponseBody do
     end
   end
 
+  @spec collect_async(Req.Response.t(), pos_integer()) :: Req.Response.t()
+  def collect_async(%Req.Response{body: %Req.Response.Async{}} = response, max_bytes)
+      when is_integer(max_bytes) and max_bytes > 0 do
+    collect_async_parts(response, max_bytes)
+  end
+
+  def collect_async(%Req.Response{} = response, _max_bytes), do: response
+
   @spec finalize(Req.Response.t()) :: Req.Response.t()
   def finalize(%Req.Response{} = response) do
     cond do
@@ -43,7 +51,15 @@ defmodule CodexPooler.Gateway.Transports.BoundedResponseBody do
     end
   end
 
-  @spec exceeded?(Req.Response.t()) :: boolean()
+  defp collect_async_parts(%Req.Response{body: body} = response, max_bytes) do
+    body
+    |> Enum.reduce_while(response, fn data, response ->
+      response = collect_data(response, data, max_bytes)
+      if exceeded?(response), do: {:halt, response}, else: {:cont, response}
+    end)
+    |> finalize()
+  end
+
   def exceeded?(%Req.Response{} = response),
     do: is_map(Req.Response.get_private(response, @exceeded_key))
 

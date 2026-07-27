@@ -20,6 +20,8 @@ defmodule CodexPooler.Upstreams.Compass do
   def enabled?(identity, assignment), do: provider(identity, assignment) == @provider
 
   @spec direct_endpoint(String.t() | nil) :: String.t() | nil
+  def direct_endpoint("/v1/messages"), do: "/messages"
+
   def direct_endpoint("/v1/chat/completions"), do: "/chat/completions"
 
   def direct_endpoint(endpoint)

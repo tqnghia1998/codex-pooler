@@ -78,13 +78,16 @@ defmodule CodexPooler.Gateway.Payloads.TransportEnvelope do
 
   defp do_codex_account_headers(_identity), do: []
 
+  @anthropic_messages_header_names ["anthropic-version", "anthropic-beta"]
+
   defp safe_forwarded_headers(headers) when is_list(headers) do
     headers
     |> Enum.flat_map(fn
       {name, value} when is_binary(name) and is_binary(value) ->
         name = String.downcase(name)
 
-        if String.starts_with?(name, "x-openai-") or String.starts_with?(name, "x-codex-") do
+        if String.starts_with?(name, "x-openai-") or String.starts_with?(name, "x-codex-") or
+             name in @anthropic_messages_header_names do
           [{name, value}]
         else
           []

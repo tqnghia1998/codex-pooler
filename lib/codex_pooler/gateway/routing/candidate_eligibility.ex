@@ -13,6 +13,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
   alias CodexPooler.Repo
   alias CodexPooler.RouteClass
   alias CodexPooler.ServiceTier
+  alias CodexPooler.Upstreams.Compass
   alias CodexPooler.Upstreams.Schemas.{PoolUpstreamAssignment, UpstreamIdentity}
   alias CodexPooler.Upstreams.StatusVocabulary.Assignment, as: AssignmentStatus
   alias CodexPooler.Upstreams.StatusVocabulary.Identity, as: IdentityStatus
@@ -262,13 +263,14 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
     enforce_service_tier? = service_tier_requires_explicit_support?(requested_service_tier)
 
     candidates =
-      Enum.filter(candidates, fn {assignment, _identity} ->
+      Enum.filter(candidates, fn {assignment, identity} ->
         assignment_compatible?(
           model,
           endpoint,
           payload,
           request_options,
           assignment,
+          identity,
           enforce_service_tier?,
           has_input_image?
         )
@@ -721,10 +723,28 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
 
   defp assignment_compatible?(
          model,
+         "/v1/messages",
+         payload,
+         _request_options,
+         assignment,
+         identity,
+         _enforce_service_tier?,
+         _has_input_image?
+       ) do
+    Compass.enabled?(identity, assignment) and
+      messages_capabilities_compatible?(
+        payload,
+        source_assignment_model_metadata(model, assignment)
+      )
+  end
+
+  defp assignment_compatible?(
+         model,
          endpoint,
          payload,
          request_options,
          assignment,
+         _identity,
          enforce_service_tier?,
          has_input_image?
        ) do
@@ -740,6 +760,24 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
       _value ->
         not enforce_service_tier?
     end
+  end
+
+  defp messages_capabilities_compatible?(_payload, nil), do: true
+
+  defp messages_capabilities_compatible?(payload, metadata) do
+    streaming_compatible?(payload, metadata) and messages_tools_compatible?(payload, metadata)
+  end
+
+  # Compass model discovery defaults missing tool capability evidence to false. Native
+  # Messages tool definitions must only be rejected when Compass explicitly advertises
+  # tools as unsupported.
+  defp messages_tools_compatible?(payload, metadata) do
+    not payload_has_tools?(payload) or
+      not ModelMetadata.metadata_falsey?(ModelMetadata.metadata_map(metadata, "capabilities"), [
+        "tools",
+        "tool_calls",
+        "function_calling"
+      ])
   end
 
   defp source_assignment_model_metadata(%Model{} = model, assignment) do

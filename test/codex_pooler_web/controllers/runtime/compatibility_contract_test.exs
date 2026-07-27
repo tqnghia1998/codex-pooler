@@ -1067,7 +1067,11 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert Enum.any?(feature.routes, &(&1.method == :get and &1.path == "/v1/models"))
       assert Enum.any?(feature.routes, &(&1.method == :get and &1.path == "/v1/responses"))
       assert Enum.any?(feature.routes, &(&1.method == :post and &1.path == "/v1/responses"))
+      assert Enum.any?(feature.routes, &(&1.method == :post and &1.path == "/v1/messages"))
       assert feature.contract =~ "OpenAI-compatible /v1 routes"
+      assert feature.contract =~ "Compass-only Anthropic POST /v1/messages"
+      assert feature.contract =~ "accepts x-api-key auth"
+      assert feature.contract =~ "gateway root URL"
       assert feature.contract =~ "narrow GET /v1/responses Responses websocket compatibility only"
       assert feature.contract =~ "exclude broad /v1/realtime routes"
       assert feature.contract =~ "POST /v1/responses/compact"
@@ -1185,7 +1189,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       assert feature.contract =~ "Responses additional_tools support narrow and non-executable"
       refute feature.contract =~ "metadata"
 
-      assert fixture.auth == "required_bearer_api_key"
+      assert fixture.auth == "required_bearer_api_key_except_messages_accepts_x_api_key"
       assert fixture.default_enabled == true
       assert fixture.websocket_route == %{method: :get, path: "/v1/responses"}
       assert fixture.websocket_contract == "narrow_responses_websocket_only"
@@ -1372,6 +1376,7 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                "/v1/files",
                "/v1/images/edits",
                "/v1/images/generations",
+               "/v1/messages",
                "/v1/models",
                "/v1/responses",
                "/v1/responses/compact",

@@ -210,6 +210,90 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
       end
     end
 
+    test "Messages rejects explicitly unsupported tools but accepts absent capability evidence" do
+      model = %Model{
+        metadata: %{
+          "source_assignment_models" => %{
+            "tools-unsupported" => %{"capabilities" => %{"tools" => false}},
+            "tools-not-advertised" => %{"supports_tools" => false}
+          }
+        }
+      }
+
+      compass_identity = %{id: "compass-identity", metadata: %{}}
+
+      candidates = [
+        {%{id: "tools-unsupported", metadata: %{"provider" => "compass"}}, compass_identity},
+        {%{id: "tools-not-advertised", metadata: %{"provider" => "compass"}}, compass_identity}
+      ]
+
+      payload = %{"model" => "claude-sonnet-5", "tools" => [%{"name" => "lookup"}]}
+      request_options = RequestOptions.build(%{}, "/v1/messages", payload)
+
+      assert {:ok, filtered} =
+               CandidateEligibility.filter_runtime_compatible_candidates(
+                 filter_input(model, payload, request_options, candidates, "/v1/messages")
+               )
+
+      assert candidate_ids(filtered) == ["tools-not-advertised"]
+    end
+
+    test "Messages keeps only Compass assignments supporting requested capabilities" do
+      model = %Model{
+        metadata: %{
+          "source_assignment_models" => %{
+            "compass-compatible" => %{"capabilities" => %{"streaming" => true, "tools" => true}},
+            "compass-no-stream" => %{"capabilities" => %{"streaming" => false, "tools" => true}},
+            "compass-no-tools" => %{"capabilities" => %{"streaming" => true, "tools" => false}}
+          }
+        }
+      }
+
+      compass_identity = %{id: "compass-identity", metadata: %{}}
+
+      candidates = [
+        {%{id: "compass-compatible", metadata: %{"provider" => "compass"}}, compass_identity},
+        {%{id: "compass-no-stream", metadata: %{"provider" => "compass"}}, compass_identity},
+        {%{id: "compass-no-tools", metadata: %{"provider" => "compass"}}, compass_identity},
+        {%{id: "openai", metadata: %{}}, %{id: "openai-identity", metadata: %{}}}
+      ]
+
+      payload = %{
+        "model" => "claude-sonnet-5",
+        "stream" => true,
+        "tools" => [%{"name" => "lookup"}]
+      }
+
+      request_options = RequestOptions.build(%{}, "/v1/messages", payload)
+
+      assert {:ok, filtered} =
+               CandidateEligibility.filter_runtime_compatible_candidates(
+                 filter_input(model, payload, request_options, candidates, "/v1/messages")
+               )
+
+      assert candidate_ids(filtered) == ["compass-compatible"]
+    end
+
+    test "Messages only selects Compass assignments" do
+      model = model_missing_assignment_metadata("compass")
+
+      candidates = [
+        {%{id: "compass", metadata: %{"provider" => "compass"}},
+         %{id: "compass-identity", metadata: %{}}},
+        {%{id: "openai", metadata: %{}}, %{id: "openai-identity", metadata: %{}}}
+      ]
+
+      payload = %{"model" => "claude-sonnet-5"}
+      request_options = RequestOptions.build(%{}, "/v1/messages", payload)
+
+      assert {:ok, filtered} =
+               CandidateEligibility.filter_runtime_compatible_candidates(
+                 filter_input(model, payload, request_options, candidates, "/v1/messages")
+               )
+
+      assert candidate_ids(filtered) == ["compass"]
+    end
+
     test "auto and default do not narrow the candidate set" do
       model = model_with_tier_support("assignment-supported", "priority")
       candidates = [candidate("assignment-supported"), candidate("assignment-plain")]
@@ -949,10 +1033,16 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
   defp candidate_ids(candidates),
     do: Enum.map(candidates, fn {assignment, _identity} -> assignment.id end)
 
-  defp filter_input(model, payload, request_options, candidates) do
+  defp filter_input(
+         model,
+         payload,
+         request_options,
+         candidates,
+         endpoint \\ "/backend-api/codex/responses"
+       ) do
     FilterInput.new(%{
       model: model,
-      endpoint: "/backend-api/codex/responses",
+      endpoint: endpoint,
       payload: payload,
       request_options: request_options,
       candidates: candidates

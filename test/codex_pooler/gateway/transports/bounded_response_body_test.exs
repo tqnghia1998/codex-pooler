@@ -62,6 +62,21 @@ defmodule CodexPooler.Gateway.Transports.BoundedResponseBodyTest do
            }
   end
 
+  test "collect_async leaves unrelated mailbox messages untouched" do
+    {:ok, upstream} =
+      CodexPooler.FakeUpstream.start_link(
+        CodexPooler.FakeUpstream.chunked_response(["hello", " world"])
+      )
+
+    on_exit(fn -> CodexPooler.FakeUpstream.stop(upstream) end)
+
+    response = Req.get!(CodexPooler.FakeUpstream.url(upstream), into: :self)
+    send(self(), :unrelated)
+
+    assert BoundedResponseBody.collect_async(response, 16).body == "hello world"
+    assert_received :unrelated
+  end
+
   test "collector receives partial chunked data before declared HTTP/1 chunk completes" do
     {:ok, listen_socket} =
       :gen_tcp.listen(0, [

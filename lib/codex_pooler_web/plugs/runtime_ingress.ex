@@ -316,11 +316,22 @@ defmodule CodexPoolerWeb.Plugs.RuntimeIngress do
     do: {:ok, conn}
 
   defp authenticate_runtime_api_request(conn) do
-    conn
-    |> get_req_header("authorization")
-    |> List.first()
-    |> authenticate_authorization_header(conn)
-    |> case do
+    result =
+      case get_req_header(conn, "authorization") do
+        [header | _rest] ->
+          authenticate_authorization_header(header, conn)
+
+        [] when conn.method == "POST" and conn.path_info == ["v1", "messages"] ->
+          conn
+          |> get_req_header("x-api-key")
+          |> List.first()
+          |> Access.authenticate_v1_api_key()
+
+        [] ->
+          authenticate_authorization_header(nil, conn)
+      end
+
+    case result do
       {:ok, auth} -> {:ok, put_private(conn, :runtime_api_auth, auth)}
       {:error, reason} -> {:error, Map.put(reason, :status, 401), conn}
     end

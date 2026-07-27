@@ -147,6 +147,7 @@ defmodule CodexPoolerWeb.Router do
     post "/audio/transcriptions", V1.AudioController, :transcriptions
     post "/images/generations", V1.ImagesController, :generations
     post "/images/edits", V1.ImagesController, :edits
+    post "/messages", V1.MessagesController, :create
 
     for {method, path, action} <- UnsupportedRoutes.router_routes() do
       match method, path, V1.UnsupportedController, action

@@ -29,7 +29,8 @@ defmodule CodexPoolerWeb.PublicGatewayDispatch do
           authenticator: authenticator(),
           local_endpoint: String.t(),
           accounting_endpoint: String.t(),
-          gateway_executor: gateway_executor()
+          gateway_executor: gateway_executor(),
+          passthrough_upstream_errors?: boolean()
         ]
   @type json_payload_dispatch_opts :: [
           admission_endpoint: String.t(),
@@ -135,7 +136,14 @@ defmodule CodexPoolerWeb.PublicGatewayDispatch do
         case coercer.() do
           {:ok, coerced} ->
             result = execute_coerced_service(conn, auth, coerced, opts)
-            PublicGatewayResult.send(conn, result, &normalize_success.(&1, coerced))
+
+            PublicGatewayResult.send(
+              conn,
+              result,
+              &normalize_success.(&1, coerced),
+              passthrough_upstream_errors?:
+                Keyword.get(opts, :passthrough_upstream_errors?, false)
+            )
 
           {:error, reason} ->
             GatewayHelpers.send_error(conn, reason)
