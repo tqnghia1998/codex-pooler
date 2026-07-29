@@ -237,6 +237,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
   defp account_quota_window?(%Quota.AccountQuotaWindow{}), do: false
 
+  # The monthly spend-control window already renders as its own fixed
+  # "Monthly Usage" card (see quota_limit_rows/2); excluding it here keeps it
+  # from also surfacing as a duplicate additional-limit card.
   defp spend_control_window?(%Quota.AccountQuotaWindow{quota_key: "spend_control"}), do: true
   defp spend_control_window?(%Quota.AccountQuotaWindow{}), do: false
 
