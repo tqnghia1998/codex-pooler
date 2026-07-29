@@ -42,7 +42,7 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletionsTest do
       refute Process.get({:openai_chat_completions_stream_state, "gpt-example"})
     end
 
-    test "normalizes response.created blocks split across chunk boundaries" do
+    test "normalizes split response.created blocks above the generic SSE buffer limit" do
       state = ChatCompletions.stream_state(%{"model" => "gpt-example"})
 
       event =
@@ -66,6 +66,10 @@ defmodule CodexPooler.Gateway.OpenAICompatibility.ChatCompletionsTest do
         ]
         |> IO.iodata_to_binary()
 
+      # Larger than the old 64 KiB generic SSE limit but under the 1 MiB chat
+      # discard threshold: proves a big response.created buffers across chunks
+      # and normalizes instead of being dropped.
+      assert byte_size(event) > 65_536
       split_at = div(byte_size(event), 2)
       first = binary_part(event, 0, split_at)
       second = binary_part(event, split_at, byte_size(event) - split_at)

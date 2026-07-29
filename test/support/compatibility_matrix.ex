@@ -1606,8 +1606,8 @@ defmodule CodexPooler.CompatibilityMatrix do
           nonblank_mismatch: "drop"
         },
         oversized_incomplete_sse: %{
-          max_buffered_bytes: 65_536,
-          overflow_byte: 65_537,
+          max_buffered_bytes: 8_388_608,
+          overflow_byte: 8_388_609,
           source_bytes_relayed: false,
           terminal_event: "error",
           accounting_error_code: "upstream_stream_error"
