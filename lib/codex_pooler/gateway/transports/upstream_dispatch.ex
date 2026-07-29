@@ -877,7 +877,16 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
        )
        when status >= 400 do
     if RouteClass.streaming?(payload) do
-      {:ok, BoundedResponseBody.collect_async(response, BoundedResponseBody.default_max_bytes())}
+      response =
+        case RejectionBody.fetch(response) do
+          body when is_binary(body) ->
+            %{response | body: body}
+
+          nil ->
+            BoundedResponseBody.collect_async(response, BoundedResponseBody.default_max_bytes())
+        end
+
+      {:ok, response}
     else
       {:ok, response}
     end

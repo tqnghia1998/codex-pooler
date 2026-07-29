@@ -10,6 +10,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
     UpstreamQuotaReadiness,
     UpstreamRoutingReadiness
   }
+
   alias CodexPooler.Catalog
   alias CodexPooler.Catalog.AssignmentModelSummaries
   alias CodexPooler.Gateway.OperationalSettings
@@ -536,7 +537,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       |> Enum.reject(&(&1.key == :spending_cap))
       |> Enum.map(& &1.percent)
       |> Enum.reject(&is_nil/1)
-      |> Enum.map(&Decimal.sub(Decimal.new(100), &1))
 
     case used_percents do
       [] -> "unknown"

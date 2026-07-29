@@ -55,8 +55,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
     remaining = Decimal.max(Decimal.sub(cap, spent), Decimal.new(0))
 
-    remaining_percent =
-      remaining
+    used_percent =
+      spent
       |> Decimal.mult(Decimal.new(100))
       |> Decimal.div(cap)
       |> decimal_clamp_percent()
@@ -64,9 +64,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     %{
       key: :spending_cap,
       label: "Spending Cap",
-      percent: remaining_percent,
-      percent_value: Decimal.to_float(remaining_percent),
-      percent_label: quota_percent_label(remaining_percent),
+      percent: used_percent,
+      percent_value: Decimal.to_float(used_percent),
+      percent_label: quota_percent_label(used_percent),
       count_label: "#{format_dollars(remaining)} left of #{format_dollars(cap)}",
       remaining_amount: nil,
       credit_backed: false,
@@ -195,7 +195,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
       ),
       quota_limit_row(
         :primary_30d,
-        if(monthly_quota, do: "30d", else: "Non-recurring"),
+        if(is_nil(monthly_quota) and non_recurring_compass_quota,
+          do: "Non-recurring",
+          else: "30d"
+        ),
         monthly_quota || non_recurring_compass_quota,
         datetime_preferences,
         snapshot_at
@@ -289,6 +292,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   defp format_dollars(credits) do
     credits
     |> Decimal.div(@credits_per_dollar)
+    |> format_dollar_amount()
+  end
+
+  defp format_dollar_amount(amount) do
+    amount
     |> Decimal.round(2)
     |> Decimal.to_string(:normal)
     |> then(&"$#{&1}")
@@ -501,7 +509,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
          datetime_preferences,
          snapshot_at
        ) do
-    remaining_percent = quota_remaining_percent(window)
+    used_percent =
+      case quota_remaining_percent(window) do
+        %Decimal{} = remaining -> remaining_percent_from_used(remaining)
+        nil -> nil
+      end
 
     {reset_semantics, reset_at, reset_label, reset_title} =
       quota_reset_presentation(window, datetime_preferences, snapshot_at)
@@ -509,9 +521,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
     %{
       key: key,
       label: label,
-      percent: remaining_percent,
-      percent_value: quota_percent_value(remaining_percent),
-      percent_label: quota_percent_label(remaining_percent),
+      percent: used_percent,
+      percent_value: quota_percent_value(used_percent),
+      percent_label: quota_percent_label(used_percent),
       count_label: quota_count_label(window),
       remaining_amount: quota_remaining_amount(window),
       credit_backed: credit_backed_window?(window),

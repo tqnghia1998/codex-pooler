@@ -18,7 +18,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
       <progress
         id={"#{@id}-progress"}
         data-role="upstream-limit-progress"
-        aria-label={"#{@limit.label} #{@limit.percent_label} remaining"}
+        aria-label={"#{@limit.label} used #{@limit.percent_label}"}
         class={quota_limit_progress_class(@limit)}
         value={@limit.percent_value}
         max="100"
@@ -81,8 +81,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
 
   defp quota_limit_percent_class(%{percent: %Decimal{} = percent}) do
     cond do
-      Decimal.compare(percent, Decimal.new(30)) == :lt -> "tabular-nums font-medium text-error"
-      Decimal.compare(percent, Decimal.new(70)) == :lt -> "tabular-nums font-medium text-warning"
+      Decimal.compare(percent, Decimal.new(70)) != :lt -> "tabular-nums font-medium text-error"
+      Decimal.compare(percent, Decimal.new(30)) != :lt -> "tabular-nums font-medium text-warning"
       true -> "tabular-nums font-medium text-success"
     end
   end
@@ -92,8 +92,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
   defp quota_limit_progress_class(%{percent: %Decimal{} = percent} = limit) do
     tone_class =
       cond do
-        Decimal.compare(percent, Decimal.new(30)) == :lt -> "progress-error"
-        Decimal.compare(percent, Decimal.new(70)) == :lt -> "progress-warning"
+        Decimal.compare(percent, Decimal.new(70)) != :lt -> "progress-error"
+        Decimal.compare(percent, Decimal.new(30)) != :lt -> "progress-warning"
         true -> "progress-success"
       end
 

@@ -352,6 +352,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
         id={"upstream-account-#{@account.identity.id}-routing-readiness"}
         data-role="upstream-account-card-footer"
       >
+        <:fact role="upstream-routing-cell">
+          <AdminComponents.card_fact_label>Routing</AdminComponents.card_fact_label>
+          <AdminComponents.card_fact_value title={@routing_readiness.reason}>
+            {@routing_readiness.label}
+          </AdminComponents.card_fact_value>
+        </:fact>
         <:fact role="upstream-token-burn-summary">
           <div
             id={"upstream-account-#{@account.identity.id}-token-burn"}
