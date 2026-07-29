@@ -2594,8 +2594,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
            )
 
     assert has_element?(view, "#upstream-cockpit-presence[data-status='refresh_failed']")
-    assert has_element?(view, "#upstream-quota-limit-primary_5h", "12%")
-    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='12'][max='100']")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h", "88%")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='88'][max='100']")
 
     assert has_element?(
              view,
@@ -3246,12 +3246,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(
              view,
              "#upstream-quota-limit-primary_5h[data-role='upstream-limit-chart']",
-             "35%"
+             "65%"
            )
 
     assert has_element?(
              view,
-             "#upstream-quota-limit-primary_5h-progress[value='35'][max='100']"
+             "#upstream-quota-limit-primary_5h-progress[value='65'][max='100']"
            )
 
     assert has_element?(view, "#request-health-chart")
@@ -3333,12 +3333,12 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     assert has_element?(
              view,
              "#upstream-quota-limit-primary_5h[data-role='upstream-limit-chart']",
-             "9%"
+             "91%"
            )
 
     assert has_element?(
              view,
-             "#upstream-quota-limit-primary_5h-progress[value='9'][max='100']"
+             "#upstream-quota-limit-primary_5h-progress[value='91'][max='100']"
            )
 
     assert has_element?(
@@ -4567,7 +4567,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitLiveTest do
     })
 
     _ = :sys.get_state(view.pid)
-    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='36'][max='100']")
+    assert has_element?(view, "#upstream-quota-limit-primary_5h-progress[value='64'][max='100']")
 
     request_health_request_fixture(pool, assignment, %{
       status: "succeeded",

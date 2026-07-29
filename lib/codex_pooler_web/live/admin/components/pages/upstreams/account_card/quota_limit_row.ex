@@ -13,17 +13,19 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
         <span data-role="upstream-limit-title" class="min-w-0 truncate font-medium text-base-content">
           {@limit.label}
         </span>
-        <span class={[quota_limit_percent_class(@limit), "shrink-0"]}>{@limit.percent_label}</span>
+        <span class={[quota_limit_percent_class(@limit), "shrink-0"]}>
+          {remaining_percent_label(@limit)}
+        </span>
       </div>
       <progress
         id={"#{@id}-progress"}
         data-role="upstream-limit-progress"
-        aria-label={"#{@limit.label} used #{@limit.percent_label}"}
+        aria-label={"#{@limit.label} remaining #{remaining_percent_label(@limit)}"}
         class={quota_limit_progress_class(@limit)}
-        value={@limit.percent_value}
+        value={remaining_percent_value(@limit)}
         max="100"
       >
-        {@limit.percent_label}
+        {remaining_percent_label(@limit)}
       </progress>
       <div
         :if={quota_limit_details?(@limit)}
@@ -78,6 +80,22 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard.QuotaLimitRow 
 
   defp present_string?(value) when is_binary(value), do: String.trim(value) != ""
   defp present_string?(_value), do: false
+
+  defp remaining_percent_value(%{percent: %Decimal{} = used_percent}) do
+    used_percent
+    |> then(&Decimal.sub(Decimal.new(100), &1))
+    |> Decimal.max(Decimal.new(0))
+    |> Decimal.min(Decimal.new(100))
+    |> Decimal.round(0)
+    |> Decimal.to_integer()
+  end
+
+  defp remaining_percent_value(_limit), do: 0
+
+  defp remaining_percent_label(%{percent: %Decimal{}} = limit),
+    do: "#{remaining_percent_value(limit)}%"
+
+  defp remaining_percent_label(%{percent_label: label}), do: label
 
   defp quota_limit_percent_class(%{percent: %Decimal{} = percent}) do
     cond do

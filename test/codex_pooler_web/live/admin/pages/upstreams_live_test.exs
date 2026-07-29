@@ -3124,7 +3124,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     refute has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "5h remaining")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "36%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "64%")
 
     assert has_element?(
              view,
@@ -3140,7 +3140,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     refute has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "Weekly remaining")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "10%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "90%")
 
     assert has_element?(
              view,
@@ -3150,7 +3150,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-weekly-progress.admin-live-progress[value='10']"
+             "#upstream-account-#{identity.id}-limit-weekly-progress.admin-live-progress[value='90']"
            )
 
     assert has_element?(
@@ -3167,7 +3167,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300-progress[value='55']"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300-progress[value='45']"
            )
 
     assert has_element?(
@@ -3183,10 +3183,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-progress[value='10']"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-progress[value='90']"
            )
 
-    assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "25%")
+    assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "75%")
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limits.grid.gap-3")
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limits.md\\:grid-cols-2")
 
@@ -3196,7 +3196,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{browser_identity.id}-limit-weekly-progress[value='25']"
+             "#upstream-account-#{browser_identity.id}-limit-weekly-progress[value='75']"
            )
   end
 
@@ -3644,18 +3644,18 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
         has_element?(
           view,
           "#upstream-account-#{identity.id}-limit-primary_5h",
-          "0%"
+          "100%"
         ) ||
-          "expected observed zero-use account evidence to render the 5h quota as 0% used",
+          "expected observed zero-use account evidence to render the 5h quota as 100% remaining",
         has_element?(
           view,
-          "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='0']"
+          "#upstream-account-#{identity.id}-limit-primary_5h-progress[value='100'][aria-label='5h remaining 100%']"
         ) ||
-          "expected observed zero-use account evidence to render an empty 5h quota meter",
+          "expected observed zero-use account evidence to render a full 5h quota meter",
         has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h-reset") ||
           "expected observed zero-use account evidence to retain the provider reset countdown",
-        has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "15%") ||
-          "expected nonzero weekly usage API account evidence to render 15% used",
+        has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "85%") ||
+          "expected nonzero weekly usage API account evidence to render 85% remaining",
         not has_element?(
           view,
           "#upstream-account-#{identity.id}-routing-readiness [data-role='upstream-routing-cell']",
@@ -3782,8 +3782,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{first_identity.id}-limit-weekly", "17%")
-    assert has_element?(view, "#upstream-account-#{second_identity.id}-limit-weekly", "15%")
+    assert has_element?(view, "#upstream-account-#{first_identity.id}-limit-weekly", "83%")
+    assert has_element?(view, "#upstream-account-#{second_identity.id}-limit-weekly", "85%")
   end
 
   @tag :upstream_quota_evidence_stability
@@ -6225,7 +6225,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "11%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "89%")
 
     assert {:ok, [_merged]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -6248,7 +6248,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     execute_scheduled_upstreams_reload(view)
 
-    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "11%")
+    assert has_element?(view, "#upstream-account-#{identity.id}-limit-primary_5h", "89%")
 
     refute has_element?(
              view,
