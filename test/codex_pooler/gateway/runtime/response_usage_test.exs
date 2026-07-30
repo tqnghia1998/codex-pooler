@@ -485,8 +485,46 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsageTest do
                cached_input_tokens: 0,
                cache_write_tokens: 3604,
                output_tokens: 4,
-               total_tokens: 3618
+               total_tokens: 3618,
+               upstream_cost_micros: upstream_cost_micros
              } = ResponseUsage.from_sse(body)
+
+      assert Decimal.equal?(upstream_cost_micros, Decimal.new("9070"))
+    end
+
+    test "extracts Compass price_cost_usd from a non-streaming Anthropic body" do
+      body =
+        Jason.encode!(%{
+          "type" => "message",
+          "usage" => %{
+            "input_tokens" => 15,
+            "cache_creation_input_tokens" => 0,
+            "cache_read_input_tokens" => 0,
+            "output_tokens" => 10,
+            "service_tier" => "standard",
+            "price_cost_usd" => "0.00065"
+          }
+        })
+
+      assert %{status: "usage_known", total_tokens: 25, upstream_cost_micros: micros} =
+               ResponseUsage.from_json(body)
+
+      assert Decimal.equal?(micros, Decimal.new("650"))
+    end
+
+    test "ignores malformed price_cost_usd without invalidating usage" do
+      body =
+        Jason.encode!(%{
+          "usage" => %{
+            "input_tokens" => 15,
+            "output_tokens" => 10,
+            "price_cost_usd" => "not-a-number"
+          }
+        })
+
+      usage = ResponseUsage.from_json(body)
+      assert %{status: "usage_known", total_tokens: 25} = usage
+      refute Map.has_key?(usage, :upstream_cost_micros)
     end
 
     test "treats a lone Anthropic message_start as known with zero output tokens" do

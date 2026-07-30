@@ -140,6 +140,8 @@ Individual and bulk cap UI lives primarily in `upstreams_live/spend_cap_workflow
 
 `spent_credits` accrues only when usage is known and pricing resolves; routing still enforces already-recorded spend independently.
 
+Compass injects the authoritative per-request cost into response usage as `price_cost_usd` (both non-streaming and the streaming `message_delta` usage). Usage extraction carries it as `usage.upstream_cost_micros`, and settlement prefers it over catalog pricing snapshots, so Compass models missing from the pricing catalog (e.g. `claude-fable-5`) still settle real cost and accrue spend-cap credits. Settlement details record `cost_source` (`upstream_reported` or `pricing_snapshot`).
+
 Anthropic pricing seeds use dateless model IDs so suffix inference covers dated variants, including both Claude Sonnet 5 introductory and post-2026-09-01 rates. Streaming usage must merge input/cache fields from `message_start` with cumulative output from `message_delta`; non-streaming extraction also recognizes Anthropic cache field names.
 
 ponytail: only the default price bucket and 5-minute cache-write rate are seeded. Add duration-specific pricing if 1-hour cache usage becomes material.

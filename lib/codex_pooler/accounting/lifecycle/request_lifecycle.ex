@@ -507,9 +507,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
     snapshot = pricing.snapshot
 
     settled_cost =
-      if usage.status == @usage_known and pricing.status == "priced",
-        do: PricingResolution.cost_micros(snapshot, usage),
-        else: nil
+      cond do
+        usage.status != @usage_known -> nil
+        match?(%Decimal{}, Map.get(usage, :upstream_cost_micros)) -> usage.upstream_cost_micros
+        pricing.status == "priced" -> PricingResolution.cost_micros(snapshot, usage)
+        true -> nil
+      end
 
     %{
       pricing: pricing,
@@ -742,8 +745,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle do
           else: "invalid_usage_tokens"
         ),
       service_tier: attr(usage, :service_tier),
+      upstream_cost_micros: usage_upstream_cost_micros(usage),
       recorded_at: attr(usage, :recorded_at) || now()
     }
+  end
+
+  # Upstream-reported cost (e.g. Compass "price_cost_usd") survives usage
+  # normalization so settlement can prefer it over catalog pricing.
+  defp usage_upstream_cost_micros(usage) do
+    case attr(usage, :upstream_cost_micros) do
+      %Decimal{} = micros -> if Decimal.compare(micros, 0) == :lt, do: nil, else: micros
+      _other -> nil
+    end
   end
 
   defp optional_usage_counter(usage, key) do

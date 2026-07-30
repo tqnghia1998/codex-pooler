@@ -12,7 +12,8 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
           optional(:output_tokens) => non_neg_integer(),
           optional(:reasoning_tokens) => non_neg_integer(),
           optional(:total_tokens) => non_neg_integer(),
-          optional(:service_tier) => String.t() | nil
+          optional(:service_tier) => String.t() | nil,
+          optional(:upstream_cost_micros) => Decimal.t()
         }
 
   @retained_usage_context_bytes 4_096
@@ -407,10 +408,38 @@ defmodule CodexPooler.Gateway.Runtime.Finalization.ResponseUsage do
         service_tier: service_tier(envelope)
       }
       |> maybe_put_cache_write_tokens(cache_write_tokens)
+      |> maybe_put_upstream_cost_micros(usage)
     else
       _invalid -> %{status: "usage_unknown", source: "invalid_usage_tokens"}
     end
   end
+
+  # Compass reports the authoritative request cost inside usage as
+  # "price_cost_usd" (a decimal USD string). Settlement prefers this over
+  # catalog pricing when present.
+  defp maybe_put_upstream_cost_micros(normalized, %{"price_cost_usd" => value}) do
+    case upstream_cost_micros(value) do
+      %Decimal{} = micros -> Map.put(normalized, :upstream_cost_micros, micros)
+      nil -> normalized
+    end
+  end
+
+  defp maybe_put_upstream_cost_micros(normalized, _usage), do: normalized
+
+  defp upstream_cost_micros(value) when is_binary(value) do
+    case Decimal.parse(String.trim(value)) do
+      {usd, ""} -> if Decimal.compare(usd, 0) != :lt, do: Decimal.mult(usd, 1_000_000)
+      _other -> nil
+    end
+  end
+
+  defp upstream_cost_micros(value) when is_integer(value) and value >= 0,
+    do: Decimal.mult(Decimal.new(value), 1_000_000)
+
+  defp upstream_cost_micros(value) when is_float(value) and value >= 0,
+    do: Decimal.mult(Decimal.from_float(value), 1_000_000)
+
+  defp upstream_cost_micros(_value), do: nil
 
   # Anthropic reports uncached input separately from cache reads/writes. The accounting
   # model stores total input with cache counters as subsets, matching OpenAI usage.

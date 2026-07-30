@@ -205,6 +205,64 @@ defmodule CodexPooler.AccountingTest do
       assert Decimal.equal?(identity.spent_credits, Decimal.new("0.00325"))
     end
 
+    test "settles upstream-reported cost and accrues spend for unpriced models" do
+      setup = accounting_setup()
+
+      # No catalog pricing for this model: only the upstream-reported cost applies.
+      Repo.delete!(setup.pricing)
+
+      started_at =
+        DateTime.utc_now() |> DateTime.add(-5, :second) |> DateTime.truncate(:microsecond)
+
+      setup.identity
+      |> Ecto.Changeset.change(%{
+        spend_cap_credits: 250,
+        spent_credits: Decimal.new(0),
+        cap_started_at: DateTime.add(started_at, -5, :second)
+      })
+      |> Repo.update!()
+
+      assert {:ok, reserved} =
+               Accounting.reserve(
+                 setup.auth,
+                 setup.model,
+                 %{
+                   "model" => setup.model.exposed_model_id,
+                   "input" => "meter upstream cost",
+                   "max_output_tokens" => 5
+                 },
+                 %{
+                   endpoint: "/backend-api/codex/responses",
+                   transport: "http_json",
+                   correlation_id: "corr-upstream-cost-metering"
+                 }
+               )
+
+      assert {:ok, attempt} =
+               Accounting.create_attempt(reserved.request, setup.assignment, %{now: started_at})
+
+      usage = %{
+        status: "usage_known",
+        input_tokens: 15,
+        output_tokens: 10,
+        total_tokens: 25,
+        upstream_cost_micros: Decimal.new("650")
+      }
+
+      assert {:ok, finalized} =
+               Accounting.finalize_success(reserved.request, attempt, usage, %{
+                 response_status_code: 200
+               })
+
+      settlement = finalized.settlement
+      assert Decimal.equal?(settlement.settled_cost_micros, Decimal.new("650"))
+      assert settlement.details["pricing_status"] == "unpriced_missing_model"
+      assert settlement.details["cost_source"] == "upstream_reported"
+
+      identity = Repo.get!(CodexPooler.Upstreams.Schemas.UpstreamIdentity, setup.identity.id)
+      assert Decimal.equal?(identity.spent_credits, Decimal.new("0.01625"))
+    end
+
     test "keeps an active upstream active after spending exceeds 125 percent of its cap" do
       setup =
         accounting_setup(%{

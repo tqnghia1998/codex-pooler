@@ -304,6 +304,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
       "retry_count" => Map.fetch!(context, :retry_count),
       "estimated_from_reserve" => usage.status != "usage_known",
       "settled_cost_micros" => context |> Map.fetch!(:settled_cost) |> decimal_string_or_nil(),
+      "cost_source" => settlement_cost_source(usage, pricing),
       "cached_input_cost_micros" => cached_input_cost_micros(usage, pricing),
       "cache_write_rate_status" => cache_write_rate_status(usage, pricing),
       "cache_write_token_micros" => cache_write_token_micros(usage, pricing),
@@ -328,6 +329,16 @@ defmodule CodexPooler.Accounting.RequestLifecycle.LedgerEntries do
       "request_status" => request.status
     }
   end
+
+  defp settlement_cost_source(%{status: "usage_known"} = usage, pricing) do
+    cond do
+      match?(%Decimal{}, Map.get(usage, :upstream_cost_micros)) -> "upstream_reported"
+      pricing.status == "priced" -> "pricing_snapshot"
+      true -> nil
+    end
+  end
+
+  defp settlement_cost_source(_usage, _pricing), do: nil
 
   defp positive_or_nil(value), do: if(value && value > 0, do: value, else: nil)
   defp nonnegative_or_nil(value) when is_integer(value) and value >= 0, do: value
