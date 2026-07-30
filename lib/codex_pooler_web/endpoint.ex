@@ -12,9 +12,12 @@ defmodule CodexPoolerWeb.Endpoint do
 
   @multipart_parser_length 2_147_483_647
 
+  # Cookie key is host-scoped, not port-scoped: a dev instance on localhost:4000
+  # and a prod instance on localhost:4001 would otherwise share "_codex_pooler_key"
+  # and evict each other's login. Override in dev via CODEX_POOLER_SESSION_COOKIE_KEY.
   @session_options [
     store: :cookie,
-    key: "_codex_pooler_key",
+    key: System.get_env("CODEX_POOLER_SESSION_COOKIE_KEY", "_codex_pooler_key"),
     signing_salt: "J9frPjlr",
     same_site: "Lax"
   ]
