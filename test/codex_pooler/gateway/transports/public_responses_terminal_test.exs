@@ -293,6 +293,8 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
 
+    # The fork unifies the terminal bound with the ordinary 8 MiB bound (see
+    # commit 0e028244); an oversized incomplete terminal reports that same limit.
     observed_bytes = StreamProtocol.max_incomplete_terminal_sse_block_bytes() + 1
 
     emit_oversized_incomplete_sse(
@@ -305,7 +307,7 @@ defmodule CodexPooler.Gateway.Transports.PublicResponsesTerminalTest do
                       buffer: "public_openai_responses_sse",
                       bytes: ^observed_bytes,
                       count: 1,
-                      max_bytes: 67_108_864
+                      max_bytes: 8_388_608
                     }}
 
     emit_oversized_incomplete_sse(~s(data: {"ordinary":"), observed_bytes)

@@ -63,10 +63,10 @@ defmodule CodexPooler.Gateway.Routing.BridgeRingStatusTest do
       status = BridgeRing.routing_status(pool.id)
 
       assert status.settings.pool_id == pool.id
-      assert status.settings.routing_strategy == "bridge_ring"
+      assert status.settings.routing_strategy == "least_recent_success"
       assert status.settings.bridge_ring_size == 3
       assert status.settings.sticky_websocket_sessions
-      refute status.settings.sticky_http_sessions
+      assert status.settings.sticky_http_sessions
       assert status.active_affinity_count == 0
       assert status.active_demotion_count == 0
       assert status.active_circuit_count == 0

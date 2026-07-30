@@ -4,9 +4,11 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
   # Upstream Responses streams carry single non-terminal SSE events well past
   # 64 KiB (reasoning items with encrypted content scale with request context),
   # so the ordinary bound must stay comfortably above real provider event sizes.
-  # Matches upstream a586178f; the old 64 KiB bound aborted large gpt-5.x
-  # reasoning turns as "stream interrupted before terminal response event".
   @max_incomplete_sse_block_bytes 8_388_608
+  # The fork enforces a single incomplete-block bound: terminal blocks are held
+  # to the same 8 MiB limit rather than upstream's separate 64 MiB terminal cap,
+  # so an oversized incomplete terminal fails instead of buffering up to 64 MiB.
+  @max_incomplete_terminal_sse_block_bytes @max_incomplete_sse_block_bytes
 
   @spec max_incomplete_sse_block_bytes() :: pos_integer()
   def max_incomplete_sse_block_bytes, do: @max_incomplete_sse_block_bytes
@@ -15,9 +17,55 @@ defmodule CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser do
   def oversized_incomplete_sse_block?(buffer) when is_binary(buffer),
     do: byte_size(buffer) > @max_incomplete_sse_block_bytes
 
+  @spec max_incomplete_terminal_sse_block_bytes() :: pos_integer()
+  def max_incomplete_terminal_sse_block_bytes,
+    do: @max_incomplete_terminal_sse_block_bytes
+
+  @spec oversized_incomplete_terminal_sse_block?(binary()) :: boolean()
+  def oversized_incomplete_terminal_sse_block?(buffer) when is_binary(buffer),
+    do: byte_size(buffer) > @max_incomplete_terminal_sse_block_bytes
+
+  # Incremental form for streaming callers that accumulate `residue <> data`
+  # chunk by chunk. Callers must feed back only residues returned by this
+  # function (or ""); a residue assembled any other way may hide complete
+  # blocks and break the shortcut.
+  @spec complete_sse_blocks(binary(), binary(), keyword()) :: {[binary()], binary()}
+  def complete_sse_blocks(residue, data, opts)
+      when is_binary(residue) and is_binary(data) do
+    if appendable_without_scan?(residue, data) do
+      bounded? = Keyword.fetch!(opts, :bounded?)
+      {[], maybe_bound_incomplete_sse_block(residue <> data, bounded?)}
+    else
+      complete_sse_blocks(residue <> data, opts)
+    end
+  end
+
+  # CRLF collapses to its fixpoint in one pass: repeatedly replacing "\r\n"
+  # with "\n" consumes one trailing CR of a "\r"+ run per pass, so the fixpoint
+  # is the whole run collapsing into the newline. A retained residue therefore
+  # can never hide a separator behind a partially collapsed sequence such as
+  # "\r\r\n", and adversarial CR runs stay linear instead of looping one scan
+  # per CR.
+  defp appendable_without_scan?("", _data), do: false
+
+  defp appendable_without_scan?(residue, data) do
+    not String.ends_with?(residue, "\r") and
+      not (String.ends_with?(residue, "\n") and String.starts_with?(data, "\n")) and
+      not String.contains?(data, ["\r", "\n\n"])
+  end
+
+  @crlf_run ~r/\r+\n/
+  defp normalize_crlf(data) do
+    if String.contains?(data, "\r") do
+      String.replace(data, @crlf_run, "\n")
+    else
+      data
+    end
+  end
+
   @spec complete_sse_blocks(binary(), keyword()) :: {[binary()], binary()}
   def complete_sse_blocks(data, opts) do
-    data = String.replace(data, "\r\n", "\n")
+    data = normalize_crlf(data)
     bounded? = Keyword.fetch!(opts, :bounded?)
 
     if String.contains?(data, "\n\n") do

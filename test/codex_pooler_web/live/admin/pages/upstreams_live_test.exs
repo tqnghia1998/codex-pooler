@@ -377,43 +377,43 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            ).reset_semantics ==
              :unknown
 
-    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    # Model-specific quota meters are intentionally hidden from index account
+    # cards (see AGENTS.md); their reset semantics render on the per-account
+    # cockpit page instead.
+    reset_id = "upstream-quota-limit-model-codex_spark-secondary-10080-reset"
 
-    anchored_reset_id =
-      "upstream-account-#{anchored.id}-limit-model-codex_spark-secondary-10080-reset"
-
-    floating_reset_id =
-      "upstream-account-#{floating.id}-limit-model-codex_spark-secondary-10080-reset"
-
-    unknown_reset_id =
-      "upstream-account-#{unknown.id}-limit-model-codex_spark-secondary-10080-reset"
+    {:ok, anchored_view, _html} = live(conn, ~p"/admin/upstreams/#{anchored.id}")
 
     assert has_element?(
-             view,
-             "##{anchored_reset_id}[title^='resets '][data-countdown-state='running'][phx-hook='RelativeCountdown'][data-countdown-at]"
+             anchored_view,
+             "##{reset_id}[title^='resets '][data-countdown-state='running'][phx-hook='RelativeCountdown'][data-countdown-at]"
            )
 
     assert has_element?(
-             view,
-             "##{anchored_reset_id} [data-role='relative-countdown-value']"
+             anchored_view,
+             "##{reset_id} [data-role='relative-countdown-value']"
            )
 
+    {:ok, floating_view, _html} = live(conn, ~p"/admin/upstreams/#{floating.id}")
+
     assert has_element?(
-             view,
-             "##{floating_reset_id}[data-countdown-state='waiting']",
+             floating_view,
+             "##{reset_id}[data-countdown-state='waiting']",
              "starts on use"
            )
 
-    refute has_element?(view, "##{floating_reset_id}[phx-hook]")
-    refute has_element?(view, "##{floating_reset_id}[data-countdown-at]")
+    refute has_element?(floating_view, "##{reset_id}[phx-hook]")
+    refute has_element?(floating_view, "##{reset_id}[data-countdown-at]")
 
     assert has_element?(
-             view,
-             "##{floating_reset_id}[title='provider reports a rolling seven-day window until use starts']"
+             floating_view,
+             "##{reset_id}[title='provider reports a rolling seven-day window until use starts']"
            )
 
-    refute has_element?(view, "##{unknown_reset_id}")
-    refute render(view) =~ sensitive_marker
+    {:ok, unknown_view, _html} = live(conn, ~p"/admin/upstreams/#{unknown.id}")
+
+    refute has_element?(unknown_view, "##{reset_id}")
+    refute render(unknown_view) =~ sensitive_marker
   end
 
   @tag :provider_reset_convergence
@@ -568,22 +568,23 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
-    anchored_reset_id =
-      "upstream-account-#{anchored_identity.id}-limit-model-codex_spark-secondary-10080-reset"
-
-    floating_reset_id =
-      "upstream-account-#{floating_identity.id}-limit-model-codex_spark-secondary-10080-reset"
+    # Model-specific quota meters are hidden from index cards (see AGENTS.md);
+    # their reset semantics render on the per-account cockpit page instead.
+    reset_id = "upstream-quota-limit-model-codex_spark-secondary-10080-reset"
 
     legacy_card_id = "upstream-account-#{legacy_identity.id}"
 
     legacy_reset_title =
       "resets #{DateTimeDisplay.format_datetime(old_reset, DateTimeDisplay.preferences_for_user(scope.user))}"
 
-    assert has_element?(view, "##{anchored_reset_id}[title^='resets ']")
+    {:ok, anchored_view, _html} = live(conn, ~p"/admin/upstreams/#{anchored_identity.id}")
+    assert has_element?(anchored_view, "##{reset_id}[title^='resets ']")
+
+    {:ok, floating_view, _html} = live(conn, ~p"/admin/upstreams/#{floating_identity.id}")
 
     assert has_element?(
-             view,
-             "##{floating_reset_id}[title='provider reports a rolling seven-day window until use starts']",
+             floating_view,
+             "##{reset_id}[title='provider reports a rolling seven-day window until use starts']",
              "starts on use"
            )
 
@@ -3043,8 +3044,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-token-burn.text-right #upstream-account-#{identity.id}-token-burn-label",
-             "TOKEN BURN"
+             "#upstream-account-#{identity.id}-token-burn #upstream-account-#{identity.id}-token-burn-label",
+             "Token burn"
            )
 
     assert has_element?(
@@ -3153,37 +3154,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
              "#upstream-account-#{identity.id}-limit-weekly-progress.admin-live-progress[value='90']"
            )
 
-    assert has_element?(
+    # Model-specific quota meters are intentionally hidden from index cards
+    # (see AGENTS.md); only the fixed account-level meters render here.
+    refute has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300 [data-role='upstream-limit-title']",
-             "GPT-5.3-Codex-Spark 5h"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "55%"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300-progress[value='45']"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080 [data-role='upstream-limit-title'].truncate",
-             "GPT-5.3-Codex-Spark Weekly"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
            )
 
     refute has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-reset"
-           )
-
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080-progress[value='90']"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080"
            )
 
     assert has_element?(view, "#upstream-account-#{browser_identity.id}-limit-weekly", "75%")
@@ -3292,16 +3272,15 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert has_element?(view, "#upstream-account-#{identity.id}-limit-weekly", "not reported")
 
-    assert has_element?(
+    # Model-specific quota meters are hidden from index cards (see AGENTS.md).
+    refute has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "0%"
+             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
            )
 
-    assert has_element?(
+    refute has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-upstream_model-provider_codex_spark-primary-300",
-             "0%"
+             "#upstream-account-#{identity.id}-limit-upstream_model-provider_codex_spark-primary-300"
            )
   end
 
@@ -3509,11 +3488,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert {:ok, [_usage_window]} =
              QuotaWindows.upsert_quota_windows(identity, [zero_use_spark])
 
-    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
-    selector = "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
+    # Model-specific quota meters render on the per-account cockpit page, not
+    # index cards (see AGENTS.md).
+    selector = "#upstream-quota-limit-model-codex_spark-primary-300"
 
-    assert has_element?(view, selector, "0%")
-    assert has_element?(view, "#{selector}-progress[value='0']")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    assert has_element?(view, selector, "100%")
+    assert has_element?(view, "#{selector}-progress[value='100']")
 
     headers_observed_at = DateTime.add(now, 60, :second)
 
@@ -3534,10 +3516,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     assert stored_headers_window.source == "codex_response_headers"
 
-    execute_scheduled_upstreams_reload(view)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
-    assert has_element?(view, selector, "0%")
-    assert has_element?(view, "#{selector}-progress[value='0']")
+    assert has_element?(view, selector, "100%")
+    assert has_element?(view, "#{selector}-progress[value='100']")
 
     usage_observed_at = DateTime.add(now, 120, :second)
 
@@ -3558,10 +3540,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert Enum.sort(Enum.map(stored_windows, & &1.source)) ==
              ["codex_response_headers", "codex_usage_api"]
 
-    execute_scheduled_upstreams_reload(view)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
-    assert has_element?(view, selector, "0%")
-    assert has_element?(view, "#{selector}-progress[value='0']")
+    assert has_element?(view, selector, "100%")
+    assert has_element?(view, "#{selector}-progress[value='100']")
   end
 
   @tag :upstream_quota_dashboard_regression
@@ -3837,11 +3819,14 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert spark.percent_value == 0
     assert spark.percent_label == "0%"
 
-    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
-    selector = "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
+    # Model-specific quota meters render on the per-account cockpit page, not
+    # index cards (see AGENTS.md).
+    selector = "#upstream-quota-limit-model-codex_spark-primary-300"
 
-    assert has_element?(view, selector, "0%")
-    assert has_element?(view, "#{selector}-progress[value='0']")
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    assert has_element?(view, selector, "100%")
+    assert has_element?(view, "#{selector}-progress[value='100']")
     assert has_element?(view, "#{selector}-reset")
   end
 
@@ -4116,7 +4101,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     |> render_submit()
 
     assert Repo.reload!(first).spend_cap_credits == 750
-    assert Repo.reload!(second).spend_cap_credits == 125
+    # `open_bulk` seeds the default rule tiers; the test only overrides rule 0,
+    # so the remaining default rules still submit. Second's $41 monthly quota
+    # left clears only the {0, 0} tier, yielding a $0 cap.
+    assert Repo.reload!(second).spend_cap_credits == 0
   end
 
   test "mass sets spending caps for Compass project balances", %{
@@ -6029,13 +6017,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                }
              ])
 
-    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    # Model-specific quota meters render on the per-account cockpit page, not
+    # index cards (see AGENTS.md). Meters display remaining percent.
+    selector = "#upstream-quota-limit-model-codex_spark-primary-300"
 
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "0%"
-           )
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
+
+    assert has_element?(view, selector, "100%")
 
     assert {:ok, [_window]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -6054,13 +6042,9 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                }
              ])
 
-    execute_scheduled_upstreams_reload(view)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
-    assert has_element?(
-             view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "20%"
-           )
+    assert has_element?(view, selector, "80%")
   end
 
   @tag :upstream_quota_evidence_stability
@@ -6125,16 +6109,16 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                }
              ])
 
-    {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
+    # Model-specific quota meters render on the per-account cockpit page, not
+    # index cards (see AGENTS.md). Meters display remaining percent.
+    primary_selector = "#upstream-quota-limit-model-codex_spark-primary-300"
 
-    primary_selector =
-      "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300"
+    weekly_selector = "#upstream-quota-limit-model-codex_spark-secondary-10080"
 
-    weekly_selector =
-      "#upstream-account-#{identity.id}-limit-model-codex_spark-secondary-10080"
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
-    assert has_element?(view, primary_selector, "1%")
-    assert has_element?(view, weekly_selector, "15%")
+    assert has_element?(view, primary_selector, "99%")
+    assert has_element?(view, weekly_selector, "85%")
 
     assert {:ok, [_primary, _weekly]} =
              QuotaWindows.upsert_quota_windows(identity, [
@@ -6174,10 +6158,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
                }
              ])
 
-    execute_scheduled_upstreams_reload(view)
+    {:ok, view, _html} = live(conn, ~p"/admin/upstreams/#{identity.id}")
 
-    assert has_element?(view, primary_selector, "1%")
-    assert has_element?(view, weekly_selector, "15%")
+    assert has_element?(view, primary_selector, "99%")
+    assert has_element?(view, weekly_selector, "85%")
     refute has_element?(view, primary_selector, "not reported")
     refute has_element?(view, weekly_selector, "not reported")
   end
@@ -6275,14 +6259,10 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert {:ok, [window]} =
              QuotaWindows.upsert_quota_windows(identity, [
                %{
-                 quota_key: "gpt_5_3_codex_spark",
                  window_kind: "primary",
                  window_minutes: 300,
                  active_limit: 100,
                  used_percent: Decimal.new("0"),
-                 display_label: "GPT-5.3-Codex-Spark",
-                 quota_scope: "model",
-                 model: "gpt-5.3-codex-spark",
                  reset_at: DateTime.add(now, 5, :hour),
                  source: "codex_usage",
                  freshness_state: "fresh",
@@ -6292,10 +6272,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
 
     {:ok, view, _html} = live(conn, ~p"/admin/upstreams")
 
+    # Account meters display remaining percent; 0% used renders as 100%.
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "0%"
+             "#upstream-account-#{identity.id}-limit-primary_5h",
+             "100%"
            )
 
     later_reset = DateTime.add(now, 7, :hour)
@@ -6323,10 +6304,11 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
     assert :ok = PostgresBridge.relay_payload(payload)
     execute_scheduled_upstreams_reload(view)
 
+    # 20% used renders as 80% remaining.
     assert has_element?(
              view,
-             "#upstream-account-#{identity.id}-limit-model-codex_spark-primary-300",
-             "20%"
+             "#upstream-account-#{identity.id}-limit-primary_5h",
+             "80%"
            )
   end
 

@@ -5,7 +5,7 @@ This repository is a customized fork of `icoretech/codex-pooler`.
 ## Upstream baseline
 
 - The canonical upstream remote is `upstream`, not `origin`.
-- This document was last reviewed against `upstream/main` at `ce58b8cf` (`codex-pooler 0.5.8`).
+- This document was last reviewed against `upstream/main` at `72c6b9bd` (`codex-pooler 0.5.9`).
 - Always inspect the complete fork delta with `git diff upstream/main`; it includes committed branch changes and current working-tree changes.
 - Preserve the behavior below when rebasing. Resolve conflicts intentionally rather than accepting either side wholesale.
 

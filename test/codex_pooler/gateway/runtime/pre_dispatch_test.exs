@@ -1691,7 +1691,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
 
     assert %RoutingSettings{} = prepared.route_state.routing_settings
     assert prepared.route_state.routing_settings.pool_id == setup.pool.id
-    assert prepared.route_state.routing_settings.routing_strategy == "bridge_ring"
+    assert prepared.route_state.routing_settings.routing_strategy == "least_recent_success"
     assert prepared.route_state.routing_settings.bridge_ring_size == 3
     assert prepared.route_state.routing_settings.v1_compatibility_enabled
     refute Pools.get_routing_settings(setup.pool)

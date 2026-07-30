@@ -298,8 +298,13 @@ defmodule CodexPoolerWeb.Admin.UpstreamCockpitComponents.Charts do
     """
   end
 
+  # The spending cap is a card-level meter (see AGENTS.md); the cockpit quota
+  # section reports provider quota windows only, so an account with none still
+  # renders the explicit empty state.
   defp reported_quota_limits(quota_limits) when is_list(quota_limits) do
-    Enum.filter(quota_limits, &reported_quota_limit?/1)
+    quota_limits
+    |> Enum.reject(&(&1.key == :spending_cap))
+    |> Enum.filter(&reported_quota_limit?/1)
   end
 
   defp reported_quota_limits(_quota_limits), do: []

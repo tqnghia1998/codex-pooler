@@ -548,6 +548,7 @@ defmodule CodexPooler.Gateway.WebsocketTest do
         )
 
       setup = gateway_setup(upstream, supported_compression_model_opts())
+      disable_request_compression!(setup.pool)
       {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
       {:ok, session} = Gateway.start_codex_session(auth, accepted_turn_state: "ws-disabled")
       omitted_sentinel = "backend websocket disabled omitted marker"
@@ -1089,6 +1090,16 @@ defmodule CodexPooler.Gateway.WebsocketTest do
     |> Pools.ensure_routing_settings()
     |> Ecto.Changeset.change(%{
       request_compression_enabled: true,
+      updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    })
+    |> Repo.update!()
+  end
+
+  defp disable_request_compression!(pool) do
+    pool
+    |> Pools.ensure_routing_settings()
+    |> Ecto.Changeset.change(%{
+      request_compression_enabled: false,
       updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond)
     })
     |> Repo.update!()
