@@ -68,38 +68,21 @@ defmodule CodexPoolerWeb.TelemetryTest do
     assert "vm.total_run_queue_lengths.io" in metric_names
   end
 
-  test "exports Ecto repo query count and latency Prometheus metrics by source and command" do
+  test "exports the bounded Ecto repo query counter without unsampled latency histograms" do
     metrics = CodexPoolerWeb.Telemetry.prometheus_metrics()
 
     assert %Telemetry.Metrics.Counter{} =
              metric_by_name(metrics, "codex_pooler.repo.query.count")
 
+    # Repo latency histograms retain every sample until scraped; they are
+    # intentionally omitted to keep memory bounded on unscraped deployments.
     for name <- [
           "codex_pooler.repo.query.total_time.seconds",
           "codex_pooler.repo.query.query_time.seconds",
           "codex_pooler.repo.query.queue_time.seconds",
           "codex_pooler.repo.query.decode_time.seconds"
         ] do
-      assert %Telemetry.Metrics.Distribution{
-               event_name: [:codex_pooler, :repo, :query],
-               tags: [:source, :command],
-               reporter_options: reporter_options
-             } = metric_by_name(metrics, name)
-
-      assert Keyword.fetch!(reporter_options, :buckets) == [
-               0.001,
-               0.0025,
-               0.005,
-               0.01,
-               0.025,
-               0.05,
-               0.1,
-               0.25,
-               0.5,
-               1,
-               2,
-               5
-             ]
+      assert metric_by_name(metrics, name) == nil
     end
   end
 

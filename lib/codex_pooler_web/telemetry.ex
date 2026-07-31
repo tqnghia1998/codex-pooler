@@ -38,7 +38,6 @@ defmodule CodexPoolerWeb.Telemetry do
         }
   @type bridge_fallback_tags :: %{reason: String.t()}
 
-  @repo_query_buckets [0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
   @admission_queue_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
   @admin_stats_duration_buckets [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5]
   @admin_stats_windows ~w(1h 5h 24h 7d)
@@ -254,42 +253,9 @@ defmodule CodexPoolerWeb.Telemetry do
         description: "Admin stats dashboard build duration by outcome, window, and scope.",
         reporter_options: [buckets: @admin_stats_duration_buckets]
       ),
-      distribution("codex_pooler.repo.query.total_time.seconds",
-        event_name: [:codex_pooler, :repo, :query],
-        measurement: :total_time,
-        unit: {:native, :second},
-        tags: [:source, :command],
-        tag_values: &repo_query_tag_values/1,
-        description: "Total Ecto repository query time by source and SQL command.",
-        reporter_options: [buckets: @repo_query_buckets]
-      ),
-      distribution("codex_pooler.repo.query.query_time.seconds",
-        event_name: [:codex_pooler, :repo, :query],
-        measurement: :query_time,
-        unit: {:native, :second},
-        tags: [:source, :command],
-        tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository database execution time by source and SQL command.",
-        reporter_options: [buckets: @repo_query_buckets]
-      ),
-      distribution("codex_pooler.repo.query.queue_time.seconds",
-        event_name: [:codex_pooler, :repo, :query],
-        measurement: :queue_time,
-        unit: {:native, :second},
-        tags: [:source, :command],
-        tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository connection checkout queue time by source and SQL command.",
-        reporter_options: [buckets: @repo_query_buckets]
-      ),
-      distribution("codex_pooler.repo.query.decode_time.seconds",
-        event_name: [:codex_pooler, :repo, :query],
-        measurement: :decode_time,
-        unit: {:native, :second},
-        tags: [:source, :command],
-        tag_values: &repo_query_tag_values/1,
-        description: "Ecto repository decode time by source and SQL command.",
-        reporter_options: [buckets: @repo_query_buckets]
-      ),
+      # The Prometheus core library holds every distribution sample until /metrics is
+      # scraped. Database queries are frequent enough that latency histograms retain
+      # unbounded memory on deployments without a scraper; keep the bounded counter.
       last_value("vm.memory.total.bytes",
         event_name: [:vm, :memory],
         measurement: :total,
