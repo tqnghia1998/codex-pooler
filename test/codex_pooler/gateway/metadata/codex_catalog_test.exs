@@ -279,6 +279,19 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalogTest do
     assert restricted.body["models"] == Enum.drop(unrestricted.body["models"], 1)
   end
 
+  test "accepts an id-only Compass source model" do
+    model = model("claude-opus-4-8", %{"source_assignment_models" => %{}})
+    assignment_id = Ecto.UUID.generate()
+    source = %{"id" => "claude-opus-4-8", "object" => "model"}
+
+    model = put_source_models(model, %{assignment_id => source})
+
+    assert [%{assignment_ids: [^assignment_id], source: ^source}] =
+             CodexCatalog.select_canonical_sources([model], %{
+               model.id => [candidate(assignment_id, ~U[2026-07-31 08:00:00.000000Z])]
+             })
+  end
+
   test "selects the canonical partition containing the oldest routable assignment anchor" do
     model = model("gpt-partition", %{"source_assignment_models" => %{}})
     shared = pristine_source("gpt-partition")

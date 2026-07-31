@@ -312,7 +312,7 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
     with {:ok, _uuid} <- Ecto.UUID.cast(assignment_id),
          {:ok, source} <- Map.fetch(source_models, assignment_id),
          {:ok, canonical} <- CanonicalModelSource.canonical_source(source),
-         true <- valid_source_slug?(canonical.source, model) do
+         true <- valid_source_model_identifier?(canonical.source, model) do
       [Map.merge(canonical, %{assignment_id: assignment_id, created_at: created_at})]
     else
       _invalid -> []
@@ -321,11 +321,21 @@ defmodule CodexPooler.Gateway.Metadata.CodexCatalog do
 
   defp canonical_pair(_candidate, _model, _source_models), do: []
 
-  defp valid_source_slug?(%{"slug" => slug}, %Model{exposed_model_id: exposed_model_id})
-       when is_binary(slug) and is_binary(exposed_model_id),
-       do: String.trim(slug) != "" and String.downcase(slug) == String.downcase(exposed_model_id)
+  defp valid_source_model_identifier?(source, %Model{exposed_model_id: exposed_model_id})
+       when is_map(source) and is_binary(exposed_model_id) do
+    source
+    |> Map.get("slug", Map.get(source, "id"))
+    |> case do
+      identifier when is_binary(identifier) ->
+        String.trim(identifier) != "" and
+          String.downcase(identifier) == String.downcase(exposed_model_id)
 
-  defp valid_source_slug?(_source, %Model{}), do: false
+      _identifier ->
+        false
+    end
+  end
+
+  defp valid_source_model_identifier?(_source, %Model{}), do: false
 
   # `partitions` is ordered oldest anchor first, so the head is exactly the
   # partition the age-only rule selects. Routability moves the selection to the
