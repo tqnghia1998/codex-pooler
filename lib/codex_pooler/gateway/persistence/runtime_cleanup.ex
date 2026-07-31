@@ -17,8 +17,12 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
 
   alias CodexPooler.Gateway.Persistence.StatusVocabulary.OwnerLease, as: OwnerLeaseStatus
   alias CodexPooler.Gateway.Runtime.Finalization.Interruption
+  alias CodexPooler.Accounting.Request
   alias CodexPooler.Repo
 
+  @completed_request_statuses ~w(succeeded failed rejected cancelled)
+  @request_history_retention_days 90
+  @request_history_cleanup_batch_size 1_000
   @owner_lease_active OwnerLeaseStatus.active_status()
 
   @type request_ref :: Ecto.UUID.t() | %{required(:id) => Ecto.UUID.t()}
@@ -28,7 +32,12 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
   def cleanup_expired_runtime_state(now \\ now()) do
     with {:ok, recovered_summary} <- recover_expired_owner_runtime_state(now),
          {:ok, cleanup_summary} <- cleanup_expired(now) do
-      {:ok, Map.merge(cleanup_summary, recovered_summary)}
+      {pruned_requests, _} = prune_completed_request_history(now)
+
+      {:ok,
+       cleanup_summary
+       |> Map.merge(recovered_summary)
+       |> Map.put(:pruned_request_history, pruned_requests)}
     end
   end
 
@@ -117,6 +126,24 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanup do
         expired_idempotency_keys: expired_idempotency_keys
       }
     end)
+  end
+
+  # ponytail: prunes 1000 rows per 15-min run (~96k/day) outside the cleanup
+  # transaction; a large first-run backlog drains over several runs rather than
+  # at once. Raise the batch/cadence only if retention can't keep up.
+  @spec prune_completed_request_history(DateTime.t()) :: {non_neg_integer(), nil}
+  defp prune_completed_request_history(%DateTime{} = now) do
+    cutoff = DateTime.add(now, -@request_history_retention_days, :day)
+
+    expired_request_ids =
+      from request in Request,
+        where: request.status in ^@completed_request_statuses and request.completed_at < ^cutoff,
+        order_by: [asc: request.completed_at],
+        limit: @request_history_cleanup_batch_size,
+        select: request.id
+
+    from(request in Request, where: request.id in subquery(expired_request_ids))
+    |> Repo.delete_all()
   end
 
   defp recover_expired_owner_runtime_state(%DateTime{} = now) do

@@ -65,7 +65,8 @@ defmodule CodexPooler.RuntimeStateCleanupTest do
              expired_aliases: 1,
              expired_idempotency_keys: 1,
              expired_owner_leases: 1,
-             expired_owner_sessions_recovered: 0
+             expired_owner_sessions_recovered: 0,
+             pruned_request_history: 0
            }
 
     assert Repo.get!(BridgeSessionAlias, expired_alias.id).status == "expired"

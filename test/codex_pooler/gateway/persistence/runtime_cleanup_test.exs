@@ -148,6 +148,44 @@ defmodule CodexPooler.Gateway.Persistence.RuntimeCleanupTest do
     assert Repo.reload!(failed_key).status == IdempotencyKey.failed_status()
   end
 
+  test "cleanup_expired_runtime_state/1 prunes only terminal request history past 90 days" do
+    pool = pool_fixture()
+    %{api_key: api_key} = active_api_key_fixture(pool)
+    %{assignment: assignment} = upstream_assignment_fixture(pool)
+    now = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+    session = session_fixture(pool, api_key, assignment, now)
+
+    old_completed_at = DateTime.add(now, -91, :day)
+
+    stale_request =
+      request_fixture(%{pool: pool, api_key: api_key}, %{
+        status: "succeeded",
+        completed_at: old_completed_at
+      })
+
+    _stale_turn =
+      turn_fixture(session, stale_request, old_completed_at, status: CodexTurn.succeeded_status())
+
+    recent_request =
+      request_fixture(%{pool: pool, api_key: api_key}, %{
+        status: "succeeded",
+        completed_at: DateTime.add(now, -1, :day)
+      })
+
+    in_progress_request =
+      request_fixture(%{pool: pool, api_key: api_key}, %{
+        status: "in_progress",
+        completed_at: nil
+      })
+
+    assert {:ok, %{pruned_request_history: 1}} =
+             RuntimeCleanup.cleanup_expired_runtime_state(now)
+
+    assert Repo.get(CodexPooler.Accounting.Request, stale_request.id) == nil
+    assert Repo.get(CodexPooler.Accounting.Request, recent_request.id)
+    assert Repo.get(CodexPooler.Accounting.Request, in_progress_request.id)
+  end
+
   defp session_fixture(pool, api_key, assignment, now, attrs \\ []) do
     %CodexSession{
       pool_id: pool.id,
