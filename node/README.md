@@ -21,7 +21,7 @@ The Node proxy covers the client-visible local compatibility path:
 | OpenAI adapters | Responses and Chat message/content/tool conversion, multimodal input, continuation/replay validation, non-stream Chat output and finish reasons | `test/openai-adapters.test.js`, `test/proxy.test.js` |
 | HTTP ingress and errors | Bounded JSON/compressed bodies, gzip/deflate/zstd, timeouts, OpenAI-shaped errors, provider-detail redaction, valid Anthropic 4xx passthrough | `test/http-ingress.test.js`, `test/gateway-routes.test.js` |
 | Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, authoritative `price_cost_usd`, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js` |
-| Routing | Ordered spend-cap-eligible candidates, explicit/session pins, safe pre-output HTTP failover, durable model/route circuit cooldown and half-open recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/store.test.js` |
+| Routing | Ordered spend-cap-eligible candidates, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output HTTP failover, durable model/route circuit cooldown and half-open recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/store.test.js` |
 | SSE | Incremental UTF-8/SSE parsing, bounded incomplete events, first-event failover, public Responses sequencing, Chat translation, terminal sanitization, cancellation and usage settlement | `test/proxy.test.js` |
 | Responses WebSocket | Public `response.create` normalization, per-turn routing/session pinning, sequential multi-turn reuse, bounded frames/pending output, pre-output reconnect, sanitized terminals and terminal usage settlement | `test/gateway-routes.test.js` |
 
@@ -54,7 +54,7 @@ Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_P
 
 Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key` and are never returned by the API or rendered in the browser. Back up both files together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
 
-Spending caps use 25 credits per dollar. A cap update starts a new cap period and resets spend. Proxy requests require a positive cap: accounts remain eligible until they reach 100%, and pinned continuation is allowed below 125%. Valid provider-reported `usage.price_cost_usd` is authoritative; otherwise supported Codex and Anthropic token usage is priced from the local snapshot. The usage endpoint remains available for other integrations.
+Spending caps use 25 credits per dollar. A cap update starts a new cap period and resets spend. Proxy requests require a positive cap: accounts remain eligible until they reach 100%, and a `previous_response_id` continuation stays pinned to its original account below 125%. Valid provider-reported `usage.price_cost_usd` is authoritative; otherwise supported Codex and Anthropic token usage is priced from the local snapshot, which applies OpenAI's long-context rates above 272,000 input tokens. The usage endpoint remains available for other integrations.
 
 ## API
 

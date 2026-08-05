@@ -53,13 +53,6 @@ export function normalizePublicResponsesEvent(source, state) {
   return result;
 }
 
-export function publicInterruption(state) {
-  if (state.terminal || !state.visible) return [];
-  state.terminal = true;
-  state.sequence = Math.min(MAX_SEQUENCE, state.sequence + 1);
-  return [encode(failed({}, 'stream_interrupted'), state.sequence)];
-}
-
 export function createChatStreamState(payload) {
   return { id: `chatcmpl-${randomUUID()}`, created: Math.floor(Date.now() / 1000), model: typeof payload?.model === 'string' ? payload.model : 'unknown', serviceTier: null, roleSent: false, visible: false, terminal: false, includeUsage: payload?.stream_options?.include_usage === true };
 }

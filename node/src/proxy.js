@@ -9,7 +9,7 @@ import { AdapterError, adaptChatRequest, adaptResponsesRequest, lowerNonStrictFu
 import { upstreamFailure } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, splitSseBlocks } from './openai-streaming.js';
+import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
@@ -33,9 +33,9 @@ const COMPASS_PATHS = {
   '/v1/messages': '/messages'
 };
 const CODEX_HEADERS = {
-  'user-agent': 'codex_cli_rs/0.146.0',
+  'user-agent': 'codex_cli_rs/0.146.1',
   originator: 'codex_cli_rs',
-  version: '0.146.0'
+  version: '0.146.1'
 };
 const ANTHROPIC_HEADERS = ['anthropic-version', 'anthropic-beta'];
 const BACKEND_METADATA_HEADERS = [
@@ -178,6 +178,7 @@ function chooseUpstreams(store, req, path, payload, originalPath = path) {
   const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
   if (responsePinnedId && (requestedId && requestedId !== responsePinnedId || requestedType && store.get(responsePinnedId, scopeId)?.type !== requestedType)) return [];
   const candidates = store.candidatePlan({
+    pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
     requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : '',
     model,
@@ -331,6 +332,7 @@ function localSseFailure(response) {
 
 function retryableSseFailure(event) {
   if (!['response.failed', 'error'].includes(event?.type)) return false;
+  if (retryableFirstSseEvent(event)) return true;
   const error = event.error || event.response?.error || {};
   return event.status === 429 || event.status_code === 429 || error.code === 'rate_limit_exceeded' || error.code === 'model_not_found' || error.type === 'model_not_found' || error.type === 'invalid_request_error' && error.param === 'model';
 }
@@ -675,9 +677,10 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
   let completed = false;
   let usage;
   let buffer = '';
-  let publicSequence = 0;
   const decoder = new TextDecoder();
   const publicState = sanitizePublicResponses ? createPublicResponsesState() : null;
+  // Synthetic terminals continue the stream's own sequence so a client never sees it restart.
+  const nextPublicSequence = () => publicState ? (publicState.sequence = Math.min(Number.MAX_SAFE_INTEGER, publicState.sequence + 1)) : 0;
   const chatState = transformChat ? createChatStreamState(payload) : null;
   res.once('close', () => {
     if (!res.writableEnded) downstreamClosed = true;
@@ -693,12 +696,12 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
         terminal = true;
         completed = true;
         void reader.cancel('Upstream terminal event').catch(() => {});
-        if (sanitizePublicResponses) await writeChunk(res, `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' }, sequence_number: publicSequence++ })}\n\n`);
+        if (sanitizePublicResponses) await writeChunk(res, `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' }, sequence_number: nextPublicSequence() })}\n\n`);
         else if (!transformChat) await writeChunk(res, `${event}\n\n`);
       } else if (sanitizePublicResponses || transformChat) {
         terminal = true;
         if (transformChat) await writeChunk(res, chatStreamFailure());
-        else await writeChunk(res, publicStreamFailure(publicSequence++));
+        else await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       } else {
         await writeChunk(res, `${event}\n\n`);
       }
@@ -725,7 +728,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     if (type === 'response.failed' || type === 'error') {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure('upstream_response_failed', 'Upstream response failed'));
-      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(publicSequence++));
+      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else await writeChunk(res, `${event}\n\n`);
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
@@ -753,7 +756,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     if (!downstreamClosed && visible && !terminal) {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure());
-      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(publicSequence++));
+      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
     }
     if (transformChat && completed && !downstreamClosed) await writeChunk(res, 'data: [DONE]\n\n');
   } catch (error) {
@@ -761,7 +764,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     if (!downstreamClosed && visible && !terminal) {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure());
-      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure());
+      else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
     }
   } finally {
     reader.releaseLock();

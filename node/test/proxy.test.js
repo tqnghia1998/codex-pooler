@@ -1082,3 +1082,73 @@ test('converts split UTF-8 Codex SSE to Chat Completions SSE', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('continues a response-pinned turn above its cap and fails over a retryable first SSE event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-continuation-cap-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'pin@example.com', accountId: 'acct-pin' }));
+  const second = store.create(codexInput({ email: 'spare@example.com', accountId: 'acct-spare' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const authHeaders = [];
+  const fetchImpl = async (_url, options) => {
+    authHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'resp_pinned01', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const auth = { authorization: 'Bearer pin-key' };
+  const { server, base } = await runningServer(store, fetchImpl, 'pin-key');
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'one' }, auth)).response.status, 200);
+    const pinned = store.credentials(first.id).accessToken === authHeaders[0].slice(7) ? first : second;
+    store.addUsage(pinned.id, { attemptId: 'over-cap', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 110_000_000, costSource: 'upstream_reported' });
+    const continued = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', previous_response_id: 'resp_pinned01',
+      input: [{ type: 'function_call_output', call_id: 'call-1', output: 'ok' }]
+    }, auth);
+    assert.equal(continued.response.status, 200);
+    assert.equal(authHeaders.at(-1), `Bearer ${store.credentials(pinned.id).accessToken}`);
+
+    store.addUsage(pinned.id, { attemptId: 'past-continuation', startedAt: new Date(Date.now() + 2).toISOString(), settledCostMicros: 130_000_000, costSource: 'upstream_reported' });
+    const exhausted = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', previous_response_id: 'resp_pinned01',
+      input: [{ type: 'function_call_output', call_id: 'call-1', output: 'ok' }]
+    }, auth);
+    assert.equal(exhausted.response.status, 503);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a retryable first SSE event and keeps the public sequence past an interruption', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-first-event-retry-'));
+  const store = new Store(dir);
+  for (const account of ['one', 'two']) {
+    const created = store.create(codexInput({ email: `${account}@example.com`, accountId: `acct-${account}` }));
+    store.setCap(created.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const body = calls === 1
+      ? 'event: error\ndata: {"type":"error","error":{"type":"server_error","code":"server_error","message":"boom"}}\n\n'
+      : [
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_seq","status":"in_progress"}}',
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}', ''
+      ].join('\n\n');
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'stream', stream: true })
+    });
+    const events = (await response.text()).trim().split('\n\n').map((block) => JSON.parse(block.split('\n').find((line) => line.startsWith('data: ')).slice(6)));
+    assert.equal(calls, 2);
+    assert.deepEqual(events.map((event) => [event.type, event.sequence_number]), [['response.created', 0], ['response.output_text.delta', 1], ['error', 2]]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
