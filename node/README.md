@@ -9,7 +9,7 @@ A deliberately small local dashboard for:
 - observing normal/reserved/reached cap status and continuation eligibility;
 - proxying the core Responses, Chat Completions, and Compass Anthropic Messages APIs.
 
-This is a small single-process proxy, not a production replacement for the Elixir service. It supports scoped API keys and the core HTTP/WebSocket compatibility layer. Codex access tokens are refreshed lazily from their stored refresh token before quota and proxy requests.
+This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer; the Elixir service remains the full-featured compatibility reference. Codex access tokens are refreshed lazily from their stored refresh token before quota and proxy requests.
 
 ## Proxy compatibility status
 

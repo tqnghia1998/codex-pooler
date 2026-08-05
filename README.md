@@ -83,6 +83,15 @@ files, audio, images, bearer tokens, or raw Codex secrets. Instance owners keep
 the global administration surface, while instance admins work only with their
 assigned Pools.
 
+## Primary implementation: Node.js
+
+New development targets [`node/`](node/). Run it with `cd node && npm install &&
+npm start`; its local dashboard is available at `http://localhost:3000`.
+
+The Elixir application remains in this repository as the full-featured legacy
+implementation and compatibility reference. Do not assume new Elixir features
+are available in Node unless they are documented in [`node/README.md`](node/README.md).
+
 ## Highlights
 
 - 🔑 **Stable Pool API keys:** give clients one Pool credential whether the Pool
