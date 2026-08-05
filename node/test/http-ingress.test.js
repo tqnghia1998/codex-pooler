@@ -57,7 +57,7 @@ test('decodes gzip, deflate, and zstd proxy JSON before dispatch', async () => {
       const result = await compressedRequest(base, encoding, bytes);
       assert.equal(result.response.status, 200, encoding);
     }
-    assert.deepEqual(received.map((payload) => payload.input[0].content[0].text), ['gzip', 'deflate', 'zstd']);
+    assert.deepEqual(received.map((payload) => payload.input), ['gzip', 'deflate', 'zstd']);
   } finally {
     await close(server, dir);
   }

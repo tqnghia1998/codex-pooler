@@ -32,18 +32,24 @@ export async function ensureProviderCredentials(upstream, credentials, {
   fetchImpl = globalThis.fetch,
   saveCredentials = () => {}
 } = {}) {
-  if (upstream.type === 'codex') {
-    await refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials);
-  }
+  if (upstream.type === 'codex') return refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials);
+  return false;
 }
 
 export async function refreshProviderCredentials(upstream, credentials, {
   fetchImpl = globalThis.fetch,
   saveCredentials = () => {}
 } = {}) {
-  if (upstream.type === 'codex') {
-    await refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials, true);
-  }
+  if (upstream.type === 'codex') return refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials, true);
+  return false;
+}
+
+export function codexRefreshFailureCode(error) {
+  const body = error?.providerBody || {};
+  const code = body.error?.code || body.error;
+  if (['invalid_grant', 'revoked', 'invalid_refresh_token', 'token_expired', 'refresh_token_reused'].includes(code)) return 'reauth_required';
+  const text = [body.error_description, body.error_message, body.message, typeof body.error === 'string' ? body.error : ''].filter((value) => typeof value === 'string').join(' ').toLowerCase();
+  return text.includes('refresh') && text.includes('token') && ['revoked', 'expired', 'invalid'].some((word) => text.includes(word)) ? 'reauth_required' : 'failed';
 }
 
 async function refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentials, retried = false) {
@@ -81,7 +87,11 @@ async function refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentia
 }
 
 async function refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials, force = false) {
-  if (!credentials.refreshToken || (!force && !tokenRefreshDue(upstream, credentials))) return false;
+  if (!credentials.refreshToken) {
+    if (force || tokenRefreshDue(upstream, credentials)) credentials.onTokenRefreshFailure?.({ providerBody: { error: 'invalid_refresh_token' } });
+    return false;
+  }
+  if (!force && !tokenRefreshDue(upstream, credentials)) return false;
   const key = upstream.id || upstream.accountId || credentials.refreshToken;
   let refresh = tokenRefreshes.get(key);
   if (!refresh) {
@@ -91,13 +101,28 @@ async function refreshCodexCredentials(upstream, credentials, fetchImpl, saveCre
       if (tokenRefreshes.get(key) === refresh) tokenRefreshes.delete(key);
     }).catch(() => {});
   }
-  const updated = await refresh;
-  credentials.accessToken = updated.accessToken;
-  if (updated.refreshToken) credentials.refreshToken = updated.refreshToken;
-  if (updated.idToken) credentials.idToken = updated.idToken;
+  let updated;
+  try {
+    updated = await refresh;
+  } catch (error) {
+    credentials.onTokenRefreshFailure?.(error);
+    throw error;
+  }
+  const nextCredentials = {
+    ...credentials,
+    accessToken: updated.accessToken,
+    ...(updated.refreshToken ? { refreshToken: updated.refreshToken } : {}),
+    ...(updated.idToken ? { idToken: updated.idToken } : {})
+  };
+  for (const key of ['credentialEpoch', 'onTokenRefreshFailure', 'onTokenRefreshSuccess']) {
+    const descriptor = Object.getOwnPropertyDescriptor(credentials, key);
+    if (descriptor) Object.defineProperty(nextCredentials, key, descriptor);
+  }
+  if (saveCredentials(nextCredentials, updated.expiresAt) === false) return false;
+  Object.assign(credentials, nextCredentials);
   upstream.accessTokenExpiresAt = updated.expiresAt;
   upstream.updatedAt = new Date().toISOString();
-  saveCredentials(credentials, upstream.accessTokenExpiresAt);
+  credentials.onTokenRefreshSuccess?.();
   return true;
 }
 

@@ -215,7 +215,7 @@ test('maps compact and native backend media routes while preserving request byte
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'compact', max_output_tokens: 128, temperature: 0.2, top_p: 0.9, reasoning: { effort: 'ultra' } })
     });
     assert.equal(compact.status, 200);
-    assert.deepEqual(JSON.parse(calls[0].body).input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'compact' }] }]);
+    assert.equal(JSON.parse(calls[0].body).input, 'compact');
     assert.equal(JSON.parse(calls[0].body).reasoning.effort, 'max');
     assert.equal(JSON.parse(calls[0].body).max_output_tokens, 128);
     assert.equal(JSON.parse(calls[0].body).temperature, 0.2);
@@ -372,7 +372,7 @@ test('normalizes public transcription multipart fields and response', async () =
     assert.equal(form.get('prompt'), 'Shopee');
     assert.deepEqual(form.getAll('keywords[]'), ['alpha', 'beta']);
     assert.deepEqual(form.getAll('languages[]'), ['en', 'vi']);
-    assert.equal(form.has('model'), false);
+    assert.equal(form.get('model'), 'gpt-4o-transcribe');
     assert.equal(form.has('response_format'), false);
     return new Response(JSON.stringify({ text: 'hello', languages: ['en'], duration: 1.2 }), { status: 200 });
   };
@@ -477,7 +477,7 @@ test('redacts public image provider 5xx errors', async () => {
   }
 });
 
-test('redacts provider-controlled image SSE failure fields', async () => {
+test('projects provider-controlled invalid image SSE failures', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-image-sse-errors-'));
   const { store } = configuredStore(dir);
   const fetchImpl = async (url) => new URL(url).pathname === '/backend-api/codex/models'
@@ -486,8 +486,8 @@ test('redacts provider-controlled image SSE failure fields', async () => {
   const { server, base } = await start(store, fetchImpl);
   try {
     const response = await gatewayFetch(base, '/v1/images/generations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-image-1-mini', prompt: 'x' }) });
-    assert.equal(response.status, 502);
-    assert.deepEqual((await response.json()).error, { type: 'server_error', code: 'upstream_error', message: 'Upstream request failed', param: null });
+    assert.equal(response.status, 400);
+    assert.deepEqual((await response.json()).error, { type: 'invalid_request_error', code: 'provider_secret', message: 'private provider message', param: 'secret' });
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
@@ -507,7 +507,7 @@ test('refreshes and retries a rejected upstream WebSocket handshake', async () =
   const upstreamAuth = [];
   const targetServer = createServer();
   const targetWs = new WebSocketServer({ noServer: true });
-  targetWs.on('connection', (socket) => socket.on('message', (data) => socket.send(data)));
+  targetWs.on('connection', (socket) => socket.on('message', () => socket.send(JSON.stringify({ type: 'response.output_text.delta', model: 'gpt-5.6-sol', delta: 'ok' }))));
   targetServer.on('upgrade', (request, socket, head) => {
     upstreamAuth.push(request.headers.authorization);
     if (request.headers.authorization !== 'Bearer rotated-token') {
@@ -605,6 +605,7 @@ test('fails over a public WebSocket turn before output and settles its terminal 
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
   const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, websocketUrl: () => `ws://127.0.0.1:${target.address().port}`, fetchImpl: async () => new Response('{}') });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const apiKeyId = store.authenticateApiKey(API_KEY).id;
   try {
     const messages = await new Promise((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: `Bearer ${API_KEY}`, 'x-codex-session-id': 'ws-failover-session' } });
@@ -619,7 +620,7 @@ test('fails over a public WebSocket turn before output and settles its terminal 
     });
     assert.deepEqual(messages.map((message) => message.response.id), ['ws-fallback', 'ws-next']);
     assert.equal(upstreamAuth.length, 2);
-    assert.equal(store.sessionUpstream('ws-failover-session'), second.id);
+    assert.equal(store.sessionUpstream('ws-failover-session', undefined, apiKeyId), second.id);
     assert.equal(store.getPublic(first.id).spending.spentDollars, 0);
     assert.deepEqual(Object.values(store.get(second.id).spending.settlements).map(({ settledCostMicros, costSource }) => ({ settledCostMicros, costSource })), [{ settledCostMicros: 35, costSource: 'pricing_snapshot' }]);
   } finally {
@@ -699,7 +700,12 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   target.on('connection', (socket, request) => {
     targetHeaders = request.headers;
-    socket.on('message', (data) => socket.send(data));
+    socket.on('message', (data) => {
+      let frame;
+      try { frame = JSON.parse(data); } catch { return socket.send(data); }
+      if (frame.generate === true) socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'public-ws', status: 'completed', output: [] } }));
+      else socket.send(data);
+    });
   });
   await new Promise((resolve) => target.once('listening', resolve));
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
@@ -718,7 +724,7 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
       client.once('message', (data) => { resolve(data.toString()); client.close(); });
       client.once('error', reject);
     });
-    assert.deepEqual(JSON.parse(message), { model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }], stream: true, store: false, reasoning: {}, instructions: '', include: ['reasoning.encrypted_content'], generate: true, sequence_number: 0 });
+    assert.deepEqual(JSON.parse(message), { type: 'response.completed', response: { id: 'public-ws', status: 'completed', output: [] }, sequence_number: 0 });
     assert.equal(publicModelsEtag, undefined);
     assert.equal(targetHeaders['openai-beta'], 'responses_websockets=2026-02-06');
     assert.match(targetHeaders.authorization, /^Bearer header\./);
