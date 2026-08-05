@@ -8,7 +8,7 @@ import { HttpError } from './http-ingress.js';
 import { extractUsage } from './pricing.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 
-const CODEX_VERSION = '0.146.0';
+const CODEX_VERSION = '0.146.1';
 const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2']);
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
