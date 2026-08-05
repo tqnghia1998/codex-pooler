@@ -72,7 +72,7 @@ test('merges Codex and Compass model discovery with the required Codex client ve
     assert.equal(response.status, 200);
     assert.deepEqual(body.data.map((model) => model.id), ['shared-model', 'gpt-5.6-sol', 'claude-fable-5']);
     assert.equal(body.data[0].object, 'model');
-    assert.equal(new URL(calls.find((url) => url.startsWith('https://chatgpt.com'))).searchParams.get('client_version'), '0.146.0');
+    assert.equal(new URL(calls.find((url) => url.startsWith('https://chatgpt.com'))).searchParams.get('client_version'), '0.146.1');
     assert.equal(new URL(calls.find((url) => url.startsWith('https://compass.llm.shopee.io'))).pathname, '/compass-api/v1/models');
     assert.equal(response.headers.get('etag'), null);
     const cached = await gatewayFetch(base, '/v1/models');
