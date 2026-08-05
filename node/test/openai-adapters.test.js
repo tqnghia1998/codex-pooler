@@ -98,6 +98,28 @@ test('normalizes Responses instructions, replay, continuation, and cache control
   assert.equal(continuation.input[2].output, null);
 });
 
+test('preserves standard detail field on Responses input_image parts', () => {
+  const adapted = adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' }] }]
+  });
+  assert.deepEqual(adapted.input[0].content[0], { type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' });
+});
+
+test('accepts pi replay shapes when switching models mid-session', () => {
+  const adapted = adaptResponsesRequest({
+    model: 'gpt-5.6-luna',
+    input: [
+      { type: 'message', role: 'assistant', status: 'completed', id: 'msg_pi_0', phase: undefined,
+        content: [{ type: 'output_text', text: 'prior answer', annotations: [] }] },
+      { role: 'user', content: [{ type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' }] }
+    ]
+  });
+  assert.deepEqual(adapted.input[0].content[0], { type: 'output_text', text: 'prior answer' });
+  assert.equal('phase' in adapted.input[0], false);
+  assert.deepEqual(adapted.input[1].content[0], { type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' });
+});
+
 test('validates and preserves Responses tools and strict local schemas', () => {
   const schema = {
     type: 'object',

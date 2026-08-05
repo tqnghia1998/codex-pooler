@@ -1,4 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import {
@@ -15,14 +16,18 @@ import {
   spendingSummary,
   updateUpstream
 } from './domain.js';
+import { codexRefreshFailureCode } from './providers.js';
 
 const SESSION_LIMIT = 1_000;
 const SESSION_ID_MAX_LENGTH = 200;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
+const RESPONSE_PIN_LIMIT = 1_000;
+const RESPONSE_PIN_TTL_MS = 24 * 60 * 60 * 1_000;
 const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CIRCUIT_COOLDOWN_MS = 60_000;
 const CIRCUIT_LIMIT = 100;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
+const GATEWAY_HISTORY_LIMIT = 1_000;
 export const DEFAULT_SCOPE_ID = 'default';
 
 export class Store {
@@ -34,8 +39,18 @@ export class Store {
     chmodSync(this.dataDir, 0o700);
     const databaseExists = existsSync(this.dbPath);
     this.key = this.loadKey(databaseExists);
-    if (!databaseExists) this.save(emptyDatabase());
-    else this.save(this.load());
+    this.events = new EventEmitter();
+    this.db = databaseExists ? this.load() : emptyDatabase();
+    this.save(this.db);
+  }
+
+  onUpstreamsChange(listener) {
+    this.events.on('upstreams', listener);
+    return () => this.events.off('upstreams', listener);
+  }
+
+  notifyUpstreamsChange() {
+    this.events.emit('upstreams');
   }
 
   createScope({ id = randomUUID(), status = 'active', models = [] } = {}) {
@@ -151,6 +166,7 @@ export class Store {
     upstream.credentials = encryptCredentials(upstream.credentials, this.key);
     db.upstreams.push(upstream);
     this.save(db);
+    this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
 
@@ -161,9 +177,14 @@ export class Store {
     const previousCredentials = decryptCredentials(upstream.credentials, this.key);
     upstream.credentials = previousCredentials;
     updateUpstream(upstream, input);
+    if (upstream.type === 'codex' && (input.authJson || input.accessToken)) {
+      upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+      delete upstream.tokenRefresh;
+    }
     if (input.routing !== undefined) upstream.routing = normalizeRouting(input.routing);
     this.saveCredentials(upstream);
     this.save(db);
+    this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
 
@@ -176,12 +197,49 @@ export class Store {
       if (entry === id || entry?.upstreamId === id) delete db.sessions[sessionId];
     }
     this.save(db);
+    this.notifyUpstreamsChange();
   }
 
   credentials(id) {
     const upstream = this.get(id);
     if (!upstream) throw notFound();
-    return decryptCredentials(upstream.credentials, this.key);
+    const credentials = decryptCredentials(upstream.credentials, this.key);
+    if (upstream.type === 'codex') {
+      Object.defineProperties(credentials, {
+        credentialEpoch: { value: Number(upstream.credentialEpoch) || 0, enumerable: false },
+        onTokenRefreshFailure: { value: (error) => this.recordTokenRefreshFailure(id, error, Number(upstream.credentialEpoch) || 0), enumerable: false },
+        onTokenRefreshSuccess: { value: () => this.clearTokenRefresh(id, Number(upstream.credentialEpoch) || 0), enumerable: false }
+      });
+    }
+    return credentials;
+  }
+
+  setTokenRefreshFailureHandler(handler) {
+    this.tokenRefreshFailureHandler = typeof handler === 'function' ? handler : null;
+  }
+
+  recordTokenRefreshFailure(id, error, expectedEpoch = null) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    if (expectedEpoch !== null && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return null;
+    const status = codexRefreshFailureCode(error);
+    upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status };
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
+    this.tokenRefreshFailureHandler?.(id, 'runtime');
+    return publicUpstream(upstream);
+  }
+
+  clearTokenRefresh(id, expectedEpoch = null) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    if (expectedEpoch !== null && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return;
+    if (!upstream.tokenRefresh) return;
+    delete upstream.tokenRefresh;
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
   }
 
   setQuota(id, quota) {
@@ -191,16 +249,33 @@ export class Store {
     upstream.quota = quota;
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
+    this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
 
   persistCredentials(id, credentials, accessTokenExpiresAt = null) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
+    const expectedEpoch = credentials?.credentialEpoch;
+    if (expectedEpoch !== undefined && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return false;
     upstream.credentials = encryptCredentials(credentials, this.key);
+    if (accessTokenExpiresAt !== upstream.accessTokenExpiresAt) delete upstream.tokenRefresh;
     upstream.accessTokenExpiresAt = accessTokenExpiresAt;
+    upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
+    this.notifyUpstreamsChange();
+    return true;
+  }
+
+  setTokenRefresh(id, tokenRefresh) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    upstream.tokenRefresh = tokenRefresh;
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return publicUpstream(upstream);
   }
 
   setCap(id, input) {
@@ -209,6 +284,7 @@ export class Store {
     ensureSpending(upstream);
     setSpendingCap(upstream, capCreditsFromInput(input));
     this.save(db);
+    this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
 
@@ -218,23 +294,99 @@ export class Store {
     ensureSpending(upstream);
     const settlement = recordUsage(upstream, input);
     this.save(db);
+    if (settlement.appliedDeltaMicros) this.notifyUpstreamsChange();
     return { upstream: publicUpstream(upstream), settlement };
   }
 
   recordGatewayUsage({ scopeId = DEFAULT_SCOPE_ID, apiKeyId = null, attemptId, startedAt, usage = null, settledCostMicros = null } = {}) {
     if (!attemptId) return;
     const db = this.load();
-    db.gatewayUsage ||= [];
-    const entry = { scopeId, apiKeyId, attemptId, startedAt: startedAt || new Date().toISOString(), usage, settledCostMicros };
-    const index = db.gatewayUsage.findIndex((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && item.attemptId === attemptId);
-    if (index === -1) db.gatewayUsage.push(entry);
-    else db.gatewayUsage[index] = entry;
+    upsertGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros });
     this.save(db);
   }
 
+  reserveGatewayRequest({ scopeId = DEFAULT_SCOPE_ID, apiKeyId, endpoint, model = '', transport = 'http_json', admittedAt = new Date().toISOString() } = {}) {
+    if (typeof apiKeyId !== 'string' || !apiKeyId) throw new Error('apiKeyId is required');
+    const db = this.load();
+    activeScope(db, scopeId);
+    if (!db.apiKeys.some((key) => key.id === apiKeyId && key.scopeId === scopeId)) throw new Error('api key not found');
+    const request = {
+      id: randomUUID(), scopeId, apiKeyId, endpoint: String(endpoint || ''), model: String(model || ''), transport,
+      status: 'accepted', usageStatus: 'usage_pending', admittedAt, completedAt: null,
+      responseStatusCode: null, lastErrorCode: null, retryCount: 0
+    };
+    db.gatewayRequests.push(request);
+    this.save(db);
+    return { ...request };
+  }
+
+  beginGatewayAttempt(requestId, upstreamId, startedAt = new Date().toISOString()) {
+    const db = this.load();
+    const request = findGatewayRequest(db, requestId);
+    if (request.completedAt || !['accepted', 'in_progress'].includes(request.status)) throw new Error('request is already finalized');
+    if (!scoped(db.upstreams, request.scopeId).some((upstream) => upstream.id === upstreamId)) throw notFound();
+    request.status = 'in_progress';
+    const attempt = {
+      id: randomUUID(), requestId, upstreamId, attemptNumber: db.gatewayAttempts.filter((item) => item.requestId === requestId).length + 1,
+      transport: request.transport, status: 'in_progress', retryable: false, startedAt, completedAt: null,
+      responseStatusCode: null, errorCode: null
+    };
+    db.gatewayAttempts.push(attempt);
+    this.save(db);
+    return { ...attempt };
+  }
+
+  retryGatewayAttempt(requestId, attemptId, { responseStatusCode = null, errorCode = null, completedAt = new Date().toISOString() } = {}) {
+    const db = this.load();
+    const request = findGatewayRequest(db, requestId);
+    const attempt = findGatewayAttempt(db, requestId, attemptId);
+    if (request.completedAt || attempt.status !== 'in_progress') throw new Error('attempt is already finalized');
+    Object.assign(attempt, { status: 'retryable_failed', retryable: true, responseStatusCode, errorCode, completedAt });
+    request.status = 'in_progress';
+    request.retryCount += 1;
+    this.save(db);
+    return { ...attempt };
+  }
+
+  finalizeGatewayRequest({ requestId, attemptId = null, status, responseStatusCode = null, errorCode = null, usage = null, settledCostMicros = null, costSource = null, completedAt = new Date().toISOString() } = {}) {
+    if (!['succeeded', 'failed'].includes(status)) throw new Error('request status must be succeeded or failed');
+    const db = this.load();
+    const request = findGatewayRequest(db, requestId);
+    if (request.completedAt) throw new Error('request is already finalized');
+    const attempt = attemptId ? findGatewayAttempt(db, requestId, attemptId) : null;
+    if (attempt && attempt.status !== 'in_progress') throw new Error('attempt is already finalized');
+    if (status === 'succeeded' && !attempt) throw new Error('successful request requires an attempt');
+    if (attempt) Object.assign(attempt, { status: status === 'succeeded' ? 'succeeded' : 'failed', retryable: false, responseStatusCode, errorCode, completedAt });
+    Object.assign(request, {
+      status, usageStatus: usage ? 'usage_known' : status === 'succeeded' ? 'usage_unknown' : 'not_applicable',
+      responseStatusCode, lastErrorCode: errorCode, completedAt
+    });
+    if (status === 'succeeded') {
+      upsertGatewayUsage(db, { scopeId: request.scopeId, apiKeyId: request.apiKeyId, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
+      if (Number.isSafeInteger(settledCostMicros)) {
+        const upstream = findOrThrow(db, attempt.upstreamId);
+        ensureSpending(upstream);
+        recordUsage(upstream, { attemptId: attempt.id, startedAt: attempt.startedAt, settledCostMicros, costSource });
+      }
+    }
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return { request: { ...request }, attempt: attempt && { ...attempt } };
+  }
+
+  gatewayRequest(id) {
+    const request = this.load().gatewayRequests.find((item) => item.id === id);
+    return request ? { ...request } : null;
+  }
+
+  gatewayAttempts(requestId) {
+    return this.load().gatewayAttempts.filter((item) => item.requestId === requestId).map((item) => ({ ...item }));
+  }
+
   gatewayUsage(scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    const db = this.load();
     const today = new Date().toISOString().slice(0, 10);
-    const entries = (this.load().gatewayUsage || []).filter((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && String(item.startedAt).slice(0, 10) === today);
+    const entries = db.gatewayUsage.filter((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && String(item.startedAt).slice(0, 10) === today);
     const totals = entries.reduce((result, { usage, settledCostMicros }) => ({
       request_count: result.request_count + 1,
       total_tokens: result.total_tokens + (usage?.totalTokens ?? (usage?.inputTokens || 0) + (usage?.outputTokens || 0)),
@@ -242,7 +394,7 @@ export class Store {
       total_cost_micros: result.total_cost_micros + (Number.isSafeInteger(settledCostMicros) ? settledCostMicros : 0),
       priced: result.priced || Number.isSafeInteger(settledCostMicros)
     }), { request_count: 0, total_tokens: 0, cached_input_tokens: 0, total_cost_micros: 0, priced: false });
-    const upstream_limits = dbUpstreamLimits(this.load().upstreams, scopeId);
+    const upstream_limits = dbUpstreamLimits(db.upstreams, scopeId);
     return { request_count: totals.request_count, total_tokens: totals.total_tokens, cached_input_tokens: totals.cached_input_tokens, total_cost_usd: totals.total_cost_micros / 1_000_000, total_cost_status: totals.priced ? 'priced' : 'unpriced', limits: [], upstream_limits };
   }
 
@@ -253,30 +405,24 @@ export class Store {
   }
 
   eligibility(continuationId = null, scopeId = null) {
-    const db = this.load();
-    const upstreams = scoped(db.upstreams, scopeId);
-    for (const upstream of upstreams) ensureSpending(upstream);
-    const result = filterSpendCapEligible(upstreams, { continuationId });
-    return {
-      eligible: result.eligible.map(publicUpstream),
-      reserved: result.reserved.map(publicUpstream),
-      exclusions: result.exclusions,
-      error: result.error
-    };
+    const result = eligibilityFromUpstreams(scoped(this.load().upstreams, scopeId), continuationId);
+    return { ...result, eligible: result.eligible.map(publicUpstream), reserved: result.reserved.map(publicUpstream) };
   }
 
   candidatePlan({ pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', model = '', requirements = {}, routeClass = 'proxy_http', now = Date.now(), scopeId = null } = {}) {
-    if (scopeId && model && !this.modelAllowed(scopeId, model)) return [];
-    let candidates = this.eligibility(pinnedId, scopeId).eligible;
+    const db = this.load();
+    const scope = scopeId ? activeScope(db, scopeId, false) : null;
+    if (scopeId && model && (!scope || scope.models.length && !scope.models.includes(String(model).toLowerCase()))) return [];
+    let candidates = eligibilityFromUpstreams(scoped(db.upstreams, scopeId), pinnedId).eligible;
     if (requestedId) candidates = candidates.filter((upstream) => upstream.id === requestedId);
     else if (requestedType) candidates = candidates.filter((upstream) => upstream.type === requestedType);
     else if (pinnedId) candidates = candidates.filter((upstream) => upstream.id === pinnedId);
     else {
       const preferred = candidates.filter((upstream) => upstream.type === preferredType);
-      candidates = [...preferred, ...candidates.filter((upstream) => upstream.type !== preferredType)];
+      candidates = [...leastRecentlySuccessful(preferred), ...leastRecentlySuccessful(candidates.filter((upstream) => upstream.type !== preferredType))];
     }
     if (requiredType) candidates = candidates.filter((upstream) => upstream.type === requiredType);
-    return candidates.filter((upstream) => candidateEligible(this.get(upstream.id), model, requirements) && circuitEligible(this.get(upstream.id), { model, routeClass }, now));
+    return candidates.filter((upstream) => candidateEligible(upstream, model, requirements) && circuitEligible(upstream, { model, routeClass }, now)).map(publicUpstream);
   }
 
   beginCircuit(id, scope, now = Date.now()) {
@@ -325,8 +471,10 @@ export class Store {
     const upstream = findOrThrow(db, id);
     const circuits = upstream.circuits ||= {};
     const key = circuitKey(scope);
-    if (success) delete circuits[key];
-    else {
+    if (success) {
+      delete circuits[key];
+      upstream.lastSuccessfulAt = new Date(now).toISOString();
+    } else {
       const state = circuits[key] || {};
       const failures = Math.max(0, Number(state.failures) || 0) + 1;
       circuits[key] = { status: 'open', failures, probeInFlight: 0, updatedAt: new Date(now).toISOString(), nextProbeAt: new Date(now + CIRCUIT_COOLDOWN_MS).toISOString() };
@@ -343,16 +491,41 @@ export class Store {
     this.save(db);
   }
 
-  sessionUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID) {
+  sessionUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
     if (!sessionId || sessionId.length > SESSION_ID_MAX_LENGTH) return null;
     const sessions = this.load().sessions;
-    const entry = sessions[sessionKey(scopeId, sessionId)] || (scopeId === DEFAULT_SCOPE_ID ? sessions[sessionId] : null);
-    if (typeof entry === 'string') return scopeId === DEFAULT_SCOPE_ID ? entry : null;
-    if (!entry || entry.scopeId !== scopeId || Date.now() - Date.parse(entry.lastUsedAt) > SESSION_TTL_MS) return null;
+    const entry = sessions[sessionKey(scopeId, apiKeyId, sessionId)];
+    if (!entry || entry.scopeId !== scopeId || (entry.apiKeyId ?? null) !== apiKeyId || Date.now() - Date.parse(entry.lastUsedAt) > SESSION_TTL_MS) return null;
     return entry.upstreamId || null;
   }
 
-  pinSession(sessionId, upstreamId, scopeId = DEFAULT_SCOPE_ID) {
+  pinResponse(responseId, upstreamId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    if (!validResponseId(responseId) || !apiKeyId) return;
+    const db = this.load();
+    if (!scoped(db.upstreams, scopeId).some((upstream) => upstream.id === upstreamId)) throw notFound();
+    const now = new Date().toISOString();
+    for (const [key, entry] of Object.entries(db.responsePins)) {
+      if (!entry || Date.now() - Date.parse(entry.lastUsedAt) > RESPONSE_PIN_TTL_MS) delete db.responsePins[key];
+    }
+    db.responsePins[responsePinKey(scopeId, apiKeyId, responseId)] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now };
+    const overflow = Object.entries(db.responsePins).sort(([, a], [, b]) => Date.parse(a.lastUsedAt || 0) - Date.parse(b.lastUsedAt || 0)).slice(0, Math.max(0, Object.keys(db.responsePins).length - RESPONSE_PIN_LIMIT));
+    for (const [key] of overflow) delete db.responsePins[key];
+    this.save(db);
+  }
+
+  responseUpstream(responseId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    if (!validResponseId(responseId) || !apiKeyId) return null;
+    const db = this.load();
+    const key = responsePinKey(scopeId, apiKeyId, responseId);
+    const entry = db.responsePins[key];
+    if (!entry || entry.scopeId !== scopeId || entry.apiKeyId !== apiKeyId || Date.now() - Date.parse(entry.lastUsedAt) > RESPONSE_PIN_TTL_MS) return null;
+    if (!scoped(db.upstreams, scopeId).some((upstream) => upstream.id === entry.upstreamId)) return null;
+    entry.lastUsedAt = new Date().toISOString();
+    this.save(db);
+    return entry.upstreamId;
+  }
+
+  pinSession(sessionId, upstreamId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
     if (!sessionId) return;
     if (sessionId.length > SESSION_ID_MAX_LENGTH) throw Object.assign(new Error(`x-codex-session-id must be at most ${SESSION_ID_MAX_LENGTH} characters`), { statusCode: 400 });
     const db = this.load();
@@ -361,7 +534,7 @@ export class Store {
     for (const [id, entry] of Object.entries(db.sessions)) {
       if (typeof entry !== 'string' && Date.now() - Date.parse(entry.lastUsedAt) > SESSION_TTL_MS) delete db.sessions[id];
     }
-    db.sessions[sessionKey(scopeId, sessionId)] = { upstreamId, scopeId, lastUsedAt: now };
+    db.sessions[sessionKey(scopeId, apiKeyId, sessionId)] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now };
     const overflow = Object.entries(db.sessions).sort(([, a], [, b]) => Date.parse(a.lastUsedAt || 0) - Date.parse(b.lastUsedAt || 0)).slice(0, Math.max(0, Object.keys(db.sessions).length - SESSION_LIMIT));
     for (const [id] of overflow) delete db.sessions[id];
     this.save(db);
@@ -400,13 +573,17 @@ export class Store {
         continue;
       }
       setSpendingCap(item.upstream, input.capCredits === undefined ? dollarsToCredits(item.capDollars) : number(input.capCredits, 'capCredits', { integer: true }));
-      this.save(db);
       updated.push(publicUpstream(item.upstream));
+    }
+    if (updated.length) {
+      this.save(db);
+      this.notifyUpstreamsChange();
     }
     return { updated, skipped };
   }
 
   load() {
+    if (this.db) return this.db;
     try {
       const parsed = JSON.parse(readFileSync(this.dbPath, 'utf8'));
       if (!parsed || !Array.isArray(parsed.upstreams)) throw new Error('invalid database');
@@ -415,8 +592,11 @@ export class Store {
       parsed.scopes ||= [{ id: DEFAULT_SCOPE_ID, status: 'active' }];
       parsed.apiKeys ||= [];
       parsed.gatewayUsage ||= [];
-      if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage)) throw new Error('invalid scoped database');
-      if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions)) throw new Error('invalid sessions database');
+      parsed.gatewayRequests ||= [];
+      parsed.gatewayAttempts ||= [];
+      parsed.responsePins ||= {};
+      if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
+      if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions) || !parsed.responsePins || typeof parsed.responsePins !== 'object' || Array.isArray(parsed.responsePins)) throw new Error('invalid session database');
       if (!parsed.scopes.some((scope) => scope.id === DEFAULT_SCOPE_ID)) parsed.scopes.push({ id: DEFAULT_SCOPE_ID, status: 'active', models: [] });
       for (const scope of parsed.scopes) scope.models = normalizeModels(scope.models || []);
       for (const upstream of parsed.upstreams) {
@@ -426,6 +606,7 @@ export class Store {
         upstream.name = deriveUpstreamName(upstream.type, upstream);
       }
       for (const file of parsed.files) file.scopeId ||= DEFAULT_SCOPE_ID;
+      this.db = parsed;
       return parsed;
     } catch (error) {
       throw new Error(`Could not read ${this.dbPath}: ${error.message}`);
@@ -433,6 +614,8 @@ export class Store {
   }
 
   save(db) {
+    pruneGatewayHistory(db);
+    this.db = db;
     const tempPath = `${this.dbPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     try {
       writeFileSync(tempPath, `${JSON.stringify(db, null, 2)}\n`, { mode: 0o600 });
@@ -462,11 +645,56 @@ export class Store {
 }
 
 function emptyDatabase() {
-  return { upstreams: [], files: [], sessions: {}, scopes: [{ id: DEFAULT_SCOPE_ID, status: 'active', models: [] }], apiKeys: [], gatewayUsage: [] };
+  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [{ id: DEFAULT_SCOPE_ID, status: 'active', models: [] }], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [] };
 }
 
 function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
+}
+
+function eligibilityFromUpstreams(upstreams, continuationId) {
+  for (const upstream of upstreams) ensureSpending(upstream);
+  const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status));
+  const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId });
+  return {
+    ...result,
+    exclusions: [...result.exclusions, ...blocked.map((upstream) => ({ id: upstream.id, name: upstream.name, code: `token_refresh_${upstream.tokenRefresh.status}` }))]
+  };
+}
+
+function pruneGatewayHistory(db) {
+  // ponytail: JSON-store history is bounded; use a database if 1,000 retained requests is insufficient.
+  const completed = db.gatewayRequests.filter(({ completedAt }) => completedAt);
+  if (completed.length <= GATEWAY_HISTORY_LIMIT) return;
+  const requestIds = new Set([
+    ...db.gatewayRequests.filter(({ completedAt }) => !completedAt).map(({ id }) => id),
+    ...completed.slice(-GATEWAY_HISTORY_LIMIT).map(({ id }) => id)
+  ]);
+  const attempts = db.gatewayAttempts.filter(({ requestId }) => requestIds.has(requestId));
+  const attemptIds = new Set(attempts.map(({ id }) => id));
+  db.gatewayRequests = db.gatewayRequests.filter(({ id }) => requestIds.has(id));
+  db.gatewayAttempts = attempts;
+  db.gatewayUsage = db.gatewayUsage.filter(({ attemptId }) => attemptIds.has(attemptId));
+}
+
+function upsertGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros }) {
+  db.gatewayUsage ||= [];
+  const entry = { scopeId, apiKeyId, attemptId, startedAt: startedAt || new Date().toISOString(), usage, settledCostMicros };
+  const index = db.gatewayUsage.findIndex((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && item.attemptId === attemptId);
+  if (index === -1) db.gatewayUsage.push(entry);
+  else db.gatewayUsage[index] = entry;
+}
+
+function findGatewayRequest(db, requestId) {
+  const request = db.gatewayRequests.find((item) => item.id === requestId);
+  if (!request) throw new Error('request not found');
+  return request;
+}
+
+function findGatewayAttempt(db, requestId, attemptId) {
+  const attempt = db.gatewayAttempts.find((item) => item.id === attemptId && item.requestId === requestId);
+  if (!attempt) throw new Error('attempt not found');
+  return attempt;
 }
 
 function dbUpstreamLimits(upstreams, scopeId) {
@@ -500,6 +728,10 @@ function normalizeRouting(value = {}) {
   return { models: normalizeModels(value.models || []), responses: boolean('responses'), streaming: boolean('streaming'), tools: boolean('tools'), imageInput: boolean('imageInput'), reasoning: boolean('reasoning'), serviceTiers };
 }
 
+function leastRecentlySuccessful(upstreams) {
+  return [...upstreams].sort((left, right) => (Date.parse(left.lastSuccessfulAt) || 0) - (Date.parse(right.lastSuccessfulAt) || 0));
+}
+
 function candidateEligible(upstream, model, requirements) {
   if (!upstream) return false;
   const routing = normalizeRouting(upstream.routing);
@@ -515,8 +747,16 @@ function activeScope(db, scopeId, required = true) {
   return scope;
 }
 
-function sessionKey(scopeId, sessionId) {
-  return `${scopeId}:${sessionId}`;
+function sessionKey(scopeId, apiKeyId, sessionId) {
+  return `${scopeId}:${apiKeyId || ''}:${sessionId}`;
+}
+
+function responsePinKey(scopeId, apiKeyId, responseId) {
+  return createHash('sha256').update(`${scopeId}\u0000${apiKeyId}\u0000${responseId}`).digest('base64url');
+}
+
+function validResponseId(value) {
+  return typeof value === 'string' && /^resp_[A-Za-z0-9_-]{1,250}$/.test(value) && Buffer.byteLength(value) <= 255;
 }
 
 function apiKeyHash(key) {

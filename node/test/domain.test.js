@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createUpstream, filterSpendCapEligible, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
+import { createUpstream, filterSpendCapEligible, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -30,6 +30,7 @@ test('derives names and provider URLs instead of accepting operator labels', () 
   });
   const compass = createUpstream({ type: 'compass', name: 'ignored', baseUrl: 'https://custom.invalid', projectId: 'project-1', projectKey: 'key' });
   assert.equal(codex.name, 'p5dymc');
+  assert.equal(publicUpstream(codex).email, 'person@example.com');
   assert.equal(codex.baseUrl, 'https://chatgpt.com');
   assert.equal(compass.name, 'project-1');
   assert.equal(compass.baseUrl, 'https://compass.llm.shopee.io/compass-api/v1');
@@ -81,7 +82,7 @@ test('priced usage updates spend, replacement applies only its delta, and old at
   setSpendingCap(upstream, 100);
   const startedAt = new Date(Date.now() + 1).toISOString();
   recordUsage(upstream, { attemptId: 'attempt-1', startedAt, settledCostMicros: 3_400_000, costSource: 'upstream_reported' });
-  assert.equal(spendingSummary(upstream.spending).status, 'reserved');
+  assert.equal(spendingSummary(upstream.spending).status, 'normal');
   recordUsage(upstream, { attemptId: 'attempt-1', startedAt, settledCostMicros: 4_000_000, costSource: 'upstream_reported' });
   assert.equal(spendingSummary(upstream.spending).spentCredits, 100);
   assert.equal(spendingSummary(upstream.spending).status, 'reached');
@@ -109,17 +110,13 @@ test('usage settlements with reserved property names persist idempotently', () =
   assert.equal(spendingSummary(restored.spending).settlementCount, 1);
 });
 
-test('spending eligibility reserves at 85 percent and permits pinned continuation below 125 percent', () => {
-  const reserved = createUpstream({ type: 'compass', name: 'reserved', projectId: 'p1', projectKey: 'k' });
+test('spending eligibility keeps an upstream available until its cap is reached', () => {
+  const nearlyCapped = createUpstream({ type: 'compass', name: 'nearly capped', projectId: 'p1', projectKey: 'k' });
   const fresh = createUpstream({ type: 'compass', name: 'fresh', projectId: 'p2', projectKey: 'k' });
-  setSpendingCap(reserved, 100);
+  setSpendingCap(nearlyCapped, 100);
   setSpendingCap(fresh, 100);
-  recordUsage(reserved, { attemptId: 'a', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 3_600_000, costSource: 'pricing_snapshot' });
-  const result = filterSpendCapEligible([reserved, fresh]);
-  assert.deepEqual(result.eligible.map((item) => item.name), ['p2']);
-  assert.equal(filterSpendCapEligible([reserved], { continuationId: reserved.id }).error, null);
-  const uncapped = createUpstream({ type: 'compass', projectId: 'uncapped-reserved-fallback', projectKey: 'k' });
-  assert.deepEqual(filterSpendCapEligible([reserved, uncapped]).eligible.map((item) => item.id), [reserved.id]);
+  recordUsage(nearlyCapped, { attemptId: 'a', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 3_600_000, costSource: 'pricing_snapshot' });
+  assert.deepEqual(filterSpendCapEligible([nearlyCapped, fresh]).eligible.map((item) => item.name), ['p1', 'p2']);
 
   const capped = createUpstream({ type: 'compass', name: 'capped', projectId: 'p3', projectKey: 'k' });
   setSpendingCap(capped, 100);

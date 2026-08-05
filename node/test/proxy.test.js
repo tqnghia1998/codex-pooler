@@ -218,7 +218,7 @@ test('translates Chat Completions image and tool-call contracts in both directio
   }
 });
 
-test('pins sessions to an upstream through the 125 percent continuation ceiling', async () => {
+test('keeps a session preference until its spending cap is reached', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-pin-'));
   const authHeaders = [];
   const fetchImpl = async (_url, options) => {
@@ -240,10 +240,9 @@ test('pins sessions to an upstream through the 125 percent continuation ceiling'
     assert.deepEqual(authHeaders, [`Bearer ${firstToken}`, `Bearer ${firstToken}`]);
 
     store.addUsage(first.id, { attemptId: 'spend-125', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 35_000_000, costSource: 'upstream_reported' });
-    const blocked = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'three' }, headers);
-    assert.equal(blocked.response.status, 503);
-    assert.equal(blocked.body.error.code, 'pinned_continuation_spend_cap_reached');
-    assert.equal(authHeaders.length, 2);
+    const continued = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'three' }, headers);
+    assert.equal(continued.response.status, 200);
+    assert.deepEqual(authHeaders, [`Bearer ${firstToken}`, `Bearer ${firstToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -505,6 +504,25 @@ test('normalizes and collects non-streaming public Codex Responses and Chat SSE'
   }
 });
 
+test('settles streamed Codex usage when the upstream omits its content type', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-headerless-sse-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const terminal = { type: 'response.completed', response: { id: 'resp-headerless', status: 'completed', model: 'gpt-5.6-luna', output: [], usage: { input_tokens: 9, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 }, output_tokens: 5, total_tokens: 14 } } };
+  const { server, base } = await runningServer(store, async () => new Response(`event: response.completed\ndata: ${JSON.stringify(terminal)}\n\n`, { status: 200 }));
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-luna', input: 'hello', stream: true }) });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    await response.text();
+    assert.equal(store.get(created.id).spending.spentCostMicros, 8);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('normalizes Codex envelopes and scopes metadata headers to backend routes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-envelope-'));
   const calls = [];
@@ -546,10 +564,10 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     await backend.text();
     assert.equal(backend.status, 200);
     assert.equal(backend.headers.get('x-codex-turn-state'), 'next-turn');
-    assert.match(backend.headers.get('x-models-etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
+    assert.equal(backend.headers.get('x-models-etag'), null);
 
     const backendCall = calls.find((call) => new URL(call.url).pathname === '/backend-api/codex/responses');
-    assert.deepEqual(backendCall.body.input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]);
+    assert.equal(backendCall.body.input, 'hello');
     assert.equal(backendCall.body.instructions, '');
     assert.deepEqual(backendCall.body.reasoning, { effort: 'low', summary: 'concise' });
     assert.equal('reasoningEffort' in backendCall.body, false);
@@ -686,7 +704,7 @@ test('settles priced Codex and streamed Anthropic usage, preferring reported cos
   }
 });
 
-test('fails over only safe pre-output failures and never bypasses explicit or session pins', async () => {
+test('fails over only safe pre-output failures while preserving explicit pins and soft session preferences', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-failover-'));
   const store = new Store(dir);
   const first = store.create(codexInput({ email: 'first-failover@example.com', accountId: 'first-failover' }));
@@ -716,8 +734,8 @@ test('fails over only safe pre-output failures and never bypasses explicit or se
     calls.length = 0;
     store.pinSession('pinned-failover', first.id);
     result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' }, { 'x-codex-session-id': 'pinned-failover' });
-    assert.equal(result.response.status, 502);
-    assert.deepEqual(calls, [`Bearer ${firstToken}`]);
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(calls, [`Bearer ${firstToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

@@ -32,6 +32,40 @@ test('persists CRUD while keeping credentials out of public records', () => {
   }
 });
 
+test('keeps routing within one loaded database snapshot', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'snapshot', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 1 });
+    let reads = 0;
+    const load = store.load.bind(store);
+    store.load = () => { reads += 1; return load(); };
+    assert.deepEqual(store.candidatePlan({ scopeId: 'default', preferredType: 'compass' }).map(({ id }) => id), [upstream.id]);
+    assert.equal(reads, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds completed gateway history while retaining in-progress requests', () => {
+  const { dir, store } = tempStore();
+  try {
+    const db = store.load();
+    db.gatewayRequests = Array.from({ length: 1_002 }, (_, index) => ({ id: `done-${index}`, completedAt: '2026-01-01T00:00:00.000Z' }));
+    db.gatewayRequests.push({ id: 'active', completedAt: null });
+    db.gatewayAttempts = db.gatewayRequests.map(({ id }) => ({ id: `attempt-${id}`, requestId: id }));
+    db.gatewayUsage = db.gatewayAttempts.map(({ id }) => ({ attemptId: id }));
+    store.save(db);
+    const reopened = new Store(dir).load();
+    assert.equal(reopened.gatewayRequests.length, 1_001);
+    assert.equal(reopened.gatewayRequests.at(-1).id, 'active');
+    assert.equal(reopened.gatewayAttempts.length, 1_001);
+    assert.equal(reopened.gatewayUsage.length, 1_001);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('refuses to replace a missing key for an existing database', () => {
   const { dir } = tempStore();
   try {
