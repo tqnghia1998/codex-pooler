@@ -4,42 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
-    "pool:build": "vite build --config pool/vite.config.js",
-    "pool:start": "npm run pool:build && sh -c 'if [ -f pool/.env ]; then exec node --env-file=pool/.env --watch pool/src/server.js; else exec node --watch pool/src/server.js; fi'",
-    "pool:dev": "npm run pool:start",
-    "start": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env src/server.js",
-    "dev": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env --watch src/server.js",
-    "compatibility:check": "node scripts/check-compatibility-fixtures.js",
-    "compatibility:intake": "node scripts/intake-compatibility-capture.js",
-    "compatibility:release-check": "node scripts/check-client-releases.js",
-    "compatibility:update": "node scripts/check-compatibility-fixtures.js --update",
-    "pricing:refresh": "node scripts/refresh-openai-pricing.js",
+    "start": "node --env-file=.env src/server.js",
+    "dev": "node --env-file=.env --watch src/server.js",
     "test": "node --test"
   },
   "dependencies": {
-    "@astryxdesign/core": "^0.1.9",
-    "@astryxdesign/theme-neutral": "^0.1.9",
-    "@dnd-kit/core": "^6.3.1",
-    "@dnd-kit/modifiers": "^9.0.0",
-    "@dnd-kit/sortable": "^10.0.0",
-    "@openai/codex": "0.152.0",
-    "better-sqlite3": "^12.11.1",
     "fzstd": "0.1.1",
-    "gpt-tokenizer": "4.0.0",
-    "lucide-react": "^1.27.0",
-    "nodemailer": "^7.0.13",
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "socks": "2.8.10",
-    "undici": "6.21.2",
     "ws": "^8.21.1"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^5.2.0",
-    "vite": "^7.3.6"
-  },
-  "allowScripts": {
-    "better-sqlite3@12.11.1": true
   }
 }
