@@ -1,3 +1,10 @@
+const RESPONSES_FIELDS = new Set([
+  'background', 'client_metadata', 'context_management', 'conversation', 'include', 'input', 'instructions',
+  'max_output_tokens', 'max_tool_calls', 'metadata', 'model', 'moderation', 'parallel_tool_calls',
+  'previous_response_id', 'prompt', 'prompt_cache_key', 'prompt_cache_options', 'prompt_cache_retention',
+  'reasoning', 'safety_identifier', 'service_tier', 'store', 'stream', 'stream_options', 'temperature',
+  'text', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'truncation', 'user'
+]);
 const RESPONSES_FORWARDED_FIELDS = new Set([
   'client_metadata', 'include', 'input', 'instructions', 'max_output_tokens', 'metadata', 'model',
   'moderation', 'parallel_tool_calls', 'previous_response_id', 'prompt_cache_key', 'prompt_cache_options',
@@ -20,7 +27,7 @@ const CHAT_LOCAL_FIELDS = new Set([
 const AUDIO_MIMES = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', ogg: 'audio/ogg' };
 const IMAGE_MIMES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
 const FILE_MIMES = new Set(['application/pdf', 'text/plain']);
-const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'shell_call_output', 'tool_search_output']);
+const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'tool_search_output']);
 
 export class AdapterError extends Error {
   constructor(message, param = null, code = 'invalid_request') {
@@ -33,11 +40,10 @@ export class AdapterError extends Error {
 
 export function adaptResponsesRequest(payload) {
   const normalized = structuredClone(payload);
-  if (Object.hasOwn(normalized, 'logprobs')) unsupported('logprobs');
+  rejectUnsupportedFields(normalized, RESPONSES_FIELDS);
   for (const field of Object.keys(normalized)) {
     if (RESPONSES_LOCAL_FIELDS.has(field)) unsupported(field);
   }
-  if (normalized.store !== undefined && normalized.store !== false) unsupported('store');
   requireModel(normalized);
   validatePromptCacheOptions(normalized.prompt_cache_options);
   validatePositiveInteger(normalized, 'max_output_tokens');
@@ -66,7 +72,7 @@ export function adaptResponsesRequest(payload) {
   validateText(normalized.text);
   validateStrictTargets(normalized);
   validateMedia(normalized.input);
-  return defined(normalized);
+  return pick(normalized, RESPONSES_FORWARDED_FIELDS);
 }
 
 export function adaptChatRequest(payload) {
@@ -80,7 +86,6 @@ export function adaptChatRequest(payload) {
   requireModel(normalized);
   validateReasoningEffort(normalized.reasoning_effort, 'reasoning_effort');
   normalizeServiceTier(normalized);
-  if (normalized.service_tier === 'ultrafast') invalid('service_tier is not supported', 'service_tier');
   validateStreamOptions(normalized.stream_options, 'include_usage');
   validatePositiveInteger(normalized, 'max_tokens');
   validatePositiveInteger(normalized, 'max_completion_tokens');
@@ -241,26 +246,13 @@ function translateChatTools(tools) {
       if (!name || !plainObject(tool.function.parameters)) invalid('function tool requires nested function name and parameters', 'tools');
       return { type: 'function', name, parameters: tool.function.parameters, ...(tool.function.description !== undefined ? { description: tool.function.description } : {}), ...(tool.function.strict !== undefined ? { strict: tool.function.strict } : {}) };
     }
-    if (tool?.type === 'custom' && plainObject(tool.custom)) {
-      exactKeys(tool, ['type', 'custom'], 'tools');
-      exactKeys(tool.custom, ['name', 'description', 'format'], 'tools');
-      return { type: 'custom', ...tool.custom };
-    }
     if (['web_search_preview', 'image_generation'].includes(tool?.type)) return tool;
     invalid('tool shape is not translatable', 'tools');
   });
 }
 
 function translateChatToolChoice(choice) {
-  if (plainObject(choice) && choice.type === 'allowed_tools') invalid('tool_choice shape is not translatable', 'tool_choice');
   if (plainObject(choice) && choice.type === 'function' && cleanString(choice.function?.name)) return { type: 'function', name: choice.function.name };
-  if (plainObject(choice) && choice.type === 'custom' && plainObject(choice.custom)) {
-    exactKeys(choice, ['type', 'custom'], 'tool_choice');
-    exactKeys(choice.custom, ['name'], 'tool_choice');
-    if (!cleanString(choice.custom.name)) invalid('tool_choice shape is not translatable', 'tool_choice');
-    return { type: 'custom', name: choice.custom.name };
-  }
-  if (plainObject(choice) && choice.type === 'custom') invalid('tool_choice shape is not translatable', 'tool_choice');
   return choice;
 }
 
@@ -317,9 +309,8 @@ function normalizeInputItem(item) {
     return [item];
   }
   if (item.type === 'compaction') {
-    const turn = item.internal_chat_message_metadata_passthrough;
-    if (!cleanString(item.encrypted_content) || Object.keys(item).some((key) => !['type', 'encrypted_content', 'id', 'internal_chat_message_metadata_passthrough'].includes(key)) || item.id !== undefined && !cleanString(item.id) || turn !== undefined && (!plainObject(turn) || !cleanString(turn.turn_id) || Object.keys(turn).some((key) => key !== 'turn_id'))) invalid('input item shape is not translatable', 'input');
-    return [item.id === undefined && turn !== undefined ? stripKey(item, 'internal_chat_message_metadata_passthrough') : item];
+    if (!cleanString(item.encrypted_content) || Object.keys(item).some((key) => !['type', 'encrypted_content', 'id'].includes(key)) || item.id !== undefined && !cleanString(item.id)) invalid('input item shape is not translatable', 'input');
+    return [item];
   }
   if (item.type === 'function_call') {
     const callId = cleanString(item.call_id) || cleanString(item.id);
@@ -353,30 +344,20 @@ function normalizeInputItem(item) {
     if (![item.id, item.call_id, item.result].every((value) => typeof value === 'string') || !['completed', 'incomplete'].includes(item.status) || Object.keys(item).some((key) => !['type', 'id', 'call_id', 'result', 'status'].includes(key))) invalid('input item shape is not translatable', 'input');
     return [item];
   }
-  if (item.type === 'shell_call' || item.type === 'shell_call_output') {
-    validateHostedShellItem(item);
-    return [item];
-  }
-  // Known native Codex replay items with no locally-owned semantics (see codex-rs
-  // protocol::models::ResponseItem for the source of truth). Forwarded as-is.
-  if (['tool_search_call', 'tool_search_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'context_compaction', 'agent_message', 'item_reference'].includes(item.type)) return [item];
+  if (['tool_search_call', 'tool_search_output'].includes(item.type)) return [item];
+  if (item.type === 'item_reference') return [item];
   if (item.type === 'input_file') {
     if (!(cleanString(item.file_id) || typeof item.file_data === 'string')) invalid('input item shape is not translatable', 'input');
     return [item];
   }
-  if (item.type === 'message' || item.type === undefined && (item.role !== undefined || item.content !== undefined)) return [normalizeResponseMessage(item)];
-  // Anything else with a type tag we don't recognize yet: forward untranslated rather
-  // than reject, so a newly added native Codex item type doesn't 400 until we get
-  // around to adding an explicit case above. Deliberately blocked shapes (e.g. remote
-  // MCP tools) are already rejected above/in additional_tools before this fallback.
-  if (cleanString(item.type)) return [item];
+  if (item.type === 'message' || item.role !== undefined || item.content !== undefined) return [normalizeResponseMessage(item)];
   invalid('input item shape is not translatable', 'input');
 }
 
 function normalizeFunctionOutputPart(part) {
   if (plainObject(part) && part.type === 'input_image') {
-    if (typeof part.image_url !== 'string' || Object.keys(part).some((key) => !['type', 'image_url', 'detail', 'prompt_cache_breakpoint'].includes(key))) invalid('input item shape is not translatable', 'input');
-    return { type: 'input_image', image_url: part.image_url, ...(part.detail !== undefined ? { detail: part.detail } : {}), ...breakpoint(part) };
+    if (typeof part.image_url !== 'string' || Object.keys(part).some((key) => !['type', 'image_url', 'prompt_cache_breakpoint'].includes(key))) invalid('input item shape is not translatable', 'input');
+    return { type: 'input_image', image_url: part.image_url, ...breakpoint(part) };
   }
   return part;
 }
@@ -390,8 +371,7 @@ function validReplayCaller(caller) {
 
 function normalizeResponseMessage(item) {
   const allowed = ['type', 'id', 'role', 'content', 'name', 'tool_call_id', 'status', 'metadata', 'internal_chat_message_metadata_passthrough'];
-  const dropped = ['phase'];
-  if (Object.keys(item).some((key) => !allowed.includes(key) && !dropped.includes(key))) invalid('message input item shape is not translatable', 'input');
+  if (Object.keys(item).some((key) => !allowed.includes(key))) invalid('message input item shape is not translatable', 'input');
   const role = item.role ?? 'user';
   if (!['system', 'user', 'assistant', 'developer', 'tool'].includes(role)) invalid('message input items require role and content', 'input');
   const normalizedRole = role === 'system' ? 'developer' : role;
@@ -407,37 +387,19 @@ function normalizeResponseContentPart(part, role) {
   if (typeof part === 'string') return { type: role === 'assistant' ? 'output_text' : 'input_text', text: part };
   if (!plainObject(part)) invalid('message content part is not translatable', 'input');
   if (role === 'assistant') {
-    if (part.type === 'output_text' && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations'].includes(key))) {
-      if (part.annotations !== undefined) validateUrlCitations(part.annotations);
-      return { type: 'output_text', text: part.text, ...(part.annotations !== undefined ? { annotations: part.annotations } : {}) };
-    }
-    if (part.type === 'text' && typeof part.text === 'string' && part.annotations === undefined && Object.keys(part).every((key) => ['type', 'text'].includes(key))) return { type: 'output_text', text: part.text };
+    if (['output_text', 'text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text'].includes(key))) return { type: 'output_text', text: part.text };
     if (part.type === 'thinking' && typeof part.thinking === 'string') return null;
     invalid('message content part is not translatable', 'input');
   }
   if (['system', 'developer'].includes(role) && !['text', 'input_text'].includes(part.type)) invalid('message content part is not translatable', 'input');
   if (['text', 'input_text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'prompt_cache_breakpoint'].includes(key))) return { type: 'input_text', text: part.text, ...breakpoint(part) };
-  if (part.type === 'input_image' && typeof part.image_url === 'string' && Object.keys(part).every((key) => ['type', 'image_url', 'detail', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
-  if (part.type === 'input_image' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'detail', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
+  if (part.type === 'input_image' && typeof part.image_url === 'string' && Object.keys(part).every((key) => ['type', 'image_url', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
+  if (part.type === 'input_image' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.file_url) && Object.keys(part).every((key) => ['type', 'file_url', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.filename) && typeof part.file_data === 'string' && Object.keys(part).every((key) => ['type', 'filename', 'file_data', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_audio') return normalizeAudioPart(part);
   invalid('message content part is not translatable', 'input');
-}
-
-function validateUrlCitations(annotations) {
-  if (!Array.isArray(annotations)) invalid('input item shape is not translatable', 'input');
-  for (const annotation of annotations) {
-    if (!plainObject(annotation)) invalid('input item shape is not translatable', 'input');
-    exactKeys(annotation, ['type', 'start_index', 'end_index', 'url', 'title'], 'input');
-    if (annotation.type !== 'url_citation'
-      || typeof annotation.start_index !== 'number' || !Number.isFinite(annotation.start_index)
-      || typeof annotation.end_index !== 'number' || !Number.isFinite(annotation.end_index)
-      || typeof annotation.url !== 'string' || typeof annotation.title !== 'string') {
-      invalid('input item shape is not translatable', 'input');
-    }
-  }
 }
 
 function rejectReservedMetadata(input) {
@@ -490,10 +452,6 @@ function lowerAndValidateTools(tools) {
   return tools.map((tool) => validateTool(lowerTool(tool)));
 }
 
-export function lowerNonStrictFunctionTools(tools) {
-  return Array.isArray(tools) ? tools.map(lowerTool) : tools;
-}
-
 function lowerTool(tool) {
   if (!plainObject(tool)) return tool;
   if (tool.type === 'namespace' && Array.isArray(tool.tools)) return { ...tool, tools: tool.tools.map(lowerTool) };
@@ -534,11 +492,7 @@ function validateTool(tool) {
   if (tool.type === 'function') {
     exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema'], 'tools');
     if (!cleanString(tool.name) || !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
-    if (tool.strict === null) {
-      delete tool.strict;
-    } else {
-      optionalBoolean(tool, 'strict', 'tools');
-    }
+    optionalBoolean(tool, 'strict', 'tools');
     optionalBoolean(tool, 'defer_loading', 'tools');
     validateAllowedCallers(tool.allowed_callers);
     if (tool.output_schema !== undefined && !plainObject(tool.output_schema)) invalid('tool shape is not translatable', 'tools');
@@ -561,53 +515,19 @@ function validateTool(tool) {
     return tool;
   }
   if (tool.type === 'mcp') invalid('remote MCP tools are not supported', 'tools');
-  if (tool.type === 'shell') invalid('hosted shell tools are not supported', 'tools');
   if (['programmatic_tool_calling', 'web_search_preview'].includes(tool.type)) {
     exactKeys(tool, ['type'], 'tools');
     return tool;
   }
   if (tool.type === 'image_generation') return tool;
   if (tool.type === 'web_search') return validateWebSearch(tool);
-  if (tool.type === 'tool_search') {
-    exactKeys(tool, ['type', 'execution', 'description', 'parameters'], 'tools');
-    if (!cleanString(tool.execution) || !cleanString(tool.description) || !plainObject(tool.parameters)) invalid('tool_search tool requires execution, description, and parameters', 'tools');
-    return tool;
-  }
-  // Any other native tool declaration (remote MCP is already rejected above) is
-  // forwarded untranslated instead of hand-listing every current and future Codex
-  // built-in tool type here.
-  if (cleanString(tool.type)) return tool;
   invalid('tool shape is not translatable', 'tools');
-}
-
-const ALLOWED_TOOLS_BUILTIN_TYPES = ['programmatic_tool_calling', 'web_search_preview', 'web_search', 'image_generation'];
-
-function isAllowedToolDeclared(allowedTool, tools) {
-  if (!plainObject(allowedTool) || !Array.isArray(tools)) return false;
-  if (['function', 'custom'].includes(allowedTool.type)) {
-    if (Object.keys(allowedTool).length !== 2 || !cleanString(allowedTool.name)) return false;
-    return tools.some((t) => t?.type === allowedTool.type && t?.name === allowedTool.name && t?.defer_loading !== true);
-  }
-  if (ALLOWED_TOOLS_BUILTIN_TYPES.includes(allowedTool.type)) {
-    if (Object.keys(allowedTool).length !== 1) return false;
-    return tools.some((t) => t?.type === allowedTool.type);
-  }
-  return false;
 }
 
 function validateToolChoice(payload) {
   const choice = payload.tool_choice;
   if (choice === undefined || ['auto', 'none', 'required'].includes(choice)) return;
   if (!plainObject(choice)) invalid('tool_choice shape is not translatable', 'tool_choice');
-  if (choice.type === 'allowed_tools') {
-    exactKeys(choice, ['type', 'mode', 'tools'], 'tool_choice');
-    if (!['auto', 'required'].includes(choice.mode)) invalid('tool_choice shape is not translatable', 'tool_choice');
-    if (!Array.isArray(choice.tools) || choice.tools.length === 0) invalid('tool_choice shape is not translatable', 'tool_choice');
-    if (!choice.tools.every((tool) => isAllowedToolDeclared(tool, payload.tools))) {
-      invalid('tool_choice shape is not translatable', 'tool_choice');
-    }
-    return;
-  }
   if (['image_generation', 'programmatic_tool_calling'].includes(choice.type)) {
     exactKeys(choice, ['type'], 'tool_choice');
     return;
@@ -620,7 +540,6 @@ function validateToolChoice(payload) {
     if (!names.includes(name)) invalid(`tool_choice references unknown ${choice.type} tool`, 'tool_choice');
     return;
   }
-  if (cleanString(choice.type)) return;
   invalid('tool_choice shape is not translatable', 'tool_choice');
 }
 
@@ -629,34 +548,12 @@ function toolNames(tools, type) {
   return tools.flatMap((tool) => tool?.type === type ? [tool.name] : tool?.type === 'namespace' ? toolNames(tool.tools, type) : []);
 }
 
-// Maps a custom tool's name to its declared namespace, so a public `custom_tool_call`
-// output missing that field can be restored. Skips ambiguous names (same name used
-// more than once, whether flat or inside another namespace).
-export function customToolNamespaces(tools) {
-  if (!Array.isArray(tools)) return {};
-  const counts = new Map();
-  const namespaceOf = new Map();
-  const seen = (name) => counts.set(name, (counts.get(name) || 0) + 1);
-  for (const tool of tools) {
-    if (tool?.type === 'custom' && typeof tool.name === 'string') seen(tool.name);
-    if (tool?.type === 'namespace' && Array.isArray(tool.tools)) {
-      for (const child of tool.tools) {
-        if (child?.type === 'custom' && typeof child.name === 'string') {
-          seen(child.name);
-          namespaceOf.set(child.name, tool.name);
-        }
-      }
-    }
-  }
-  return Object.fromEntries([...namespaceOf].filter(([name]) => counts.get(name) === 1));
-}
-
 function validateText(text) {
   if (text === undefined) return;
   if (!plainObject(text)) invalid('text must be an object', 'text');
   if (text.verbosity !== undefined && (typeof text.verbosity !== 'string' || !['low', 'medium', 'high'].includes(text.verbosity.trim().toLowerCase()))) invalid('verbosity is not supported', 'text.verbosity');
   if (text.format !== undefined) {
-    if (!plainObject(text.format) || !cleanString(text.format.type)) invalid('text format is not supported', 'text.format');
+    if (!plainObject(text.format) || !['text', 'json_object', 'json_schema'].includes(text.format.type)) invalid('text format is not supported', 'text.format');
     if (text.format.type === 'json_schema' && !plainObject(text.format.schema)) invalid('text format json_schema must include a schema object', 'text.format.schema');
   }
 }
@@ -682,21 +579,15 @@ function validateStrictTool(tool, path) {
 
 function validateStrictSchema(schema, param, root = schema, refs = new Set()) {
   if (!plainObject(schema)) invalid('strict json_schema schema must be an object', param, 'invalid_json_schema');
-  if (schema === root) {
-    if (Object.hasOwn(schema, '$ref')) invalid('strict json_schema root schema must not contain $ref', param, 'invalid_json_schema');
-    if (schema.type !== 'object') invalid('strict json_schema root schema must have type object', param, 'invalid_json_schema');
-    if (Object.hasOwn(schema, 'anyOf')) invalid('strict json_schema root schema must not contain anyOf', param, 'invalid_json_schema');
-  }
   if (schema !== root && schema.type === undefined) {
     if (schema.properties !== undefined || schema.required !== undefined || schema.additionalProperties !== undefined) schema.type = 'object';
     else if (schema.items !== undefined) schema.type = 'array';
   }
   if (Object.hasOwn(schema, '$ref')) {
-    if (Object.keys(schema).some((key) => key !== '$ref')) invalid('strict json_schema $ref schema nodes must contain only $ref', param, 'invalid_json_schema');
     if (typeof schema.$ref !== 'string' || !schema.$ref.startsWith('#/')) invalid('strict json_schema $ref must be a local JSON Pointer fragment', `${param}.$ref`, 'invalid_json_schema');
     const tokens = schema.$ref.slice(2).split('/').map((token) => token.replace(/~1/g, '/').replace(/~0/g, '~'));
     if (!['$defs', 'definitions'].includes(tokens[0]) || !tokens[1]) invalid('strict json_schema $ref must point into $defs or definitions', `${param}.$ref`, 'invalid_json_schema');
-    if (refs.has(schema.$ref)) return;
+    if (refs.has(schema.$ref)) invalid('strict json_schema circular local $ref is not supported', `${param}.$ref`, 'invalid_json_schema');
     let target = root;
     for (const token of tokens) target = plainObject(target) && Object.hasOwn(target, token) ? target[token] : undefined;
     if (!plainObject(target)) invalid('strict json_schema $ref target could not be resolved', `${param}.$ref`, 'invalid_json_schema');
@@ -733,93 +624,6 @@ function validateStrictSchema(schema, param, root = schema, refs = new Set()) {
   }
 }
 
-function validateHostedShellItem(item) {
-  const invalidItem = () => invalid('input item shape is not translatable', 'input');
-  if (item.type === 'shell_call') {
-    if (!exactObjectKeys(item, ['type', 'call_id', 'action', 'id', 'caller', 'status', 'environment'])
-      || !boundedIdentifier(item.call_id)
-      || !validShellAction(item.action)
-      || !optionalNullable(item, 'id', (value) => typeof value === 'string')
-      || !validShellCaller(item.caller)
-      || !validShellStatus(item.status)
-      || !validShellEnvironment(item.environment)) invalidItem();
-    return;
-  }
-  if (!exactObjectKeys(item, ['type', 'call_id', 'output', 'id', 'caller', 'status', 'max_output_length'])
-    || !boundedIdentifier(item.call_id)
-    || !Array.isArray(item.output)
-    || item.output.some((chunk) => !validShellOutputChunk(chunk))
-    || !optionalNullable(item, 'id', (value) => typeof value === 'string')
-    || !validShellCaller(item.caller)
-    || !validShellStatus(item.status)
-    || !optionalNullable(item, 'max_output_length', Number.isInteger)) invalidItem();
-}
-
-function validShellAction(action) {
-  return exactObjectKeys(action, ['commands', 'timeout_ms', 'max_output_length'])
-    && Array.isArray(action.commands)
-    && action.commands.every((command) => typeof command === 'string')
-    && optionalNullable(action, 'timeout_ms', Number.isInteger)
-    && optionalNullable(action, 'max_output_length', Number.isInteger);
-}
-
-function validShellCaller(caller) {
-  if (caller === undefined || caller === null) return true;
-  if (caller?.type === 'direct') return exactObjectKeys(caller, ['type']);
-  return caller?.type === 'program'
-    && exactObjectKeys(caller, ['type', 'caller_id'])
-    && boundedIdentifier(caller.caller_id);
-}
-
-function validShellStatus(status) {
-  return status === undefined || status === null || ['in_progress', 'completed', 'incomplete'].includes(status);
-}
-
-function validShellEnvironment(environment) {
-  if (environment === undefined || environment === null) return true;
-  if (environment?.type === 'container_reference') {
-    return exactObjectKeys(environment, ['type', 'container_id']) && typeof environment.container_id === 'string';
-  }
-  if (environment?.type !== 'local' || !exactObjectKeys(environment, ['type', 'skills'])) return false;
-  if (environment.skills === undefined) return true;
-  return Array.isArray(environment.skills)
-    && environment.skills.length <= 200
-    && environment.skills.every((skill) => exactObjectKeys(skill, ['name', 'description', 'path'])
-      && [skill.name, skill.description, skill.path].every((value) => typeof value === 'string'));
-}
-
-function validShellOutputChunk(chunk) {
-  return exactObjectKeys(chunk, ['stdout', 'stderr', 'outcome'])
-    && typeof chunk.stdout === 'string'
-    && typeof chunk.stderr === 'string'
-    && codepointLength(chunk.stdout) <= 10_485_760
-    && codepointLength(chunk.stderr) <= 10_485_760
-    && (chunk.outcome?.type === 'timeout' && exactObjectKeys(chunk.outcome, ['type'])
-      || chunk.outcome?.type === 'exit' && exactObjectKeys(chunk.outcome, ['type', 'exit_code']) && Number.isInteger(chunk.outcome.exit_code));
-}
-
-function exactObjectKeys(value, allowed) {
-  return plainObject(value) && Object.keys(value).every((key) => allowed.includes(key));
-}
-
-function optionalNullable(object, key, predicate) {
-  return !Object.hasOwn(object, key) || object[key] === null || predicate(object[key]);
-}
-
-function boundedIdentifier(value) {
-  const length = typeof value === 'string' ? codepointLength(value, 64) : 0;
-  return length >= 1 && length <= 64;
-}
-
-function codepointLength(value, maximum = Infinity) {
-  let count = 0;
-  for (const _codepoint of value) {
-    count += 1;
-    if (count > maximum) break;
-  }
-  return count;
-}
-
 function validateMedia(value) {
   if (Array.isArray(value)) return value.forEach(validateMedia);
   if (!plainObject(value)) return;
@@ -854,9 +658,10 @@ function validatePromptCacheOptions(options) {
 function validateReasoning(reasoning) {
   if (reasoning === undefined) return;
   if (!plainObject(reasoning)) invalid('reasoning must be an object', 'reasoning');
+  for (const key of Object.keys(reasoning)) if (!['effort', 'summary', 'context'].includes(key)) invalid('reasoning field is not supported', `reasoning.${key}`);
   validateReasoningEffort(reasoning.effort, 'reasoning.effort');
-  validateCompatibilityToken(reasoning.summary, 'reasoning summary is not supported', 'reasoning.summary');
-  validateCompatibilityToken(reasoning.context, 'reasoning context is not supported', 'reasoning.context');
+  if (reasoning.summary !== undefined && (typeof reasoning.summary !== 'string' || !['auto', 'concise', 'detailed'].includes(reasoning.summary.trim().toLowerCase()))) invalid('reasoning summary is not supported', 'reasoning.summary');
+  if (reasoning.context !== undefined && (typeof reasoning.context !== 'string' || !['auto', 'current_turn', 'all_turns'].includes(reasoning.context.trim().toLowerCase()))) invalid('reasoning context is not supported', 'reasoning.context');
 }
 
 function validateReasoningEffort(value, param) {
@@ -873,24 +678,21 @@ function validateModeration(moderation) {
 
 function normalizeServiceTier(payload) {
   if (payload.service_tier === undefined) return;
-  validateCompatibilityToken(payload.service_tier, 'service_tier is not supported', 'service_tier');
+  if (typeof payload.service_tier !== 'string') invalid('service_tier is not supported', 'service_tier');
   const tier = payload.service_tier.trim().toLowerCase() === 'fast' ? 'priority' : payload.service_tier.trim().toLowerCase();
+  if (!['auto', 'default', 'flex', 'priority', 'scale'].includes(tier)) invalid('service_tier is not supported', 'service_tier');
   payload.service_tier = tier;
 }
 
 function validateStreamOptions(options, allowedKey) {
   if (options === undefined) return;
   if (!plainObject(options)) invalid('stream_options must be an object', 'stream_options');
+  for (const key of Object.keys(options)) if (key !== allowedKey) invalid('stream_options field is not supported', `stream_options.${key}`);
   if (options[allowedKey] !== undefined && typeof options[allowedKey] !== 'boolean') invalid(`stream_options.${allowedKey} must be a boolean`, `stream_options.${allowedKey}`);
 }
 
 function validatePositiveInteger(payload, field) {
   if (payload[field] !== undefined && (!Number.isInteger(payload[field]) || payload[field] <= 0)) invalid(`${field} must be a positive integer`, field);
-}
-
-function validateCompatibilityToken(value, message, param) {
-  if (value === undefined) return;
-  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.trim())) invalid(message, param);
 }
 
 function validateWebSearch(tool) {
@@ -911,7 +713,6 @@ function validateCustomFormat(format) {
   if (!plainObject(format)) invalid('tool shape is not translatable', 'tools');
   if (format.type === 'text') return exactKeys(format, ['type'], 'tools');
   if (format.type === 'grammar' && cleanString(format.definition) && ['lark', 'regex'].includes(format.syntax)) return exactKeys(format, ['type', 'definition', 'syntax'], 'tools');
-  if (cleanString(format.type)) return;
   invalid('tool shape is not translatable', 'tools');
 }
 
@@ -960,10 +761,6 @@ function breakpoint(part) {
 
 function pick(object, fields) {
   return Object.fromEntries(Object.entries(object).filter(([key, value]) => fields.has(key) && value !== undefined));
-}
-
-function defined(object) {
-  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
 }
 
 function stripKey(object, key) {

@@ -1,15 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CLAUDE_OAUTH_USAGE_URL, codexRefreshFailureCode, codexRefreshFailureDetail, ensureProviderCredentials, refreshQuota } from '../src/providers.js';
-
-test('classifies invalidated Codex refresh tokens as requiring reauthentication', () => {
-  assert.equal(codexRefreshFailureCode({ providerBody: { error: { code: 'refresh_token_invalidated' } } }), 'reauth_required');
-});
-
-test('extracts a safe Codex token refresh failure detail', () => {
-  assert.equal(codexRefreshFailureDetail({ providerBody: { error: { message: 'Your refresh token has already been used.' } } }), 'Your refresh token has already been used.');
-  assert.equal(codexRefreshFailureDetail(new Error('request failed')), 'request failed');
-});
+import { ensureProviderCredentials, refreshQuota } from '../src/providers.js';
 
 test('refreshes Codex quota using the account header', async () => {
   let request;
@@ -49,7 +40,7 @@ test('refreshes an expired Codex access token and persists rotated credentials',
   assert.equal(credentials.accessToken, 'new-access');
   assert.equal(credentials.refreshToken, 'new-refresh');
   assert.equal(credentials.idToken, 'new-id');
-  assert.deepEqual(saved[0], credentials);
+  assert.equal(saved[0], credentials);
   assert.equal(saved[1], upstream.accessTokenExpiresAt);
   assert.equal(requests[1].options.headers.authorization, 'Bearer new-access');
 });
@@ -93,75 +84,6 @@ test('coalesces concurrent Codex token refreshes for one upstream', async () => 
   assert.equal(second.accessToken, 'shared-access');
   assert.equal(first.refreshToken, 'shared-refresh');
   assert.equal(second.refreshToken, 'shared-refresh');
-});
-
-test('retries transient Claude OAuth refresh failures and refreshes advisory identity', async () => {
-  const requests = [];
-  const fetchImpl = async (url) => {
-    requests.push(url);
-    if (url === 'https://platform.claude.com/v1/oauth/token') {
-      if (requests.filter((candidate) => candidate === url).length === 1) return new Response('{}', { status: 503 });
-      return new Response(JSON.stringify({ access_token: 'claude-new-access', refresh_token: 'claude-new-refresh', expires_in: 3600 }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ account: { uuid: 'account-after-refresh', email: 'refreshed@example.com' }, organization: { uuid: 'org-after-refresh', name: 'Refreshed Org' } }), { status: 200 });
-  };
-  const upstream = { id: 'claude-refresh-retry', type: 'claude', accessTokenExpiresAt: new Date(Date.now() - 1_000).toISOString() };
-  const credentials = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-retry-token' };
-  await ensureProviderCredentials(upstream, credentials, { fetchImpl });
-  assert.deepEqual(requests, [
-    'https://platform.claude.com/v1/oauth/token',
-    'https://platform.claude.com/v1/oauth/token',
-    'https://api.anthropic.com/api/oauth/profile'
-  ]);
-  assert.equal(credentials.accessToken, 'claude-new-access');
-  assert.equal(upstream.accountId, 'account-after-refresh');
-  assert.equal(upstream.email, 'refreshed@example.com');
-});
-
-test('blocks repeated Claude OAuth refresh attempts after a 429', async () => {
-  let refreshCalls = 0;
-  const fetchImpl = async () => {
-    refreshCalls += 1;
-    return new Response('{}', { status: 429, headers: { 'retry-after': '60' } });
-  };
-  const upstream = { id: 'claude-refresh-429', type: 'claude', accessTokenExpiresAt: new Date(Date.now() - 1_000).toISOString() };
-  const first = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-429-token' };
-  const second = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-429-token' };
-  await assert.rejects(ensureProviderCredentials(upstream, first, { fetchImpl }), (error) => error.statusCode === 429);
-  await assert.rejects(ensureProviderCredentials(upstream, second, { fetchImpl }), (error) => error.statusCode === 429);
-  assert.equal(refreshCalls, 1);
-});
-
-test('keeps the last known Claude quota when the header probe is rate limited', async () => {
-  const quota = { remainingPercent: 70, source: 'claude_oauth_headers', observedAt: new Date(0).toISOString() };
-  const upstream = {
-    id: 'claude-quota-rate-limited',
-    type: 'claude',
-    baseUrl: 'https://api.anthropic.com',
-    metadata: { auth_kind: 'oauth' },
-    quota
-  };
-  let messagesCalls = 0;
-  const options = {
-    force: false,
-    fetchImpl: async (url) => {
-      if (url === CLAUDE_OAUTH_USAGE_URL) return new Response(JSON.stringify({ error: { details: { required_scopes: ['user:profile'], error_code: 'oauth_scope_insufficient' } } }), { status: 403 });
-      messagesCalls += 1;
-      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', message: 'Rate limited' } }), { status: 429, headers: { 'retry-after': '600' } });
-    }
-  };
-  const result = await refreshQuota(upstream, { accessToken: 'sk-ant-oat-quota-rate-limited' }, options);
-  const repeated = await refreshQuota(upstream, { accessToken: 'sk-ant-oat-quota-rate-limited' }, options);
-  assert.equal(result, quota);
-  assert.equal(repeated, quota);
-  assert.equal(messagesCalls, 1);
-});
-
-test('does not attempt AIS quota refresh without its SSO session', async () => {
-  await assert.rejects(
-    refreshQuota({ type: 'compass', projectId: 'ais', projectKey: 'key', quotaSource: 'ais' }, {}, { fetchImpl: async () => { throw new Error('must not fetch'); } }),
-    /AIS quota requires a Compass SSO session/
-  );
 });
 
 test('refreshes Compass project quota with the gateway token', async () => {

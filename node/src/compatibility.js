@@ -1,27 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { defaultBaseUrl } from './domain.js';
+import { defaultBaseUrl, dollarsToMicros } from './domain.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
 import { upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
-import { extractUsage, upstreamCostMicros } from './pricing.js';
-import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
-import { codexProtocolHeaders } from './protocol-compat.js';
-import { modelCatalogForStore } from './codex-model-catalog.js';
-import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
-import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
-import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
-import {
-  isShareCredential,
-  personalShareSessions,
-  releaseShareRequest,
-  reserveShareRequest,
-  selectPersonalShareSession
-} from './share-authorization.js';
+import { extractUsage } from './pricing.js';
 
-const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
-const IMAGE_25_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
+const CODEX_VERSION = '0.146.0';
+const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2']);
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
 const IMAGE_ENUMS = {
@@ -37,30 +24,18 @@ export function isCompatibilityRoute(method, path) {
   return method === 'POST' && ['/v1/files', '/v1/audio/transcriptions', '/v1/images/generations', '/v1/images/edits'].includes(path);
 }
 
-export function isUnsupportedV1Route(method, path) {
-  if (method === 'POST' && ['/v1/images/variations', '/v1/embeddings', '/v1/batches', '/v1/moderations', '/v1/fine_tuning/jobs'].includes(path)) return true;
-  if ((method === 'GET' || method === 'DELETE') && /^\/v1\/responses\/[^/]+$/.test(path)) return true;
-  return method === 'POST' && /^\/v1\/responses\/[^/]+\/cancel$/.test(path);
-}
-
-export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store) }) {
-  try {
-    if (path === '/v1/files') {
-      if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: listFiles(store, req) });
-      return await createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
-    }
-    const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);
-    if (fileMatch) return fileOperation({ req, res, store, id: decodeURIComponent(fileMatch[1]), content: Boolean(fileMatch[2]) });
-    if (path === '/v1/audio/transcriptions') {
-      return await transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
-    }
-    return await image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
-  } finally {
-    releaseShareRequest(req, req.compatibilityShareAttemptId, 'compatibility_request_failed');
+export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch }) {
+  if (path === '/v1/files') {
+    if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: store.listFiles(requestScopeId(req)) });
+    return createFile({ req, res, body, store, fetchImpl });
   }
+  const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);
+  if (fileMatch) return fileOperation({ req, res, store, id: decodeURIComponent(fileMatch[1]), content: Boolean(fileMatch[2]) });
+  if (path === '/v1/audio/transcriptions') return transcribe({ req, res, body, store, fetchImpl });
+  return image({ req, res, path, body, store, fetchImpl });
 }
 
-async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth }) {
+async function createFile({ req, res, body, store, fetchImpl }) {
   const form = await multipart(req, body);
   const unexpected = unsupportedFormField(form, new Set(['file', 'purpose']));
   if (unexpected) return invalid(res, `${unexpected} is not supported`, unexpected);
@@ -69,7 +44,7 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
   const file = form.get('file');
   if (!(file instanceof Blob)) return invalid(res, 'file is required', 'file');
 
-  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { codexHostHealth });
+  const provider = await codexContext(store, req, fetchImpl);
   if (!provider) return noCodex(res);
   const filename = safeFilename(file.name || 'upload.bin');
   const created = await codexFetch(provider, '/backend-api/files', {
@@ -77,8 +52,8 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file_name: filename, file_size: file.size, use_case: 'codex' })
   });
-  const createdBody = await responseJson(created, provider.upstreamDeadlines, provider);
-  if (!created.ok) return sendFailure(res, retryAfterHeader(created));
+  const createdBody = await responseJson(created);
+  if (!created.ok) return sendFailure(res);
   const fileId = text(createdBody?.file_id);
   const uploadUrl = text(createdBody?.upload_url);
   if (!fileId || !uploadUrl) return sendFailure(res);
@@ -89,17 +64,16 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
     redirect: 'error',
     headers: { 'content-type': file.type || 'application/octet-stream', 'x-ms-blob-type': 'BlockBlob' },
     body: Buffer.from(await file.arrayBuffer())
-  }, fetchImpl, upstreamDeadlines);
+  }, fetchImpl);
   if (!upload.ok) return sendFailure(res);
 
   const { response: finalized, body: finalizedBody } = await finalizeFile(provider, fileId);
-  if (!finalized.ok) return sendFailure(res, retryAfterHeader(finalized));
+  if (!finalized.ok) return sendFailure(res);
   if (finalizedBody?.status !== 'success' || !text(finalizedBody?.download_url)) return sendFailure(res);
-  pinCompatibilitySession(provider);
 
   const now = Math.floor(Date.now() / 1000);
   const record = store.saveFile({
-    scopeId: fileScopeId(req),
+    scopeId: requestScopeId(req),
     id: fileId,
     object: 'file',
     bytes: file.size,
@@ -109,18 +83,17 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
     status: 'uploaded',
     expires_at: integer(createdBody?.expires_at) || now + 86_400
   });
-  releaseShareRequest(req, provider.shareAttemptId, null);
   sendJson(res, 200, record);
 }
 
 function fileOperation({ req, res, store, id, content }) {
-  const file = fileScopes(req).map((scopeId) => store.getFile(id, scopeId)).find(Boolean);
+  const file = store.getFile(id, requestScopeId(req));
   if (!file) return sendError(res, 404, 'file_not_found', 'File not found', 'file_id');
   if (req.method === 'GET' && !content) return sendJson(res, 200, file);
   return sendError(res, 404, 'unsupported_endpoint', 'Unsupported OpenAI /v1 endpoint');
 }
 
-async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth }) {
+async function transcribe({ req, res, body, store, fetchImpl }) {
   const form = await multipart(req, body);
   const unexpected = unsupportedFormField(form, new Set(['file', 'model', 'language', 'prompt', 'response_format', 'temperature', 'keywords', 'keywords[]', 'languages', 'languages[]']));
   if (unexpected) return invalid(res, `${unexpected} is not supported`, unexpected);
@@ -130,11 +103,10 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines,
   }
   const file = form.get('file');
   if (!(file instanceof Blob)) return invalid(res, 'file is required', 'file');
-  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { codexHostHealth });
+  const provider = await codexContext(store, req, fetchImpl);
   if (!provider) return noCodex(res);
 
   const upstreamForm = new FormData();
-  upstreamForm.append('model', 'gpt-4o-transcribe');
   upstreamForm.append('file', file, 'audio.wav');
   const prompt = text(form.get('prompt'));
   if (prompt) upstreamForm.append('prompt', prompt);
@@ -144,17 +116,16 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines,
       upstreamForm.append(target, value);
     }
   }
-  const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm }, { pacingModel: 'gpt-4o-transcribe' });
-  const responseBody = await responseJson(response, provider.upstreamDeadlines, provider);
-  if (!response.ok) return sendFailure(res, retryAfterHeader(response));
+  const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm });
+  const responseBody = await responseJson(response);
+  if (!response.ok) return sendFailure(res);
   if (!responseBody) return sendFailure(res);
-  pinCompatibilitySession(provider);
   delete responseBody.languages;
   settleCost(store, provider.upstream, responseBody, req);
   sendJson(res, response.status, responseBody, responseHeaders(response));
 }
 
-async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth }) {
+async function image({ req, res, path, body, store, fetchImpl }) {
   const edit = path.endsWith('/edits');
   let payload;
   let images = [];
@@ -170,11 +141,12 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
   } else {
     payload = jsonBody(body);
   }
-  const error = validateImage(payload, edit);
+  const error = validateImage(payload);
   if (error) return invalid(res, error.message, error.param);
-  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { modelCatalog, requireImageModel: true, codexHostHealth });
+  const provider = await codexContext(store, req, fetchImpl);
   if (!provider) return noCodex(res);
-  const hostModel = provider.hostModel;
+  const hostModel = await imageHostModel(provider);
+  if (!hostModel) return sendFailure(res);
 
   const requestBody = imageResponsesPayload(payload, hostModel);
   if (edit) {
@@ -193,59 +165,26 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
 
   const response = await codexFetch(provider, '/backend-api/codex/responses', {
     method: 'POST', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(requestBody)
-  }, { deferSettlement: true, pacingModel: hostModel });
-  let textBody;
-  try {
-    textBody = (await responseBytes(response, 32 * 1024 * 1024, provider.upstreamDeadlines)).toString('utf8');
-  } catch (error) {
-    settleCodexFetch(provider, response, classifyTransportError(error));
-    throw error;
-  }
-  if (!response.ok) {
-    let structuredBody = null;
-    try { structuredBody = JSON.parse(textBody); } catch {}
-    settleCodexFetch(provider, response, classifyHttpResponse(response, structuredBody));
-    return sendFailure(res, retryAfterHeader(response));
-  }
-  const events = parseSse(textBody);
-  const terminal = events.findLast((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type));
-  settleCodexFetch(provider, response, terminal ? classifySseEvent(terminal) : { class: 'transient', retryable: true });
-  const result = imageResponse(events);
+  });
+  const textBody = (await responseBytes(response, 32 * 1024 * 1024)).toString('utf8');
+  if (!response.ok) return sendFailure(res);
+  const result = imageResponse(parseSse(textBody));
   if (result.error) return sendError(res, result.error.status, result.error.code, result.error.message, result.error.param);
-  pinCompatibilitySession(provider);
   settleCost(store, provider.upstream, result.costBody, req);
   sendJson(res, 200, result.body);
 }
 
-function validateImage(payload, edit) {
+function validateImage(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return { message: 'request body must be an object' };
-  const allowed = edit
-    ? new Set(['model', 'prompt', 'size', 'quality', 'background', 'input_fidelity', 'n', 'image', 'image[]', 'mask', 'response_format', 'user'])
-    : new Set(['model', 'prompt', 'size', 'quality', 'background', 'n', 'response_format', 'user']);
-  const unsupported = Object.keys(payload).find((field) => !allowed.has(field));
+  const unsupported = Object.keys(payload).find((field) => !new Set(['model', 'prompt', 'size', 'quality', 'background', 'input_fidelity', 'n', 'image', 'image[]', 'mask', 'response_format', 'user']).has(field));
   if (unsupported) return { message: `${unsupported} is not supported`, param: unsupported };
   if (!IMAGE_MODELS.has(text(payload.model))) return { message: payload.model ? 'image model is not supported' : 'model is required', param: 'model' };
   if (!text(payload.prompt)) return { message: 'prompt is required', param: 'prompt' };
   for (const [field, allowed] of Object.entries(IMAGE_ENUMS)) {
-    const value = text(payload[field]);
-    if (payload[field] === undefined) continue;
-    if (field === 'quality' && IMAGE_25_MODELS.has(payload.model) && ['xhigh', 'max'].includes(value)) continue;
-    if (field === 'size' && IMAGE_25_MODELS.has(payload.model) && validImage25Size(value)) continue;
-    if (!allowed.has(value)) return { message: `${field} is not supported`, param: field };
+    if (payload[field] !== undefined && !allowed.has(text(payload[field]))) return { message: `${field} is not supported`, param: field };
   }
   if (payload.n !== undefined && Number(payload.n) !== 1) return { message: 'n must be 1', param: 'n' };
   return null;
-}
-
-function validImage25Size(value) {
-  const dimensions = /^(\d{1,4})x(\d{1,4})$/.exec(value);
-  if (!dimensions) return false;
-  const [width, height] = dimensions.slice(1).map(Number);
-  return width % 16 === 0 && height % 16 === 0
-    && Math.max(width, height) <= 3840
-    && Math.max(width, height) <= 3 * Math.min(width, height)
-    && width * height >= 655_360
-    && width * height <= 8_294_400;
 }
 
 function imageResponsesPayload(payload, hostModel) {
@@ -271,6 +210,15 @@ async function imagePart(file) {
   return { type: 'input_image', image_url: `data:${file.type || 'application/octet-stream'};base64,${Buffer.from(await file.arrayBuffer()).toString('base64')}` };
 }
 
+async function imageHostModel(provider) {
+  const response = await codexFetch(provider, `/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`, { method: 'GET' });
+  if (!response.ok) return null;
+  const body = await responseJson(response);
+  const models = Array.isArray(body?.models) ? body.models : Array.isArray(body?.data) ? body.data : [];
+  const model = models.find((item) => Array.isArray(item?.input_modalities) && item.input_modalities.includes('image')) || models[0];
+  return text(model?.slug || model?.id);
+}
+
 function imageResponse(events) {
   const items = [];
   let usage;
@@ -284,15 +232,7 @@ function imageResponse(events) {
   }
   const uniqueItems = [...new Map(items.map((item, index) => [item.id || item.result || index, item])).values()];
   const failed = uniqueItems.find((item) => item.status === 'failed');
-  if (failed) {
-    const error = failed.error && typeof failed.error === 'object' ? failed.error : null;
-    return { error: {
-      status: error?.type === 'invalid_request_error' ? 400 : 502,
-      code: text(error?.code) || 'image_generation_failed',
-      message: text(error?.message) || 'upstream image generation failed',
-      ...(text(error?.param) ? { param: error.param } : {})
-    } };
-  }
+  if (failed) return { error: { status: 502, code: 'upstream_error', message: 'Upstream request failed' } };
   const data = uniqueItems.flatMap((item) => text(item.result) ? [{ b64_json: item.result, ...(text(item.revised_prompt) ? { revised_prompt: item.revised_prompt } : {}) }] : []);
   if (!data.length) return { error: { status: 502, code: 'image_generation_failed', message: 'Upstream image response contained no image data' } };
   const normalizedUsage = normalizeUsage(usage);
@@ -321,7 +261,7 @@ async function finalizeFile(provider, fileId) {
     response = await codexFetch(provider, `/backend-api/files/${encodeURIComponent(fileId)}/uploaded`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
     });
-    body = await responseJson(response, provider.upstreamDeadlines, provider);
+    body = await responseJson(response);
     if (!response.ok || body?.status === 'success' || !['retry', 'retrying', 'pending'].includes(text(body?.status))) return { response, body };
     if (Date.now() >= deadline) return { response, body };
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -334,135 +274,40 @@ function unsupportedFormField(form, allowed) {
   return null;
 }
 
-const COMPATIBILITY_CIRCUIT_SCOPE = { routeClass: 'compatibility_native', model: '' };
-
-async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, { modelCatalog = modelCatalogForStore(store), requireImageModel = false, codexHostHealth = codexHostHealthForStore(store) } = {}) {
+async function codexContext(store, req, fetchImpl) {
   const scopeId = requestScopeId(req);
-  const personalKey = req.proxyAuth?.kind === 'personal_share';
-  const sharedUpstreamId = req.proxyAuth?.kind === 'share_session' ? req.proxyAuth.upstreamId : '';
-  const apiKeyId = isShareCredential(req.proxyAuth) ? null : req.proxyAuth?.id || null;
   const sessionId = sessionAffinity(req);
-  const personalSessions = personalShareSessions(req, { sessionId });
-  if (personalKey) req.personalShareSessions = personalSessions;
-  const pinnedId = sharedUpstreamId || (personalKey ? '' : store.sessionUpstream(sessionId, scopeId, apiKeyId));
-  const rotationUpstreamId = personalKey ? null : store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
-  const headerRequestedId = text(req.headers['x-upstream-id']);
-  if (personalKey && headerRequestedId) return null;
-  if (sharedUpstreamId && headerRequestedId && headerRequestedId !== sharedUpstreamId) return null;
-  const requestedId = sharedUpstreamId || headerRequestedId;
-  const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass, ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) });
-  const allowed = personalKey
-    ? candidates.filter((candidate) => personalSessions.some((session) => session.upstreamId === candidate.id))
-    : candidates;
-  for (const candidate of allowed) {
-    if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionId, allowReselect: true })) continue;
-    const upstream = store.get(candidate.id, scopeId);
-    const credentials = store.credentials(candidate.id);
-    try {
-      await ensureProviderCredentials(upstream, credentials, {
-        fetchImpl,
-        saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
-      });
-      const hostModel = requireImageModel
-        ? await modelCatalog.imageModel(candidate.id, { fetchImpl, upstreamDeadlines, codexHostHealth })
-        : null;
-      if (requireImageModel && !hostModel) continue;
-      const shareAttemptId = compatibilityShareAttemptId(req);
-      if (!reserveShareRequest(req, shareAttemptId, {
-        model: hostModel || '',
-        route: new URL(req.url, 'http://localhost').pathname
-      })) {
-        continue;
-      }
-      return {
-        upstream,
-        credentials,
-        store,
-        fetchImpl,
-        req,
-        res,
-        scopeId,
-        apiKeyId,
-        sessionId,
-        upstreamDeadlines,
-        hostModel,
-        codexHostHealth,
-        shareAttemptId
-      };
-    } catch (error) {
-      if (error?.codexHostCircuitOpen) throw error;
-    }
-  }
-  return null;
+  const pinnedId = store.sessionUpstream(sessionId, scopeId);
+  const { eligible } = store.eligibility(pinnedId, scopeId);
+  const requested = text(req.headers['x-upstream-id']);
+  const record = requested
+    ? eligible.find((item) => item.id === requested && item.type === 'codex')
+    : pinnedId
+      ? eligible.find((item) => item.id === pinnedId && item.type === 'codex')
+      : eligible.find((item) => item.type === 'codex');
+  if (!record) return null;
+  if (sessionId) store.pinSession(sessionId, record.id, scopeId);
+  const upstream = store.get(record.id, scopeId);
+  const credentials = store.credentials(record.id);
+  await ensureProviderCredentials(upstream, credentials, {
+    fetchImpl,
+    saveCredentials: (updated, expiresAt) => store.persistCredentials(record.id, updated, expiresAt)
+  });
+  return { upstream, credentials, store, fetchImpl };
 }
 
-function pinCompatibilitySession(context) {
-  if (context?.sessionId && !isShareCredential(context.req.proxyAuth)) {
-    context.store.pinSession(context.sessionId, context.upstream.id, context.scopeId, context.apiKeyId);
-  }
-}
-
-async function codexFetch(context, path, options, { deferSettlement = false, pacingModel = '' } = {}) {
-  const scope = { ...COMPATIBILITY_CIRCUIT_SCOPE, ignoreQuotaCooldown: Boolean(context.req.ignoreQuotaCooldown) };
-  let admission = context.store.beginUpstreamAttempt(context.upstream.id, scope);
-  if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
-  const abort = downstreamAbortSignal(context.req, context.res);
-  let response;
-  try {
-    if (!context.req.disablePacing) {
-      await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
-    }
-    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
+async function codexFetch(context, path, options) {
+  let response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, options), context.fetchImpl);
+  persistCookies(response, context);
+  if ((response.status === 401 || response.status === 403) && context.credentials.refreshToken) {
+    await refreshProviderCredentials(context.upstream, context.credentials, {
+      fetchImpl: context.fetchImpl,
+      saveCredentials: (updated, expiresAt) => context.store.persistCredentials(context.upstream.id, updated, expiresAt)
+    });
+    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, options), context.fetchImpl);
     persistCookies(response, context);
-    if ((response.status === 401 || response.status === 403) && context.credentials.refreshToken) {
-      try {
-        const refreshed = await refreshProviderCredentials(context.upstream, context.credentials, {
-          fetchImpl: context.fetchImpl,
-          saveCredentials: (updated, expiresAt) => context.store.persistCredentials(context.upstream.id, updated, expiresAt)
-        });
-        if (refreshed) {
-          context.store.settleUpstreamAttempt(context.upstream.id, admission, { class: 'neutral', retryable: false });
-          admission = context.store.beginUpstreamAttempt(context.upstream.id, scope);
-          if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
-        }
-      } catch (error) {
-        context.store.settleUpstreamAttempt(context.upstream.id, admission, { class: 'neutral', retryable: false });
-        error.upstreamOutcomeSettled = true;
-        throw error;
-      }
-      if (!context.req.disablePacing) {
-        await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
-      }
-      response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
-      persistCookies(response, context);
-    }
-  } catch (error) {
-    if (!error?.upstreamOutcomeSettled) {
-      try {
-        context.store.settleUpstreamAttempt(
-          context.upstream.id,
-          admission,
-          error instanceof PacingError || error?.codexHostPreconnect || error?.codexHostCircuitOpen
-            ? { class: 'neutral', retryable: false }
-            : classifyTransportError(error)
-        );
-      } catch {}
-    }
-    throw error;
-  } finally {
-    abort.cleanup();
-  }
-  Object.defineProperty(response, 'relaydeckAdmission', { value: admission });
-  if (!deferSettlement) {
-    Object.defineProperty(response, 'relaydeckSettleAfterBody', { value: true });
   }
   return response;
-}
-
-function settleCodexFetch(context, response, outcome) {
-  const admission = response?.relaydeckAdmission;
-  if (!admission) return;
-  context.store.settleUpstreamAttempt(context.upstream.id, admission, outcome);
 }
 
 function withCodexHeaders(context, options) {
@@ -471,7 +316,9 @@ function withCodexHeaders(context, options) {
     headers: {
       authorization: `Bearer ${context.credentials.accessToken}`,
       accept: 'application/json',
-      ...codexProtocolHeaders(),
+      'user-agent': `codex_cli_rs/${CODEX_VERSION}`,
+      originator: 'codex_cli_rs',
+      version: CODEX_VERSION,
       ...codexCookieHeaders(context.credentials),
       ...(context.upstream.accountId ? { 'chatgpt-account-id': context.upstream.accountId } : {}),
       ...(options.headers || {})
@@ -485,37 +332,15 @@ function persistCookies(response, context) {
   }
 }
 
-async function timedFetch(url, options, fetchImpl, upstreamDeadlines = {}, codexHostHealth = null) {
+async function timedFetch(url, options, fetchImpl) {
   try {
-    return await withCodexHostHealth(codexHostHealth, url, () => fetchWithHeaderDeadline(fetchImpl, url, options, upstreamDeadlines));
+    return await fetchImpl(url, { ...options, signal: AbortSignal.timeout(120_000) });
   } catch (error) {
-    if (error?.codexHostCircuitOpen) throw error;
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
-    const wrapped = new Error(timedOut ? 'Upstream request timed out' : `Upstream request failed: ${error.message}`, { cause: error });
+    const wrapped = new Error(timedOut ? 'Upstream request timed out after 120 seconds' : `Upstream request failed: ${error.message}`);
     wrapped.statusCode = 502;
-    wrapped.upstreamFailureKind = timedOut ? 'timeout' : 'transport';
-    if (error?.codexHostPreconnect) {
-      wrapped.codexHostPreconnect = true;
-      wrapped.codexHostPreconnectCode = error.codexHostPreconnectCode;
-    }
     throw wrapped;
   }
-}
-
-function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new DOMException('Upstream request timed out', 'TimeoutError')), timeoutMs);
-  const abort = () => controller.abort(new DOMException('Downstream request closed', 'AbortError'));
-  req?.once('aborted', abort);
-  res?.once('close', abort);
-  return {
-    signal: controller.signal,
-    cleanup() {
-      clearTimeout(timeout);
-      req?.removeListener('aborted', abort);
-      res?.removeListener('close', abort);
-    }
-  };
 }
 
 async function multipart(req, body) {
@@ -551,62 +376,35 @@ function parseSse(body) {
 }
 
 function extractCost(body) {
-  return upstreamCostMicros(body?.usage) ?? upstreamCostMicros(body?.message?.usage) ?? upstreamCostMicros(body?.response?.usage) ?? upstreamCostMicros(body);
+  const value = body?.usage?.price_cost_usd ?? body?.message?.usage?.price_cost_usd ?? body?.response?.usage?.price_cost_usd ?? body?.price_cost_usd;
+  const cost = Number(value);
+  return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
 }
 
 function settleCost(store, upstream, body, req) {
-  const settledCostMicros = extractCost(body);
-  const attemptId = req.compatibilityShareAttemptId || randomUUID();
+  const cost = extractCost(body);
+  const attemptId = randomUUID();
   const startedAt = new Date().toISOString();
   try {
-    const scopeId = requestScopeId(req);
-    const shared = isShareCredential(req.proxyAuth);
-    const apiKeyId = shared ? null : req.proxyAuth?.id || null;
-    if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
-    if (settledCostMicros !== undefined) {
-      store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
-      if (!shared) store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
-      if (shared && req.proxyAuth.shareSessionId) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros);
-    } else if (shared) {
-      releaseShareRequest(req, attemptId, null);
-    }
+    store.recordGatewayUsage({ scopeId: requestScopeId(req), apiKeyId: req.proxyAuth?.id || null, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: cost === undefined ? null : dollarsToMicros(cost) });
+    if (cost !== undefined) store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros: dollarsToMicros(cost), costSource: 'upstream_reported' });
   } catch {
     // Accounting must not replace a successful provider response.
   }
 }
 
-function compatibilityShareAttemptId(req) {
-  if (!isShareCredential(req.proxyAuth)) return null;
-  req.compatibilityShareAttemptId ||= randomUUID();
-  return req.compatibilityShareAttemptId;
+async function responseJson(response) {
+  try { return JSON.parse((await responseBytes(response)).toString('utf8')); } catch { return null; }
 }
 
-async function responseJson(response, upstreamDeadlines = {}, context = null) {
-  let bytes;
-  try {
-    bytes = await responseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
-  } catch (error) {
-    if (context && response?.relaydeckSettleAfterBody) settleCodexFetch(context, response, classifyTransportError(error));
-    throw error;
-  }
-  let body = null;
-  try { body = JSON.parse(bytes.toString('utf8')); } catch {}
-  if (context && response?.relaydeckSettleAfterBody) {
-    settleCodexFetch(context, response, response.ok
-      ? body === null ? { class: 'transient', retryable: true } : { class: 'success', retryable: false }
-      : classifyHttpResponse(response, body));
-  }
-  return body;
-}
-
-async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}) {
+async function responseBytes(response, maxBytes = 16 * 1024 * 1024) {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
   const chunks = [];
   let size = 0;
   try {
     while (true) {
-      const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
+      const { done, value } = await reader.read();
       if (done) return Buffer.concat(chunks, size);
       size += value.byteLength;
       if (size > maxBytes) {
@@ -622,23 +420,16 @@ async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDead
 
 function responseHeaders(response) {
   const headers = {};
-  for (const name of ['x-request-id', 'x-oai-request-id', 'openai-request-id', 'cache-control', 'retry-after']) {
+  for (const name of ['x-request-id', 'cache-control']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
   }
   return headers;
 }
 
-function retryAfterHeader(response) {
-  const value = response?.headers?.get?.('retry-after');
-  return typeof value === 'string' && value.length <= 1_024 && !/[\x00-\x1f\x7f]/.test(value)
-    ? { 'retry-after': value }
-    : {};
-}
-
-function sendFailure(res, headers = {}) {
+function sendFailure(res) {
   const failure = upstreamFailure();
-  return sendJson(res, failure.status, failure.body, headers);
+  return sendJson(res, failure.status, failure.body);
 }
 
 function invalid(res, message, param = null) {
@@ -668,29 +459,6 @@ function sessionAffinity(req) {
 
 function requestScopeId(req) {
   return req.proxyAuth?.scopeId || 'default';
-}
-
-function fileScopes(req) {
-  if (req.proxyAuth?.kind === 'share_session' && req.proxyAuth.shareSessionId) {
-    return [`share-session:${req.proxyAuth.shareSessionId}`];
-  }
-  if (req.proxyAuth?.kind === 'personal_share') {
-    return personalShareSessions(req).map(({ shareSessionId }) => `share-session:${shareSessionId}`);
-  }
-  return [requestScopeId(req)];
-}
-
-function fileScopeId(req) {
-  if (isShareCredential(req.proxyAuth) && req.proxyAuth.shareSessionId) {
-    return `share-session:${req.proxyAuth.shareSessionId}`;
-  }
-  return requestScopeId(req);
-}
-
-function listFiles(store, req) {
-  const seen = new Set();
-  return fileScopes(req).flatMap((scopeId) => store.listFiles(scopeId))
-    .filter((file) => !seen.has(file.id) && seen.add(file.id));
 }
 
 function text(value) {
