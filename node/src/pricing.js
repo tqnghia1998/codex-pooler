@@ -1,10 +1,15 @@
+// OpenAI bills a separate long-context bucket once input exceeds this many tokens.
+const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
+
 const OPENAI_PRICES = [
-  ['gpt-5.6-luna', [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 2.4]],
-  ['gpt-5.6-terra', [2, 0.2, 2.5, 12], [4, 0.4, 5, 24]],
-  ['gpt-5.6-sol', [5, 0.5, 6.25, 30], [10, 1, 12.5, 60]]
-].flatMap(([model, standard, priority]) => [
-  price(model, standard, 'openai-2026-07-31'),
-  price(model, priority, 'openai-2026-07-31', 'priority')
+  ['gpt-5.6-luna', [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 2.4], [0.4, 0.04, 0.5, 1.8], [0.8, 0.08, 1, 3.6]],
+  ['gpt-5.6-terra', [2, 0.2, 2.5, 12], [4, 0.4, 5, 24], [4, 0.4, 5, 18], [8, 0.8, 10, 36]],
+  ['gpt-5.6-sol', [5, 0.5, 6.25, 30], [10, 1, 12.5, 60], [10, 1, 12.5, 45], [20, 2, 25, 90]]
+].flatMap(([model, standard, priority, standardLong, priorityLong]) => [
+  price(model, standard, 'openai-2026-08-05'),
+  price(model, priority, 'openai-2026-08-05', 'priority'),
+  price(model, standardLong, 'openai-2026-08-05', 'standard', '2026-01-01T00:00:00Z', 'long_context'),
+  price(model, priorityLong, 'openai-2026-08-05', 'priority', '2026-01-01T00:00:00Z', 'long_context')
 ]);
 
 const ANTHROPIC_PRICES = [
@@ -22,8 +27,8 @@ const PRICES = [
   price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z')
 ];
 
-function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z') {
-  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt };
+function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default') {
+  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt, bucket };
 }
 
 export function extractUsage(body) {
@@ -67,7 +72,8 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   const timestamp = Date.parse(startedAt);
   if (!Number.isFinite(timestamp)) return null;
   const tier = canonicalTier(usage.serviceTier || requestedTier);
-  const snapshot = resolvePrice(models, tier, timestamp);
+  const bucket = usage.inputTokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD ? 'long_context' : 'default';
+  const snapshot = resolvePrice(models, tier, timestamp, bucket);
   if (!snapshot) return null;
   const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens);
   const cacheWrite = usage.cacheWriteTokens || 0;
@@ -88,10 +94,12 @@ function completeUsage(usage) {
   return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens && (usage.totalTokens === undefined || usage.totalTokens === usage.inputTokens + usage.outputTokens);
 }
 
-function resolvePrice(models, tier, timestamp) {
+function resolvePrice(models, tier, timestamp, bucket) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
-    const snapshots = PRICES.filter((snapshot) => snapshot.model === candidate && snapshot.tier === tier && Date.parse(snapshot.effectiveAt) <= timestamp);
+    const matching = PRICES.filter((snapshot) => snapshot.model === candidate && snapshot.tier === tier && Date.parse(snapshot.effectiveAt) <= timestamp);
+    // Models without a long-context bucket (all Anthropic entries) keep their default rates.
+    const snapshots = matching.filter((snapshot) => snapshot.bucket === bucket).length ? matching.filter((snapshot) => snapshot.bucket === bucket) : matching.filter((snapshot) => snapshot.bucket === 'default');
     if (snapshots.length) return snapshots.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
   }
   return null;

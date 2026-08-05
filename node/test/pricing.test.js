@@ -26,8 +26,15 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
     settledCostMicros: 11_450,
     costSource: 'pricing_snapshot',
     model: 'gpt-5.6-sol',
-    priceVersion: 'openai-2026-07-31'
+    priceVersion: 'openai-2026-08-05'
   });
+  assert.deepEqual(priceUsage(['gpt-5.6-sol'], { inputTokens: 272_001, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }), {
+    settledCostMicros: 2_720_010,
+    costSource: 'pricing_snapshot',
+    model: 'gpt-5.6-sol',
+    priceVersion: 'openai-2026-08-05'
+  });
+  assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 272_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }).settledCostMicros, 1_360_000);
   assert.equal(priceUsage(['claude-sonnet-5-20260101'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-08-31T23:59:59Z').settledCostMicros, 1_200);
   assert.equal(priceUsage(['claude-sonnet-5-20260101'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-09-01T00:00:00Z').settledCostMicros, 1_800);
   assert.equal(priceUsage(['claude-3-sonnet'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 1, outputTokens: 100 }), null);
