@@ -40,7 +40,7 @@ test('refreshes an expired Codex access token and persists rotated credentials',
   assert.equal(credentials.accessToken, 'new-access');
   assert.equal(credentials.refreshToken, 'new-refresh');
   assert.equal(credentials.idToken, 'new-id');
-  assert.equal(saved[0], credentials);
+  assert.deepEqual(saved[0], credentials);
   assert.equal(saved[1], upstream.accessTokenExpiresAt);
   assert.equal(requests[1].options.headers.authorization, 'Bearer new-access');
 });

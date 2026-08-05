@@ -356,8 +356,8 @@ function normalizeInputItem(item) {
 
 function normalizeFunctionOutputPart(part) {
   if (plainObject(part) && part.type === 'input_image') {
-    if (typeof part.image_url !== 'string' || Object.keys(part).some((key) => !['type', 'image_url', 'prompt_cache_breakpoint'].includes(key))) invalid('input item shape is not translatable', 'input');
-    return { type: 'input_image', image_url: part.image_url, ...breakpoint(part) };
+    if (typeof part.image_url !== 'string' || Object.keys(part).some((key) => !['type', 'image_url', 'detail', 'prompt_cache_breakpoint'].includes(key))) invalid('input item shape is not translatable', 'input');
+    return { type: 'input_image', image_url: part.image_url, ...(part.detail !== undefined ? { detail: part.detail } : {}), ...breakpoint(part) };
   }
   return part;
 }
@@ -371,7 +371,8 @@ function validReplayCaller(caller) {
 
 function normalizeResponseMessage(item) {
   const allowed = ['type', 'id', 'role', 'content', 'name', 'tool_call_id', 'status', 'metadata', 'internal_chat_message_metadata_passthrough'];
-  if (Object.keys(item).some((key) => !allowed.includes(key))) invalid('message input item shape is not translatable', 'input');
+  const dropped = ['phase'];
+  if (Object.keys(item).some((key) => !allowed.includes(key) && !dropped.includes(key))) invalid('message input item shape is not translatable', 'input');
   const role = item.role ?? 'user';
   if (!['system', 'user', 'assistant', 'developer', 'tool'].includes(role)) invalid('message input items require role and content', 'input');
   const normalizedRole = role === 'system' ? 'developer' : role;
@@ -387,14 +388,14 @@ function normalizeResponseContentPart(part, role) {
   if (typeof part === 'string') return { type: role === 'assistant' ? 'output_text' : 'input_text', text: part };
   if (!plainObject(part)) invalid('message content part is not translatable', 'input');
   if (role === 'assistant') {
-    if (['output_text', 'text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text'].includes(key))) return { type: 'output_text', text: part.text };
+    if (['output_text', 'text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations'].includes(key))) return { type: 'output_text', text: part.text };
     if (part.type === 'thinking' && typeof part.thinking === 'string') return null;
     invalid('message content part is not translatable', 'input');
   }
   if (['system', 'developer'].includes(role) && !['text', 'input_text'].includes(part.type)) invalid('message content part is not translatable', 'input');
   if (['text', 'input_text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'prompt_cache_breakpoint'].includes(key))) return { type: 'input_text', text: part.text, ...breakpoint(part) };
-  if (part.type === 'input_image' && typeof part.image_url === 'string' && Object.keys(part).every((key) => ['type', 'image_url', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
-  if (part.type === 'input_image' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
+  if (part.type === 'input_image' && typeof part.image_url === 'string' && Object.keys(part).every((key) => ['type', 'image_url', 'detail', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
+  if (part.type === 'input_image' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'detail', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.file_id) && Object.keys(part).every((key) => ['type', 'file_id', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.file_url) && Object.keys(part).every((key) => ['type', 'file_url', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_file' && cleanString(part.filename) && typeof part.file_data === 'string' && Object.keys(part).every((key) => ['type', 'filename', 'file_data', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
@@ -450,6 +451,10 @@ function lowerAndValidateTools(tools) {
   if (tools === undefined) return undefined;
   if (!Array.isArray(tools)) invalid('tools must be an array', 'tools');
   return tools.map((tool) => validateTool(lowerTool(tool)));
+}
+
+export function lowerNonStrictFunctionTools(tools) {
+  return Array.isArray(tools) ? tools.map(lowerTool) : tools;
 }
 
 function lowerTool(tool) {
