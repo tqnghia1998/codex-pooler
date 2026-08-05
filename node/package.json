@@ -4,12 +4,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --env-file=.env src/server.js",
-    "dev": "node --env-file=.env --watch src/server.js",
+    "build": "vite build",
+    "start": "npm run build && node --env-file=.env src/server.js",
+    "dev": "npm run build && node --env-file=.env --watch src/server.js",
     "test": "node --test"
   },
   "dependencies": {
+    "@astryxdesign/core": "^0.1.9",
+    "@astryxdesign/theme-neutral": "^0.1.9",
     "fzstd": "0.1.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.2.0",
+    "vite": "^7.3.6"
   }
 }
