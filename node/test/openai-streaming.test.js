@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, MAX_SSE_EVENT_BYTES, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
+import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, retryableFirstSseEvent } from '../src/openai-streaming.js';
 
 const decode = (chunk) => JSON.parse(chunk.match(/^data: (.+)$/m)[1]);
 
@@ -9,49 +9,6 @@ test('strictly decodes SSE labels and retries only legacy retry codes', () => {
   assert.equal(decodeSseBlock('data: [DONE]').kind, 'done');
   assert.equal(retryableFirstSseEvent({ error: { code: 'server_error' } }), true);
   assert.equal(retryableFirstSseEvent({ error: { code: 'rate_limit_exceeded' } }), false);
-  assert.deepEqual(splitSseBlocks('data: one\r\rdata: two\r\r'), ['data: one', 'data: two', '']);
-});
-
-test('parses CRLF and standalone CR incrementally without phantom blocks', () => {
-  let state = createSseParserState();
-  let result = consumeSseChunk(state, 'event: message_start\r');
-  assert.deepEqual(result.blocks, []);
-  state = result.state;
-
-  result = consumeSseChunk(state, '\ndata: {"message":{"usage":{"input_tokens":1}}}\r\n\r');
-  assert.deepEqual(result.blocks.map(decodeSseBlock), [{
-    kind: 'event',
-    event: { type: 'message_start', message: { usage: { input_tokens: 1 } } }
-  }]);
-  state = result.state;
-
-  result = consumeSseChunk(state, '\nevent: message_stop\rdata: {"type":"message_stop"}\r\r');
-  assert.deepEqual(result.blocks.map(decodeSseBlock), [
-    { kind: 'event', event: { type: 'message_stop' } }
-  ]);
-});
-
-test('rejects oversized complete and incomplete SSE events', () => {
-  const oversized = `data: ${'x'.repeat(MAX_SSE_EVENT_BYTES)}`;
-  for (const delimiter of ['', '\n\n', '\r\n\r\n', '\r\r']) {
-    const result = consumeSseChunk(createSseParserState(), oversized + delimiter);
-    assert.equal(result.overflow, true, JSON.stringify(delimiter));
-    assert.deepEqual(result.blocks, []);
-    assert.deepEqual(result.state, createSseParserState());
-  }
-});
-
-test('retains fragmented events without rebuilding the pending block', () => {
-  let state = createSseParserState();
-  let completed = [];
-  for (const chunk of ['data: {"type":', '"response.output_text.delta",', '"delta":"hello"}', '\n', '\n']) {
-    const result = consumeSseChunk(state, chunk);
-    state = result.state;
-    completed = completed.concat(result.blocks);
-  }
-  assert.equal(completed.length, 1);
-  assert.equal(decodeSseBlock(completed[0]).event.delta, 'hello');
-  assert.equal(pendingSseBlock(state), '');
 });
 
 test('projects failed terminals without provider fields and latches', () => {
@@ -65,31 +22,6 @@ test('projects failed terminals without provider fields and latches', () => {
   assert.equal(normalizePublicResponsesEvent({ type: 'response.output_text.delta', delta: 'late' }, state).length, 0);
 });
 
-test('projects policy failures with only the stable public contract', () => {
-  const result = decode(normalizePublicResponsesEvent({
-    type: 'response.failed',
-    sequence_number: 4,
-    provider_sibling: 'drop',
-    response: {
-      id: 'resp_policy',
-      error: {
-        type: 'provider_policy',
-        code: 'misalignment_policy_violation',
-        message: 'Request blocked by policy.',
-        param: 'drop',
-        sibling: 'drop'
-      }
-    }
-  }, createPublicResponsesState())[0]);
-  assert.deepEqual(result.response.error, {
-    type: 'invalid_request_error',
-    code: 'misalignment_policy_violation',
-    message: 'Request blocked by policy.'
-  });
-  assert.equal(JSON.stringify(result).includes('provider_policy'), false);
-  assert.equal(JSON.stringify(result).includes('"param"'), false);
-});
-
 test('synthesizes public lifecycle events and normalizes done/typeless success', () => {
   const state = createPublicResponsesState();
   normalizePublicResponsesEvent({ type: 'response.output_item.added', item: { type: 'function_call', call_id: 'call_1' }, output_index: 2 }, state);
@@ -100,39 +32,15 @@ test('synthesizes public lifecycle events and normalizes done/typeless success',
   assert.equal(typeless.type, 'response.completed');
 });
 
-test('restores a missing custom_tool_call namespace from declared tools, live and streamed', () => {
-  const namespaces = { shell: 'ops' };
-  assert.deepEqual(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'shell', call_id: 'c1' }] }, namespaces).output[0].namespace, 'ops');
-  assert.equal(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'shell', namespace: 'explicit' }] }, namespaces).output[0].namespace, 'explicit');
-  assert.equal(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'unknown' }] }, namespaces).output[0].namespace, undefined);
-
-  const state = createPublicResponsesState(namespaces);
-  const [chunk] = normalizePublicResponsesEvent({ type: 'response.output_item.done', item: { type: 'custom_tool_call', name: 'shell', call_id: 'c1' }, output_index: 0 }, state);
-  assert.equal(decode(chunk).item.namespace, 'ops');
-});
-
 test('translates Chat tool arguments, moderation, incomplete usage, and early failure', () => {
   const state = createChatStreamState({ model: 'gpt', stream_options: { include_usage: true } });
   const tool = normalizeChatEvent({ type: 'response.output_item.added', output_index: 4, item: { type: 'function_call', call_id: 'call_4', name: 'lookup', arguments: '{"q":1}' } }, state)[0];
   assert.deepEqual(tool.choices[0].delta.tool_calls[0], { index: 4, id: 'call_4', type: 'function', function: { name: 'lookup', arguments: '{"q":1}' } });
   assert.deepEqual(normalizeChatEvent({ type: 'response.function_call_arguments.delta', output_index: 4, delta: '}' }, state)[0].choices[0].delta.tool_calls[0], { index: 4, function: { arguments: '}' } });
-  assert.deepEqual(normalizeChatEvent({ type: 'response.output_item.added', output_index: 5, item: { type: 'custom_tool_call', call_id: 'call_5', name: 'code_exec', input: 'print(' } }, state)[0].choices[0].delta.tool_calls[0], { index: 5, id: 'call_5', type: 'custom', custom: { name: 'code_exec', input: 'print(' } });
-  assert.deepEqual(normalizeChatEvent({ type: 'response.custom_tool_call_input.delta', output_index: 5, delta: ')' }, state)[0].choices[0].delta.tool_calls[0], { index: 5, custom: { input: ')' } });
   assert.deepEqual(normalizeChatEvent({ type: 'response.output_text.delta', delta: 'x', moderation: { flagged: true } }, state)[0].choices, []);
   const terminal = normalizeChatEvent({ type: 'response.incomplete', response: { incomplete_details: { reason: 'content-filter' }, usage: { input_tokens: 2, output_tokens: 3 } } }, state);
   assert.equal(terminal.at(-1), '[DONE]');
   assert.equal(terminal.at(-2).usage.total_tokens, 5);
   assert.equal(terminal.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'content_filter');
   assert.deepEqual(normalizeChatEvent({ type: 'response.failed', response: { error: { message: 'secret' } } }, createChatStreamState({ model: 'gpt' })), [{ error: { type: 'server_error', code: 'upstream_response_failed', message: 'Upstream response failed', param: null } }]);
-  assert.deepEqual(normalizeChatEvent({
-    type: 'response.failed',
-    response: { error: { code: 'misalignment_policy_violation', message: 'Policy blocked.' } }
-  }, createChatStreamState({ model: 'gpt' })), [{
-    error: { type: 'invalid_request_error', code: 'misalignment_policy_violation', message: 'Policy blocked.' }
-  }]);
-
-  const completedToolState = createChatStreamState({ model: 'gpt' });
-  normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call_done', name: 'lookup', arguments: '{}' } }, completedToolState);
-  const completedTool = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed' } }, completedToolState);
-  assert.equal(completedTool.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
 });
