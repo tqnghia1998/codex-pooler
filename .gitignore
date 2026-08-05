@@ -86,3 +86,6 @@ output/imagegen/
 graphify-out/
 .planning/
 .pi
+.data/
+.pi-tasks/
+.pi-subagents/
