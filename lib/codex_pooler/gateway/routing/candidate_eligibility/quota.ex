@@ -412,12 +412,7 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility.Quota do
   defp quota_exhaustion_reason?(_reason), do: false
 
   defp exclusion_exhausted?(exclusion) do
-    exclusion
-    |> Map.get(:reasons, [])
-    |> case do
-      [] -> false
-      reasons -> Enum.any?(reasons, &quota_exhaustion_reason?/1)
-    end
+    Enum.any?(Map.get(exclusion, :reasons, []), &quota_exhaustion_reason?/1)
   end
 
   defp quota_decision(

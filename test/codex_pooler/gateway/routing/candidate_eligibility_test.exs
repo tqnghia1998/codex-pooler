@@ -40,6 +40,25 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibilityTest do
       end
     end
 
+    test "prefers the newest equal-plan source across month boundaries" do
+      pool = pool_fixture()
+      older = upstream_assignment_fixture(pool, %{plan_family: "pro"})
+      newer = upstream_assignment_fixture(pool, %{plan_family: "pro"})
+      model = model_fixture(pool, %{exposed_model_id: unique_model_id("gpt-source-order")})
+
+      hydration = %{
+        visible_candidates_by_model_id: %{
+          model.id => [
+            {%{older.assignment | created_at: ~U[2026-05-31 00:00:00Z]}, older.identity},
+            {%{newer.assignment | created_at: ~U[2026-06-01 00:00:00Z]}, newer.identity}
+          ]
+        }
+      }
+
+      assert %{id: identity_id} = CandidateEligibility.model_source_identity(hydration, [model])
+      assert identity_id == newer.identity.id
+    end
+
     test "uses one hydrated assignment snapshot for visible models and routable candidates" do
       pool = pool_fixture()
       routed = upstream_assignment_fixture(pool, %{plan_family: "pro"})

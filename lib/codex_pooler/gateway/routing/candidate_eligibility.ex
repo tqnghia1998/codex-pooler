@@ -467,20 +467,17 @@ defmodule CodexPooler.Gateway.Routing.CandidateEligibility do
 
   defp spend_cap_account_label(_identity), do: "Upstream account"
 
-  defp identity_spend_credits(%UpstreamIdentity{spent_credits: %Decimal{} = spent}), do: spent
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: %Decimal{} = spent}),
+    do: spend_cap_spent(spent)
 
   defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_integer(spent),
-    do: Decimal.new(spent)
+    do: spend_cap_spent(spent)
 
   defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_float(spent),
-    do: Decimal.from_float(spent)
+    do: spend_cap_spent(spent)
 
-  defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_binary(spent) do
-    case Decimal.parse(String.trim(spent)) do
-      {value, ""} -> value
-      _invalid -> Decimal.new(0)
-    end
-  end
+  defp identity_spend_credits(%UpstreamIdentity{spent_credits: spent}) when is_binary(spent),
+    do: spend_cap_spent(spent)
 
   defp identity_spend_credits(%UpstreamIdentity{metadata: metadata}) when is_map(metadata) do
     metadata |> Map.get("spent_credits", 0) |> spend_cap_spent()
