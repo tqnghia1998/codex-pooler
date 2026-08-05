@@ -4000,7 +4000,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamsLiveTest do
            ]
 
     assert Enum.at(accounts, 0).last_used_at == now
-    assert Enum.at(accounts, 2).last_used_label == "never used"
 
     named =
       UpstreamAccountsReadModel.list_visible_accounts(scope, [pool], %{"sort" => "name"})

@@ -648,7 +648,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
             label={if @testing?, do: "Testing…", else: "Test connection"}
             phx-click="test_account"
             phx-value-id={@account.identity.id}
-            disabled={@testing? || !testable?(@account.identity.status)}
+            disabled={@testing? || !refreshable?(@account.identity.status)}
           />
         </li>
         <li>
@@ -1045,6 +1045,5 @@ defmodule CodexPoolerWeb.Admin.UpstreamPageComponents.AccountCard do
 
   defp reactivatable?(status), do: status in @reactivatable_statuses
 
-  defp testable?(status), do: status in ["active", "refresh_due", "refresh_failed"]
   defp refreshable?(status), do: status in ["active", "refresh_due", "refresh_failed"]
 end

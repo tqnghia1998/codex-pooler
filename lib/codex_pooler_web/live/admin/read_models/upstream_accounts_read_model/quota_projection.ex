@@ -6,6 +6,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
   alias CodexPooler.Upstreams.Quota
   alias CodexPooler.Upstreams.Quota.Charts.Measurements
   alias CodexPooler.Upstreams.Quota.WindowSelector
+  alias CodexPoolerWeb.Admin.Format
   alias CodexPoolerWeb.Admin.UpstreamAccountsReadModel.Formatting
   alias CodexPoolerWeb.DateTimeDisplay
   alias CodexPoolerWeb.RelativeTime
@@ -292,18 +293,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
 
   defp credit_amount(_value), do: Decimal.new(0)
 
-  defp format_dollars(credits) do
-    credits
-    |> Decimal.div(@credits_per_dollar)
-    |> format_dollar_amount()
-  end
-
-  defp format_dollar_amount(amount) do
-    amount
-    |> Decimal.round(2)
-    |> Decimal.to_string(:normal)
-    |> then(&"$#{&1}")
-  end
+  defp format_dollars(credits), do: credits |> Decimal.div(@credits_per_dollar) |> Format.money()
 
   defp last_active_label(%DateTime{} = last_active_at) do
     "active #{Formatting.format_reset_duration(DateTime.diff(DateTime.utc_now(), last_active_at, :second))} ago"
@@ -631,7 +621,7 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel.QuotaProjection do
        when is_binary(balance) and is_binary(cap) do
     with {balance, ""} <- Decimal.parse(balance),
          {cap, ""} <- Decimal.parse(cap) do
-      "#{format_dollar_amount(decimal_non_negative(balance))} left of #{format_dollar_amount(cap)}"
+      "#{Format.money(decimal_non_negative(balance))} left of #{Format.money(cap)}"
     else
       _invalid -> nil
     end

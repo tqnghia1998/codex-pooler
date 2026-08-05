@@ -101,7 +101,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
           required(:plan_reported?) => boolean(),
           required(:refresh_status) => String.t(),
           required(:last_used_at) => DateTime.t() | nil,
-          required(:last_used_label) => String.t(),
           required(:token_refresh_label) => String.t(),
           required(:refresh_job_state) => String.t() | nil,
           required(:quota_refresh_status) => String.t(),
@@ -446,14 +445,6 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
       plan_reported?: account_plan_reported?(identity),
       refresh_status: refresh_status_label(identity),
       last_used_at: Map.get(last_used, identity.id),
-      last_used_label:
-        case Map.get(last_used, identity.id) do
-          %DateTime{} = timestamp ->
-            Formatting.timestamp_status_label("last used", timestamp, datetime_preferences)
-
-          nil ->
-            "never used"
-        end,
       token_refresh_label: token_refresh_label(identity, datetime_preferences),
       refresh_job_state: refresh_job_state(refresh_job),
       quota_refresh_status:
@@ -624,12 +615,8 @@ defmodule CodexPoolerWeb.Admin.UpstreamAccountsReadModel do
   defp safe_workspace_label(value) do
     case Formatting.present_string(value) do
       nil -> nil
-      label -> mask_email_like(label)
+      label -> Format.censor_email(label)
     end
-  end
-
-  defp mask_email_like(value) do
-    Format.censor_email(value)
   end
 
   defp workspace_ref(nil), do: "legacy"

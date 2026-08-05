@@ -253,9 +253,6 @@ defmodule CodexPoolerWeb.Telemetry do
         description: "Admin stats dashboard build duration by outcome, window, and scope.",
         reporter_options: [buckets: @admin_stats_duration_buckets]
       ),
-      # The Prometheus core library holds every distribution sample until /metrics is
-      # scraped. Database queries are frequent enough that latency histograms retain
-      # unbounded memory on deployments without a scraper; keep the bounded counter.
       last_value("vm.memory.total.bytes",
         event_name: [:vm, :memory],
         measurement: :total,
