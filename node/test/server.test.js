@@ -102,6 +102,74 @@ test('start refreshes quota immediately, repeats on the configured interval, and
   }
 });
 
+test('streams upstream changes after the initial ready event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-upstream-events-'));
+  const store = new Store(dir);
+  const upstream = store.create({ type: 'compass', projectId: 'events-project', projectKey: 'secret' });
+  const { server, base } = await runningServer(store);
+  try {
+    const events = await new Promise((resolve, reject) => {
+      const req = httpRequest(`${base}/api/upstreams/events`, (res) => {
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (!body.includes('event: ready')) return;
+          store.setCap(upstream.id, { capDollars: 100 });
+          if (body.includes('event: upstreams')) {
+            req.destroy();
+            resolve(body);
+          }
+        });
+      });
+      req.once('error', reject);
+      req.end();
+    });
+    assert.match(events, /event: ready/);
+    assert.match(events, /event: upstreams/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('streams upstream changes when a request settlement updates spending', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-settlement-events-'));
+  const store = new Store(dir);
+  const upstream = store.create({ type: 'compass', projectId: 'settlement-events', projectKey: 'secret' });
+  store.setCap(upstream.id, { capDollars: 1 });
+  const apiKey = store.configureApiKey('settlement-events-key');
+  const request = store.reserveGatewayRequest({ apiKeyId: apiKey.id, endpoint: '/v1/responses' });
+  const attempt = store.beginGatewayAttempt(request.id, upstream.id);
+  const { server, base } = await runningServer(store);
+  try {
+    let finalized = false;
+    const events = await new Promise((resolve, reject) => {
+      const req = httpRequest(`${base}/api/upstreams/events`, (res) => {
+        let body = '';
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.includes('event: ready') && !finalized) {
+            finalized = true;
+            store.finalizeGatewayRequest({ requestId: request.id, attemptId: attempt.id, status: 'succeeded', usage: { totalTokens: 1 }, settledCostMicros: 1, costSource: 'upstream_reported' });
+          }
+          if (body.includes('event: upstreams')) {
+            req.destroy();
+            resolve(body);
+          }
+        });
+      });
+      req.once('error', reject);
+      req.end();
+    });
+    assert.match(events, /event: upstreams/);
+    assert.equal(store.getPublic(upstream.id).spending.spentCostMicros, 1);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('serves unauthenticated health checks but protects usage with the single API key', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-health-'));
   const store = new Store(dir);

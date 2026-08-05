@@ -18,12 +18,16 @@ function upstreams(store) {
   return { first, second };
 }
 
-test('orders fallback candidates but preserves explicit and session pins', () => {
+test('balances automatic candidates by least recent success and preserves pins', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-routing-plan-'));
   const store = new Store(dir);
   try {
     const { first, second } = upstreams(store);
     const scope = { model: 'gpt-5.6-sol', routeClass: 'proxy_http' };
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [first.id, second.id]);
+    store.completeCircuit(first.id, scope, true, Date.parse('2026-08-04T00:00:00Z'));
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [second.id, first.id]);
+    store.completeCircuit(second.id, scope, true, Date.parse('2026-08-04T00:01:00Z'));
     assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [first.id, second.id]);
     assert.deepEqual(store.candidatePlan({ requestedId: second.id, preferredType: 'codex', ...scope }).map((item) => item.id), [second.id]);
     store.pinSession('pinned', first.id);
@@ -49,7 +53,7 @@ test('opens durable circuits, permits one half-open probe, and resets on success
     assert.equal(restarted.beginCircuit(first.id, scope, now + 60_003), false);
     assert.equal(restarted.beginCircuit(first.id, scope, now + 120_002), true);
     restarted.completeCircuit(first.id, scope, true, now + 120_003);
-    assert.deepEqual(restarted.candidatePlan({ preferredType: 'codex', ...scope, now: now + 120_004 }).map((item) => item.id), [first.id, second.id]);
+    assert.deepEqual(restarted.candidatePlan({ preferredType: 'codex', ...scope, now: now + 120_004 }).map((item) => item.id), [second.id, first.id]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

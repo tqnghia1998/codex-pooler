@@ -132,6 +132,7 @@ export function createUpstream(input) {
     accountId: '',
     email: '',
     accessTokenExpiresAt: null,
+    credentialEpoch: 1,
     projectId: '',
     quota: null,
     spending: newSpending(),
@@ -224,7 +225,7 @@ export function spendingSummary(spending = {}) {
     : Math.max(0, Math.round((Number(spending.spentCredits) || 0) * MICROS_PER_CREDIT));
   const spentCredits = microsToCredits(spentCostMicros);
   const percentUsed = capCredits > 0 ? (spentCredits / capCredits) * 100 : null;
-  const status = capCredits <= 0 ? 'not_set' : spentCredits >= capCredits ? 'reached' : spentCredits >= capCredits * 0.85 ? 'reserved' : 'normal';
+  const status = capCredits <= 0 ? 'not_set' : spentCredits >= capCredits ? 'reached' : 'normal';
 
   return {
     capCredits,
@@ -309,41 +310,35 @@ function parseDate(value, label) {
 
 export function spendingEligibility(upstream, continuation = false) {
   const spending = spendingSummary(upstream.spending);
-  if (spending.capCredits <= 0) return { eligible: false, reserved: false, reason: 'spend_cap_unset', status: 'spend_cap_unset' };
+  if (spending.capCredits <= 0) return { eligible: false, reason: 'spend_cap_unset', status: 'spend_cap_unset' };
   if (continuation && spending.spentCredits < spending.capCredits * 1.25) {
-    return { eligible: true, reserved: false, reason: null, status: 'continuation_allowed' };
+    return { eligible: true, reason: null, status: 'continuation_allowed' };
   }
-  if (spending.spentCredits >= spending.capCredits) return { eligible: false, reserved: false, reason: 'spend_cap_reached', status: 'spend_cap_reached' };
-  if (spending.spentCredits >= spending.capCredits * 0.85) return { eligible: false, reserved: true, reason: 'spend_cap_reserved', status: 'spend_cap_reserved' };
-  return { eligible: true, reserved: false, reason: null, status: 'normal' };
+  if (spending.spentCredits >= spending.capCredits) return { eligible: false, reason: 'spend_cap_reached', status: 'spend_cap_reached' };
+  return { eligible: true, reason: null, status: 'normal' };
 }
 
 export function filterSpendCapEligible(upstreams, { continuationId = null } = {}) {
   const eligible = [];
-  const reserved = [];
   const exclusions = [];
   for (const upstream of upstreams) {
     const decision = spendingEligibility(upstream, upstream.id === continuationId);
     if (decision.eligible) eligible.push(upstream);
-    else {
-      exclusions.push({ id: upstream.id, name: upstream.name, code: decision.reason, capCredits: spendingSummary(upstream.spending).capCredits });
-      if (decision.reserved) reserved.push(upstream);
-    }
+    else exclusions.push({ id: upstream.id, name: upstream.name, code: decision.reason, capCredits: spendingSummary(upstream.spending).capCredits });
   }
   const pinned = continuationId && exclusions.find((item) => item.id === continuationId && item.code === 'spend_cap_reached');
   if (pinned) {
     return {
       eligible: [],
-      reserved,
+      reserved: [],
       exclusions,
       error: { status: 503, code: 'pinned_continuation_spend_cap_reached', message: `${pinned.name || 'Upstream account'} reached its spending cap`, retryable: true, requiresNewUpstreamSession: false }
     };
   }
   if (eligible.length) return { eligible, reserved: [], exclusions, error: null };
-  if (reserved.length) return { eligible: reserved, reserved, exclusions, error: null };
   return {
     eligible: [],
-    reserved,
+    reserved: [],
     exclusions,
     error: { status: 503, code: 'no_eligible_backend', message: 'No upstream has an eligible spending cap', retryable: true }
   };
@@ -428,6 +423,17 @@ export function parseCompassQuota(payload, observedAt = new Date()) {
   };
 }
 
+function publicTokenRefresh(value) {
+  if (!value || !['succeeded', 'refreshing', 'failed', 'reauth_required'].includes(value.status)) return null;
+  return {
+    status: value.status,
+    startedAt: value.startedAt || null,
+    finishedAt: value.finishedAt || null,
+    trigger: value.trigger || null,
+    errorCode: value.errorCode || null
+  };
+}
+
 function resetTime(window, observedAt) {
   const explicit = window.reset_at ?? window.resets_at;
   if (typeof explicit === 'number' && explicit > 0) return new Date(explicit * 1000).toISOString();
@@ -449,8 +455,9 @@ export function publicUpstream(upstream) {
     type: upstream.type,
     name: deriveUpstreamName(upstream.type, upstream),
     accountId: upstream.accountId || null,
-    email: maskEmail(upstream.email) || null,
+    email: text(upstream.email) || null,
     accessTokenExpiresAt: upstream.accessTokenExpiresAt || null,
+    tokenRefresh: publicTokenRefresh(upstream.tokenRefresh),
     projectId: upstream.projectId || null,
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
     quota: upstream.quota,

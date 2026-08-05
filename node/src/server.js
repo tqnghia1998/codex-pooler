@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
 import { dollarsToMicros } from './domain.js';
-import { refreshQuota } from './providers.js';
+import { codexRefreshFailureCode, refreshProviderCredentials, refreshQuota } from './providers.js';
 import { handleCompatibilityRequest, isCompatibilityRoute } from './compatibility.js';
 import { HttpError, readRequestBody } from './http-ingress.js';
 import { errorEnvelope } from './public-errors.js';
@@ -24,9 +24,16 @@ import {
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 export const AUTO_REFRESH_INTERVAL_MS = 60_000;
+export const TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
 const QUOTA_REFRESH_CONCURRENCY = 3;
+const TOKEN_REFRESH_CONCURRENCY = 3;
+const TOKEN_REFRESH_WINDOW_MS = 12 * 60 * 60 * 1_000;
+const TOKEN_REFRESH_FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
+const TOKEN_REFRESH_STALE_MS = 50_000;
+const TOKEN_REFRESH_MAX_ATTEMPTS = 8;
+const TOKEN_REFRESH_BATCH_SIZE = 100;
 
-export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, ingress = {} } = {}) {
+export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console } = {}) {
   store.configureApiKey(apiKey);
   const admission = admissionPolicy(ingress);
   return async function app(req, res) {
@@ -81,7 +88,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         return;
       }
       if (jsonProxyRoute) {
-        await proxyRequest({ req, res, path: url.pathname, payload: await jsonRuntimeBody(req, ingress, ['/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(url.pathname)), store, apiKey, fetchImpl });
+        await proxyRequest({ req, res, path: url.pathname, payload: await jsonRuntimeBody(req, ingress, ['/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(url.pathname)), store, apiKey, fetchImpl, upstreamDeadlines, logger });
         return;
       }
       if (modelRoute) {
@@ -89,11 +96,11 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         return;
       }
       if (compatibilityRoute) {
-        await handleCompatibilityRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, fetchImpl });
+        await handleCompatibilityRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, fetchImpl, upstreamDeadlines });
         return;
       }
       if (rawProxyRoute) {
-        await proxyRawRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, apiKey, fetchImpl });
+        await proxyRawRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, apiKey, fetchImpl, upstreamDeadlines, logger });
         return;
       }
       if (url.pathname.startsWith('/api/')) {
@@ -101,7 +108,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
-        await api(req, res, url, store, { fetchImpl, compassGatewayToken });
+        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure });
         return;
       }
       await staticFile(res, url.pathname);
@@ -127,11 +134,13 @@ export function start(port = Number(process.env.PORT) || 3000, {
   compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN,
   apiKey = process.env.CODEX_POOLER_API_KEY,
   pollIntervalMs = AUTO_REFRESH_INTERVAL_MS,
+  tokenRefreshIntervalMs = TOKEN_REFRESH_INTERVAL_MS,
   host = process.env.CODEX_POOLER_BIND_HOST || '127.0.0.1',
   ingress = {}
 } = {}) {
   if (!apiKey) throw new Error('CODEX_POOLER_API_KEY is required');
-  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, ingress }));
+  let scheduleTokenRetry = () => {};
+  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress }));
   attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress });
   let polling = false;
   const poll = async () => {
@@ -146,7 +155,18 @@ export function start(port = Number(process.env.PORT) || 3000, {
   void poll();
   const timer = setInterval(poll, pollIntervalMs);
   timer.unref?.();
-  server.once('close', () => clearInterval(timer));
+  const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl, compassGatewayToken });
+  scheduleTokenRetry = tokenScheduler.schedule;
+  store.setTokenRefreshFailureHandler?.(tokenScheduler.schedule);
+  void tokenScheduler.run();
+  const tokenTimer = setInterval(tokenScheduler.run, tokenRefreshIntervalMs);
+  tokenTimer.unref?.();
+  server.once('close', () => {
+    clearInterval(timer);
+    clearInterval(tokenTimer);
+    store.setTokenRefreshFailureHandler?.(null);
+    tokenScheduler.close();
+  });
   server.listen(port, host, () => console.log(`codex-pooler-node listening on http://${host}:${server.address().port}`));
   return server;
 }
@@ -164,6 +184,112 @@ export async function refreshAllQuotas(store, options = {}) {
   });
 }
 
+export async function refreshDueCodexTokens(store, { now = Date.now(), ...options } = {}) {
+  const candidates = store.list()
+    .map(({ id }) => ({ id, eligibleAt: tokenRefreshEligibleAt(store.get(id), now) }))
+    .filter(({ eligibleAt }) => eligibleAt !== null)
+    .sort((left, right) => left.eligibleAt - right.eligibleAt || left.id.localeCompare(right.id))
+    .slice(0, TOKEN_REFRESH_BATCH_SIZE);
+  return mapConcurrent(candidates, TOKEN_REFRESH_CONCURRENCY, async ({ id }) => {
+    const upstream = store.get(id);
+    const credentials = store.credentials(id);
+    if (!credentials.refreshToken) return store.setTokenRefresh(id, tokenRefreshState('reauth_required', 'scheduled', now));
+    return refreshCodexToken(store, id, { trigger: 'scheduled', now, ...options });
+  });
+}
+
+export async function refreshCodexToken(store, id, { trigger = 'manual', now = Date.now(), retryAttempt = null, ...options } = {}) {
+  const upstream = store.get(id);
+  if (!upstream) throw notFound();
+  if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Token refresh is only available for Codex upstreams');
+  const refreshing = upstream.tokenRefresh;
+  if (refreshing?.status === 'reauth_required') return { upstream: store.getPublic(id), errorCode: 'reauth_required' };
+  if (refreshing?.status === 'refreshing' && Date.parse(refreshing.startedAt) > now - TOKEN_REFRESH_STALE_MS) return { upstream: store.getPublic(id), errorCode: 'refresh_in_progress' };
+  const credentials = store.credentials(id);
+  if (!credentials.refreshToken) {
+    return { upstream: store.setTokenRefresh(id, tokenRefreshState('reauth_required', trigger, now)), errorCode: 'reauth_required' };
+  }
+  store.setTokenRefresh(id, tokenRefreshState('refreshing', trigger, now));
+  try {
+    const refreshed = await refreshProviderCredentials(upstream, credentials, {
+      ...options,
+      saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
+    });
+    return refreshed ? { upstream: store.setTokenRefresh(id, tokenRefreshState('succeeded', trigger, now)) } : { upstream: store.getPublic(id) };
+  } catch (error) {
+    if ((Number(store.get(id)?.credentialEpoch) || 0) !== (Number(upstream.credentialEpoch) || 0)) return { upstream: store.getPublic(id) };
+    const errorCode = codexRefreshFailureCode(error);
+    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt)), errorCode };
+  }
+}
+
+function tokenRefreshEligibleAt(upstream, now) {
+  if (!upstream || upstream.type !== 'codex') return null;
+  const refresh = upstream.tokenRefresh;
+  if (refresh?.status === 'reauth_required') return null;
+  if (refresh?.status === 'refreshing') {
+    const startedAt = Date.parse(refresh.startedAt || upstream.updatedAt);
+    return !Number.isFinite(startedAt) || startedAt <= now - TOKEN_REFRESH_STALE_MS ? Number.isFinite(startedAt) ? startedAt : now : null;
+  }
+  if (refresh?.status === 'failed') {
+    const finishedAt = Date.parse(refresh.finishedAt || upstream.updatedAt);
+    const eligibleAt = Number.isFinite(finishedAt) ? finishedAt + TOKEN_REFRESH_FAILURE_COOLDOWN_MS : now;
+    return eligibleAt <= now ? eligibleAt : null;
+  }
+  const expiresAt = Date.parse(upstream.accessTokenExpiresAt);
+  const eligibleAt = expiresAt - TOKEN_REFRESH_WINDOW_MS;
+  return Number.isFinite(eligibleAt) && eligibleAt <= now ? eligibleAt : null;
+}
+
+function tokenRefreshState(status, trigger, now, retryAttempt = null) {
+  const timestamp = new Date(now).toISOString();
+  return status === 'refreshing'
+    ? { status, startedAt: timestamp, trigger }
+    : { status, finishedAt: timestamp, trigger, errorCode: status === 'succeeded' ? null : status, ...(status === 'failed' && retryAttempt ? { retryAttempt } : {}) };
+}
+
+function createTokenRefreshScheduler(store, options) {
+  const timers = new Map();
+  const schedule = (id, trigger = 'scheduled', attempt = 1, retryAt = null) => {
+    if (attempt >= TOKEN_REFRESH_MAX_ATTEMPTS) return;
+    const upstream = store.get(id);
+    if (!upstream || upstream.tokenRefresh?.status !== 'failed') return;
+    const dueAt = retryAt || new Date(Date.now() + Math.min(2 ** attempt * 30_000, 3_600_000)).toISOString();
+    const delay = Math.max(0, Date.parse(dueAt) - Date.now());
+    clearTimeout(timers.get(id));
+    store.setTokenRefresh(id, { ...upstream.tokenRefresh, trigger, retryAttempt: attempt, retryAt: dueAt });
+    const timer = setTimeout(async () => {
+      timers.delete(id);
+      if (store.get(id)?.tokenRefresh?.status !== 'failed') return;
+      try {
+        const result = await refreshCodexToken(store, id, { ...options, trigger, retryAttempt: attempt + 1 });
+        if (result.errorCode === 'failed') schedule(id, trigger, attempt + 1);
+      } catch {}
+    }, delay);
+    timer.unref?.();
+    timers.set(id, timer);
+  };
+  let running = false;
+  const run = async () => {
+    if (running) return;
+    running = true;
+    try {
+      for (const upstream of store.list()) {
+        const refresh = store.get(upstream.id)?.tokenRefresh;
+        if (refresh?.status === 'failed' && refresh.retryAttempt && refresh.retryAt) schedule(upstream.id, refresh.trigger, refresh.retryAttempt, refresh.retryAt);
+      }
+      const results = await refreshDueCodexTokens(store, options);
+      for (const result of results) {
+        const value = result.status === 'fulfilled' && result.value;
+        if (value?.errorCode === 'failed') schedule(value.upstream.id, value.upstream.tokenRefresh.trigger, value.upstream.tokenRefresh.retryAttempt || 1);
+      }
+    } finally {
+      running = false;
+    }
+  };
+  return { run, schedule, close: () => timers.forEach(clearTimeout) };
+}
+
 async function api(req, res, url, store, options) {
   try {
     return await apiRequest(req, res, url, store, options);
@@ -173,7 +299,14 @@ async function api(req, res, url, store, options) {
   }
 }
 
-async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken }) {
+async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure }) {
+  if (req.method === 'GET' && url.pathname === '/api/upstreams/events') {
+    res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    res.write('event: ready\ndata: {"type":"upstreams"}\n\n');
+    const unsubscribe = store.onUpstreamsChange(() => res.write('event: upstreams\ndata: {"type":"upstreams"}\n\n'));
+    req.once('close', unsubscribe);
+    return;
+  }
   const parts = url.pathname.split('/').filter(Boolean);
   const id = parts[2];
   const action = parts[3];
@@ -225,6 +358,13 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     sendJson(res, 200, { upstream });
     return;
   }
+  if (req.method === 'GET' && action === 'credentials' && parts.length === 4) {
+    const upstream = store.get(id);
+    if (!upstream) throw notFound();
+    const credentials = store.credentials(id);
+    sendJson(res, 200, { credentials });
+    return;
+  }
   if (req.method === 'PATCH' && parts.length === 3) {
     sendJson(res, 200, { upstream: store.update(id, await body(req)) });
     return;
@@ -232,6 +372,17 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   if (req.method === 'DELETE' && parts.length === 3) {
     store.remove(id);
     sendJson(res, 204, null);
+    return;
+  }
+  if (req.method === 'POST' && action === 'refresh-token' && parts.length === 4) {
+    const result = await refreshCodexToken(store, id, { fetchImpl, compassGatewayToken });
+    if (result.errorCode === 'failed') onTokenRefreshFailure(id, 'manual');
+    if (result.errorCode) {
+      const status = result.errorCode === 'failed' ? 502 : 409;
+      const message = result.errorCode === 'reauth_required' ? 'Codex reauthentication is required' : result.errorCode === 'refresh_in_progress' ? 'Codex token refresh is already in progress' : 'Codex token refresh failed';
+      throw new HttpError(status, `token_refresh_${result.errorCode}`, message);
+    }
+    sendJson(res, 200, result);
     return;
   }
   if (req.method === 'POST' && action === 'refresh-quota' && parts.length === 4) {
