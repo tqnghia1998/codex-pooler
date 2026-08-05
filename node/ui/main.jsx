@@ -601,6 +601,13 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
     ? `$${formatNumber(capRemainingDollars)} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
     : 'Set a cap to make this upstream routable';
   const tokenRefresh = upstream.tokenRefresh;
+  const quotaVariant = !quota ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent';
+  const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'accent';
+  const trackBgMap = {
+    error: 'var(--color-background-red)',
+    warning: 'var(--color-background-yellow)',
+    accent: 'var(--color-background-blue)',
+  };
   return (
     <Card>
       <VStack gap={3}>
@@ -615,12 +622,26 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
         </HStack>
         <VStack gap={1}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap"><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : 'Click refresh to read provider quota'}</Text></HStack>
-          <ProgressBar label="Quota remaining" value={quotaRemaining} max={100} isLabelHidden variant={!quota ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent'} />
+          <ProgressBar
+            label="Quota remaining"
+            value={!quota ? 0 : quotaRemaining}
+            max={100}
+            isLabelHidden
+            variant={quotaVariant}
+            style={trackBgMap[quotaVariant] ? { '--color-background-muted': trackBgMap[quotaVariant] } : undefined}
+          />
           {quotaCount(quota) && <Text type="supporting" color="secondary">{quotaCount(quota)}</Text>}
         </VStack>
         <VStack gap={1}>
           <Text type="label" weight="bold">{capHeading}</Text>
-          <ProgressBar label="Spending cap remaining" value={spendingRemaining} max={100} isLabelHidden variant={spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'accent'} />
+          <ProgressBar
+            label="Spending cap remaining"
+            value={spending.capCredits <= 0 ? 0 : spendingRemaining}
+            max={100}
+            isLabelHidden
+            variant={spendingVariant}
+            style={trackBgMap[spendingVariant] ? { '--color-background-muted': trackBgMap[spendingVariant] } : undefined}
+          />
           <Text type="supporting" color="secondary">{capUsage}</Text>
         </VStack>
         <HStack gap={2} wrap="wrap">
