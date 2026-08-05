@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Codex Pooler Node</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main>
+    <h1>Codex Pooler Node</h1>
+    <p class="muted">Small local upstream and quota dashboard. Credentials never leave this server.</p>
+
+    <section class="panel">
+      <h2 id="form-title">Add upstream</h2>
+      <form id="upstream-form">
+        <div class="row">
+          <label>Type
+            <select name="type" id="type" required>
+              <option value="codex">Codex</option>
+              <option value="compass">Compass</option>
+            </select>
+          </label>
+        </div>
+
+        <div id="codex-fields">
+          <label>Codex auth.json <textarea name="authJson" rows="5" placeholder='Paste auth.json here (tokens.access_token, refresh_token, id_token)'></textarea></label>
+          <p class="hint">The account name is derived from the JWT email.</p>
+        </div>
+
+        <div id="compass-fields" hidden>
+          <div class="row">
+            <label>Project ID <input name="projectId"></label>
+            <label>Project key <input name="projectKey" type="password"></label>
+          </div>
+          <p class="hint">The account name is derived from the project ID. Quota reads use CODEX_POOLER_COMPASS_GATEWAY_TOKEN on the server.</p>
+        </div>
+
+        <div class="actions">
+          <button type="submit">Save</button>
+          <button type="button" id="cancel-edit" hidden>Cancel edit</button>
+        </div>
+      </form>
+    </section>
+
+    <section>
+      <div class="section-heading"><h2>Upstreams</h2><div class="actions"><button id="bulk-cap">Bulk caps</button><button id="reload">Reload</button></div></div>
+      <p id="message" class="message"></p>
+      <div id="upstreams" class="cards"></div>
+    </section>
+
+    <dialog id="bulk-cap-dialog" aria-labelledby="bulk-cap-title">
+      <form id="bulk-cap-form">
+        <h2 id="bulk-cap-title">Set spending caps</h2>
+        <p class="hint">Quota rules use monthly quota left in USD. The original server preset is pre-filled.</p>
+        <label>Strategy
+          <select id="bulk-mode">
+            <option value="rules">Original quota presets</option>
+            <option value="all">Set one cap for all upstreams</option>
+            <option value="cap_reached">Replace caps already reached</option>
+            <option value="uncapped">Set caps on uncapped upstreams</option>
+          </select>
+        </label>
+        <label id="bulk-cap-value-field" hidden>Cap (USD)
+          <input id="bulk-cap-value" type="number" min="0" step="any" value="100">
+        </label>
+        <div id="bulk-rules-field">
+          <div class="bulk-rule-heading"><span>If monthly quota left &gt; (USD)</span><span>Set cap (USD)</span><span></span></div>
+          <div id="bulk-rules"></div>
+          <button type="button" id="add-bulk-rule">Add rule</button>
+        </div>
+        <div class="actions"><button type="button" id="cancel-bulk-cap">Cancel</button><button class="primary" type="submit">Save caps</button></div>
+      </form>
+    </dialog>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
