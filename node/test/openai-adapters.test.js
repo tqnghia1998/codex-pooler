@@ -121,6 +121,23 @@ test('validates and preserves Responses tools and strict local schemas', () => {
   assert.deepEqual(adapted.tools[2].parameters.properties.labels.additionalProperties, { type: 'string' });
   assert.deepEqual(adapted.tools[2].parameters.properties.pair.items, [{ type: 'string' }, { type: 'number' }]);
   assert.equal(adapted.text.format.strict, true);
+
+  const inferred = adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: 'repair',
+    tools: [{
+      type: 'function',
+      name: 'nested',
+      strict: true,
+      parameters: {
+        type: 'object',
+        properties: { value: { properties: { label: { type: 'string' } }, required: ['label'], additionalProperties: false } },
+        required: ['value'],
+        additionalProperties: false
+      }
+    }]
+  });
+  assert.equal(inferred.tools[0].parameters.properties.value.type, 'object');
 });
 
 test('rejects malformed adapter shapes deterministically', () => {

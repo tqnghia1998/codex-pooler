@@ -579,6 +579,10 @@ function validateStrictTool(tool, path) {
 
 function validateStrictSchema(schema, param, root = schema, refs = new Set()) {
   if (!plainObject(schema)) invalid('strict json_schema schema must be an object', param, 'invalid_json_schema');
+  if (schema !== root && schema.type === undefined) {
+    if (schema.properties !== undefined || schema.required !== undefined || schema.additionalProperties !== undefined) schema.type = 'object';
+    else if (schema.items !== undefined) schema.type = 'array';
+  }
   if (Object.hasOwn(schema, '$ref')) {
     if (typeof schema.$ref !== 'string' || !schema.$ref.startsWith('#/')) invalid('strict json_schema $ref must be a local JSON Pointer fragment', `${param}.$ref`, 'invalid_json_schema');
     const tokens = schema.$ref.slice(2).split('/').map((token) => token.replace(/~1/g, '/').replace(/~0/g, '~'));
