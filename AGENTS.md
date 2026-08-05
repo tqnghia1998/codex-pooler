@@ -40,6 +40,22 @@ allowlisted documents only when necessary; port worthwhile gateway behavior to
 - Read `node/README.md` before changing supported routes, routing, quota,
   spending-cap, storage, or compatibility behavior. Keep it accurate.
 
+## Node UI / Astryx
+
+- The dashboard UI lives in `node/ui/` and uses the Astryx component library:
+  https://astryx.atmeta.com/components
+- Use React 19 with `@astryxdesign/core` and
+  `@astryxdesign/theme-neutral`; import the library reset, Astryx base CSS,
+  and the neutral theme CSS before rendering `Theme` with `neutralTheme`.
+- Prefer raw Astryx components such as `AppShell`, `Card`, `Section`,
+  `Layout`, `Grid`, `HStack`, `VStack`, `Text`, `Heading`, `Button`, and the
+  form components. The dashboard uses the neutral dark theme for its page
+  background. Do not add custom CSS files, manual CSS declarations,
+  visual `className` hooks, or inline `style` props for dashboard layout or
+  appearance; use component props and theme tokens instead.
+- Run `cd node && npm run build` after UI changes. Generated files in
+  `node/public/` are build output and should not be edited by hand.
+
 ## Validation
 
 For Node changes:
