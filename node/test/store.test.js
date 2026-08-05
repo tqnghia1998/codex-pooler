@@ -1,0 +1,90 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { Store } from '../src/store.js';
+
+function tempStore() {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-'));
+  return { dir, store: new Store(dir) };
+}
+
+test('persists CRUD while keeping credentials out of public records', () => {
+  const { dir, store } = tempStore();
+  try {
+    const created = store.create({ type: 'compass', name: 'Compass one', projectId: 'project-1', projectKey: 'secret-key' });
+    assert.equal(store.list().length, 1);
+    assert.equal(store.list()[0].hasCredentials, true);
+    assert.equal(store.list()[0].projectId, 'project-1');
+    assert.equal(store.credentials(created.id).projectKey, 'secret-key');
+    assert.match(readFileSync(join(dir, 'db.json'), 'utf8'), /v1:/);
+    assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /secret-key/);
+    store.update(created.id, { name: 'Renamed', projectId: 'project-2' });
+    assert.equal(store.credentials(created.id).projectKey, 'secret-key');
+    store.persistCredentials(created.id, { projectKey: 'rotated-key' }, '2030-01-01T00:00:00.000Z');
+    assert.equal(store.credentials(created.id).projectKey, 'rotated-key');
+    assert.equal(store.getPublic(created.id).accessTokenExpiresAt, '2030-01-01T00:00:00.000Z');
+    store.remove(created.id);
+    assert.equal(store.list().length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refuses to replace a missing key for an existing database', () => {
+  const { dir } = tempStore();
+  try {
+    unlinkSync(join(dir, '.key'));
+    assert.throws(() => new Store(dir), /Stored credential key is missing/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists file metadata and upstream session pins', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'project-files', projectKey: 'secret' });
+    store.pinSession('session-1', upstream.id);
+    assert.throws(() => store.pinSession('x'.repeat(201), upstream.id), /at most 200/);
+    store.saveFile({ id: 'file-1', object: 'file', bytes: 3, filename: 'a.txt', purpose: 'user_data', status: 'uploaded' });
+
+    const reopened = new Store(dir);
+    assert.equal(reopened.sessionUpstream('session-1'), upstream.id);
+    assert.deepEqual(reopened.getFile('file-1'), { id: 'file-1', object: 'file', bytes: 3, filename: 'a.txt', purpose: 'user_data', status: 'uploaded' });
+    assert.equal(reopened.listFiles().length, 1);
+    reopened.remove(upstream.id);
+    assert.equal(reopened.sessionUpstream('session-1'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sets caps in dollars, records priced usage, and applies bulk quota rules', () => {
+  const { dir, store } = tempStore();
+  try {
+    const first = store.create({ type: 'compass', name: 'First', projectId: 'p1', projectKey: 'k1' });
+    const second = store.create({ type: 'compass', name: 'Second', projectId: 'p2', projectKey: 'k2' });
+    store.setCap(first.id, { capDollars: 100 });
+    const usage = store.addUsage(first.id, {
+      attemptId: 'attempt-1',
+      startedAt: new Date(Date.now() + 1).toISOString(),
+      settledCostMicros: 1_000_000,
+      costSource: 'upstream_reported'
+    });
+    assert.equal(usage.upstream.spending.capCredits, 2500);
+    assert.equal(usage.upstream.spending.spentDollars, 1);
+
+    store.setQuota(first.id, { remainingUnits: 15_000, remainingDollars: 1_500, remainingPercent: 75 });
+    store.setQuota(second.id, { remainingUnits: 500, remainingDollars: 500, remainingPercent: 25 });
+    const bulk = store.bulkCaps({ rules: [{ minQuotaLeft: 1_000, capDollars: 30 }, { minQuotaLeft: 0, capDollars: 10 }] });
+    assert.equal(bulk.updated.length, 2);
+    assert.equal(store.getPublic(first.id).spending.capDollars, 30);
+    assert.equal(store.getPublic(first.id).spending.spentDollars, 0);
+    assert.equal(store.getPublic(first.id).spending.settlementCount, 0);
+    assert.equal(store.getPublic(second.id).spending.capDollars, 10);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
