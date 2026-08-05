@@ -1,15 +1,11 @@
-import {
-  OPENAI_PRICE_ROWS,
-  OPENAI_PRICING_EFFECTIVE_AT,
-  OPENAI_PRICING_VERSION
-} from './openai-pricing-snapshot.js';
-
-// OpenAI bills a separate long-context bucket once input exceeds this many tokens.
-const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
-
-const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket }) => (
-  price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket)
-));
+const OPENAI_PRICES = [
+  ['gpt-5.6-luna', [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 2.4]],
+  ['gpt-5.6-terra', [2, 0.2, 2.5, 12], [4, 0.4, 5, 24]],
+  ['gpt-5.6-sol', [5, 0.5, 6.25, 30], [10, 1, 12.5, 60]]
+].flatMap(([model, standard, priority]) => [
+  price(model, standard, 'openai-2026-07-31'),
+  price(model, priority, 'openai-2026-07-31', 'priority')
+]);
 
 const ANTHROPIC_PRICES = [
   ['claude-opus-5', 5, 25, 6.25, 0.5], ['claude-opus-4-8', 5, 25, 6.25, 0.5], ['claude-opus-4-7', 5, 25, 6.25, 0.5], ['claude-opus-4-6', 5, 25, 6.25, 0.5], ['claude-opus-4-5', 5, 25, 6.25, 0.5],
@@ -26,8 +22,8 @@ const PRICES = [
   price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z')
 ];
 
-function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default') {
-  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt, bucket };
+function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z') {
+  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt };
 }
 
 export function extractUsage(body) {
@@ -37,22 +33,17 @@ export function extractUsage(body) {
   const output = integer(first(usage, ['output_tokens'], ['completion_tokens']));
   const cached = integer(first(usage, ['cached_input_tokens'], ['cache_read_input_tokens'], ['input_tokens_details', 'cached_tokens'], ['prompt_tokens_details', 'cached_tokens']));
   const cacheWrite = integer(first(usage, ['cache_write_tokens'], ['cache_creation_input_tokens'], ['input_tokens_details', 'cache_write_tokens'], ['prompt_tokens_details', 'cache_write_tokens']));
-  const reasoning = integer(first(usage, ['output_tokens_details', 'reasoning_tokens'], ['reasoning_tokens']));
   const total = integer(usage.total_tokens);
-  if ([input, output, cached, cacheWrite, reasoning, total].some((value) => value === false)) return null;
+  if ([input, output, cached, cacheWrite, total].some((value) => value === false)) return null;
   if ([input, output, cached, cacheWrite].every((value) => value === undefined) && upstreamCostMicros(usage) === undefined) return null;
   const anthropic = Object.hasOwn(usage, 'cache_read_input_tokens') || Object.hasOwn(usage, 'cache_creation_input_tokens');
   const inputTokens = input === undefined ? undefined : input + (anthropic ? (cached || 0) + (cacheWrite || 0) : 0);
   if (inputTokens !== undefined && (cached || 0) + (cacheWrite || 0) > inputTokens) return null;
-  // The served model is what gets billed, so it has to survive stream merging: the usage object is all settlement sees.
-  const model = string(body?.model ?? body?.response?.model ?? body?.message?.model);
   return {
-    ...(model === null ? {} : { model }),
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(cached === undefined ? {} : { cachedInputTokens: cached }),
     ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
-    ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
     ...(total === undefined ? {} : { totalTokens: total }),
     serviceTier: string(body?.service_tier ?? body?.response?.service_tier ?? usage.service_tier),
     ...(upstreamCostMicros(usage) === undefined ? {} : { upstreamCostMicros: upstreamCostMicros(usage) })
@@ -76,8 +67,7 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   const timestamp = Date.parse(startedAt);
   if (!Number.isFinite(timestamp)) return null;
   const tier = canonicalTier(usage.serviceTier || requestedTier);
-  const bucket = usage.inputTokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD ? 'long_context' : 'default';
-  const snapshot = resolvePrice(models, tier, timestamp, bucket);
+  const snapshot = resolvePrice(models, tier, timestamp);
   if (!snapshot) return null;
   const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens);
   const cacheWrite = usage.cacheWriteTokens || 0;
@@ -89,53 +79,22 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   return { settledCostMicros, costSource: 'pricing_snapshot', model: snapshot.model, priceVersion: snapshot.priceVersion };
 }
 
-export function cheapestPricedModel(models, startedAt = new Date().toISOString()) {
-  const timestamp = Date.parse(startedAt);
-  const candidates = [...new Set((Array.isArray(models) ? models : [models])
-    .map((model) => string(model)?.toLowerCase())
-    .filter(Boolean))];
-  if (!Number.isFinite(timestamp) || !candidates.length) return candidates[0] || null;
-  let selected = null;
-  for (const model of candidates) {
-    const snapshot = resolvePrice(model, 'standard', timestamp, 'default');
-    if (!snapshot) continue;
-    const score = snapshot.input + snapshot.output;
-    if (!selected || score < selected.score) selected = { model, score };
-  }
-  return selected?.model || candidates[0];
-}
-
 function usageObject(body) {
   const usage = body?.usage || body?.message?.usage || body?.response?.usage;
   return usage && typeof usage === 'object' && !Array.isArray(usage) ? usage : null;
 }
 
-// totalTokens is reporting only: providers disagree on whether it counts cache tokens, and a mismatch there
-// must not discard priced input/output tokens, which would let the request escape the spending cap.
 function completeUsage(usage) {
-  return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens;
+  return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens && (usage.totalTokens === undefined || usage.totalTokens === usage.inputTokens + usage.outputTokens);
 }
 
-function resolvePrice(models, tier, timestamp, bucket) {
+function resolvePrice(models, tier, timestamp) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
-    const dated = PRICES.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
-    if (tier === 'ultrafast') {
-      const exact = dated.filter((snapshot) => snapshot.tier === tier && snapshot.bucket === bucket);
-      if (exact.length) return exact.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
-      continue;
-    }
-    // A known model priced only at standard rates (no priority tier, no long-context bucket: all Anthropic entries)
-    // bills at those rates instead of going unpriced, which would let the request escape the spending cap.
-    const snapshots = preferred(preferred(dated, 'tier', tier, 'standard'), 'bucket', bucket, 'default');
+    const snapshots = PRICES.filter((snapshot) => snapshot.model === candidate && snapshot.tier === tier && Date.parse(snapshot.effectiveAt) <= timestamp);
     if (snapshots.length) return snapshots.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
   }
   return null;
-}
-
-function preferred(snapshots, key, wanted, fallback) {
-  const matching = snapshots.filter((snapshot) => snapshot[key] === wanted);
-  return matching.length ? matching : snapshots.filter((snapshot) => snapshot[key] === fallback);
 }
 
 function modelCandidates(models) {
@@ -155,8 +114,7 @@ function modelCandidates(models) {
   return [...new Set(candidates)];
 }
 
-// Provider-reported cost is upstream-controlled input: accept only plain non-negative decimal numbers.
-export function upstreamCostMicros(usage) {
+function upstreamCostMicros(usage) {
   const value = usage?.price_cost_usd;
   if (typeof value === 'string' && /^\s*\d+(?:\.\d+)?\s*$/.test(value)) {
     const micros = Math.round(Number(value) * 1_000_000);
@@ -190,8 +148,5 @@ function string(value) {
 
 function canonicalTier(value) {
   const tier = string(value)?.toLowerCase();
-  if (tier === 'fast' || tier === 'priority') return 'priority';
-  if (tier === 'flex') return 'flex';
-  if (tier === 'ultrafast') return 'ultrafast';
-  return 'standard';
+  return tier === 'fast' || tier === 'priority' ? 'priority' : 'standard';
 }
