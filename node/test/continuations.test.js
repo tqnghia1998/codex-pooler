@@ -44,7 +44,7 @@ test('uses Elixir session aliases in precedence order and requires an authentica
     body: JSON.stringify({ model: 'gpt-test', input: 'hello' })
   });
   assert.equal(response.status, 200);
-  assert.equal(fixture.store.sessionUpstream('winner'), fixture.upstream.id);
+  assert.equal(fixture.store.sessionUpstream('winner', undefined, fixture.store.authenticateApiKey(KEY).id), fixture.upstream.id);
   assert.equal(fixture.store.sessionUpstream('loser'), null);
 
   const noUpgrade = await fetch(`${fixture.base}/v1/responses`, { headers: { authorization: `Bearer ${KEY}` } });
