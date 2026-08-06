@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
@@ -18,8 +19,9 @@ test('persists CRUD while keeping credentials out of public records', () => {
     assert.equal(store.list()[0].hasCredentials, true);
     assert.equal(store.list()[0].projectId, 'project-1');
     assert.equal(store.credentials(created.id).projectKey, 'secret-key');
-    assert.match(readFileSync(join(dir, 'db.json'), 'utf8'), /v1:/);
-    assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /secret-key/);
+    const stored = store.sqlite.prepare("SELECT value FROM records WHERE collection = 'upstreams'").get().value;
+    assert.match(stored, /v1:/);
+    assert.doesNotMatch(stored, /secret-key/);
     store.update(created.id, { name: 'Renamed', projectId: 'project-2' });
     assert.equal(store.credentials(created.id).projectKey, 'secret-key');
     store.persistCredentials(created.id, { projectKey: 'rotated-key' }, '2030-01-01T00:00:00.000Z');
@@ -63,6 +65,24 @@ test('keeps only bounded terminal failure diagnostics on disk', () => {
     assert.equal(reopened.load().gatewayAttempts.length, 100);
     assert.deepEqual(reopened.load().gatewayUsage, [{ scopeId: 'default', apiKeyId: 'key', day, requestCount: 1, totalTokens: 3, cachedInputTokens: 0, totalCostMicros: 400, priced: true, attemptIds: ['attempt-legacy'] }]);
     assert.equal(reopened.gatewayRequest('active'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('migrates db.json into SQLite on first start', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-legacy-'));
+  try {
+    const day = new Date().toISOString().slice(0, 10);
+    writeFileSync(join(dir, '.key'), randomBytes(32));
+    writeFileSync(join(dir, 'db.json'), JSON.stringify({
+      upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [{ id: 'default', status: 'active', models: [] }], apiKeys: [], gatewayRequests: [], gatewayAttempts: [],
+      gatewayUsage: [{ scopeId: 'default', apiKeyId: 'key', attemptId: 'legacy', startedAt: `${day}T12:00:00.000Z`, usage: { inputTokens: 1, outputTokens: 2 } }]
+    }));
+    const store = new Store(dir);
+    assert.equal(store.gatewayUsage('default', 'key').request_count, 1);
+    assert.equal(existsSync(join(dir, 'db.json')), false);
+    assert.equal(existsSync(join(dir, 'db.sqlite')), true);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
