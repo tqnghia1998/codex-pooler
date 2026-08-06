@@ -5,11 +5,11 @@ import { defaultBaseUrl } from './domain.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
-import { AdapterError, adaptChatRequest, adaptResponsesRequest, lowerNonStrictFunctionTools } from './openai-adapters.js';
+import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools } from './openai-adapters.js';
 import { upstreamFailure } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
@@ -120,7 +120,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     const collected = dispatchedCollection;
     settleUsage(store, upstream, attemptId, startedAt, collected, payload, accounting, lifecycle, response.status);
     if (path === '/v1/responses') learnResponsePin(store, collected, upstream.id, authScopeId, accounting.apiKeyId);
-    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(collected, payload) : { object: 'response', ...collected };
+    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(collected, payload) : restoreCustomToolCallNamespaces({ object: 'response', ...collected }, customToolNamespaces(codexPayload.tools));
     sendJson(res, 200, output);
     return;
   }
@@ -129,6 +129,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       response, res,
       transformChat: upstream.type === 'codex' && sourcePath === '/v1/chat/completions',
       sanitizePublicResponses: upstream.type === 'codex' && path === '/v1/responses',
+      publicResponsesNamespaces: path === '/v1/responses' ? customToolNamespaces(codexPayload.tools) : undefined,
       store, upstream, attemptId, startedAt, payload, accounting, lifecycle,
       responseStatusCode: response.status,
       responseOptions: { ...responseOptions, modelsEtag },
@@ -687,7 +688,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, transformChat, sanitizePublicResponses, store, upstream, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -699,7 +700,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
   let usage;
   let buffer = '';
   const decoder = new TextDecoder();
-  const publicState = sanitizePublicResponses ? createPublicResponsesState() : null;
+  const publicState = sanitizePublicResponses ? createPublicResponsesState(publicResponsesNamespaces) : null;
   // Synthetic terminals continue the stream's own sequence so a client never sees it restart.
   const nextPublicSequence = () => publicState ? (publicState.sequence = Math.min(Number.MAX_SAFE_INTEGER, publicState.sequence + 1)) : 0;
   const chatState = transformChat ? createChatStreamState(payload) : null;
@@ -1418,7 +1419,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         publicOutput = false;
         publicPayload = payload;
         publicUsage = null;
-        publicState = createPublicResponsesState();
+        publicState = createPublicResponsesState(customToolNamespaces(payload.tools));
         retriedTurn = false;
         activeFrame = { data, isBinary: false };
         publicLifecycle = accounting.apiKeyId
