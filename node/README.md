@@ -33,7 +33,7 @@ The Node proxy covers the client-visible local compatibility path:
 - Credential preparation and refresh failures stay on the selected account instead of crossing accounts. Failover is allowed only after a refresh succeeds but that same account is still rejected, and only when the request is not explicitly or session pinned.
 - Pricing is a small static snapshot, not the Elixir catalog/database sync. Unknown or ambiguous models remain unpriced unless the provider reports `price_cost_usd`.
 - Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility.
-- The encrypted local JSON store is suitable for one local process, not concurrent replicas or production high-availability storage.
+- The encrypted local SQLite store is suitable for one local process, not concurrent replicas or production high-availability storage.
 
 ## Run
 
@@ -52,7 +52,7 @@ By default, the server binds `127.0.0.1` and accepts only localhost Host headers
 
 Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; when it is expired or rejected, the server refreshes it through `https://auth.openai.com/oauth/token` using OpenAI's Codex client ID and persists rotated tokens. Independently, it checks refreshable Codex tokens at startup and hourly, refreshing those that expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. The dashboard also offers a manual Codex token refresh. The server refreshes all upstream quotas immediately and every minute.
 
-Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key` and are never returned by the API or rendered in the browser. `db.json` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Back up both files together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
+Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key` and are never returned by the API or rendered in the browser. `db.sqlite` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Existing `db.json` files migrate automatically on startup. Back up `.data/.key` and `db.sqlite` together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
 
 Spending caps use 25 credits per dollar. A cap update starts a new cap period and resets spend. Proxy requests require a positive cap: accounts remain eligible until they reach 100%, and a `previous_response_id` continuation stays pinned to its original account below 125%. Valid provider-reported `usage.price_cost_usd` is authoritative; otherwise supported Codex and Anthropic token usage is priced from the local snapshot, which applies OpenAI's long-context rates above 272,000 input tokens. The usage endpoint remains available for other integrations.
 
