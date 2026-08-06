@@ -12,6 +12,7 @@
   "dependencies": {
     "@astryxdesign/core": "^0.1.9",
     "@astryxdesign/theme-neutral": "^0.1.9",
+    "better-sqlite3": "^12.11.1",
     "fzstd": "0.1.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -20,5 +21,8 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^5.2.0",
     "vite": "^7.3.6"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
   }
 }
