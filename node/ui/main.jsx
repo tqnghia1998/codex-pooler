@@ -59,8 +59,7 @@ const FILTER_OPTIONS = {
     { value: 'unknown', label: 'Unknown' }
   ],
   sort: [
-    { value: 'name', label: 'Name A–Z' },
-    { value: 'status', label: 'Status' },
+    { value: 'recent_active', label: 'Recent active' },
     { value: 'quota_asc', label: 'Least quota remaining (Urgent)' },
     { value: 'quota', label: 'Most quota remaining' },
     { value: 'expiry_asc', label: 'Earliest quota reset / expiry' },
@@ -131,7 +130,8 @@ function App() {
   const [filterType, setFilterType] = useStoredValue('codex_filter_filter-type');
   const [filterStatus, setFilterStatus] = useStoredValue('codex_filter_filter-status');
   const [filterQuota, setFilterQuota] = useStoredValue('codex_filter_filter-quota');
-  const [filterSort, setFilterSort] = useStoredValue('codex_filter_filter-sort', 'name');
+  const [filterSort, setFilterSort] = useStoredValue('codex_filter_filter-sort', 'recent_active');
+  const [themeMode, setThemeMode] = useStoredValue('codex_theme_mode', 'dark');
   const reloadTimer = useRef(null);
   const loadingRef = useRef(false);
   const editingIdRef = useRef(null);
@@ -404,7 +404,7 @@ function App() {
   };
 
   return (
-    <Theme theme={neutralTheme} mode="dark">
+    <Theme theme={neutralTheme} mode={themeMode}>
       <AppShell variant="elevated" height="auto" contentPadding={4} mobileNav={false}>
         <VStack gap={6}>
           <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
@@ -413,6 +413,11 @@ function App() {
               <Text type="supporting" color="secondary">Small local upstream and quota dashboard. Credentials never leave this server.</Text>
             </VStack>
             <HStack gap={2} vAlign="center" wrap="wrap">
+              <Button
+                label={themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
+                variant="secondary"
+                onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
+              />
               <Button label="Reload" variant="secondary" isLoading={loading} onClick={() => void load()} />
             </HStack>
           </HStack>
@@ -591,8 +596,10 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
   const spending = upstream.spending || {};
   const quotaRemaining = quota ? Math.min(100, Math.max(0, quota.remainingPercent)) : 0;
   const spendingRemaining = spending.capCredits > 0 ? Math.min(100, Math.max(0, 100 - spending.percentUsed)) : 0;
+  const compassWorkspaceId = upstream.type === 'compass' ? (upstream.metadata?.workspace_id ?? upstream.metadata?.workspaceId) : null;
+  const compassUrl = compassWorkspaceId ? `https://smart.shopee.io/workspace-management?tab=quota&workspace_id=${compassWorkspaceId}` : null;
   const tokenExpiry = upstream.type === 'compass'
-    ? 'No expiry'
+    ? (compassUrl ? <a href={compassUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-text-link, inherit)', textDecoration: 'underline' }}>More Info</a> : 'No expiry')
     : upstream.accessTokenExpiresAt ? formatTokenExpiry(upstream.accessTokenExpiresAt) : 'Expiry unknown';
   const expiresSoon = upstream.type === 'codex' && upstream.accessTokenExpiresAt && new Date(upstream.accessTokenExpiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000;
   const capHeading = spending.capCredits > 0 ? `${formatPercent(spendingRemaining)} left` : 'No spending cap';
@@ -600,6 +607,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
   const capUsage = spending.capCredits > 0
     ? `$${formatNumber(capRemainingDollars)} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
     : 'Set a cap to make this upstream routable';
+  const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
   const quotaVariant = !quota ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'accent';
@@ -642,7 +650,10 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             variant={spendingVariant}
             style={trackBgMap[spendingVariant] ? { '--color-background-muted': trackBgMap[spendingVariant] } : undefined}
           />
-          <Text type="supporting" color="secondary">{capUsage}</Text>
+          <HStack justify="between" vAlign="center" gap={2}>
+            <Text type="supporting" color="secondary">{capUsage}</Text>
+            {recentActiveText && <Text type="supporting" color="secondary">{recentActiveText}</Text>}
+          </HStack>
         </VStack>
         <HStack gap={2} wrap="wrap">
           <Button label="Refresh" size="sm" variant="secondary" onClick={() => onRefresh(upstream)} />
@@ -760,8 +771,17 @@ function getExpiryTs(upstream) {
   return Number.isNaN(timestamp) ? null : timestamp;
 }
 
+function getRecentActiveTs(upstream) {
+  const dates = [
+    upstream.spending?.lastActivityAt,
+    upstream.lastSuccessfulAt
+  ].filter(Boolean);
+  if (dates.length === 0) return 0;
+  return Math.max(...dates.map(d => new Date(d).getTime()).filter(t => !Number.isNaN(t)));
+}
+
 function sortUpstreams(a, b, sort) {
-  if (sort === 'status') return (a.status || '').localeCompare(b.status || '') || nameSort(a, b);
+  if (sort === 'recent_active') return getRecentActiveTs(b) - getRecentActiveTs(a) || nameSort(a, b);
   if (sort === 'quota') return quotaValue(b) - quotaValue(a) || nameSort(a, b);
   if (sort === 'quota_asc') return (quotaValue(a, 99999999) - quotaValue(b, 99999999)) || nameSort(a, b);
   if (sort === 'cap_left') return capValue(b, -1) - capValue(a, -1) || nameSort(a, b);
@@ -788,12 +808,27 @@ function capValue(upstream, missing) {
 function nameSort(a, b) { return (a.name || '').localeCompare(b.name || ''); }
 function formatNumber(value) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
 function formatPercent(value) { return `${Math.round(Number(value) || 0)}%`; }
-function quotaCount(quota) { return quota && Number.isFinite(quota.remainingDollars) && Number.isFinite(quota.limitDollars) ? `$${formatNumber(quota.remainingDollars)} left of $${formatNumber(quota.limitDollars)}` : ''; }
+function quotaCount(quota) {
+  if (!quota || !Number.isFinite(quota.remainingDollars) || !Number.isFinite(quota.limitDollars)) return '';
+  const remaining = Math.max(0, quota.remainingDollars);
+  return `$${formatNumber(remaining)} left of $${formatNumber(quota.limitDollars)}`;
+}
 function formatDate(value) { return value ? new Date(value).toLocaleString() : 'unknown'; }
 function formatTokenExpiry(value) {
   const hours = Math.floor((new Date(value).getTime() - Date.now()) / (60 * 60 * 1000));
   if (hours < 0) return `Expired ${Math.ceil(-hours / 24)} day${Math.ceil(-hours / 24) === 1 ? '' : 's'} ago`;
   return `Expires in ${Math.floor(hours / 24)} day${Math.floor(hours / 24) === 1 ? '' : 's'} ${hours % 24} hour${hours % 24 === 1 ? '' : 's'}`;
+}
+function formatTimeAgo(ts) {
+  if (!ts || ts <= 0) return 'no activity';
+  const seconds = Math.floor((Date.now() - ts) / 1000);
+  if (seconds < 60) return 'active just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `active ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `active ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `active ${days}d ago`;
 }
 
 createRoot(document.getElementById('root')).render(<App />);
