@@ -17,7 +17,7 @@ function codexInput() {
   return { type: 'codex', authJson: JSON.stringify({ tokens: { access_token: token, id_token: token } }) };
 }
 
-test('persists reserved requests, retryable attempts, and final settlement', () => {
+test('aggregates successful requests without retaining lifecycle history', () => {
   const { dir, store } = tempStore();
   try {
     const key = store.configureApiKey('accounting-key');
@@ -30,14 +30,32 @@ test('persists reserved requests, retryable attempts, and final settlement', () 
     store.finalizeGatewayRequest({ requestId: request.id, attemptId: second.id, status: 'succeeded', responseStatusCode: 200, usage: { inputTokens: 2, outputTokens: 1 }, settledCostMicros: 1200, costSource: 'pricing_snapshot' });
 
     const reopened = new Store(dir);
-    assert.deepEqual(reopened.gatewayAttempts(request.id).map(({ attemptNumber, status, retryable }) => ({ attemptNumber, status, retryable })), [
-      { attemptNumber: 1, status: 'retryable_failed', retryable: true },
-      { attemptNumber: 2, status: 'succeeded', retryable: false }
-    ]);
-    assert.equal(reopened.gatewayRequest(request.id).status, 'succeeded');
-    assert.equal(reopened.gatewayRequest(request.id).retryCount, 1);
+    assert.equal(reopened.gatewayAttempts(request.id).length, 0);
+    assert.equal(reopened.gatewayRequest(request.id), null);
     assert.equal(reopened.gatewayUsage(key.scopeId, key.id).request_count, 1);
     assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /raw prompt/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists terminal failures with their retry diagnostics', () => {
+  const { dir, store } = tempStore();
+  try {
+    const key = store.configureApiKey('accounting-key');
+    const upstream = store.create(codexInput());
+    const request = store.reserveGatewayRequest({ scopeId: key.scopeId, apiKeyId: key.id, endpoint: '/v1/responses' });
+    const first = store.beginGatewayAttempt(request.id, upstream.id);
+    store.retryGatewayAttempt(request.id, first.id, { responseStatusCode: 503, errorCode: 'upstream_retryable_response' });
+    const second = store.beginGatewayAttempt(request.id, upstream.id);
+    store.finalizeGatewayRequest({ requestId: request.id, attemptId: second.id, status: 'failed', responseStatusCode: 502, errorCode: 'upstream_failed' });
+
+    const reopened = new Store(dir);
+    assert.equal(reopened.gatewayRequest(request.id).status, 'failed');
+    assert.deepEqual(reopened.gatewayAttempts(request.id).map(({ status, errorCode }) => ({ status, errorCode })), [
+      { status: 'retryable_failed', errorCode: 'upstream_retryable_response' },
+      { status: 'failed', errorCode: 'upstream_failed' }
+    ]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -53,7 +71,8 @@ test('reserves authenticated public Responses and Chat requests before dispatch'
     store,
     apiKey: 'accounting-key',
     fetchImpl: async () => {
-      const request = store.load().gatewayRequests[upstreamCalls++];
+      const request = store.load().gatewayRequests.find((item) => item.status === 'in_progress');
+      upstreamCalls += 1;
       assert.equal(request.status, 'in_progress');
       assert.equal(store.gatewayAttempts(request.id).length, 1);
       return new Response(JSON.stringify({ id: 'resp-accounting', model: 'gpt-5.6-sol', output: [] }), { headers: { 'content-type': 'application/json' } });
@@ -69,12 +88,9 @@ test('reserves authenticated public Responses and Chat requests before dispatch'
       const response = await fetch(base + path, { method: 'POST', headers: { authorization: 'Bearer accounting-key', 'content-type': 'application/json' }, body: JSON.stringify(body) });
       assert.equal(response.status, 200);
     }
-    const records = [store.gatewayRequest(store.load().gatewayRequests[0].id), store.gatewayRequest(store.load().gatewayRequests[1].id)];
-    assert.deepEqual(records.map(({ endpoint, apiKeyId, status }) => ({ endpoint, apiKeyId, status })), [
-      { endpoint: '/v1/responses', apiKeyId: key.id, status: 'succeeded' },
-      { endpoint: '/v1/chat/completions', apiKeyId: key.id, status: 'succeeded' }
-    ]);
-    assert.equal(records.every((record) => store.gatewayAttempts(record.id).length === 1), true);
+    assert.equal(upstreamCalls, 2);
+    assert.equal(store.load().gatewayRequests.length, 0);
+    assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 2);
     assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /raw prompt/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
