@@ -351,6 +351,13 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     sendJson(res, 201, { upstream });
     return;
   }
+
+  if (req.method === 'PUT' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'priority') {
+    const payload = await body(req);
+    sendJson(res, 200, { upstreams: store.setPriorityList(payload.ids) });
+    return;
+  }
+
   if (!id || parts[1] !== 'upstreams') throw notFound();
 
   if (req.method === 'GET' && parts.length === 3) {
