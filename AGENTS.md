@@ -39,6 +39,9 @@ allowlisted documents only when necessary; port worthwhile gateway behavior to
 - `node/.data/` and `node/.env` are local credential state. Never commit them.
 - Read `node/README.md` before changing supported routes, routing, quota,
   spending-cap, storage, or compatibility behavior. Keep it accurate.
+- Treat every route or protocol behavior that OpenAI, Codex, or Claude Code
+  clients can invoke as used, even when local configs or telemetry show no
+  traffic. Only code with zero callers anywhere may be removed as dead.
 
 ## Node UI / Astryx
 
