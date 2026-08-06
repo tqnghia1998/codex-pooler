@@ -9,6 +9,7 @@ import {
   dollarsToCredits,
   ensureSpending,
   filterSpendCapEligible,
+  isAiswitchUpstream,
   number,
   publicUpstream,
   recordUsage,
@@ -247,6 +248,7 @@ export class Store {
     const upstream = findOrThrow(db, id);
     ensureSpending(upstream);
     upstream.quota = quota;
+    upstream.quotaSource = quota?.source || null;
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
@@ -736,7 +738,7 @@ function candidateEligible(upstream, model, requirements) {
   if (!upstream) return false;
   const routing = normalizeRouting(upstream.routing);
   if (routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return false;
-  if (Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
+  if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
 }
@@ -811,10 +813,11 @@ function capCreditsFromInput(input = {}) {
 
 function selectBulkTargets(upstreams, input = {}) {
   const target = input.target;
+  const eligible = (upstream) => !isAiswitchUpstream(upstream);
   if (target) {
     if (!['all', 'cap_reached', 'uncapped'].includes(target)) throw new Error('target must be all, cap_reached, or uncapped');
     return upstreams
-      .filter((upstream) => target === 'all' || (target === 'uncapped' && spendingSummary(upstream.spending).capCredits <= 0) || (target === 'cap_reached' && spendingSummary(upstream.spending).status === 'reached'))
+      .filter((upstream) => eligible(upstream) && (target === 'all' || (target === 'uncapped' && spendingSummary(upstream.spending).capCredits <= 0) || (target === 'cap_reached' && spendingSummary(upstream.spending).status === 'reached')))
       .map((upstream) => ({ upstream, capDollars: input.capDollars }));
   }
 
@@ -824,6 +827,7 @@ function selectBulkTargets(upstreams, input = {}) {
     capDollars: number(rule.capDollars, 'capDollars')
   }));
   return upstreams.flatMap((upstream) => {
+    if (!eligible(upstream)) return [];
     const quotaLeft = Number(upstream.quota?.remainingDollars ?? upstream.quota?.remainingUnits);
     if (!Number.isFinite(quotaLeft)) return [];
     const matching = rules.filter((rule) => quotaLeft > rule.minQuotaLeft).sort((a, b) => b.minQuotaLeft - a.minQuotaLeft)[0];
