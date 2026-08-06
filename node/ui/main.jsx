@@ -24,6 +24,10 @@ import { Theme } from '@astryxdesign/core/theme';
 import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
+import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
+import { restrictToParentElement, restrictToVerticalAxis } from '@dnd-kit/modifiers';
+import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 
 const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 1000, capDollars: 100 },
@@ -113,6 +117,7 @@ function App() {
   const [capUpstream, setCapUpstream] = useState(null);
   const [capValue, setCapValue] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
+  const [priorityOpen, setPriorityOpen] = useState(false);
   const [bulkMode, setBulkMode] = useState('rules');
   const [bulkCapValue, setBulkCapValue] = useState(100);
   const [bulkRules, setBulkRules] = useState(DEFAULT_BULK_RULES);
@@ -376,6 +381,12 @@ function App() {
     }
   };
 
+  const savePriority = (ids) => run(async () => {
+    await api('/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids }) });
+    setPriorityOpen(false);
+    await load();
+  }, 'Priority list updated', show);
+
   const openBulkCaps = () => {
     setBulkMode('rules');
     setBulkCapValue(100);
@@ -466,12 +477,13 @@ function App() {
             <HStack align="center" justify="between">
               <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
               <HStack gap={2}>
+                <Button label="Set Priority" size="sm" variant="secondary" onClick={() => setPriorityOpen(true)} />
                 <Button label="Bulk set caps" size="sm" variant="secondary" onClick={() => setBulkOpen(true)} />
                 <Button label="Add upstream" size="sm" variant="primary" onClick={add} />
               </HStack>
             </HStack>
             {filteredUpstreams.length ? (
-              <Grid columns={{ minWidth: 280, max: 4, repeat: 'fit' }} gap={3}>{filteredUpstreams.map((upstream) => <UpstreamCard key={upstream.id} upstream={upstream} onRefresh={refresh} onRefreshToken={promptRefreshToken} isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id} onEdit={edit} onCap={openCap} onDelete={remove} />)}</Grid>
+              <Grid columns={{ minWidth: 280, max: 4, repeat: 'fit' }} gap={3}>{filteredUpstreams.map((upstream) => <UpstreamCard key={upstream.id} upstream={upstream} onRefresh={refresh} onRefreshToken={promptRefreshToken} isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id} onEdit={edit} onCap={openCap} onPriority={() => setPriorityOpen(true)} onDelete={remove} />)}</Grid>
             ) : (
               <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex or Compass upstream to start routing requests.'} />
             )}
@@ -496,6 +508,7 @@ function App() {
             onSubmit={saveCap}
           />
 
+          <PriorityDialog isOpen={priorityOpen} upstreams={upstreams} onClose={() => setPriorityOpen(false)} onSave={savePriority} />
           <BulkCapDialog
             open={bulkOpen}
             mode={bulkMode}
@@ -607,7 +620,7 @@ function Metric({ label, value }) {
   );
 }
 
-function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, onEdit, onCap, onDelete }) {
+function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, onEdit, onCap, onPriority, onDelete }) {
   const quota = upstream.quota;
   const spending = upstream.spending || {};
   const quotaRemaining = quota ? Math.min(100, Math.max(0, quota.remainingPercent)) : 0;
@@ -619,9 +632,8 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
     : upstream.accessTokenExpiresAt ? formatTokenExpiry(upstream.accessTokenExpiresAt) : 'Expiry unknown';
   const expiresSoon = upstream.type === 'codex' && upstream.accessTokenExpiresAt && new Date(upstream.accessTokenExpiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000;
   const capHeading = spending.capCredits > 0 ? `${formatPercent(spendingRemaining)} left` : 'No spending cap';
-  const capRemainingDollars = Math.max(0, (spending.capDollars || 0) - (spending.spentDollars || 0));
   const capUsage = spending.capCredits > 0
-    ? `$${formatNumber(capRemainingDollars)} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
+    ? `$${formatNumber(Math.max(0, (spending.capDollars || 0) - (spending.spentDollars || 0)))} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
     : 'Set a cap to make this upstream routable';
   const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
@@ -642,7 +654,10 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
             {tokenRefresh?.status === 'reauth_required' && <Badge label="Reauthentication required" variant="error" />}
           </VStack>
-          <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
+          <HStack gap={1} vAlign="center">
+            {Number.isInteger(upstream.priority) && <Badge label={`${ordinal(upstream.priority + 1)} priority`} variant="blue" />}
+            <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
+          </HStack>
         </HStack>
         <VStack gap={1}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap"><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
@@ -676,6 +691,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
           {upstream.type === 'codex' && <Button label="Refresh token" size="sm" variant="secondary" isLoading={isRefreshingToken} isDisabled={isRefreshingToken || tokenRefresh?.status === 'refreshing'} onClick={() => onRefreshToken(upstream)} />}
           <Button label="Edit" size="sm" variant="secondary" onClick={() => onEdit(upstream)} />
           <Button label="Set cap" size="sm" variant="secondary" onClick={() => onCap(upstream)} />
+          <Button label="Set priority" size="sm" variant="secondary" onClick={onPriority} />
           <Button label="Delete" size="sm" variant="destructive" onClick={() => onDelete(upstream)} />
         </HStack>
       </VStack>
@@ -823,6 +839,14 @@ function capValue(upstream, missing) {
 
 function nameSort(a, b) { return (a.name || '').localeCompare(b.name || ''); }
 function formatNumber(value) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function capSummary(spending) {
+  const cap = Number(spending?.capDollars) || 0;
+  return cap > 0 && `$${formatNumber(Math.max(0, cap - (Number(spending?.spentDollars) || 0)))} left of $${formatNumber(cap)} cap`;
+}
+function ordinal(value) {
+  const n = Math.trunc(Number(value) || 0);
+  return `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
+}
 function formatPercent(value) { return `${Math.round(Number(value) || 0)}%`; }
 function quotaCount(quota) {
   if (!quota || !Number.isFinite(quota.remainingDollars) || !Number.isFinite(quota.limitDollars)) return '';
@@ -845,6 +869,105 @@ function formatTimeAgo(ts) {
   if (hours < 24) return `active ${hours}h ago`;
   const days = Math.floor(hours / 24);
   return `active ${days}d ago`;
+}
+
+function SortableRow({ upstream, index, onRemove }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: upstream.id });
+  return (
+    <div ref={setNodeRef} {...attributes} {...listeners} style={{ transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.6 : 1, cursor: 'grab', touchAction: 'none' }}>
+      <Card>
+        <HStack gap={2} vAlign="center" justify="between">
+          <HStack gap={2} vAlign="center">
+            <Text type="label" color="secondary">⠿</Text>
+            <Badge label={ordinal(index + 1)} variant="purple" />
+            <VStack>
+              <Text type="label" weight="bold">{upstream.name}</Text>
+              <Text type="supporting" color="secondary">{upstream.type} · {capSummary(upstream.spending) || 'no cap'}</Text>
+            </VStack>
+          </HStack>
+          <Button label="Remove" size="sm" variant="ghost" onClick={() => onRemove(upstream.id)} />
+        </HStack>
+      </Card>
+    </div>
+  );
+}
+
+function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
+  const [ids, setIds] = useState([]);
+  const [pending, setPending] = useState('');
+  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setIds(upstreams.filter((upstream) => Number.isInteger(upstream.priority)).sort((a, b) => a.priority - b.priority).map((upstream) => upstream.id));
+    setPending('');
+  }, [isOpen, upstreams]);
+
+  const listed = ids.map((id) => upstreams.find((upstream) => upstream.id === id)).filter(Boolean);
+  const available = upstreams.filter((upstream) => !ids.includes(upstream.id));
+
+  const onDragEnd = ({ active, over }) => {
+    if (!over || active.id === over.id) return;
+    setIds((current) => arrayMove(current, current.indexOf(active.id), current.indexOf(over.id)));
+  };
+
+  const submit = (event) => {
+    event.preventDefault();
+    onSave(ids);
+  };
+
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={onClose} purpose="form" width={560}>
+      <Layout
+        header={<DialogHeader title="Upstream priority list" subtitle="Listed upstreams are used first, in order. Others are used only once every listed upstream reaches its spending cap." onOpenChange={onClose} hasDivider />}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="between" gap={2} wrap="wrap">
+              <Button label="Clear list" variant="secondary" isDisabled={!ids.length} onClick={() => setIds([])} />
+              <HStack gap={2}>
+                <Button label="Cancel" variant="secondary" onClick={onClose} />
+                <Button label="Save priority" variant="primary" type="submit" form="priority-form" />
+              </HStack>
+            </HStack>
+          </LayoutFooter>
+        )}
+      >
+        <LayoutContent>
+          <form id="priority-form" onSubmit={submit}>
+            <VStack gap={3}>
+              <HStack gap={2} vAlign="end" wrap="wrap" width="100%">
+                <StackItem size="fill">
+                  <Selector
+                    label="Add upstream to the priority list"
+                    width="100%"
+                    hasSearch
+                    searchPlaceholder="Search upstreams..."
+                    value={pending}
+                    options={[{ value: '', label: available.length ? 'Select an upstream' : 'All upstreams are listed' }, ...available.map((upstream) => ({ value: upstream.id, label: `${upstream.name} (${upstream.type})` }))]}
+                    onChange={setPending}
+                  />
+                </StackItem>
+                <Button label="Add" variant="secondary" isDisabled={!pending} onClick={() => { setIds((current) => [...current, pending]); setPending(''); }} />
+              </HStack>
+              {listed.length ? (
+                <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToVerticalAxis, restrictToParentElement]} onDragEnd={onDragEnd}>
+                  <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+                    <VStack gap={2}>
+                      {listed.map((upstream, index) => (
+                        <SortableRow key={upstream.id} upstream={upstream} index={index} onRemove={(id) => setIds((current) => current.filter((item) => item !== id))} />
+                      ))}
+                    </VStack>
+                  </SortableContext>
+                </DndContext>
+              ) : (
+                <EmptyState title="Priority list is empty" description="Every upstream is balanced by least recent success. Add an upstream above to make it preferred." />
+              )}
+            </VStack>
+          </form>
+        </LayoutContent>
+      </Layout>
+    </Dialog>
+  );
 }
 
 createRoot(document.getElementById('root')).render(<App />);
