@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, retryableFirstSseEvent } from '../src/openai-streaming.js';
+import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent } from '../src/openai-streaming.js';
 
 const decode = (chunk) => JSON.parse(chunk.match(/^data: (.+)$/m)[1]);
 
@@ -30,6 +30,17 @@ test('synthesizes public lifecycle events and normalizes done/typeless success',
   assert.equal(events.at(-1).response.status, 'completed');
   const typeless = decode(normalizePublicResponsesEvent({ id: 'resp_typeless', output: [] }, createPublicResponsesState())[0]);
   assert.equal(typeless.type, 'response.completed');
+});
+
+test('restores a missing custom_tool_call namespace from declared tools, live and streamed', () => {
+  const namespaces = { shell: 'ops' };
+  assert.deepEqual(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'shell', call_id: 'c1' }] }, namespaces).output[0].namespace, 'ops');
+  assert.equal(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'shell', namespace: 'explicit' }] }, namespaces).output[0].namespace, 'explicit');
+  assert.equal(restoreCustomToolCallNamespaces({ output: [{ type: 'custom_tool_call', name: 'unknown' }] }, namespaces).output[0].namespace, undefined);
+
+  const state = createPublicResponsesState(namespaces);
+  const [chunk] = normalizePublicResponsesEvent({ type: 'response.output_item.done', item: { type: 'custom_tool_call', name: 'shell', call_id: 'c1' }, output_index: 0 }, state);
+  assert.equal(decode(chunk).item.namespace, 'ops');
 });
 
 test('translates Chat tool arguments, moderation, incomplete usage, and early failure', () => {
