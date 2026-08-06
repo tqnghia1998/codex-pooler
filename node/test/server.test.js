@@ -59,7 +59,7 @@ test('refreshes quotas with bounded concurrency', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-bounded-poll-'));
   try {
     const store = new Store(dir);
-    for (let index = 0; index < 4; index += 1) store.create({ type: 'codex', accessToken: `token-${index}` });
+    for (let index = 0; index < 4; index += 1) store.create({ type: 'codex', accessToken: `token-${index}`, accountId: `acc-${index}` });
     let active = 0;
     let peak = 0;
     await refreshAllQuotas(store, {
