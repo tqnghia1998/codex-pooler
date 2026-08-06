@@ -92,12 +92,6 @@ export class Store {
     return Boolean(scope) && (!scope.models?.length || scope.models.includes(String(model || '').toLowerCase()));
   }
 
-  upstreamModelAllowed(id, scopeId, model) {
-    const upstream = this.get(id, scopeId);
-    const models = normalizeRouting(upstream?.routing).models;
-    return Boolean(upstream) && (!models.length || models.includes(String(model || '').toLowerCase()));
-  }
-
   createApiKey({ key, scopeId = DEFAULT_SCOPE_ID, status = 'active' } = {}) {
     if (typeof key !== 'string' || !key.trim()) throw new Error('key is required');
     if (!['active', 'disabled'].includes(status)) throw new Error('api key status must be active or disabled');
