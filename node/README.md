@@ -3,7 +3,7 @@
 A deliberately small local dashboard for:
 
 - adding, editing, and deleting Codex or Compass upstreams (provider URLs are fixed server-side);
-- reading the provider's current quota window (monthly when the provider reports one);
+- reading the provider's current quota window (monthly when the provider reports one); AISwitch/CQP accounts are marked `aiswitch` because their quota requires a separate Compass SSO session;
 - setting individual or bulk spending caps in dollars;
 - exposing spending-cap state and eligibility;
 - observing normal/reached cap status and continuation eligibility;
@@ -105,7 +105,7 @@ POST   /backend-api/codex/images/edits
 
 The dashboard's bulk-cap dialog starts with the original quota presets: quota left above $1,000/$500/$200/$100/$50/$0 maps to caps of $100/$50/$20/$10/$5/$0. Rules are editable, and one-cap targets remain available.
 
-Create a Codex upstream with `{ "type": "codex", "authJson": "..." }`, or a Compass upstream with `{ "type": "compass", "projectId": "...", "projectKey": "..." }`. Names are derived server-side: masked JWT email for Codex and project ID for Compass. Bulk caps accept either `{ "target": "all|cap_reached|uncapped", "capDollars": 100 }` or quota rules such as `{ "rules": [{ "minQuotaLeft": 1000, "capDollars": 100 }] }`. Bulk updates are sequential, not atomic.
+Create a Codex upstream with `{ "type": "codex", "authJson": "..." }`, or a Compass upstream with `{ "type": "compass", "projectId": "...", "projectKey": "...", "quotaSource": "compass|aiswitch" }`. Use `quotaSource: "aiswitch"` for CQP accounts whose quota is managed in AISwitch; they remain routable based on their spending cap without a gateway quota refresh. Names are derived server-side: masked JWT email for Codex and project ID for Compass. Bulk caps accept either `{ "target": "all|cap_reached|uncapped", "capDollars": 100 }` or quota rules such as `{ "rules": [{ "minQuotaLeft": 1000, "capDollars": 100 }] }`. Bulk updates are sequential, not atomic.
 
 Proxy routing prefers Codex, prefers Compass for `claude-*` models, and routes `/v1/messages` to Compass. Use `x-upstream-type: codex|compass` or `x-upstream-id` to select explicitly. `x-codex-session-id` is an API-key-isolated soft upstream preference and falls back safely when unavailable. Codex Chat Completions are translated to Responses upstream and converted back, while Compass requests are sent directly to `/chat/completions`, `/responses`, or `/messages`.
 
