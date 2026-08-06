@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import Database from 'better-sqlite3';
 import {
   createUpstream,
   defaultBaseUrl,
@@ -36,15 +37,23 @@ export const DEFAULT_SCOPE_ID = 'default';
 export class Store {
   constructor(dataDir = process.env.CODEX_POOLER_NODE_DATA_DIR || resolve(process.cwd(), '.data')) {
     this.dataDir = resolve(dataDir);
-    this.dbPath = join(this.dataDir, 'db.json');
+    this.dbPath = join(this.dataDir, 'db.sqlite');
+    this.legacyDbPath = join(this.dataDir, 'db.json');
     this.keyPath = join(this.dataDir, '.key');
     mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
     chmodSync(this.dataDir, 0o700);
-    const databaseExists = existsSync(this.dbPath);
-    this.key = this.loadKey(databaseExists);
+    this.key = this.loadKey(existsSync(this.dbPath) || existsSync(this.legacyDbPath));
+    this.sqlite = new Database(this.dbPath);
+    chmodSync(this.dbPath, 0o600);
+    this.sqlite.pragma('journal_mode = DELETE');
+    this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
     this.events = new EventEmitter();
-    this.db = databaseExists ? this.load() : emptyDatabase();
-    this.save(this.db);
+    if (this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
+    else {
+      this.db = normalizeDatabase(JSON.parse(readFileSync(this.legacyDbPath, 'utf8')));
+      this.save(this.db);
+      unlinkSync(this.legacyDbPath);
+    }
   }
 
   onUpstreamsChange(listener) {
@@ -594,31 +603,15 @@ export class Store {
   load() {
     if (this.db) return this.db;
     try {
-      const parsed = JSON.parse(readFileSync(this.dbPath, 'utf8'));
-      if (!parsed || !Array.isArray(parsed.upstreams)) throw new Error('invalid database');
-      parsed.files ||= [];
-      parsed.sessions ||= {};
-      parsed.scopes ||= [{ id: DEFAULT_SCOPE_ID, status: 'active' }];
-      parsed.apiKeys ||= [];
-      parsed.gatewayUsage ||= [];
-      parsed.gatewayRequests ||= [];
-      parsed.gatewayAttempts ||= [];
-      parsed.responsePins ||= {};
-      if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
-      parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
-      pruneGatewayHistory(parsed);
-      if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions) || !parsed.responsePins || typeof parsed.responsePins !== 'object' || Array.isArray(parsed.responsePins)) throw new Error('invalid session database');
-      if (!parsed.scopes.some((scope) => scope.id === DEFAULT_SCOPE_ID)) parsed.scopes.push({ id: DEFAULT_SCOPE_ID, status: 'active', models: [] });
-      for (const scope of parsed.scopes) scope.models = normalizeModels(scope.models || []);
-      for (const upstream of parsed.upstreams) {
-        upstream.scopeId ||= DEFAULT_SCOPE_ID;
-        upstream.routing = normalizeRouting(upstream.routing);
-        upstream.baseUrl = defaultBaseUrl(upstream.type);
-        upstream.name = deriveUpstreamName(upstream.type, upstream);
+      const db = emptyDatabase();
+      for (const { collection, key, value } of this.sqlite.prepare('SELECT collection, key, value FROM records ORDER BY rowid').all()) {
+        const target = db[collection];
+        if (Array.isArray(target)) target.push(JSON.parse(value));
+        else target[key] = JSON.parse(value);
       }
-      for (const file of parsed.files) file.scopeId ||= DEFAULT_SCOPE_ID;
-      this.db = parsed;
-      return parsed;
+      this.db = normalizeDatabase(db);
+      this.persisted = structuredClone(this.db);
+      return this.db;
     } catch (error) {
       throw new Error(`Could not read ${this.dbPath}: ${error.message}`);
     }
@@ -629,14 +622,21 @@ export class Store {
     const persisted = structuredClone(db);
     persisted.gatewayUsage = compactGatewayUsage(persisted.gatewayUsage);
     pruneGatewayHistory(persisted);
-    const tempPath = `${this.dbPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
-    try {
-      writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
-      chmodSync(tempPath, 0o600);
-      renameSync(tempPath, this.dbPath);
-    } finally {
-      if (existsSync(tempPath)) unlinkSync(tempPath);
-    }
+    const previous = databaseRecords(this.persisted || emptyDatabase());
+    const next = databaseRecords(persisted);
+    const upsert = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
+    const remove = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
+    this.sqlite.transaction(() => {
+      for (const [id, value] of next) if (previous.get(id) !== value) {
+        const [collection, key] = JSON.parse(id);
+        upsert.run(collection, key, value);
+      }
+      for (const id of previous.keys()) if (!next.has(id)) {
+        const [collection, key] = JSON.parse(id);
+        remove.run(collection, key);
+      }
+    })();
+    this.persisted = persisted;
   }
 
   saveCredentials(upstream) {
@@ -661,6 +661,47 @@ function emptyDatabase() {
   return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [{ id: DEFAULT_SCOPE_ID, status: 'active', models: [] }], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [] };
 }
 
+function normalizeDatabase(parsed) {
+  if (!parsed || !Array.isArray(parsed.upstreams)) throw new Error('invalid database');
+  parsed.files ||= [];
+  parsed.sessions ||= {};
+  parsed.scopes ||= [{ id: DEFAULT_SCOPE_ID, status: 'active' }];
+  parsed.apiKeys ||= [];
+  parsed.gatewayUsage ||= [];
+  parsed.gatewayRequests ||= [];
+  parsed.gatewayAttempts ||= [];
+  parsed.responsePins ||= {};
+  if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
+  parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
+  pruneGatewayHistory(parsed);
+  if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions) || !parsed.responsePins || typeof parsed.responsePins !== 'object' || Array.isArray(parsed.responsePins)) throw new Error('invalid session database');
+  if (!parsed.scopes.some((scope) => scope.id === DEFAULT_SCOPE_ID)) parsed.scopes.push({ id: DEFAULT_SCOPE_ID, status: 'active', models: [] });
+  for (const scope of parsed.scopes) scope.models = normalizeModels(scope.models || []);
+  for (const upstream of parsed.upstreams) {
+    upstream.scopeId ||= DEFAULT_SCOPE_ID;
+    upstream.routing = normalizeRouting(upstream.routing);
+    upstream.baseUrl = defaultBaseUrl(upstream.type);
+    upstream.name = deriveUpstreamName(upstream.type, upstream);
+  }
+  for (const file of parsed.files) file.scopeId ||= DEFAULT_SCOPE_ID;
+  return parsed;
+}
+
+function databaseRecords(db) {
+  const records = new Map();
+  const add = (collection, key, value) => records.set(JSON.stringify([collection, key]), JSON.stringify(value));
+  for (const upstream of db.upstreams) add('upstreams', upstream.id, upstream);
+  for (const file of db.files) add('files', JSON.stringify([file.scopeId, file.id]), file);
+  for (const scope of db.scopes) add('scopes', scope.id, scope);
+  for (const apiKey of db.apiKeys) add('apiKeys', apiKey.id, apiKey);
+  for (const usage of db.gatewayUsage) add('gatewayUsage', JSON.stringify([usage.scopeId, usage.apiKeyId, usage.day]), usage);
+  for (const request of db.gatewayRequests) add('gatewayRequests', request.id, request);
+  for (const attempt of db.gatewayAttempts) add('gatewayAttempts', attempt.id, attempt);
+  for (const [key, value] of Object.entries(db.sessions)) add('sessions', key, value);
+  for (const [key, value] of Object.entries(db.responsePins)) add('responsePins', key, value);
+  return records;
+}
+
 function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
 }
@@ -676,7 +717,7 @@ function eligibilityFromUpstreams(upstreams, continuationId) {
 }
 
 function pruneGatewayHistory(db, keepActive = false) {
-  // ponytail: keep only bounded terminal failures; use SQLite when this diagnostic window is insufficient.
+  // ponytail: keep only 100 terminal failures; add a diagnostic query path if a longer window is needed.
   const requests = [
     ...(keepActive ? db.gatewayRequests.filter(({ completedAt }) => !completedAt) : []),
     ...db.gatewayRequests.filter((item) => item.status === 'failed' && item.completedAt).slice(-GATEWAY_ERROR_HISTORY_LIMIT)
