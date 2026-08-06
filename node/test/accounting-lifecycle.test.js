@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
@@ -33,7 +33,7 @@ test('aggregates successful requests without retaining lifecycle history', () =>
     assert.equal(reopened.gatewayAttempts(request.id).length, 0);
     assert.equal(reopened.gatewayRequest(request.id), null);
     assert.equal(reopened.gatewayUsage(key.scopeId, key.id).request_count, 1);
-    assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /raw prompt/);
+    assert.doesNotMatch(store.sqlite.prepare('SELECT group_concat(value) AS result FROM records').get().result || '', /raw prompt/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -91,7 +91,7 @@ test('reserves authenticated public Responses and Chat requests before dispatch'
     assert.equal(upstreamCalls, 2);
     assert.equal(store.load().gatewayRequests.length, 0);
     assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 2);
-    assert.doesNotMatch(readFileSync(join(dir, 'db.json'), 'utf8'), /raw prompt/);
+    assert.doesNotMatch(store.sqlite.prepare('SELECT group_concat(value) AS result FROM records').get().result || '', /raw prompt/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
