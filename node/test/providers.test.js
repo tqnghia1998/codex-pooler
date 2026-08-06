@@ -86,6 +86,13 @@ test('coalesces concurrent Codex token refreshes for one upstream', async () => 
   assert.equal(second.refreshToken, 'shared-refresh');
 });
 
+test('does not attempt AISwitch quota refresh without its SSO session', async () => {
+  await assert.rejects(
+    refreshQuota({ type: 'compass', projectId: 'aiswitch', projectKey: 'key', quotaSource: 'aiswitch' }, {}, { fetchImpl: async () => { throw new Error('must not fetch'); } }),
+    /AISwitch quota requires a Compass SSO session/
+  );
+});
+
 test('refreshes Compass project quota with the gateway token', async () => {
   let request;
   const fetchImpl = async (url, options) => {
