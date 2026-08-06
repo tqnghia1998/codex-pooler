@@ -424,7 +424,7 @@ function App() {
 
           <VStack gap={2}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
-            <Grid columns={{ minWidth: 150, max: 8, repeat: 'fit' }} gap={2}>
+            <Grid columns={9} gap={2}>
               <Metric label="Codex total" value={stats.totalCodex} />
               <Metric label="Compass total" value={stats.totalCompass} />
               <Metric label="Active" value={stats.active} />
