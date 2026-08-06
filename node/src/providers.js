@@ -1,4 +1,4 @@
-import { accessTokenExpiresAt, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, normalizeBaseUrl, parseCodexQuota, parseCompassQuota } from './domain.js';
+import { accessTokenExpiresAt, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, isAiswitchUpstream, normalizeBaseUrl, parseCodexQuota, parseCompassQuota } from './domain.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 
 const CODEX_PATHS = ['/backend-api/wham/usage', '/backend-api/codex/usage', '/api/codex/usage'];
@@ -24,6 +24,7 @@ export async function refreshQuota(upstream, credentials, {
   fetchImpl = globalThis.fetch,
   saveCredentials = () => {}
 } = {}) {
+  if (isAiswitchUpstream(upstream)) throw new Error('AISwitch quota requires a Compass SSO session');
   if (upstream.type === 'compass') return refreshCompassQuota(upstream, compassGatewayToken, fetchImpl);
   return refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentials);
 }
