@@ -553,6 +553,28 @@ function toolNames(tools, type) {
   return tools.flatMap((tool) => tool?.type === type ? [tool.name] : tool?.type === 'namespace' ? toolNames(tool.tools, type) : []);
 }
 
+// Maps a custom tool's name to its declared namespace, so a public `custom_tool_call`
+// output missing that field can be restored. Skips ambiguous names (same name used
+// more than once, whether flat or inside another namespace).
+export function customToolNamespaces(tools) {
+  if (!Array.isArray(tools)) return {};
+  const counts = new Map();
+  const namespaceOf = new Map();
+  const seen = (name) => counts.set(name, (counts.get(name) || 0) + 1);
+  for (const tool of tools) {
+    if (tool?.type === 'custom' && typeof tool.name === 'string') seen(tool.name);
+    if (tool?.type === 'namespace' && Array.isArray(tool.tools)) {
+      for (const child of tool.tools) {
+        if (child?.type === 'custom' && typeof child.name === 'string') {
+          seen(child.name);
+          namespaceOf.set(child.name, tool.name);
+        }
+      }
+    }
+  }
+  return Object.fromEntries([...namespaceOf].filter(([name]) => counts.get(name) === 1));
+}
+
 function validateText(text) {
   if (text === undefined) return;
   if (!plainObject(text)) invalid('text must be an object', 'text');
