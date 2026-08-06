@@ -124,6 +124,7 @@ export function parseCodexAuthJson(raw) {
 export function createUpstream(input) {
   const type = text(input.type).toLowerCase();
   if (!SUPPORTED_TYPES.has(type)) throw new Error('type must be codex or compass');
+  const quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
   const upstream = {
     id: randomUUID(),
     type,
@@ -135,6 +136,7 @@ export function createUpstream(input) {
     credentialEpoch: 1,
     projectId: '',
     quota: null,
+    quotaSource,
     spending: newSpending(),
     credentials: {},
     createdAt: new Date().toISOString(),
@@ -195,6 +197,9 @@ export function updateUpstream(upstream, input) {
     if (input.projectKey !== undefined && text(input.projectKey)) upstream.credentials.projectKey = text(input.projectKey);
   }
   if (input.metadata !== undefined && typeof input.metadata === 'object') upstream.metadata = input.metadata;
+  if (input.quotaSource !== undefined || input.metadata?.quota_type !== undefined || input.metadata?.quotaType !== undefined) {
+    upstream.quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
+  }
 
   upstream.name = deriveUpstreamName(upstream.type, upstream);
   upstream.updatedAt = new Date().toISOString();
@@ -462,6 +467,17 @@ function resetTime(window, observedAt) {
   return null;
 }
 
+export function isAiswitchUpstream(upstream) {
+  return upstream?.type === 'compass' && normalizeQuotaSource(upstream.quotaSource || upstream.metadata?.quota_type || upstream.metadata?.quotaType) === 'aiswitch';
+}
+
+function normalizeQuotaSource(value) {
+  const source = text(value).toLowerCase();
+  if (source === 'aiswitch' || source === 'cqp') return 'aiswitch';
+  if (source === 'compass') return 'compass';
+  return null;
+}
+
 export function publicUpstream(upstream) {
   const spending = spendingSummary(upstream.spending);
   return {
@@ -476,6 +492,7 @@ export function publicUpstream(upstream) {
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
     metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
+    quotaSource: isAiswitchUpstream(upstream) ? 'aiswitch' : upstream.quotaSource || null,
     spending,
     updatedAt: upstream.updatedAt || null,
     lastSuccessfulAt: upstream.lastSuccessfulAt || null,
