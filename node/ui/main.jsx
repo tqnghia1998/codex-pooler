@@ -16,6 +16,7 @@ import { Grid, GridSpan } from '@astryxdesign/core/Grid';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
+import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
@@ -34,11 +35,6 @@ const DEFAULT_BULK_RULES = [
 ];
 
 const FILTER_OPTIONS = {
-  type: [
-    { value: '', label: 'Any type' },
-    { value: 'codex', label: 'Codex' },
-    { value: 'compass', label: 'Compass' }
-  ],
   status: [
     { value: '', label: 'Any status' },
     { value: 'active', label: 'Active' },
@@ -205,7 +201,11 @@ function App() {
     let exhausted = 0;
     let capLeft = 0;
     let capSpent = 0;
+    let totalCodex = 0;
+    let totalCompass = 0;
     upstreams.forEach((upstream) => {
+      if (upstream.type === 'codex') totalCodex += 1;
+      if (upstream.type === 'compass') totalCompass += 1;
       if (upstream.status === 'active') active += 1;
       if (upstream.status === 'reauth_required') reauth += 1;
       const quotaBand = getQuotaBand(upstream);
@@ -219,7 +219,7 @@ function App() {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { total: upstreams.length, active, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { total: upstreams.length, totalCodex, totalCompass, active, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [upstreams]);
 
   const filteredUpstreams = useMemo(() => {
@@ -425,7 +425,7 @@ function App() {
           <VStack gap={2}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
             <Grid columns={{ minWidth: 150, max: 8, repeat: 'fit' }} gap={2}>
-              <Metric label="Total" value={stats.total} />
+              <Metric label="Total" value={stats.total} breakdown={`Codex ${stats.totalCodex} · Compass ${stats.totalCompass}`} />
               <Metric label="Active" value={stats.active} />
               <Metric label="Reauth required" value={stats.reauth} />
               <Metric label="Low quota (<30%)" value={stats.lowQuota} />
@@ -440,7 +440,11 @@ function App() {
             <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
             <Grid columns={{ minWidth: 200, max: 5, repeat: 'fit' }} gap={2}>
               <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
-              <Selector label="Type" isLabelHidden options={FILTER_OPTIONS.type} value={filterType} onChange={setFilterType} />
+              <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
+                <SegmentedControlItem value="all" label="All" />
+                <SegmentedControlItem value="codex" label="Codex" />
+                <SegmentedControlItem value="compass" label="Compass" />
+              </SegmentedControl>
               <Selector label="Status" isLabelHidden options={FILTER_OPTIONS.status} value={filterStatus} onChange={setFilterStatus} />
               <Selector label="Quota" isLabelHidden options={FILTER_OPTIONS.quota} value={filterQuota} onChange={setFilterQuota} />
               <Selector label="Sort" isLabelHidden options={FILTER_OPTIONS.sort} value={filterSort} onChange={setFilterSort} />
@@ -580,12 +584,13 @@ function App() {
   );
 }
 
-function Metric({ label, value }) {
+function Metric({ label, value, breakdown }) {
   return (
     <Card variant="muted" padding={2}>
       <VStack gap={1}>
         <Text type="supporting" color="secondary">{label}</Text>
         <Heading level={3} type="display-3">{value}</Heading>
+        {breakdown && <Text type="supporting" color="secondary">{breakdown}</Text>}
       </VStack>
     </Card>
   );
