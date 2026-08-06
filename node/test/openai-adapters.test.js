@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AdapterError, adaptChatRequest, adaptResponsesRequest } from '../src/openai-adapters.js';
+import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces } from '../src/openai-adapters.js';
 
 function assertAdapterError(fn, { code = 'invalid_request', param }) {
   assert.throws(fn, (error) => {
@@ -160,6 +160,17 @@ test('validates and preserves Responses tools and strict local schemas', () => {
     }]
   });
   assert.equal(inferred.tools[0].parameters.properties.value.type, 'object');
+});
+
+test('maps unique namespace custom tool names but skips ambiguous ones', () => {
+  const tools = [
+    { type: 'namespace', name: 'ops', description: 'Operations', tools: [{ type: 'custom', name: 'shell' }] },
+    { type: 'namespace', name: 'files', description: 'Files', tools: [{ type: 'custom', name: 'dup' }] },
+    { type: 'namespace', name: 'other', description: 'Other', tools: [{ type: 'custom', name: 'dup' }] },
+    { type: 'custom', name: 'flat' }
+  ];
+  assert.deepEqual(customToolNamespaces(tools), { shell: 'ops' });
+  assert.deepEqual(customToolNamespaces(undefined), {});
 });
 
 test('rejects malformed adapter shapes deterministically', () => {
