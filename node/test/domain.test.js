@@ -118,6 +118,16 @@ test('usage settlements with reserved property names persist idempotently', () =
   assert.equal(spendingSummary(restored.spending).settlementCount, 1);
 });
 
+test('bounds the settlement idempotency ledger', () => {
+  const upstream = createUpstream({ type: 'compass', projectId: 'settlement-limit', projectKey: 'key' });
+  setSpendingCap(upstream, 100);
+  for (let index = 0; index < 101; index += 1) {
+    recordUsage(upstream, { attemptId: `attempt-${index}`, startedAt: new Date(Date.now() + index).toISOString(), settledCostMicros: 0, costSource: 'pricing_snapshot' });
+  }
+  assert.equal(spendingSummary(upstream.spending).settlementCount, 100);
+  assert.equal(spendingSummary(upstream.spending).lastActivityAt, Object.values(upstream.spending.settlements).at(-1).startedAt);
+});
+
 test('spending eligibility keeps an upstream available until its cap is reached', () => {
   const nearlyCapped = createUpstream({ type: 'compass', name: 'nearly capped', projectId: 'p1', projectKey: 'k' });
   const fresh = createUpstream({ type: 'compass', name: 'fresh', projectId: 'p2', projectKey: 'k' });
