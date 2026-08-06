@@ -58,3 +58,26 @@ test('opens durable circuits, permits one half-open probe, and resets on success
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('priority list members are routed before unlisted upstreams until their cap is reached', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-routing-priority-'));
+  const store = new Store(dir);
+  try {
+    const { first, second } = upstreams(store);
+    const scope = { model: 'gpt-5.6-sol', routeClass: 'proxy_http' };
+    assert.deepEqual(store.list().map((item) => item.priority), [null, null]);
+    store.completeCircuit(second.id, scope, true, Date.parse('2026-08-04T00:00:00Z'));
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [first.id, second.id]);
+    store.setPriorityList([second.id]);
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [second.id, first.id]);
+    store.addUsage(second.id, { attemptId: 'a1', costSource: 'pricing_snapshot', settledCostMicros: 100 * 1_000_000, startedAt: new Date().toISOString() });
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ...scope }).map((item) => item.id), [first.id]);
+    store.setPriorityList([first.id, second.id]);
+    assert.deepEqual(store.list().map((item) => item.priority), [0, 1]);
+    store.setPriorityList([]);
+    assert.deepEqual(store.list().map((item) => item.priority), [null, null]);
+    assert.throws(() => store.setPriorityList(['missing']), /unknown upstream/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
