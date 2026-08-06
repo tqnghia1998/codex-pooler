@@ -697,14 +697,18 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-'));
   const { store } = configuredStore(dir);
   let targetHeaders;
+  let publicFrame;
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   target.on('connection', (socket, request) => {
     targetHeaders = request.headers;
     socket.on('message', (data) => {
       let frame;
       try { frame = JSON.parse(data); } catch { return socket.send(data); }
-      if (frame.generate === true) socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'public-ws', status: 'completed', output: [] } }));
-      else socket.send(data);
+      if (frame.generate === true) {
+        publicFrame = frame;
+        if (frame.type !== 'response.create') return socket.send(JSON.stringify({ type: 'error', error: { message: "Expected a 'response.create' message as the first websocket event." } }));
+        socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'public-ws', status: 'completed', output: [] } }));
+      } else socket.send(data);
     });
   });
   await new Promise((resolve) => target.once('listening', resolve));
@@ -725,6 +729,7 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
       client.once('error', reject);
     });
     assert.deepEqual(JSON.parse(message), { type: 'response.completed', response: { id: 'public-ws', status: 'completed', output: [] }, sequence_number: 0 });
+    assert.equal(publicFrame.type, 'response.create');
     assert.equal(publicModelsEtag, undefined);
     assert.equal(targetHeaders['openai-beta'], 'responses_websockets=2026-02-06');
     assert.match(targetHeaders.authorization, /^Bearer header\./);
