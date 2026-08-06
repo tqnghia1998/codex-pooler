@@ -65,7 +65,7 @@ const FILTER_OPTIONS = {
   ]
 };
 
-const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '' };
+const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', quotaSource: 'compass' };
 
 function useStoredValue(key, fallback = '') {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? fallback);
@@ -273,7 +273,7 @@ function App() {
   const edit = async (upstream) => {
     editingIdRef.current = upstream.id;
 
-    const initialValues = { ...upstream, authJson: '', projectKey: '' };
+    const initialValues = { ...upstream, authJson: '', projectKey: '', quotaSource: upstream.quotaSource || 'compass' };
     setFormValues(initialValues);
     setFormDialog({ isOpen: true, mode: 'edit', upstream });
 
@@ -570,8 +570,9 @@ function App() {
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
                           <TextInput label="Project ID" value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
                           <TextInput label="Project key" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />
+                          <Selector label="Quota source" options={[{ value: 'compass', label: 'Compass' }, { value: 'aiswitch', label: 'AISwitch' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
                           <GridSpan columns="full">
-                            <Text type="supporting" color="secondary">The account name is derived from the project ID.</Text>
+                            <Text type="supporting" color="secondary">The account name is derived from the project ID. AISwitch quota is managed outside this gateway.</Text>
                           </GridSpan>
                         </Grid>
                       )}
@@ -624,7 +625,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
     : 'Set a cap to make this upstream routable';
   const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
-  const quotaVariant = !quota ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent';
+  const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'accent';
   const trackBgMap = {
     error: 'var(--color-background-red)',
@@ -641,10 +642,10 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
             {tokenRefresh?.status === 'reauth_required' && <Badge label="Reauthentication required" variant="error" />}
           </VStack>
-          <Badge label={upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
+          <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
         </HStack>
         <VStack gap={1}>
-          <HStack justify="between" vAlign="center" gap={2} wrap="wrap"><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : 'Click refresh to read provider quota'}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} wrap="wrap"><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
           <ProgressBar
             label="Quota remaining"
             value={!quota ? 0 : quotaRemaining}
@@ -720,7 +721,7 @@ function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueCh
           <LayoutContent>
             <form id="bulk-cap-form" onSubmit={onSubmit}>
               <VStack gap={4}>
-                <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled.</Text>
+                <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled. AISwitch upstreams are excluded.</Text>
                 <Selector
                   label="Strategy"
                   options={[{ value: 'rules', label: 'Original quota presets' }, { value: 'all', label: 'Set one cap for all upstreams' }, { value: 'cap_reached', label: 'Replace caps already reached' }, { value: 'uncapped', label: 'Set caps on uncapped upstreams' }]}
