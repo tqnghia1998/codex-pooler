@@ -21,7 +21,7 @@ The Node proxy covers the client-visible local compatibility path:
 | OpenAI adapters | Responses and Chat message/content/tool conversion, multimodal input, continuation/replay validation, non-stream Chat output and finish reasons | `test/openai-adapters.test.js`, `test/proxy.test.js` |
 | HTTP ingress and errors | Bounded JSON/compressed bodies, gzip/deflate/zstd, timeouts, OpenAI-shaped errors, provider-detail redaction, valid Anthropic 4xx passthrough | `test/http-ingress.test.js`, `test/gateway-routes.test.js` |
 | Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, authoritative `price_cost_usd`, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js` |
-| Routing | Ordered spend-cap-eligible candidates, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output HTTP failover, durable model/route circuit cooldown and half-open recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/store.test.js` |
+| Routing | Ordered spend-cap-eligible candidates, an optional operator-managed priority list ahead of least-recent-success balancing, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output HTTP failover, durable model/route circuit cooldown and half-open recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/store.test.js` |
 | SSE | Incremental UTF-8/SSE parsing, bounded incomplete events, first-event failover, public Responses sequencing, Chat translation, terminal sanitization, cancellation and usage settlement | `test/proxy.test.js` |
 | Responses WebSocket | Public `response.create` normalization, per-turn routing/session pinning, sequential multi-turn reuse, bounded frames/pending output, pre-output reconnect, sanitized terminals and terminal usage settlement | `test/gateway-routes.test.js` |
 
@@ -71,6 +71,7 @@ POST   /api/upstreams/:id/usage     { "attemptId": "...", "startedAt": "...", "s
                                  or { "costUsd": 1 } instead of settledCostMicros
 GET    /api/upstreams/:id/spending
 GET    /api/upstreams/eligibility?continuationId=...
+PUT    /api/upstreams/priority     { "ids": ["first", "second"] }   # ordered priority list; [] clears it
 POST   /api/spending-caps/bulk
 
 # Model proxy
@@ -107,7 +108,7 @@ The dashboard's bulk-cap dialog starts with the original quota presets: quota le
 
 Create a Codex upstream with `{ "type": "codex", "authJson": "..." }`, or a Compass upstream with `{ "type": "compass", "projectId": "...", "projectKey": "...", "quotaSource": "compass|aiswitch" }`. Use `quotaSource: "aiswitch"` for CQP accounts whose quota is managed in AISwitch; they remain routable based on their spending cap without a gateway quota refresh. Names are derived server-side: masked JWT email for Codex and project ID for Compass. Bulk caps accept either `{ "target": "all|cap_reached|uncapped", "capDollars": 100 }` or quota rules such as `{ "rules": [{ "minQuotaLeft": 1000, "capDollars": 100 }] }`. Bulk updates are sequential, not atomic.
 
-Proxy routing prefers Codex, prefers Compass for `claude-*` models, and routes `/v1/messages` to Compass. Use `x-upstream-type: codex|compass` or `x-upstream-id` to select explicitly. `x-codex-session-id` is an API-key-isolated soft upstream preference and falls back safely when unavailable. Codex Chat Completions are translated to Responses upstream and converted back, while Compass requests are sent directly to `/chat/completions`, `/responses`, or `/messages`.
+Proxy routing prefers Codex, prefers Compass for `claude-*` models, and routes `/v1/messages` to Compass. The priority list is empty by default; upstreams added to it (dashboard **Set priority**, or `PUT /api/upstreams/priority`) are dispatched in list order ahead of unlisted upstreams of the same type, bypassing least-recent-success balancing. Unlisted upstreams are only reached once every listed upstream of that type is filtered out by its spending cap, and keep least-recent-success balancing among themselves. Use `x-upstream-type: codex|compass` or `x-upstream-id` to select explicitly. `x-codex-session-id` is an API-key-isolated soft upstream preference and falls back safely when unavailable. Codex Chat Completions are translated to Responses upstream and converted back, while Compass requests are sent directly to `/chat/completions`, `/responses`, or `/messages`.
 
 Public file creation performs the Codex create → upload → finalize protocol and stores only file metadata locally; file content and signed URLs are not persisted. Audio requests normalize OpenAI multipart fields for Codex transcription. Public image requests translate through the Responses image-generation tool and automatically select an image-capable Codex host model. The proxy binds to `127.0.0.1`. The API key is a single shared key, not a Pool or per-user key system.
 
