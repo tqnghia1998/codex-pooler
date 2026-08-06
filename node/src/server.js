@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
-import { dollarsToMicros } from './domain.js';
+import { dollarsToMicros, isAiswitchUpstream } from './domain.js';
 import { codexRefreshFailureCode, refreshProviderCredentials, refreshQuota } from './providers.js';
 import { handleCompatibilityRequest, isCompatibilityRoute } from './compatibility.js';
 import { HttpError, readRequestBody } from './http-ingress.js';
@@ -176,6 +176,7 @@ export async function refreshAllQuotas(store, options = {}) {
     const upstream = store.get(id);
     if (!upstream) return;
     const credentials = store.credentials(id);
+    if (isAiswitchUpstream(upstream)) return { status: 'skipped', id, source: 'aiswitch' };
     const quota = await refreshQuota(upstream, credentials, {
       ...options,
       saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
@@ -388,6 +389,10 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   if (req.method === 'POST' && action === 'refresh-quota' && parts.length === 4) {
     const upstream = store.get(id);
     if (!upstream) throw notFound();
+    if (isAiswitchUpstream(upstream)) {
+      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'aiswitch' });
+      return;
+    }
     const credentials = store.credentials(id);
     const quota = await refreshQuota(upstream, credentials, {
       fetchImpl,
