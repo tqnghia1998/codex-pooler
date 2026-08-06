@@ -153,6 +153,7 @@ export function createUpstream(input) {
     upstream.name = deriveUpstreamName(type, upstream);
     upstream.accessTokenExpiresAt = auth.accessTokenExpiresAt;
     upstream.credentials = { accessToken: auth.accessToken, refreshToken: auth.refreshToken, idToken: auth.idToken };
+    if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
   } else {
     upstream.projectId = text(input.projectId);
     if (!upstream.projectId) throw new Error('projectId is required');
@@ -160,6 +161,7 @@ export function createUpstream(input) {
     if (!projectKey) throw new Error('projectKey is required');
     upstream.name = deriveUpstreamName(type, upstream);
     upstream.credentials = { projectKey };
+    if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
   }
 
   return upstream;
@@ -192,6 +194,7 @@ export function updateUpstream(upstream, input) {
     }
     if (input.projectKey !== undefined && text(input.projectKey)) upstream.credentials.projectKey = text(input.projectKey);
   }
+  if (input.metadata !== undefined && typeof input.metadata === 'object') upstream.metadata = input.metadata;
 
   upstream.name = deriveUpstreamName(upstream.type, upstream);
   upstream.updatedAt = new Date().toISOString();
@@ -227,6 +230,16 @@ export function spendingSummary(spending = {}) {
   const percentUsed = capCredits > 0 ? (spentCredits / capCredits) * 100 : null;
   const status = capCredits <= 0 ? 'not_set' : spentCredits >= capCredits ? 'reached' : 'normal';
 
+  const settlements = spending.settlements || {};
+  let lastActivityAt = null;
+  for (const s of Object.values(settlements)) {
+    if (s && s.startedAt) {
+      if (!lastActivityAt || new Date(s.startedAt) > new Date(lastActivityAt)) {
+        lastActivityAt = s.startedAt;
+      }
+    }
+  }
+
   return {
     capCredits,
     capDollars: creditsToDollars(capCredits),
@@ -240,7 +253,8 @@ export function spendingSummary(spending = {}) {
     routingStatus: status,
     continuationStatus: capCredits <= 0 ? 'spend_cap_unset' : spentCredits < capCredits * 1.25 ? 'allowed' : 'spend_cap_reached',
     capStartedAt: spending.capStartedAt || null,
-    settlementCount: Object.keys(spending.settlements || {}).length
+    lastActivityAt,
+    settlementCount: Object.keys(settlements).length
   };
 }
 
@@ -460,8 +474,11 @@ export function publicUpstream(upstream) {
     tokenRefresh: publicTokenRefresh(upstream.tokenRefresh),
     projectId: upstream.projectId || null,
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
+    metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
     spending,
+    updatedAt: upstream.updatedAt || null,
+    lastSuccessfulAt: upstream.lastSuccessfulAt || null,
     eligibility: spendingEligibility(upstream).status
   };
 }
