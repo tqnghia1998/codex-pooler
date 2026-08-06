@@ -438,13 +438,15 @@ function App() {
 
           <VStack gap={2}>
             <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
-            <Grid columns={{ minWidth: 200, max: 5, repeat: 'fit' }} gap={2}>
-              <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
+            <HStack justify="start">
               <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
                 <SegmentedControlItem value="all" label="All" />
                 <SegmentedControlItem value="codex" label="Codex" />
                 <SegmentedControlItem value="compass" label="Compass" />
               </SegmentedControl>
+            </HStack>
+            <Grid columns={{ minWidth: 200, max: 5, repeat: 'fit' }} gap={2}>
+              <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
               <Selector label="Status" isLabelHidden options={FILTER_OPTIONS.status} value={filterStatus} onChange={setFilterStatus} />
               <Selector label="Quota" isLabelHidden options={FILTER_OPTIONS.quota} value={filterQuota} onChange={setFilterQuota} />
               <Selector label="Sort" isLabelHidden options={FILTER_OPTIONS.sort} value={filterSort} onChange={setFilterSort} />
@@ -589,8 +591,10 @@ function Metric({ label, value, breakdown }) {
     <Card variant="muted" padding={2}>
       <VStack gap={1}>
         <Text type="supporting" color="secondary">{label}</Text>
-        <Heading level={3} type="display-3">{value}</Heading>
-        {breakdown && <Text type="supporting" color="secondary">{breakdown}</Text>}
+        <HStack gap={2} align="end">
+          <Heading level={3} type="display-3">{value}</Heading>
+          {breakdown && <Text type="supporting" color="secondary">{breakdown}</Text>}
+        </HStack>
       </VStack>
     </Card>
   );
