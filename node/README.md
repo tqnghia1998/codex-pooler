@@ -32,7 +32,7 @@ The Node proxy covers the client-visible local compatibility path:
 - Public Responses WebSocket turns queue in-process while an active turn terminates. A process restart loses queued and in-flight socket state.
 - Credential preparation and refresh failures stay on the selected account instead of crossing accounts. Failover is allowed only after a refresh succeeds but that same account is still rejected, and only when the request is not explicitly or session pinned.
 - Pricing is a small static snapshot, not the Elixir catalog/database sync. Unknown or ambiguous models remain unpriced unless the provider reports `price_cost_usd`.
-- Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility.
+- Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility. `POST /v1/messages/count_tokens` is intentionally unsupported: Compass does not serve it and no local Claude tokenizer exists, so clients fall back to their own estimation.
 - The encrypted local SQLite store is suitable for one local process, not concurrent replicas or production high-availability storage.
 
 ## Run
