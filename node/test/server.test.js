@@ -284,3 +284,46 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('serves the upstream priority list API', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-priority-http-'));
+  const { server, base } = await runningServer(new Store(dir));
+  const create = async (projectId) => (await request(base, '/api/upstreams', {
+    method: 'POST',
+    body: JSON.stringify({ type: 'compass', projectId, projectKey: 'secret' })
+  })).data.upstream.id;
+  const priorities = async () => (await request(base, '/api/upstreams')).data.upstreams.map((upstream) => [upstream.name, upstream.priority]);
+  try {
+    const first = await create('first');
+    const second = await create('second');
+    assert.deepEqual(await priorities(), [['first', null], ['second', null]]);
+
+    const listed = await request(base, '/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids: [second, first] }) });
+    assert.equal(listed.response.status, 200);
+    assert.deepEqual(listed.data.upstreams.map((upstream) => [upstream.name, upstream.priority]), [['second', 0], ['first', 1]]);
+    assert.deepEqual(await priorities(), [['first', 1], ['second', 0]]);
+
+    const partial = await request(base, '/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids: [first] }) });
+    assert.deepEqual(partial.data.upstreams.map((upstream) => upstream.name), ['first']);
+    assert.deepEqual(await priorities(), [['first', 0], ['second', null]]);
+
+    const cleared = await request(base, '/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids: [] }) });
+    assert.equal(cleared.response.status, 200);
+    assert.deepEqual(cleared.data.upstreams, []);
+    assert.deepEqual(await priorities(), [['first', null], ['second', null]]);
+
+    const unknown = await request(base, '/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids: ['nope'] }) });
+    assert.equal(unknown.response.status, 400);
+    assert.equal(unknown.data.error.code, 'invalid_request');
+    assert.match(unknown.data.error.message, /unknown upstream nope/);
+
+    const notArray = await request(base, '/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids: 'first' }) });
+    assert.equal(notArray.response.status, 400);
+    assert.match(notArray.data.error.message, /ids must be an array/);
+    assert.deepEqual(await priorities(), [['first', null], ['second', null]]);
+
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

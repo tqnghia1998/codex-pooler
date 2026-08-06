@@ -139,6 +139,7 @@ export function createUpstream(input) {
     quota: null,
     quotaSource,
     spending: newSpending(),
+    priority: null,
     credentials: {},
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString()
@@ -492,6 +493,7 @@ export function publicUpstream(upstream) {
   const spending = spendingSummary(upstream.spending);
   return {
     id: upstream.id,
+    priority: Number.isInteger(upstream.priority) ? upstream.priority : null,
     type: upstream.type,
     name: deriveUpstreamName(upstream.type, upstream),
     accountId: upstream.accountId || null,

@@ -200,6 +200,22 @@ export class Store {
     return publicUpstream(upstream);
   }
 
+  setPriorityList(ids) {
+    if (!Array.isArray(ids)) throw new Error('ids must be an array');
+    const db = this.load();
+    const ordered = [];
+    for (const id of ids) {
+      const upstream = db.upstreams.find((item) => item.id === id);
+      if (!upstream) throw new Error(`unknown upstream ${id}`);
+      if (!ordered.includes(upstream)) ordered.push(upstream);
+    }
+    for (const upstream of db.upstreams) upstream.priority = null;
+    ordered.forEach((upstream, index) => { upstream.priority = index; });
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return ordered.map(publicUpstream);
+  }
+
   remove(id) {
     const db = this.load();
     const index = db.upstreams.findIndex((upstream) => upstream.id === id);
@@ -807,7 +823,8 @@ function normalizeRouting(value = {}) {
 }
 
 function leastRecentlySuccessful(upstreams) {
-  return [...upstreams].sort((left, right) => (Date.parse(left.lastSuccessfulAt) || 0) - (Date.parse(right.lastSuccessfulAt) || 0));
+  const rank = (upstream) => Number.isInteger(upstream.priority) ? upstream.priority : Infinity;
+  return [...upstreams].sort((left, right) => rank(left) - rank(right) || (Date.parse(left.lastSuccessfulAt) || 0) - (Date.parse(right.lastSuccessfulAt) || 0));
 }
 
 function candidateEligible(upstream, model, requirements) {
