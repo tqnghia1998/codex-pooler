@@ -264,7 +264,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       store.completeCircuit(upstream.id, scope, true);
       return { upstream, attemptId, startedAt, response, collected };
     }
-    if (sourcePath !== '/v1/responses/compact' && await retryableUpstreamResponse(response)) {
+    if (sourcePath !== '/v1/responses/compact' && await retryableUpstreamResponse(response, upstream)) {
       await readBoundedResponse(response);
       store.recordCircuitFailure(upstream.id, scope);
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_retryable_response', responseStatusCode: response.status });
@@ -276,7 +276,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
   return null;
 }
 
-async function retryableUpstreamResponse(response) {
+async function retryableUpstreamResponse(response, upstream) {
+  if (upstream.type === 'compass' && (response.status === 401 || response.status === 403)) return true;
   if (response.status === 429 || response.status >= 500) return true;
   if (![400, 404, 422].includes(response.status)) return false;
   const body = parseJson(await readBoundedResponse(response.clone()));
