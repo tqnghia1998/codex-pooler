@@ -47,20 +47,22 @@ test('keeps routing within one loaded database snapshot', () => {
   }
 });
 
-test('bounds completed gateway history while retaining in-progress requests', () => {
+test('keeps only bounded terminal failure diagnostics on disk', () => {
   const { dir, store } = tempStore();
   try {
     const db = store.load();
-    db.gatewayRequests = Array.from({ length: 1_002 }, (_, index) => ({ id: `done-${index}`, completedAt: '2026-01-01T00:00:00.000Z' }));
-    db.gatewayRequests.push({ id: 'active', completedAt: null });
-    db.gatewayAttempts = db.gatewayRequests.map(({ id }) => ({ id: `attempt-${id}`, requestId: id }));
-    db.gatewayUsage = db.gatewayAttempts.map(({ id }) => ({ attemptId: id }));
+    const day = new Date().toISOString().slice(0, 10);
+    db.gatewayRequests = Array.from({ length: 102 }, (_, index) => ({ id: `failed-${index}`, status: 'failed', completedAt: '2026-01-01T00:00:00.000Z' }));
+    db.gatewayRequests.push({ id: 'active', status: 'in_progress', completedAt: null });
+    db.gatewayAttempts = db.gatewayRequests.map(({ id }) => ({ id: `attempt-${id}`, requestId: id, status: 'failed' }));
+    db.gatewayUsage = [{ scopeId: 'default', apiKeyId: 'key', attemptId: 'attempt-legacy', startedAt: `${day}T12:00:00.000Z`, usage: { inputTokens: 2, outputTokens: 1 }, settledCostMicros: 400 }];
     store.save(db);
-    const reopened = new Store(dir).load();
-    assert.equal(reopened.gatewayRequests.length, 1_001);
-    assert.equal(reopened.gatewayRequests.at(-1).id, 'active');
-    assert.equal(reopened.gatewayAttempts.length, 1_001);
-    assert.equal(reopened.gatewayUsage.length, 1_001);
+    const reopened = new Store(dir);
+    assert.equal(reopened.load().gatewayRequests.length, 100);
+    assert.equal(reopened.load().gatewayRequests[0].id, 'failed-2');
+    assert.equal(reopened.load().gatewayAttempts.length, 100);
+    assert.deepEqual(reopened.load().gatewayUsage, [{ scopeId: 'default', apiKeyId: 'key', day, requestCount: 1, totalTokens: 3, cachedInputTokens: 0, totalCostMicros: 400, priced: true, attemptIds: ['attempt-legacy'] }]);
+    assert.equal(reopened.gatewayRequest('active'), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
