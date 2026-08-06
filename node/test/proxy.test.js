@@ -422,6 +422,29 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
   }
 });
 
+test('fails over Compass after an invalid project key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-auth-failover-'));
+  const store = new Store(dir);
+  const first = store.create({ type: 'compass', projectId: 'first-project', projectKey: 'first-secret' });
+  const second = store.create({ type: 'compass', projectId: 'second-project', projectKey: 'second-secret' });
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const calls = [];
+  const { server, base } = await runningServer(store, async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (calls.length === 1) return new Response(JSON.stringify({ retcode: 40101, message: 'API key not found' }), { status: 401 });
+    return new Response(JSON.stringify({ id: 'compass-ok', content: [], model: 'claude-sonnet-4-6' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const result = await request(base, '/v1/messages', { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(calls, ['Bearer first-secret', 'Bearer second-secret']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('redacts provider 5xx bodies, passes valid Anthropic 4xx, and rejects failed Codex SSE', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-errors-'));
   const store = new Store(dir);
