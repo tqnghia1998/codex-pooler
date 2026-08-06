@@ -162,6 +162,12 @@ export class Store {
     const upstream = createUpstream(input);
     const db = this.load();
     activeScope(db, scopeId);
+
+    const isDuplicate = db.upstreams.some((item) => (item.scopeId || DEFAULT_SCOPE_ID) === scopeId && item.type === upstream.type && (upstream.type === 'codex'
+      ? (upstream.accountId && item.accountId === upstream.accountId) || (upstream.email && item.email === upstream.email)
+      : item.projectId === upstream.projectId));
+    if (isDuplicate) throw new Error(`${upstream.type} upstream already exists`);
+
     upstream.scopeId = scopeId;
     upstream.routing = normalizeRouting(input.routing);
     upstream.credentials = encryptCredentials(upstream.credentials, this.key);

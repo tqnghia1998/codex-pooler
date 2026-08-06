@@ -95,6 +95,25 @@ test('persists file metadata and upstream session pins', () => {
   }
 });
 
+test('prevents creating duplicate upstreams within the same scope', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create({ type: 'compass', name: 'First', projectId: 'p1', projectKey: 'k1' });
+    assert.throws(
+      () => store.create({ type: 'compass', name: 'Duplicate', projectId: 'p1', projectKey: 'k2' }),
+      /compass upstream already exists/
+    );
+
+    store.create({ type: 'codex', accountId: 'acc1', email: 'user@example.com', accessToken: 'token1' });
+    assert.throws(
+      () => store.create({ type: 'codex', accountId: 'acc1', email: 'user@example.com', accessToken: 'token2' }),
+      /codex upstream already exists/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sets caps in dollars, records priced usage, and applies bulk quota rules', () => {
   const { dir, store } = tempStore();
   try {
