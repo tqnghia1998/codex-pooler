@@ -28,7 +28,9 @@ const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CIRCUIT_COOLDOWN_MS = 60_000;
 const CIRCUIT_LIMIT = 100;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
-const GATEWAY_HISTORY_LIMIT = 1_000;
+const GATEWAY_ERROR_HISTORY_LIMIT = 100;
+const GATEWAY_USAGE_DAYS = 90;
+const GATEWAY_USAGE_ATTEMPT_LIMIT = 100;
 export const DEFAULT_SCOPE_ID = 'default';
 
 export class Store {
@@ -309,8 +311,7 @@ export class Store {
   recordGatewayUsage({ scopeId = DEFAULT_SCOPE_ID, apiKeyId = null, attemptId, startedAt, usage = null, settledCostMicros = null } = {}) {
     if (!attemptId) return;
     const db = this.load();
-    upsertGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros });
-    this.save(db);
+    if (addGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros })) this.save(db);
   }
 
   reserveGatewayRequest({ scopeId = DEFAULT_SCOPE_ID, apiKeyId, endpoint, model = '', transport = 'http_json', admittedAt = new Date().toISOString() } = {}) {
@@ -324,7 +325,6 @@ export class Store {
       responseStatusCode: null, lastErrorCode: null, retryCount: 0
     };
     db.gatewayRequests.push(request);
-    this.save(db);
     return { ...request };
   }
 
@@ -340,7 +340,6 @@ export class Store {
       responseStatusCode: null, errorCode: null
     };
     db.gatewayAttempts.push(attempt);
-    this.save(db);
     return { ...attempt };
   }
 
@@ -352,7 +351,6 @@ export class Store {
     Object.assign(attempt, { status: 'retryable_failed', retryable: true, responseStatusCode, errorCode, completedAt });
     request.status = 'in_progress';
     request.retryCount += 1;
-    this.save(db);
     return { ...attempt };
   }
 
@@ -370,13 +368,15 @@ export class Store {
       responseStatusCode, lastErrorCode: errorCode, completedAt
     });
     if (status === 'succeeded') {
-      upsertGatewayUsage(db, { scopeId: request.scopeId, apiKeyId: request.apiKeyId, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
+      addGatewayUsage(db, { scopeId: request.scopeId, apiKeyId: request.apiKeyId, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
       if (Number.isSafeInteger(settledCostMicros)) {
         const upstream = findOrThrow(db, attempt.upstreamId);
         ensureSpending(upstream);
         recordUsage(upstream, { attemptId: attempt.id, startedAt: attempt.startedAt, settledCostMicros, costSource });
       }
+      deleteGatewayRequest(db, requestId);
     }
+    pruneGatewayHistory(db, true);
     this.save(db);
     this.notifyUpstreamsChange();
     return { request: { ...request }, attempt: attempt && { ...attempt } };
@@ -394,13 +394,13 @@ export class Store {
   gatewayUsage(scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
     const db = this.load();
     const today = new Date().toISOString().slice(0, 10);
-    const entries = db.gatewayUsage.filter((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && String(item.startedAt).slice(0, 10) === today);
-    const totals = entries.reduce((result, { usage, settledCostMicros }) => ({
-      request_count: result.request_count + 1,
-      total_tokens: result.total_tokens + (usage?.totalTokens ?? (usage?.inputTokens || 0) + (usage?.outputTokens || 0)),
-      cached_input_tokens: result.cached_input_tokens + (usage?.cachedInputTokens || 0),
-      total_cost_micros: result.total_cost_micros + (Number.isSafeInteger(settledCostMicros) ? settledCostMicros : 0),
-      priced: result.priced || Number.isSafeInteger(settledCostMicros)
+    const entries = db.gatewayUsage.filter((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && item.day === today);
+    const totals = entries.reduce((result, item) => ({
+      request_count: result.request_count + item.requestCount,
+      total_tokens: result.total_tokens + item.totalTokens,
+      cached_input_tokens: result.cached_input_tokens + item.cachedInputTokens,
+      total_cost_micros: result.total_cost_micros + item.totalCostMicros,
+      priced: result.priced || item.priced
     }), { request_count: 0, total_tokens: 0, cached_input_tokens: 0, total_cost_micros: 0, priced: false });
     const upstream_limits = dbUpstreamLimits(db.upstreams, scopeId);
     return { request_count: totals.request_count, total_tokens: totals.total_tokens, cached_input_tokens: totals.cached_input_tokens, total_cost_usd: totals.total_cost_micros / 1_000_000, total_cost_status: totals.priced ? 'priced' : 'unpriced', limits: [], upstream_limits };
@@ -482,6 +482,7 @@ export class Store {
     if (success) {
       delete circuits[key];
       upstream.lastSuccessfulAt = new Date(now).toISOString();
+      return;
     } else {
       const state = circuits[key] || {};
       const failures = Math.max(0, Number(state.failures) || 0) + 1;
@@ -604,6 +605,8 @@ export class Store {
       parsed.gatewayAttempts ||= [];
       parsed.responsePins ||= {};
       if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
+      parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
+      pruneGatewayHistory(parsed);
       if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions) || !parsed.responsePins || typeof parsed.responsePins !== 'object' || Array.isArray(parsed.responsePins)) throw new Error('invalid session database');
       if (!parsed.scopes.some((scope) => scope.id === DEFAULT_SCOPE_ID)) parsed.scopes.push({ id: DEFAULT_SCOPE_ID, status: 'active', models: [] });
       for (const scope of parsed.scopes) scope.models = normalizeModels(scope.models || []);
@@ -622,11 +625,13 @@ export class Store {
   }
 
   save(db) {
-    pruneGatewayHistory(db);
     this.db = db;
+    const persisted = structuredClone(db);
+    persisted.gatewayUsage = compactGatewayUsage(persisted.gatewayUsage);
+    pruneGatewayHistory(persisted);
     const tempPath = `${this.dbPath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
     try {
-      writeFileSync(tempPath, `${JSON.stringify(db, null, 2)}\n`, { mode: 0o600 });
+      writeFileSync(tempPath, `${JSON.stringify(persisted, null, 2)}\n`, { mode: 0o600 });
       chmodSync(tempPath, 0o600);
       renameSync(tempPath, this.dbPath);
     } finally {
@@ -670,27 +675,57 @@ function eligibilityFromUpstreams(upstreams, continuationId) {
   };
 }
 
-function pruneGatewayHistory(db) {
-  // ponytail: JSON-store history is bounded; use a database if 1,000 retained requests is insufficient.
-  const completed = db.gatewayRequests.filter(({ completedAt }) => completedAt);
-  if (completed.length <= GATEWAY_HISTORY_LIMIT) return;
-  const requestIds = new Set([
-    ...db.gatewayRequests.filter(({ completedAt }) => !completedAt).map(({ id }) => id),
-    ...completed.slice(-GATEWAY_HISTORY_LIMIT).map(({ id }) => id)
-  ]);
-  const attempts = db.gatewayAttempts.filter(({ requestId }) => requestIds.has(requestId));
-  const attemptIds = new Set(attempts.map(({ id }) => id));
-  db.gatewayRequests = db.gatewayRequests.filter(({ id }) => requestIds.has(id));
-  db.gatewayAttempts = attempts;
-  db.gatewayUsage = db.gatewayUsage.filter(({ attemptId }) => attemptIds.has(attemptId));
+function pruneGatewayHistory(db, keepActive = false) {
+  // ponytail: keep only bounded terminal failures; use SQLite when this diagnostic window is insufficient.
+  const requests = [
+    ...(keepActive ? db.gatewayRequests.filter(({ completedAt }) => !completedAt) : []),
+    ...db.gatewayRequests.filter((item) => item.status === 'failed' && item.completedAt).slice(-GATEWAY_ERROR_HISTORY_LIMIT)
+  ];
+  const requestIds = new Set(requests.map(({ id }) => id));
+  db.gatewayRequests = requests;
+  db.gatewayAttempts = db.gatewayAttempts.filter(({ requestId, status }) => requestIds.has(requestId) && (keepActive || !['in_progress', 'succeeded'].includes(status)));
 }
 
-function upsertGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros }) {
-  db.gatewayUsage ||= [];
-  const entry = { scopeId, apiKeyId, attemptId, startedAt: startedAt || new Date().toISOString(), usage, settledCostMicros };
-  const index = db.gatewayUsage.findIndex((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && item.attemptId === attemptId);
-  if (index === -1) db.gatewayUsage.push(entry);
-  else db.gatewayUsage[index] = entry;
+function deleteGatewayRequest(db, requestId) {
+  db.gatewayRequests = db.gatewayRequests.filter((item) => item.id !== requestId);
+  db.gatewayAttempts = db.gatewayAttempts.filter((item) => item.requestId !== requestId);
+}
+
+function compactGatewayUsage(entries) {
+  const earliestDay = new Date(Date.now() - GATEWAY_USAGE_DAYS * 24 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+  const compacted = new Map();
+  for (const item of entries || []) {
+    const day = String(item.day || item.startedAt || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day < earliestDay) continue;
+    const key = `${item.scopeId || DEFAULT_SCOPE_ID}\u0000${item.apiKeyId || ''}\u0000${day}`;
+    const entry = compacted.get(key) || { scopeId: item.scopeId || DEFAULT_SCOPE_ID, apiKeyId: item.apiKeyId || null, day, requestCount: 0, totalTokens: 0, cachedInputTokens: 0, totalCostMicros: 0, priced: false, attemptIds: [] };
+    const usage = item.usage || item;
+    entry.requestCount += Number.isSafeInteger(item.requestCount) ? item.requestCount : 1;
+    entry.totalTokens += Number.isSafeInteger(item.totalTokens) ? item.totalTokens : usage?.totalTokens ?? (usage?.inputTokens || 0) + (usage?.outputTokens || 0);
+    entry.cachedInputTokens += Number.isSafeInteger(item.cachedInputTokens) ? item.cachedInputTokens : usage?.cachedInputTokens || 0;
+    entry.totalCostMicros += Number.isSafeInteger(item.totalCostMicros) ? item.totalCostMicros : Number.isSafeInteger(item.settledCostMicros) ? item.settledCostMicros : 0;
+    entry.priced ||= item.priced || Number.isSafeInteger(item.settledCostMicros);
+    entry.attemptIds = [...new Set([...entry.attemptIds, ...(item.attemptIds || []), ...(item.attemptId ? [item.attemptId] : [])])].slice(-GATEWAY_USAGE_ATTEMPT_LIMIT);
+    compacted.set(key, entry);
+  }
+  return [...compacted.values()];
+}
+
+function addGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros }) {
+  db.gatewayUsage = compactGatewayUsage(db.gatewayUsage);
+  const day = String(startedAt || new Date().toISOString()).slice(0, 10);
+  const entry = db.gatewayUsage.find((item) => item.scopeId === scopeId && item.apiKeyId === apiKeyId && item.day === day)
+    || (db.gatewayUsage[db.gatewayUsage.length] = { scopeId, apiKeyId, day, requestCount: 0, totalTokens: 0, cachedInputTokens: 0, totalCostMicros: 0, priced: false, attemptIds: [] });
+  if (entry.attemptIds.includes(attemptId)) return false;
+  entry.attemptIds = [...entry.attemptIds, attemptId].slice(-GATEWAY_USAGE_ATTEMPT_LIMIT);
+  entry.requestCount += 1;
+  entry.totalTokens += usage?.totalTokens ?? (usage?.inputTokens || 0) + (usage?.outputTokens || 0);
+  entry.cachedInputTokens += usage?.cachedInputTokens || 0;
+  if (Number.isSafeInteger(settledCostMicros)) {
+    entry.totalCostMicros += settledCostMicros;
+    entry.priced = true;
+  }
+  return true;
 }
 
 function findGatewayRequest(db, requestId) {
