@@ -6,6 +6,7 @@ export const SUPPORTED_TYPES = new Set(['codex', 'compass']);
 export const CREDITS_PER_DOLLAR = 25;
 export const MICROS_PER_CREDIT = 40_000;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
+const SETTLEMENT_LIMIT = 100;
 
 export function text(value) {
   return typeof value === 'string' ? value.trim() : '';
@@ -223,6 +224,7 @@ export function ensureSpending(upstream) {
   if (!Number.isSafeInteger(upstream.spending.spentCostMicros)) {
     upstream.spending.spentCostMicros = Math.max(0, Math.round((Number(upstream.spending.spentCredits) || 0) * MICROS_PER_CREDIT));
   }
+  pruneSettlements(upstream.spending);
   return upstream.spending;
 }
 
@@ -236,7 +238,7 @@ export function spendingSummary(spending = {}) {
   const status = capCredits <= 0 ? 'not_set' : spentCredits >= capCredits ? 'reached' : 'normal';
 
   const settlements = spending.settlements || {};
-  let lastActivityAt = null;
+  let lastActivityAt = spending.lastActivityAt || null;
   for (const s of Object.values(settlements)) {
     if (s && s.startedAt) {
       if (!lastActivityAt || new Date(s.startedAt) > new Date(lastActivityAt)) {
@@ -310,6 +312,8 @@ export function recordUsage(upstream, input) {
     configurable: true,
     writable: true
   });
+  spending.lastActivityAt = effectiveStartedAt;
+  pruneSettlements(spending);
   upstream.updatedAt = new Date().toISOString();
   return {
     attemptId,
@@ -319,6 +323,12 @@ export function recordUsage(upstream, input) {
     appliedDeltaMicros,
     counted
   };
+}
+
+function pruneSettlements(spending) {
+  // ponytail: retain recent settlement IDs for duplicate delivery; use SQLite if this idempotency window is too short.
+  const overflow = Object.entries(spending.settlements).sort(([, a], [, b]) => Date.parse(a.startedAt || 0) - Date.parse(b.startedAt || 0)).slice(0, Math.max(0, Object.keys(spending.settlements).length - SETTLEMENT_LIMIT));
+  for (const [id] of overflow) delete spending.settlements[id];
 }
 
 function parseDate(value, label) {
