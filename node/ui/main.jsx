@@ -23,7 +23,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Theme } from '@astryxdesign/core/theme';
 import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
-import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
+import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
 
 const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 1000, capDollars: 100 },
@@ -219,7 +219,7 @@ function App() {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { total: upstreams.length, totalCodex, totalCompass, active, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { totalCodex, totalCompass, active, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [upstreams]);
 
   const filteredUpstreams = useMemo(() => {
@@ -425,7 +425,8 @@ function App() {
           <VStack gap={2}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
             <Grid columns={{ minWidth: 150, max: 8, repeat: 'fit' }} gap={2}>
-              <Metric label="Total" value={stats.total} breakdown={`Codex ${stats.totalCodex} · Compass ${stats.totalCompass}`} />
+              <Metric label="Codex total" value={stats.totalCodex} />
+              <Metric label="Compass total" value={stats.totalCompass} />
               <Metric label="Active" value={stats.active} />
               <Metric label="Reauth required" value={stats.reauth} />
               <Metric label="Low quota (<30%)" value={stats.lowQuota} />
@@ -438,19 +439,27 @@ function App() {
 
           <VStack gap={2}>
             <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
-            <HStack justify="start">
-              <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
-                <SegmentedControlItem value="all" label="All" />
-                <SegmentedControlItem value="codex" label="Codex" />
-                <SegmentedControlItem value="compass" label="Compass" />
-              </SegmentedControl>
+            <HStack gap={2} wrap="wrap" vAlign="start">
+              <StackItem size="static">
+                <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
+                  <SegmentedControlItem value="all" label="All" />
+                  <SegmentedControlItem value="codex" label="Codex" />
+                  <SegmentedControlItem value="compass" label="Compass" />
+                </SegmentedControl>
+              </StackItem>
+              <StackItem size="fill">
+                <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
+              </StackItem>
+              <StackItem size="fill">
+                <Selector label="Status" isLabelHidden options={FILTER_OPTIONS.status} value={filterStatus} onChange={setFilterStatus} />
+              </StackItem>
+              <StackItem size="fill">
+                <Selector label="Quota" isLabelHidden options={FILTER_OPTIONS.quota} value={filterQuota} onChange={setFilterQuota} />
+              </StackItem>
+              <StackItem size="fill">
+                <Selector label="Sort" isLabelHidden options={FILTER_OPTIONS.sort} value={filterSort} onChange={setFilterSort} />
+              </StackItem>
             </HStack>
-            <Grid columns={{ minWidth: 200, max: 5, repeat: 'fit' }} gap={2}>
-              <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
-              <Selector label="Status" isLabelHidden options={FILTER_OPTIONS.status} value={filterStatus} onChange={setFilterStatus} />
-              <Selector label="Quota" isLabelHidden options={FILTER_OPTIONS.quota} value={filterQuota} onChange={setFilterQuota} />
-              <Selector label="Sort" isLabelHidden options={FILTER_OPTIONS.sort} value={filterSort} onChange={setFilterSort} />
-            </Grid>
           </VStack>
 
           <VStack gap={2}>
@@ -586,15 +595,12 @@ function App() {
   );
 }
 
-function Metric({ label, value, breakdown }) {
+function Metric({ label, value }) {
   return (
     <Card variant="muted" padding={2}>
       <VStack gap={1}>
         <Text type="supporting" color="secondary">{label}</Text>
-        <HStack gap={2} align="end">
-          <Heading level={3} type="display-3">{value}</Heading>
-          {breakdown && <Text type="supporting" color="secondary">{breakdown}</Text>}
-        </HStack>
+        <Heading level={3} type="display-3">{value}</Heading>
       </VStack>
     </Card>
   );
