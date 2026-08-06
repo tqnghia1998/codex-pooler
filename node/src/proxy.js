@@ -1413,7 +1413,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           targetSocket = undefined;
           void ensureProviderCredentials(upstream, credentials, { fetchImpl, saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt) }).then(connect).catch(() => failActiveTurn('upstream_credentials_failed', 'No eligible Codex upstream'));
         }
-        data = Buffer.from(JSON.stringify({ ...publicResponsesPayload(payload), generate: true }));
+        data = Buffer.from(JSON.stringify({ type: 'response.create', ...publicResponsesPayload(payload), generate: true }));
         publicTurnActive = true;
         publicSequence = 0;
         publicOutput = false;
