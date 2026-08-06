@@ -24,7 +24,7 @@ export function retryableFirstSseEvent(event) {
   return RETRY_CODES.has(string(error.code) || string(error.type) || incompleteReason(event));
 }
 
-export function createPublicResponsesState() { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '' }; }
+export function createPublicResponsesState(customToolNamespaces = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces }; }
 
 export function normalizePublicResponsesEvent(source, state) {
   if (state.terminal || !plain(source)) return [];
@@ -41,8 +41,8 @@ export function normalizePublicResponsesEvent(source, state) {
     state.terminal = true;
     return [...result, encode(failed({}, 'response_sequence_exhausted'), MAX_SEQUENCE)];
   }
-  const projected = terminal === 'failed' ? failed(event) : project(event, terminal);
-  repairItem(projected);
+  const projected = terminal === 'failed' ? failed(event) : project(event, terminal, state.customToolNamespaces);
+  repairItem(projected, state.customToolNamespaces);
   state.sequence = sequence;
   result.push(encode(projected, sequence));
   if (projected.type === 'response.created') state.created = true;
@@ -107,11 +107,20 @@ function terminalKind(event) {
 function failedIncomplete(event) { const response = event.response || {}; return event.type === 'response.incomplete' && (response.status === 'failed' || [event.error, response.error, event.status_details?.error, response.status_details?.error].some(plain) || FAILURE_REASONS.has(incompleteReason(event))); }
 function nextSequence(incoming, state, terminal) { const value = Number.isSafeInteger(incoming) && incoming >= 0 && incoming > state.sequence ? incoming : state.sequence + 1; return value > MAX_SEQUENCE || !terminal && value === MAX_SEQUENCE ? 'overflow' : value; }
 function synthetic(state) { state.sequence += 1; return state.sequence; }
-function project(event, terminal) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index })); return value; }
+function project(event, terminal, namespaces) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index }, namespaces)); return value; }
 function failed(event, reason = '') { const response = plain(event.response) ? event.response : {}; const usage = safeUsage(response.usage || event.usage); return { type: 'response.failed', response: { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'failed', error: safeError(event), ...(reason || incompleteReason(event) ? { incomplete_details: { reason: reason || incompleteReason(event) } } : {}), model: 'unknown', output: [], output_text: '', instructions: null, metadata: null, ...(usage ? { usage } : {}), temperature: null, top_p: null, parallel_tool_calls: false, tool_choice: 'auto', tools: [] } }; }
 function safeError(_event) { return { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null }; }
 function safeUsage(usage) { if (!plain(usage)) return null; const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0; const input = number(usage.input_tokens ?? usage.prompt_tokens); const output = number(usage.output_tokens ?? usage.completion_tokens); return { input_tokens: input, output_tokens: output, total_tokens: Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens : input + output }; }
-function repairItem(event) { const item = event.item; if (!plain(item) || string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
+function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; if (item.type === 'custom_tool_call' && (item.namespace === undefined || item.namespace === null) && namespaces[item.name]) item.namespace = namespaces[item.name]; if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
+
+// Applies the same custom_tool_call namespace restoration to a fully-collected
+// non-streaming Responses body (the SSE path repairs items via repairItem/project).
+export function restoreCustomToolCallNamespaces(response, namespaces = {}) {
+  if (plain(response) && Array.isArray(response.output)) {
+    for (const item of response.output) repairItem({ item }, namespaces);
+  }
+  return response;
+}
 function lifecycle(response) { return { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'in_progress' }; }
 function terminalText(response) { for (const item of response?.output || []) for (const part of item?.content || []) if (typeof part?.text === 'string' && part.text) return part.text; return ''; }
 function encode(event, sequence) { return `event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number: sequence })}\n\n`; }
