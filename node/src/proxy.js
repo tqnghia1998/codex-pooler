@@ -47,6 +47,7 @@ const BACKEND_METADATA_HEADERS = [
   'x-openai-subagent'
 ];
 const UNSUPPORTED_CODEX_RESPONSE_FIELDS = new Set(['max_output_tokens', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_p']);
+const PROMPT_CACHE_BREAKPOINT_TYPES = new Set(['input_text', 'input_image', 'input_file']);
 const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
@@ -464,7 +465,26 @@ function normalizeCodexInput(payload, { compact = false, native = false } = {}) 
     });
     if (!foundEncrypted) normalized.include.push('reasoning.encrypted_content');
   }
-  return normalized;
+  return stripPromptCacheControls(normalized);
+}
+
+// Codex's backend doesn't support these OpenAI Responses cache-control knobs;
+// drop them before egress while leaving prompt_cache_key intact.
+function stripPromptCacheControls(payload) {
+  const { prompt_cache_options, ...rest } = payload;
+  return stripPromptCacheBreakpoints(rest);
+}
+
+function stripPromptCacheBreakpoints(value) {
+  if (Array.isArray(value)) return value.map(stripPromptCacheBreakpoints);
+  if (!plainObject(value)) return value;
+  const removeHere = PROMPT_CACHE_BREAKPOINT_TYPES.has(value.type) && Object.hasOwn(value, 'prompt_cache_breakpoint');
+  const out = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (removeHere && key === 'prompt_cache_breakpoint') continue;
+    out[key] = stripPromptCacheBreakpoints(nested);
+  }
+  return out;
 }
 
 function normalizeNativeCodexInput(payload) {

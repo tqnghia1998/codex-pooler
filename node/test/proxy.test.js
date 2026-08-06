@@ -1175,3 +1175,44 @@ test('fails over a retryable first SSE event and keeps the public sequence past 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('strips unsupported explicit prompt cache controls before Codex egress while keeping prompt_cache_key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-prompt-cache-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-cache","output":[]}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  const buildPayload = () => ({
+    model: 'gpt-5.6-sol',
+    prompt_cache_key: 'cache-key-fixture',
+    prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+    input: [{
+      type: 'message', role: 'user',
+      content: [
+        { type: 'input_text', text: 'fixture', prompt_cache_breakpoint: { mode: 'explicit' } },
+        { type: 'input_file', file_id: 'file-1', prompt_cache_breakpoint: { mode: 'explicit' } }
+      ]
+    }]
+  });
+  try {
+    for (const path of ['/v1/responses', '/backend-api/codex/responses/compact']) {
+      calls.length = 0;
+      const response = await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildPayload()) });
+      await response.text();
+      assert.equal(response.status, 200, path);
+      const body = calls[0].body;
+      assert.equal(body.prompt_cache_key, 'cache-key-fixture', path);
+      assert.equal('prompt_cache_options' in body, false, path);
+      assert.equal('prompt_cache_breakpoint' in body.input[0].content[0], false, path);
+      assert.equal('prompt_cache_breakpoint' in body.input[0].content[1], false, path);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
