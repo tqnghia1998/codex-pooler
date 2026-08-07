@@ -336,6 +336,8 @@ export function recordUsage(upstream, input) {
 function pruneSettlements(spending) {
   // ponytail: retain recent settlement IDs for duplicate delivery; use SQLite if this idempotency window is too short.
   const overflow = Object.entries(spending.settlements).sort(([, a], [, b]) => Date.parse(a.startedAt || 0) - Date.parse(b.startedAt || 0)).slice(0, Math.max(0, Object.keys(spending.settlements).length - SETTLEMENT_LIMIT));
+  // A settlement older than this window cannot be deduplicated: it is counted again rather than risk dropping a
+  // slow request that legitimately settles after 100 newer ones, which under load is the far more common case.
   for (const [id] of overflow) delete spending.settlements[id];
 }
 
