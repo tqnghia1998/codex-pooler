@@ -97,7 +97,7 @@ function useApi() {
       }
     }
     const data = response.status === 204 ? {} : await response.json();
-    if (!response.ok) throw new Error(data.error || 'Request failed');
+    if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'Request failed');
     return data;
   }, [apiKey]);
   return { api, apiKey };
@@ -202,10 +202,19 @@ function App() {
     let capLeft = 0;
     let capSpent = 0;
     let totalCodex = 0;
+    let activeCodex = 0;
     let totalCompass = 0;
+    let activeCompass = 0;
     upstreams.forEach((upstream) => {
-      if (upstream.type === 'codex') totalCodex += 1;
-      if (upstream.type === 'compass') totalCompass += 1;
+      const active = !['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status) && upstream.spending?.status === 'normal';
+      if (upstream.type === 'codex') {
+        totalCodex += 1;
+        if (active) activeCodex += 1;
+      }
+      if (upstream.type === 'compass') {
+        totalCompass += 1;
+        if (active) activeCompass += 1;
+      }
       if (upstream.tokenRefresh?.status === 'reauth_required') reauth += 1;
       const quotaBand = getQuotaBand(upstream);
       if (quotaBand === 'exhausted') exhausted += 1;
@@ -218,7 +227,7 @@ function App() {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { totalCodex, totalCompass, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { totalCodex, activeCodex, totalCompass, activeCompass, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [upstreams]);
 
   const filteredUpstreams = useMemo(() => {
@@ -330,15 +339,16 @@ function App() {
 
   const confirmRefreshToken = async () => {
     if (!refreshTokenTarget) return;
+    const { id } = refreshTokenTarget;
+    setRefreshTokenTarget(null);
     setIsRefreshingToken(true);
     try {
-      await api(`/api/upstreams/${refreshTokenTarget.id}/refresh-token`, { method: 'POST' });
+      await api(`/api/upstreams/${id}/refresh-token`, { method: 'POST' });
       show('Token refreshed');
-      setRefreshTokenTarget(null);
-      await load();
     } catch (error) {
       show(error.message, true);
     } finally {
+      await load();
       setIsRefreshingToken(false);
     }
   };
@@ -432,8 +442,8 @@ function App() {
           <VStack gap={2}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
             <Grid columns={9} gap={2}>
-              <Metric label="Codex total" value={stats.totalCodex} />
-              <Metric label="Compass total" value={stats.totalCompass} />
+              <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />
+              <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />
               <Metric label="Reauth required" value={stats.reauth} />
               <Metric label="Low quota (<30%)" value={stats.lowQuota} />
               <Metric label="Uncapped" value={stats.uncapped} />
@@ -537,7 +547,7 @@ function App() {
           />
           <AlertDialog
             isOpen={Boolean(refreshTokenTarget)}
-            onOpenChange={(isOpen) => { if (!isOpen) setRefreshTokenTarget(null); }}
+            onOpenChange={(isOpen) => { if (!isOpen && !isRefreshingToken) setRefreshTokenTarget(null); }}
             title="Refresh OAuth token?"
             description={refreshTokenTarget ? `Obtain new access token for "${refreshTokenTarget.name}" using refresh token?${refreshTokenTarget.email ? `\nEmail: ${refreshTokenTarget.email}` : ''}${refreshTokenTarget.accessTokenExpiresAt ? `\nExpires: ${formatTokenExpiry(refreshTokenTarget.accessTokenExpiresAt)}` : ''}` : ''}
             actionLabel="Refresh Token"
@@ -648,7 +658,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
               <HStack gap={1} vAlign="center" minHeight={28}>
                 {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary">{tokenExpiry}</Text>}
                 {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
-                {tokenRefresh?.status === 'reauth_required' && <Badge label="Reauth required" variant="error" />}
+                {tokenRefresh?.status === 'reauth_required' && <Badge label={<>Reauth required{tokenRefresh.errorDetail && <> <span title={tokenRefresh.errorDetail} aria-label={`Refresh failure: ${tokenRefresh.errorDetail}`}>(!)</span></>}</>} variant="error" />}
               </HStack>
             </VStack>
           </StackItem>
@@ -909,7 +919,7 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
     if (!isOpen) return;
     setIds(upstreams.filter((upstream) => Number.isInteger(upstream.priority)).sort((a, b) => a.priority - b.priority).map((upstream) => upstream.id));
     setPending('');
-  }, [isOpen, upstreams]);
+  }, [isOpen]);
 
   const listed = ids.map((id) => upstreams.find((upstream) => upstream.id === id)).filter(Boolean);
   const available = upstreams.filter((upstream) => !ids.includes(upstream.id));
@@ -949,9 +959,9 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
                     label="Add upstream to the priority list"
                     width="100%"
                     hasSearch
-                    searchPlaceholder="Search upstreams..."
+                    searchPlaceholder="Search name or email..."
                     value={pending}
-                    options={[{ value: '', label: available.length ? 'Select an upstream' : 'All upstreams are listed' }, ...available.map((upstream) => ({ value: upstream.id, label: `${upstream.name} (${upstream.type})` }))]}
+                    options={[{ value: '', label: available.length ? 'Select an upstream' : 'All upstreams are listed' }, ...available.map((upstream) => ({ value: upstream.id, label: `${upstream.name} (${upstream.email || upstream.type})` }))]}
                     onChange={setPending}
                   />
                 </StackItem>
