@@ -24,6 +24,16 @@ test('applies runtime firewall rules only after trusted-proxy client extraction'
   assert.equal((await fetch(`${app.base}/v1/usage`, { headers: { ...auth, 'x-forwarded-for': '198.51.100.7, 127.0.0.1' } })).status, 200);
 });
 
+test('enforces the firewall for unrecognized runtime-shaped paths instead of falling through to a bare 404', async (t) => {
+  const app = await running({ firewallAllowlist: ['198.51.100.0/24'], trustedProxies: ['127.0.0.1'] });
+  t.after(() => app.close());
+  const blocked = await fetch(`${app.base}/backend-api/codex/analytics-events/events`, { method: 'POST' });
+  assert.equal(blocked.status, 403);
+  assert.equal((await blocked.json()).error.code, 'access_denied');
+  const admitted = await fetch(`${app.base}/backend-api/codex/analytics-events/events`, { method: 'POST', headers: { 'x-forwarded-for': '198.51.100.7' } });
+  assert.equal(admitted.status, 404);
+});
+
 test('does not trust forwarded client headers from an untrusted peer', async (t) => {
   const app = await running({ firewallAllowlist: ['198.51.100.7'] });
   t.after(() => app.close());
