@@ -38,6 +38,13 @@ test('matches IPv6 CIDRs and strips trusted proxy hops from forwarded chains', (
   assert.equal(firewallAllowed(req, policy), true);
 });
 
+test('normalizes IPv4-mapped IPv6 addresses for proxy and firewall rules', () => {
+  const policy = admissionPolicy({ firewallAllowlist: ['198.51.100.0/24'], trustedProxies: ['127.0.0.1'] });
+  const req = { socket: { remoteAddress: '::ffff:127.0.0.1' }, headers: { 'x-forwarded-for': '::ffff:198.51.100.7' } };
+  assert.equal(clientIp(req, policy), '::ffff:198.51.100.7');
+  assert.equal(firewallAllowed(req, policy), true);
+});
+
 test('allows explicitly configured deployment hosts and same-host browser origins', async (t) => {
   const app = await running({ allowedHosts: ['proxy.example'] });
   t.after(() => app.close());
