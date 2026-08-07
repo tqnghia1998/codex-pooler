@@ -376,9 +376,12 @@ export function filterSpendCapEligible(upstreams, { continuationId = null } = {}
 
 export function parseCodexQuota(payload, observedAt = new Date()) {
   const candidates = [];
+  const rateLimitReached = payload?.rate_limit?.limit_reached === true;
   const addWindow = (window, source = 'primary', monthly = false) => {
     if (!window || typeof window !== 'object') return;
-    const usedPercent = Number(window.used_percent);
+    // WHAM can omit usage percentages while still flagging the window as reached.
+    const reportedUsedPercent = Number(window.used_percent);
+    const usedPercent = Number.isFinite(reportedUsedPercent) ? reportedUsedPercent : (rateLimitReached ? 100 : NaN);
     if (!Number.isFinite(usedPercent)) return;
     const seconds = Number(window.limit_window_seconds);
     const remainingUnits = Number(window.remaining);
