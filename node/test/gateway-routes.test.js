@@ -54,114 +54,21 @@ async function close(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test('merges Codex and Compass model discovery with the required Codex client version', async () => {
+test('serves the static model catalog without querying upstreams', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-models-'));
   const { store } = configuredStore(dir, { compass: true });
-  const calls = [];
-  const fetchImpl = async (url) => {
-    calls.push(url);
-    if (url.startsWith('https://chatgpt.com')) {
-      return new Response(JSON.stringify({ models: [{ slug: 'shared-model' }, { slug: 'gpt-5.6-sol', input_modalities: ['text', 'image'] }] }), { status: 200 });
-    }
-    return new Response(JSON.stringify({ data: [{ id: 'shared-model', owned_by: 'compass' }, { id: 'claude-fable-5' }] }), { status: 200 });
-  };
-  const { server, base } = await start(store, fetchImpl);
-  try {
-    const response = await gatewayFetch(base, '/v1/models');
-    const body = await response.json();
-    assert.equal(response.status, 200);
-    assert.deepEqual(body.data.map((model) => model.id), ['shared-model', 'gpt-5.6-sol', 'claude-fable-5']);
-    assert.equal(body.data[0].object, 'model');
-    assert.equal(new URL(calls.find((url) => url.startsWith('https://chatgpt.com'))).searchParams.get('client_version'), '0.146.1');
-    assert.equal(new URL(calls.find((url) => url.startsWith('https://compass.llm.shopee.io'))).pathname, '/compass-api/v1/models');
-    assert.equal(response.headers.get('etag'), null);
-    const cached = await gatewayFetch(base, '/v1/models');
-    assert.equal(cached.status, 200);
-    assert.equal(calls.length, 2);
-
-    const backend = await gatewayFetch(base, '/backend-api/codex/models');
-    const firstEtag = backend.headers.get('etag');
-    assert.match(firstEtag, /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
-    assert.deepEqual((await backend.json()).models.map((model) => model.id), ['shared-model', 'gpt-5.6-sol', 'claude-fable-5']);
-    const alias = await gatewayFetch(base, '/backend-api/codex/v1/models');
-    assert.equal(alias.headers.get('etag'), firstEtag);
-  } finally {
-    await close(server);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('coalesces simultaneous model-catalog refreshes', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-single-flight-'));
-  const { store } = configuredStore(dir);
   let calls = 0;
-  const fetchImpl = async () => {
-    calls += 1;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    return new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), { status: 200 });
-  };
-  const { server, base } = await start(store, fetchImpl);
-  try {
-    const [first, second] = await Promise.all([
-      gatewayFetch(base, '/v1/models'),
-      gatewayFetch(base, '/v1/models')
-    ]);
-    assert.equal(first.status, 200);
-    assert.equal(second.status, 200);
-    assert.equal(calls, 1);
-  } finally {
-    await close(server);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('returns an empty model list when at least one provider succeeds', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-empty-models-'));
-  const { store } = configuredStore(dir, { compass: true });
-  const fetchImpl = async (url) => url.startsWith('https://chatgpt.com')
-    ? new Response(JSON.stringify({ models: [] }), { status: 200 })
-    : new Response('{}', { status: 500 });
-  const { server, base } = await start(store, fetchImpl);
+  const { server, base } = await start(store, async () => { calls += 1; throw new Error('Models must not query upstreams'); });
   try {
     const response = await gatewayFetch(base, '/v1/models');
     assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).data, []);
-  } finally {
-    await close(server);
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('returns a model result on partial provider failure and 502 when all providers fail', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-errors-'));
-  const { store } = configuredStore(dir, { compass: true });
-  let compassFails = true;
-  const fetchImpl = async (url) => {
-    if (new URL(url).pathname === '/backend-api/codex/responses') {
-      return new Response('data: {"type":"response.completed","response":{"id":"resp-no-catalog","output":[]}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
-    }
-    if (url.startsWith('https://chatgpt.com')) return new Response('{}', { status: 500 });
-    return compassFails
-      ? new Response('{}', { status: 500 })
-      : new Response(JSON.stringify({ data: [{ id: 'claude-fable-5' }] }), { status: 200 });
-  };
-  const { server, base } = await start(store, fetchImpl);
-  try {
-    let response = await gatewayFetch(base, '/v1/models');
-    assert.equal(response.status, 502);
-    assert.deepEqual((await response.json()).error, { type: 'server_error', code: 'upstream_error', message: 'Upstream request failed', param: null });
-    compassFails = false;
-    response = await gatewayFetch(base, '/v1/models');
-    assert.equal(response.status, 200);
-    assert.deepEqual((await response.json()).data.map((model) => model.id), ['claude-fable-5']);
-
-    const backend = await gatewayFetch(base, '/backend-api/codex/responses', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [], stream: true })
-    });
-    await backend.text();
-    assert.equal(backend.status, 200);
-    assert.match(backend.headers.get('x-models-etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
+    assert.deepEqual((await response.json()).data.map((model) => model.id), [
+      'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+      'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'glm-5.2', 'kimi-k3'
+    ]);
+    const backend = await gatewayFetch(base, '/backend-api/codex/models');
+    assert.match(backend.headers.get('etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
+    assert.equal(calls, 0);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
