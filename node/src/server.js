@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
 import { dollarsToMicros, isAiswitchUpstream } from './domain.js';
-import { codexRefreshFailureCode, refreshProviderCredentials, refreshQuota } from './providers.js';
+import { codexRefreshFailureCode, codexRefreshFailureDetail, refreshProviderCredentials, refreshQuota } from './providers.js';
 import { handleCompatibilityRequest, isCompatibilityRoute } from './compatibility.js';
 import { HttpError, readRequestBody } from './http-ingress.js';
 import { errorEnvelope } from './public-errors.js';
@@ -223,7 +223,7 @@ export async function refreshCodexToken(store, id, { trigger = 'manual', now = D
   } catch (error) {
     if ((Number(store.get(id)?.credentialEpoch) || 0) !== (Number(upstream.credentialEpoch) || 0)) return { upstream: store.getPublic(id) };
     const errorCode = codexRefreshFailureCode(error);
-    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt)), errorCode };
+    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt, codexRefreshFailureDetail(error))), errorCode };
   }
 }
 
@@ -245,11 +245,11 @@ function tokenRefreshEligibleAt(upstream, now) {
   return Number.isFinite(eligibleAt) && eligibleAt <= now ? eligibleAt : null;
 }
 
-function tokenRefreshState(status, trigger, now, retryAttempt = null) {
+function tokenRefreshState(status, trigger, now, retryAttempt = null, errorDetail = null) {
   const timestamp = new Date(now).toISOString();
   return status === 'refreshing'
     ? { status, startedAt: timestamp, trigger }
-    : { status, finishedAt: timestamp, trigger, errorCode: status === 'succeeded' ? null : status, ...(status === 'failed' && retryAttempt ? { retryAttempt } : {}) };
+    : { status, finishedAt: timestamp, trigger, errorCode: status === 'succeeded' ? null : status, ...(errorDetail ? { errorDetail } : {}), ...(status === 'failed' && retryAttempt ? { retryAttempt } : {}) };
 }
 
 function createTokenRefreshScheduler(store, options) {
@@ -390,7 +390,7 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     if (result.errorCode === 'failed') onTokenRefreshFailure(id, 'manual');
     if (result.errorCode) {
       const status = result.errorCode === 'failed' ? 502 : 409;
-      const message = result.errorCode === 'reauth_required' ? 'Codex reauthentication is required' : result.errorCode === 'refresh_in_progress' ? 'Codex token refresh is already in progress' : 'Codex token refresh failed';
+      const message = result.errorCode === 'reauth_required' ? result.upstream.tokenRefresh?.errorDetail || 'Codex reauthentication is required' : result.errorCode === 'refresh_in_progress' ? 'Codex token refresh is already in progress' : 'Codex token refresh failed';
       throw new HttpError(status, `token_refresh_${result.errorCode}`, message);
     }
     sendJson(res, 200, result);
