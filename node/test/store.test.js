@@ -34,6 +34,18 @@ test('persists CRUD while keeping credentials out of public records', () => {
   }
 });
 
+test('allows Codex accounts that share an organization account ID', () => {
+  const { dir, store } = tempStore();
+  try {
+    const token = (email) => `e.${Buffer.from(JSON.stringify({ email })).toString('base64url')}.s`;
+    store.create({ type: 'codex', authJson: JSON.stringify({ tokens: { access_token: token('first@example.com'), id_token: token('first@example.com'), account_id: 'shared-account' } }) });
+    store.create({ type: 'codex', authJson: JSON.stringify({ tokens: { access_token: token('second@example.com'), id_token: token('second@example.com'), account_id: 'shared-account' } }) });
+    assert.equal(store.list().length, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps routing within one loaded database snapshot', () => {
   const { dir, store } = tempStore();
   try {
