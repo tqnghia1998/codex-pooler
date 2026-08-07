@@ -614,7 +614,7 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     await backend.text();
     assert.equal(backend.status, 200);
     assert.equal(backend.headers.get('x-codex-turn-state'), 'next-turn');
-    assert.equal(backend.headers.get('x-models-etag'), null);
+    assert.match(backend.headers.get('x-models-etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
 
     const backendCall = calls.find((call) => new URL(call.url).pathname === '/backend-api/codex/responses');
     assert.equal(backendCall.body.input, 'hello');
