@@ -2,6 +2,11 @@ import { createHash, randomUUID } from 'node:crypto';
 
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com';
 export const DEFAULT_COMPASS_BASE_URL = 'https://compass.llm.shopee.io/compass-api/v1';
+export const STATIC_MODEL_CATALOG = Object.freeze([
+  'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+  'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5',
+  'glm-5.2', 'kimi-k3'
+].map((id) => Object.freeze({ id, object: 'model', owned_by: id.startsWith('claude-') ? 'compass' : 'codex' })));
 export const SUPPORTED_TYPES = new Set(['codex', 'compass']);
 export const CREDITS_PER_DOLLAR = 25;
 export const MICROS_PER_CREDIT = 40_000;
