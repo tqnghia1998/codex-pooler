@@ -111,7 +111,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure });
         return;
       }
-      await staticFile(res, url.pathname);
+      await staticFile(res, url.pathname, req, admission);
     } catch (error) {
       if (res.headersSent) {
         res.destroy();
@@ -483,9 +483,18 @@ function isUnsupportedV1Route(method, path) {
   return method === 'POST' && /^\/v1\/responses\/[^/]+\/cancel$/.test(path);
 }
 
-async function staticFile(res, pathname) {
+async function staticFile(res, pathname, req, admission) {
   const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
   if (!['index.html', 'app.js', 'styles.css', 'assets/relaydeck.svg'].includes(filename)) {
+    // Any other path is an unrecognized runtime-surface request (typo, probe, or a
+    // backend-api route we don't implement), not a real static asset. Enforce the
+    // firewall before the fixed 404 so a blocked client gets the same access_denied
+    // it gets from every other runtime route, instead of silently learning nothing
+    // is enforced here.
+    if (!firewallAllowed(req, admission)) {
+      sendJson(res, 403, { error: { type: 'invalid_request_error', code: 'access_denied', message: 'client IP is not allowed', param: null } });
+      return;
+    }
     sendJson(res, 404, { error: 'Not found' });
     return;
   }
