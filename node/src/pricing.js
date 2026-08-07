@@ -44,7 +44,10 @@ export function extractUsage(body) {
   const anthropic = Object.hasOwn(usage, 'cache_read_input_tokens') || Object.hasOwn(usage, 'cache_creation_input_tokens');
   const inputTokens = input === undefined ? undefined : input + (anthropic ? (cached || 0) + (cacheWrite || 0) : 0);
   if (inputTokens !== undefined && (cached || 0) + (cacheWrite || 0) > inputTokens) return null;
+  // The served model is what gets billed, so it has to survive stream merging: the usage object is all settlement sees.
+  const model = string(body?.model ?? body?.response?.model ?? body?.message?.model);
   return {
+    ...(model === null ? {} : { model }),
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(cached === undefined ? {} : { cachedInputTokens: cached }),
