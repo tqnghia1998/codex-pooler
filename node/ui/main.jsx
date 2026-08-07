@@ -103,6 +103,80 @@ function useApi() {
   return { api, apiKey };
 }
 
+const VIRTUAL_MIN_ITEMS = 24;
+const VIRTUAL_OVERSCAN_ROWS = 2;
+const UPSTREAM_GRID_COLUMNS = { minWidth: 280, max: 4, repeat: 'fit' };
+
+// Windowed grid: renders only the rows near the viewport and reserves the rest
+// of the height with padding. Row height and column count are measured from the
+// live grid, so the responsive `repeat: fit` layout keeps working.
+// ponytail: assumes uniform row height (cards are fixed-height); switch to
+// per-row measurement if card contents ever vary in height.
+function VirtualGrid({ items, renderItem }) {
+  const wrapperRef = useRef(null);
+  const [metrics, setMetrics] = useState(null);
+  const [range, setRange] = useState({ start: 0, end: VIRTUAL_MIN_ITEMS });
+  const isVirtual = items.length > VIRTUAL_MIN_ITEMS;
+
+  const measure = useCallback(() => {
+    const grid = wrapperRef.current?.firstElementChild;
+    const first = grid?.firstElementChild;
+    if (!first) return;
+    const styles = getComputedStyle(grid);
+    const columns = styles.gridTemplateColumns.split(' ').filter((track) => parseFloat(track) > 0).length || 1;
+    const rowHeight = first.getBoundingClientRect().height + (parseFloat(styles.rowGap) || 0);
+    if (!(rowHeight > 0)) return;
+    setMetrics((prev) => (prev && prev.columns === columns && Math.abs(prev.rowHeight - rowHeight) < 1 ? prev : { columns, rowHeight }));
+  }, []);
+
+  useEffect(() => {
+    if (!isVirtual) { setMetrics(null); return undefined; }
+    measure();
+    const grid = wrapperRef.current?.firstElementChild;
+    if (!grid || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(measure);
+    observer.observe(grid);
+    return () => observer.disconnect();
+  }, [isVirtual, measure, items.length]);
+
+  useEffect(() => {
+    if (!isVirtual || !metrics) return undefined;
+    const { rowHeight, columns } = metrics;
+    const update = () => {
+      const wrapper = wrapperRef.current;
+      if (!wrapper) return;
+      const above = Math.max(0, -wrapper.getBoundingClientRect().top);
+      const startRow = Math.max(0, Math.floor(above / rowHeight) - VIRTUAL_OVERSCAN_ROWS);
+      const rows = Math.ceil(window.innerHeight / rowHeight) + VIRTUAL_OVERSCAN_ROWS * 2;
+      const start = startRow * columns;
+      const end = Math.min(items.length, start + rows * columns);
+      setRange((prev) => (prev.start === start && prev.end === end ? prev : { start, end }));
+    };
+    update();
+    // capture:true also catches scrolling on any ancestor container.
+    window.addEventListener('scroll', update, { capture: true, passive: true });
+    window.addEventListener('resize', update);
+    return () => {
+      window.removeEventListener('scroll', update, { capture: true });
+      window.removeEventListener('resize', update);
+    };
+  }, [isVirtual, metrics, items.length]);
+
+  const windowed = isVirtual && metrics;
+  const start = windowed ? Math.min(range.start, Math.max(0, items.length - 1)) : 0;
+  const end = windowed ? range.end : isVirtual ? VIRTUAL_MIN_ITEMS : items.length;
+  const columns = metrics?.columns || 1;
+  const totalRows = Math.ceil(items.length / columns);
+  const paddingTop = windowed ? (start / columns) * metrics.rowHeight : 0;
+  const paddingBottom = windowed ? Math.max(0, (totalRows - Math.ceil(end / columns)) * metrics.rowHeight) : 0;
+
+  return (
+    <div ref={wrapperRef} style={{ paddingTop, paddingBottom }}>
+      <Grid columns={UPSTREAM_GRID_COLUMNS} gap={3}>{items.slice(start, end).map(renderItem)}</Grid>
+    </div>
+  );
+}
+
 function App() {
   const { api, apiKey } = useApi();
   const [upstreams, setUpstreams] = useState([]);
@@ -194,6 +268,27 @@ function App() {
     };
   }, [apiKey, load]);
 
+  const filteredUpstreams = useMemo(() => {
+    let filtered = upstreams.slice();
+    const query = filterQuery.trim().toLowerCase();
+    if (query) {
+      filtered = filtered.filter((upstream) => matchesSearch([upstream.name, upstream.email, upstream.id, upstream.accountId, upstream.projectId], query));
+    }
+    if (filterType) filtered = filtered.filter((upstream) => upstream.type === filterType);
+    if (filterStatus === 'exhausted') {
+      filtered = filtered.filter((upstream) => getQuotaBand(upstream) === 'exhausted');
+    } else if (filterStatus === 'uncapped') {
+      filtered = filtered.filter((upstream) => !upstream.spending || upstream.spending.capCredits <= 0);
+    } else if (filterStatus === 'reauth_required') {
+      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'reauth_required');
+    } else if (filterStatus === 'refresh_failed') {
+      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'failed');
+    }
+    if (filterQuota) filtered = filtered.filter((upstream) => getQuotaBand(upstream) === filterQuota);
+    return filtered.sort((a, b) => sortUpstreams(a, b, filterSort));
+  }, [filterQuery, filterType, filterStatus, filterQuota, filterSort, upstreams]);
+
+  // Metrics reflect the current filters (e.g. Type=Codex shows Codex-only counts), not the full pool.
   const stats = useMemo(() => {
     let reauth = 0;
     let lowQuota = 0;
@@ -205,7 +300,7 @@ function App() {
     let activeCodex = 0;
     let totalCompass = 0;
     let activeCompass = 0;
-    upstreams.forEach((upstream) => {
+    filteredUpstreams.forEach((upstream) => {
       const active = !['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status) && upstream.spending?.status === 'normal';
       if (upstream.type === 'codex') {
         totalCodex += 1;
@@ -228,27 +323,10 @@ function App() {
       }
     });
     return { totalCodex, activeCodex, totalCompass, activeCompass, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
-  }, [upstreams]);
+  }, [filteredUpstreams]);
 
-  const filteredUpstreams = useMemo(() => {
-    let filtered = upstreams.slice();
-    const query = filterQuery.trim().toLowerCase();
-    if (query) {
-      filtered = filtered.filter((upstream) => matchesSearch([upstream.name, upstream.email, upstream.id, upstream.accountId, upstream.projectId], query));
-    }
-    if (filterType) filtered = filtered.filter((upstream) => upstream.type === filterType);
-    if (filterStatus === 'exhausted') {
-      filtered = filtered.filter((upstream) => getQuotaBand(upstream) === 'exhausted');
-    } else if (filterStatus === 'uncapped') {
-      filtered = filtered.filter((upstream) => !upstream.spending || upstream.spending.capCredits <= 0);
-    } else if (filterStatus === 'reauth_required') {
-      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'reauth_required');
-    } else if (filterStatus === 'refresh_failed') {
-      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'failed');
-    }
-    if (filterQuota) filtered = filtered.filter((upstream) => getQuotaBand(upstream) === filterQuota);
-    return filtered.sort((a, b) => sortUpstreams(a, b, filterSort));
-  }, [filterQuery, filterType, filterStatus, filterQuota, filterSort, upstreams]);
+  // A type card whose type is filtered out would always read 0/0, so drop it and shrink the grid to match, keeping cards stretched full width.
+  const metricCount = 6 + (filterType !== 'compass' ? 1 : 0) + (filterType !== 'codex' ? 1 : 0);
 
   const updateForm = (field, value) => setFormValues((current) => ({ ...current, [field]: value }));
   const resetForm = useCallback(() => {
@@ -440,20 +518,6 @@ function App() {
           </HStack>
 
           <VStack gap={2}>
-            <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
-            <Grid columns={9} gap={2}>
-              <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />
-              <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />
-              <Metric label="Reauth required" value={stats.reauth} />
-              <Metric label="Low quota (<30%)" value={stats.lowQuota} />
-              <Metric label="Uncapped" value={stats.uncapped} />
-              <Metric label="Exhausted" value={stats.exhausted} />
-              <Metric label="Spending cap left" value={`$${formatNumber(stats.capLeft)}`} />
-              <Metric label="Spending cap spent" value={`$${formatNumber(stats.capSpent)}`} />
-            </Grid>
-          </VStack>
-
-          <VStack gap={2}>
             <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
             <HStack gap={2} wrap="wrap" vAlign="start">
               <StackItem size="static">
@@ -479,6 +543,20 @@ function App() {
           </VStack>
 
           <VStack gap={2}>
+            <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
+            <Grid columns={metricCount} gap={2}>
+              {filterType !== 'compass' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
+              {filterType !== 'codex' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
+              <Metric label="Reauth required" value={stats.reauth} />
+              <Metric label="Low quota (<30%)" value={stats.lowQuota} />
+              <Metric label="Uncapped" value={stats.uncapped} />
+              <Metric label="Exhausted" value={stats.exhausted} />
+              <Metric label="Spending cap left" value={`$${formatNumber(stats.capLeft)}`} />
+              <Metric label="Spending cap spent" value={`$${formatNumber(stats.capSpent)}`} />
+            </Grid>
+          </VStack>
+
+          <VStack gap={2}>
             <HStack align="center" justify="between">
               <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
               <HStack gap={2}>
@@ -488,7 +566,10 @@ function App() {
               </HStack>
             </HStack>
             {filteredUpstreams.length ? (
-              <Grid columns={{ minWidth: 280, max: 4, repeat: 'fit' }} gap={3}>{filteredUpstreams.map((upstream) => <UpstreamCard key={upstream.id} upstream={upstream} onRefresh={refresh} onRefreshToken={promptRefreshToken} isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id} onEdit={edit} onCap={openCap} onPriority={() => setPriorityOpen(true)} onDelete={remove} />)}</Grid>
+              <VirtualGrid
+                items={filteredUpstreams}
+                renderItem={(upstream) => <UpstreamCard key={upstream.id} upstream={upstream} onRefresh={refresh} onRefreshToken={promptRefreshToken} isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id} onEdit={edit} onCap={openCap} onPriority={() => setPriorityOpen(true)} onDelete={remove} />}
+              />
             ) : (
               <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex or Compass upstream to start routing requests.'} />
             )}
@@ -644,9 +725,10 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
   const tokenRefresh = upstream.tokenRefresh;
   const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'success';
-  const trackBgMap = {
-    error: 'var(--color-background-red)',
-    warning: 'var(--color-background-yellow)',
+  const progressStyleMap = {
+    success: { '--color-success': 'light-dark(#9fe59b, #0c5700)' },
+    error: { '--color-background-muted': 'var(--color-background-red)' },
+    warning: { '--color-background-muted': 'var(--color-background-yellow)' },
   };
   return (
     <Card height="100%">
@@ -675,7 +757,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             max={100}
             isLabelHidden
             variant={quotaVariant}
-            style={trackBgMap[quotaVariant] ? { '--color-background-muted': trackBgMap[quotaVariant] } : undefined}
+            style={progressStyleMap[quotaVariant]}
           />
           <Text type="supporting" color="secondary" minHeight={20}>{quotaCount(quota)}</Text>
         </VStack>
@@ -687,7 +769,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             max={100}
             isLabelHidden
             variant={spendingVariant}
-            style={trackBgMap[spendingVariant] ? { '--color-background-muted': trackBgMap[spendingVariant] } : undefined}
+            style={progressStyleMap[spendingVariant]}
           />
           <HStack justify="between" vAlign="center" gap={2}>
             <Text type="supporting" color="secondary">{capUsage}</Text>
