@@ -171,10 +171,12 @@ function normalizeProxyPath(path) {
 function chooseUpstreams(store, req, path, payload, originalPath = path) {
   const scopeId = requestScopeId(req);
   const sessionId = sessionAffinity(req);
-  const pinnedId = store.sessionUpstream(sessionId, scopeId, requestAccounting(req).apiKeyId);
+  const apiKeyId = requestAccounting(req).apiKeyId;
+  const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const requestedId = header(req, 'x-upstream-id');
   const requestedType = header(req, 'x-upstream-type');
-  const responsePinnedId = originalPath === '/v1/responses' ? store.responseUpstream(payload?.previous_response_id, scopeId, requestAccounting(req).apiKeyId) : null;
+  const responsePinnedId = originalPath === '/v1/responses' ? store.responseUpstream(payload?.previous_response_id, scopeId, apiKeyId) : null;
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
   const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
@@ -183,6 +185,7 @@ function chooseUpstreams(store, req, path, payload, originalPath = path) {
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
     requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : '',
+    rotateFromId: pinnedId || responsePinnedId || requestedId || requestedType ? '' : rotationUpstreamId,
     model,
     scopeId,
     requirements: requestRequirements(path, payload),
@@ -824,12 +827,12 @@ function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, 
     ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier)
     : { settledCostMicros: usage.upstreamCostMicros, costSource: 'upstream_reported' };
   try {
-    if (lifecycle) {
-      store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: 'succeeded', responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
-      return;
+    if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: 'succeeded', responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
+    else {
+      store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
+      if (settlement) store.addUsage(upstream.id, { attemptId, startedAt, ...settlement });
     }
-    store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
-    if (settlement) store.addUsage(upstream.id, { attemptId, startedAt, ...settlement });
+    if (settlement) store.addSessionUsage(accounting.sessionId, upstream.id, settlement.settledCostMicros, accounting.scopeId, accounting.apiKeyId);
   } catch {
     // Accounting must not replace a successful provider response.
   }
@@ -955,7 +958,7 @@ function requestScopeId(req) {
 }
 
 function requestAccounting(req) {
-  return { scopeId: requestScopeId(req), apiKeyId: req.proxyAuth?.id || null };
+  return { scopeId: requestScopeId(req), apiKeyId: req.proxyAuth?.id || null, sessionId: sessionAffinity(req) };
 }
 
 function header(req, name) {
@@ -1158,11 +1161,13 @@ function chooseRawUpstream(store, req) {
   const sessionId = sessionAffinity(req);
   const apiKeyId = requestAccounting(req).apiKeyId;
   const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const requestedId = header(req, 'x-upstream-id');
   const candidates = store.candidatePlan({
     requestedId,
     preferredType: 'codex',
     requiredType: 'codex',
+    rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId,
     scopeId,
     routeClass: 'raw_native'
   });

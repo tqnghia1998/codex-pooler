@@ -297,8 +297,9 @@ async function codexContext(store, req, fetchImpl, upstreamDeadlines = {}) {
   const apiKeyId = req.proxyAuth?.id || null;
   const sessionId = sessionAffinity(req);
   const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const requestedId = text(req.headers['x-upstream-id']);
-  const candidates = store.candidatePlan({ requestedId, preferredType: 'codex', requiredType: 'codex', scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
+  const candidates = store.candidatePlan({ requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
   const ordered = pinnedId && !requestedId
     ? [...candidates.filter((candidate) => candidate.id === pinnedId), ...candidates.filter((candidate) => candidate.id !== pinnedId)]
     : candidates;
@@ -427,8 +428,14 @@ function settleCost(store, upstream, body, req) {
   const attemptId = randomUUID();
   const startedAt = new Date().toISOString();
   try {
-    store.recordGatewayUsage({ scopeId: requestScopeId(req), apiKeyId: req.proxyAuth?.id || null, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: cost === undefined ? null : dollarsToMicros(cost) });
-    if (cost !== undefined) store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros: dollarsToMicros(cost), costSource: 'upstream_reported' });
+    const scopeId = requestScopeId(req);
+    const apiKeyId = req.proxyAuth?.id || null;
+    store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: cost === undefined ? null : dollarsToMicros(cost) });
+    if (cost !== undefined) {
+      const settledCostMicros = dollarsToMicros(cost);
+      store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
+      store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
+    }
   } catch {
     // Accounting must not replace a successful provider response.
   }

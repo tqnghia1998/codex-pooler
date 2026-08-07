@@ -23,6 +23,7 @@ import { codexRefreshFailureCode } from './providers.js';
 const SESSION_LIMIT = 1_000;
 const SESSION_ID_MAX_LENGTH = 200;
 const SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
+const SESSION_ROTATION_SPEND_MICROS = 5_000_000;
 const RESPONSE_PIN_LIMIT = 1_000;
 const RESPONSE_PIN_TTL_MS = 24 * 60 * 60 * 1_000;
 const CIRCUIT_FAILURE_THRESHOLD = 3;
@@ -169,7 +170,7 @@ export class Store {
     activeScope(db, scopeId);
 
     const isDuplicate = db.upstreams.some((item) => (item.scopeId || DEFAULT_SCOPE_ID) === scopeId && item.type === upstream.type && (upstream.type === 'codex'
-      ? (upstream.accountId && item.accountId === upstream.accountId) || (upstream.email && item.email === upstream.email)
+      ? (upstream.email ? item.email === upstream.email : upstream.accountId && item.accountId === upstream.accountId)
       : item.projectId === upstream.projectId));
     if (isDuplicate) throw new Error(`${upstream.type} upstream already exists`);
 
@@ -222,7 +223,7 @@ export class Store {
     if (index === -1) throw notFound();
     db.upstreams.splice(index, 1);
     for (const [sessionId, entry] of Object.entries(db.sessions)) {
-      if (entry === id || entry?.upstreamId === id) delete db.sessions[sessionId];
+      if (entry === id || entry?.upstreamId === id || entry?.rotationUpstreamId === id) delete db.sessions[sessionId];
     }
     this.save(db);
     this.notifyUpstreamsChange();
@@ -270,7 +271,7 @@ export class Store {
     this.notifyUpstreamsChange();
   }
 
-  setQuota(id, quota) {
+  setQuota(id, quota, { notify = true } = {}) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
     ensureSpending(upstream);
@@ -278,7 +279,7 @@ export class Store {
     upstream.quotaSource = quota?.source || null;
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
-    this.notifyUpstreamsChange();
+    if (notify) this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
 
@@ -436,7 +437,7 @@ export class Store {
     return { ...result, eligible: result.eligible.map(publicUpstream), reserved: result.reserved.map(publicUpstream) };
   }
 
-  candidatePlan({ pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', model = '', requirements = {}, routeClass = 'proxy_http', now = Date.now(), scopeId = null } = {}) {
+  candidatePlan({ pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, routeClass = 'proxy_http', now = Date.now(), scopeId = null } = {}) {
     const db = this.load();
     const scope = scopeId ? activeScope(db, scopeId, false) : null;
     if (scopeId && model && (!scope || scope.models.length && !scope.models.includes(String(model).toLowerCase()))) return [];
@@ -449,7 +450,10 @@ export class Store {
       candidates = [...leastRecentlySuccessful(preferred), ...leastRecentlySuccessful(candidates.filter((upstream) => upstream.type !== preferredType))];
     }
     if (requiredType) candidates = candidates.filter((upstream) => upstream.type === requiredType);
-    return candidates.filter((upstream) => candidateEligible(upstream, model, requirements) && circuitEligible(upstream, { model, routeClass }, now)).map(publicUpstream);
+    const plan = candidates.filter((upstream) => candidateEligible(upstream, model, requirements) && circuitEligible(upstream, { model, routeClass }, now)).map(publicUpstream);
+    // A session past its rotation threshold skips its previous upstream unless nothing else is eligible.
+    const rotated = rotateFromId ? plan.filter((upstream) => upstream.id !== rotateFromId) : plan;
+    return rotated.length ? rotated : plan;
   }
 
   beginCircuit(id, scope, now = Date.now()) {
@@ -520,11 +524,17 @@ export class Store {
   }
 
   sessionUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    return this.sessionEntry(sessionId, scopeId, apiKeyId)?.upstreamId || null;
+  }
+
+  sessionRotationUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    return this.sessionEntry(sessionId, scopeId, apiKeyId)?.rotationUpstreamId || null;
+  }
+
+  sessionEntry(sessionId, scopeId, apiKeyId) {
     if (!sessionId || sessionId.length > SESSION_ID_MAX_LENGTH) return null;
-    const sessions = this.load().sessions;
-    const entry = sessions[sessionKey(scopeId, apiKeyId, sessionId)];
-    if (!entry || entry.scopeId !== scopeId || (entry.apiKeyId ?? null) !== apiKeyId || Date.now() - Date.parse(entry.lastUsedAt) > SESSION_TTL_MS) return null;
-    return entry.upstreamId || null;
+    const entry = this.load().sessions[sessionKey(scopeId, apiKeyId, sessionId)];
+    return entry && entry.scopeId === scopeId && (entry.apiKeyId ?? null) === apiKeyId && Date.now() - Date.parse(entry.lastUsedAt) <= SESSION_TTL_MS ? entry : null;
   }
 
   pinResponse(responseId, upstreamId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
@@ -562,9 +572,23 @@ export class Store {
     for (const [id, entry] of Object.entries(db.sessions)) {
       if (typeof entry !== 'string' && Date.now() - Date.parse(entry.lastUsedAt) > SESSION_TTL_MS) delete db.sessions[id];
     }
-    db.sessions[sessionKey(scopeId, apiKeyId, sessionId)] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now };
+    const key = sessionKey(scopeId, apiKeyId, sessionId);
+    const previous = db.sessions[key];
+    db.sessions[key] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now, spentCostMicros: previous?.upstreamId === upstreamId ? previous.spentCostMicros || 0 : 0 };
     const overflow = Object.entries(db.sessions).sort(([, a], [, b]) => Date.parse(a.lastUsedAt || 0) - Date.parse(b.lastUsedAt || 0)).slice(0, Math.max(0, Object.keys(db.sessions).length - SESSION_LIMIT));
     for (const [id] of overflow) delete db.sessions[id];
+    this.save(db);
+  }
+
+  addSessionUsage(sessionId, upstreamId, settledCostMicros, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
+    if (!sessionId || !Number.isSafeInteger(settledCostMicros) || settledCostMicros <= 0) return;
+    const db = this.load();
+    const key = sessionKey(scopeId, apiKeyId, sessionId);
+    const entry = db.sessions[key];
+    if (!entry || entry.upstreamId !== upstreamId) return;
+    entry.spentCostMicros = (Number.isSafeInteger(entry.spentCostMicros) ? entry.spentCostMicros : 0) + settledCostMicros;
+    entry.lastUsedAt = new Date().toISOString();
+    if (entry.spentCostMicros >= SESSION_ROTATION_SPEND_MICROS) db.sessions[key] = { scopeId, apiKeyId, rotationUpstreamId: upstreamId, lastUsedAt: entry.lastUsedAt };
     this.save(db);
   }
 
