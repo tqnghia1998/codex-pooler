@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractUsage, mergeUsage, priceUsage } from '../src/pricing.js';
+import { extractUsage, mergeUsage, priceUsage, upstreamCostMicros } from '../src/pricing.js';
 
 test('extracts Codex and Anthropic token/cache usage shapes', () => {
   assert.deepEqual(extractUsage({ usage: {
@@ -26,6 +26,14 @@ test('keeps the served model across stream events', () => {
 
 test('prices usage when a provider total_tokens disagrees with input plus output', () => {
   assert.equal(priceUsage(['gpt-5.6-terra'], { inputTokens: 1_000, outputTokens: 100, totalTokens: 900 }).settledCostMicros, 3_200);
+});
+
+test('accepts only plain decimal provider-reported cost', () => {
+  assert.equal(upstreamCostMicros({ price_cost_usd: '0.5' }), 500_000);
+  assert.equal(upstreamCostMicros({ price_cost_usd: 0.5 }), 500_000);
+  for (const value of ['', ' ', '1e5', 'abc', [], true, -1, null, undefined]) {
+    assert.equal(upstreamCostMicros({ price_cost_usd: value }), undefined, `rejects ${JSON.stringify(value)}`);
+  }
 });
 
 test('merges partial stream usage and resolves dated model pricing by suffix', () => {
