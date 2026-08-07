@@ -133,7 +133,8 @@ test('validates and preserves Responses tools and strict local schemas', () => {
     tools: [
       { type: 'function', name: 'weather', parameters: schema, strict: true },
       { type: 'namespace', name: 'ops', description: 'Operations', tools: [{ type: 'custom', name: 'shell', format: { type: 'text' } }] },
-      { type: 'function', name: 'flexible', parameters: { type: 'object', properties: { labels: { type: 'object', additionalProperties: { type: 'string' } }, pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] } } } }
+      { type: 'function', name: 'flexible', parameters: { type: 'object', properties: { labels: { type: 'object', additionalProperties: { type: 'string' } }, pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] } } } },
+      { type: 'tool_search', execution: 'client', description: 'Searches deferred tools', parameters: { type: 'object', properties: { query: { type: 'string' } } } }
     ],
     tool_choice: { type: 'function', name: 'weather' },
     text: { format: { type: 'json_schema', name: 'answer', schema, strict: true }, verbosity: 'medium' }
@@ -142,6 +143,7 @@ test('validates and preserves Responses tools and strict local schemas', () => {
   assert.deepEqual(adapted.tool_choice, { type: 'function', name: 'weather' });
   assert.deepEqual(adapted.tools[2].parameters.properties.labels.additionalProperties, { type: 'string' });
   assert.deepEqual(adapted.tools[2].parameters.properties.pair.items, [{ type: 'string' }, { type: 'number' }]);
+  assert.deepEqual(adapted.tools[3], { type: 'tool_search', execution: 'client', description: 'Searches deferred tools', parameters: { type: 'object', properties: { query: { type: 'string' } } } });
   assert.equal(adapted.text.format.strict, true);
 
   const inferred = adaptResponsesRequest({
@@ -160,6 +162,33 @@ test('validates and preserves Responses tools and strict local schemas', () => {
     }]
   });
   assert.equal(inferred.tools[0].parameters.properties.value.type, 'object');
+});
+
+test('passes through native Codex replay items untranslated', () => {
+  const items = [
+    { type: 'message', role: 'user', content: 'hi' },
+    { type: 'local_shell_call', id: 'lsh_1', call_id: 'call_1', status: 'completed', action: { type: 'exec', command: ['ls'] } },
+    { type: 'web_search_call', id: 'ws_1', status: 'completed', action: { type: 'search', query: 'weather' } },
+    { type: 'image_generation_call', id: 'ig_1', status: 'completed', result: 'base64data' },
+    { type: 'context_compaction', id: 'cc_1', encrypted_content: 'enc' },
+    { type: 'agent_message', id: 'am_1', author: 'a', recipient: 'b', content: [] }
+  ];
+  const adapted = adaptResponsesRequest({ model: 'gpt-5.6-sol', input: items, previous_response_id: undefined });
+  assert.deepEqual(adapted.input.slice(1), items.slice(1));
+});
+
+test('forwards unrecognized native item/tool types by default but still rejects mcp and shapeless garbage', () => {
+  const futureItem = { type: 'future_native_item', id: 'x_1', anything: [1, 2, 3] };
+  const adapted = adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: [{ type: 'message', role: 'user', content: 'hi' }, futureItem],
+    tools: [{ type: 'future_native_tool', anything: 'goes' }]
+  });
+  assert.deepEqual(adapted.input[1], futureItem);
+  assert.deepEqual(adapted.tools[0], { type: 'future_native_tool', anything: 'goes' });
+
+  assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: [{ foo: 'bar' }] }), { param: 'input' });
+  assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'x', tools: [{ type: 'mcp', server_url: 'https://example.com' }] }), { param: 'tools' });
 });
 
 test('maps unique namespace custom tool names but skips ambiguous ones', () => {
