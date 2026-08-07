@@ -142,6 +142,18 @@ test('a positive cap never rounds down into an unset one', () => {
   assert.equal(dollarsToCredits(100), 2_500);
 });
 
+test('counts a slow settlement that lands after the deduplication window has rolled over', () => {
+  const upstream = createUpstream({ type: 'compass', projectId: 'slow', projectKey: 'key' });
+  setSpendingCap(upstream, 1_000);
+  const slow = { attemptId: 'attempt-slow', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 40_000, costSource: 'pricing_snapshot' };
+  for (let index = 1; index <= 120; index += 1) {
+    recordUsage(upstream, { attemptId: `attempt-${index}`, startedAt: new Date(Date.now() + 1 + index).toISOString(), settledCostMicros: 40_000, costSource: 'pricing_snapshot' });
+  }
+  assert.equal(spendingSummary(upstream.spending).settlementCount, 100);
+  assert.equal(recordUsage(upstream, slow).counted, true);
+  assert.equal(spendingSummary(upstream.spending).spentCredits, 121);
+});
+
 test('usage settlements with reserved property names persist idempotently', () => {
   const upstream = createUpstream({ type: 'compass', projectId: 'settlement-id', projectKey: 'key' });
   setSpendingCap(upstream, 100);
