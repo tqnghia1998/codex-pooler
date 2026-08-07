@@ -34,6 +34,19 @@ async function request(base, path, options = {}) {
   return { response, data };
 }
 
+test('serves the Relaydeck favicon', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'relaydeck-favicon-'));
+  const { server, base } = await runningServer(new Store(dir), { apiKey: 'test-key' });
+  try {
+    const response = await fetch(`${base}/assets/relaydeck.svg`);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('content-type'), 'image/svg+xml');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('automatically refreshes Codex quotas for all stored upstreams', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-poll-'));
   try {
@@ -62,6 +75,8 @@ test('refreshes quotas with bounded concurrency', async () => {
     for (let index = 0; index < 4; index += 1) store.create({ type: 'codex', accessToken: `token-${index}`, accountId: `acc-${index}` });
     let active = 0;
     let peak = 0;
+    let changes = 0;
+    store.onUpstreamsChange(() => { changes += 1; });
     await refreshAllQuotas(store, {
       fetchImpl: async () => {
         active += 1;
@@ -72,6 +87,7 @@ test('refreshes quotas with bounded concurrency', async () => {
       }
     });
     assert.equal(peak, 3);
+    assert.equal(changes, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
