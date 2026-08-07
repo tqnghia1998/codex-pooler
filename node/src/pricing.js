@@ -133,7 +133,8 @@ function modelCandidates(models) {
   return [...new Set(candidates)];
 }
 
-function upstreamCostMicros(usage) {
+// Provider-reported cost is upstream-controlled input: accept only plain non-negative decimal numbers.
+export function upstreamCostMicros(usage) {
   const value = usage?.price_cost_usd;
   if (typeof value === 'string' && /^\s*\d+(?:\.\d+)?\s*$/.test(value)) {
     const micros = Math.round(Number(value) * 1_000_000);

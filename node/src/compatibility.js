@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
-import { defaultBaseUrl, dollarsToMicros } from './domain.js';
+import { defaultBaseUrl } from './domain.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
 import { upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
-import { extractUsage } from './pricing.js';
+import { extractUsage, upstreamCostMicros } from './pricing.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 
 const CODEX_VERSION = '0.146.1';
@@ -418,21 +418,18 @@ function parseSse(body) {
 }
 
 function extractCost(body) {
-  const value = body?.usage?.price_cost_usd ?? body?.message?.usage?.price_cost_usd ?? body?.response?.usage?.price_cost_usd ?? body?.price_cost_usd;
-  const cost = Number(value);
-  return Number.isFinite(cost) && cost >= 0 ? cost : undefined;
+  return upstreamCostMicros(body?.usage) ?? upstreamCostMicros(body?.message?.usage) ?? upstreamCostMicros(body?.response?.usage) ?? upstreamCostMicros(body);
 }
 
 function settleCost(store, upstream, body, req) {
-  const cost = extractCost(body);
+  const settledCostMicros = extractCost(body);
   const attemptId = randomUUID();
   const startedAt = new Date().toISOString();
   try {
     const scopeId = requestScopeId(req);
     const apiKeyId = req.proxyAuth?.id || null;
-    store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: cost === undefined ? null : dollarsToMicros(cost) });
-    if (cost !== undefined) {
-      const settledCostMicros = dollarsToMicros(cost);
+    store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
+    if (settledCostMicros !== undefined) {
       store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
       store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
     }
