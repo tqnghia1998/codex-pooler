@@ -22,7 +22,7 @@ import {
 } from './proxy.js';
 
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
-const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
+const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 export const AUTO_REFRESH_INTERVAL_MS = 60_000;
 export const TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
 const QUOTA_REFRESH_CONCURRENCY = 3;
@@ -172,7 +172,7 @@ export function start(port = Number(process.env.PORT) || 3000, {
 }
 
 export async function refreshAllQuotas(store, options = {}) {
-  return mapConcurrent(store.list(), QUOTA_REFRESH_CONCURRENCY, async ({ id }) => {
+  const results = await mapConcurrent(store.list(), QUOTA_REFRESH_CONCURRENCY, async ({ id }) => {
     const upstream = store.get(id);
     if (!upstream) return;
     const credentials = store.credentials(id);
@@ -181,8 +181,11 @@ export async function refreshAllQuotas(store, options = {}) {
       ...options,
       saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
     });
-    store.setQuota(id, quota);
+    store.setQuota(id, quota, { notify: false });
+    return { status: 'refreshed', id };
   });
+  if (results.some((result) => result.value?.status === 'refreshed')) store.notifyUpstreamsChange();
+  return results;
 }
 
 export async function refreshDueCodexTokens(store, { now = Date.now(), ...options } = {}) {
@@ -482,7 +485,7 @@ function isUnsupportedV1Route(method, path) {
 
 async function staticFile(res, pathname) {
   const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-  if (!['index.html', 'app.js', 'styles.css'].includes(filename)) {
+  if (!['index.html', 'app.js', 'styles.css', 'assets/relaydeck.svg'].includes(filename)) {
     sendJson(res, 404, { error: 'Not found' });
     return;
   }
