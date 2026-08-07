@@ -41,12 +41,8 @@ const DEFAULT_BULK_RULES = [
 const FILTER_OPTIONS = {
   status: [
     { value: '', label: 'Any status' },
-    { value: 'active', label: 'Active' },
-    { value: 'paused', label: 'Paused' },
-    { value: 'disabled', label: 'Disabled' },
     { value: 'reauth_required', label: 'Reauth required' },
     { value: 'refresh_failed', label: 'Refresh failed' },
-    { value: 'errored', label: 'Errored' },
     { value: 'exhausted', label: 'Exhausted' },
     { value: 'uncapped', label: 'Uncapped' }
   ],
@@ -93,7 +89,7 @@ function useApi() {
     });
     let response = await request(apiKey);
     if (response.status === 401) {
-      const nextKey = window.prompt('Enter the Codex Pooler API key')?.trim() || '';
+      const nextKey = window.prompt('Enter the Relaydeck API key')?.trim() || '';
       if (nextKey) {
         sessionStorage.setItem('codex-pooler-api-key', nextKey);
         setApiKey(nextKey);
@@ -110,7 +106,7 @@ function useApi() {
 function App() {
   const { api, apiKey } = useApi();
   const [upstreams, setUpstreams] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [isManualReloading, setIsManualReloading] = useState(false);
   const [message, setMessage] = useState({ text: '', error: false });
   const [formDialog, setFormDialog] = useState({ isOpen: false, mode: 'add', upstream: null });
   const [formValues, setFormValues] = useState(FORM_DEFAULTS);
@@ -140,10 +136,10 @@ function App() {
   const show = useCallback((text, error = false) => {
     setMessage({ text, error });
   }, []);
-  const load = useCallback(async () => {
+  const load = useCallback(async (manual = false) => {
     if (loadingRef.current) return;
     loadingRef.current = true;
-    setLoading(true);
+    if (manual) setIsManualReloading(true);
     try {
       const data = await api('/api/upstreams');
       setUpstreams(data.upstreams);
@@ -151,7 +147,7 @@ function App() {
       show(error.message, true);
     } finally {
       loadingRef.current = false;
-      setLoading(false);
+      if (manual) setIsManualReloading(false);
     }
   }, [api, show]);
 
@@ -199,7 +195,6 @@ function App() {
   }, [apiKey, load]);
 
   const stats = useMemo(() => {
-    let active = 0;
     let reauth = 0;
     let lowQuota = 0;
     let uncapped = 0;
@@ -211,10 +206,9 @@ function App() {
     upstreams.forEach((upstream) => {
       if (upstream.type === 'codex') totalCodex += 1;
       if (upstream.type === 'compass') totalCompass += 1;
-      if (upstream.status === 'active') active += 1;
-      if (upstream.status === 'reauth_required') reauth += 1;
+      if (upstream.tokenRefresh?.status === 'reauth_required') reauth += 1;
       const quotaBand = getQuotaBand(upstream);
-      if (quotaBand === 'exhausted' || upstream.status === 'exhausted') exhausted += 1;
+      if (quotaBand === 'exhausted') exhausted += 1;
       if (quotaBand === 'low') lowQuota += 1;
       const spending = upstream.spending || {};
       if (spending.capCredits <= 0) {
@@ -224,22 +218,24 @@ function App() {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { totalCodex, totalCompass, active, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { totalCodex, totalCompass, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [upstreams]);
 
   const filteredUpstreams = useMemo(() => {
     let filtered = upstreams.slice();
     const query = filterQuery.trim().toLowerCase();
     if (query) {
-      filtered = filtered.filter((upstream) => `${upstream.name || ''} ${upstream.id || ''} ${upstream.accountId || ''} ${upstream.projectId || ''}`.toLowerCase().includes(query));
+      filtered = filtered.filter((upstream) => matchesSearch([upstream.name, upstream.email, upstream.id, upstream.accountId, upstream.projectId], query));
     }
     if (filterType) filtered = filtered.filter((upstream) => upstream.type === filterType);
     if (filterStatus === 'exhausted') {
-      filtered = filtered.filter((upstream) => getQuotaBand(upstream) === 'exhausted' || upstream.status === 'exhausted');
+      filtered = filtered.filter((upstream) => getQuotaBand(upstream) === 'exhausted');
     } else if (filterStatus === 'uncapped') {
       filtered = filtered.filter((upstream) => !upstream.spending || upstream.spending.capCredits <= 0);
-    } else if (filterStatus) {
-      filtered = filtered.filter((upstream) => upstream.status === filterStatus);
+    } else if (filterStatus === 'reauth_required') {
+      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'reauth_required');
+    } else if (filterStatus === 'refresh_failed') {
+      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'failed');
     }
     if (filterQuota) filtered = filtered.filter((upstream) => getQuotaBand(upstream) === filterQuota);
     return filtered.sort((a, b) => sortUpstreams(a, b, filterSort));
@@ -420,7 +416,7 @@ function App() {
         <VStack gap={6}>
           <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
             <VStack gap={1}>
-              <Heading level={1}>Codex Pooler Node</Heading>
+              <Heading level={1}>Relaydeck</Heading>
               <Text type="supporting" color="secondary">Small local upstream and quota dashboard. Credentials never leave this server.</Text>
             </VStack>
             <HStack gap={2} vAlign="center" wrap="wrap">
@@ -429,7 +425,7 @@ function App() {
                 variant="secondary"
                 onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
               />
-              <Button label="Reload" variant="secondary" isLoading={loading} onClick={() => void load()} />
+              <Button label="Reload" variant="secondary" isLoading={isManualReloading} onClick={() => void load(true)} />
             </HStack>
           </HStack>
 
@@ -438,7 +434,6 @@ function App() {
             <Grid columns={9} gap={2}>
               <Metric label="Codex total" value={stats.totalCodex} />
               <Metric label="Compass total" value={stats.totalCompass} />
-              <Metric label="Active" value={stats.active} />
               <Metric label="Reauth required" value={stats.reauth} />
               <Metric label="Low quota (<30%)" value={stats.lowQuota} />
               <Metric label="Uncapped" value={stats.uncapped} />
@@ -637,30 +632,33 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
     : 'Set a cap to make this upstream routable';
   const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
-  const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'accent';
-  const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'accent';
+  const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
+  const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'success';
   const trackBgMap = {
     error: 'var(--color-background-red)',
     warning: 'var(--color-background-yellow)',
-    accent: 'var(--color-background-blue)',
   };
   return (
-    <Card>
-      <VStack gap={3}>
-        <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-          <VStack gap={1}>
-            <Heading level={3}>{upstream.name}</Heading>
-            {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary">{tokenExpiry}</Text>}
-            {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
-            {tokenRefresh?.status === 'reauth_required' && <Badge label="Reauthentication required" variant="error" />}
-          </VStack>
+    <Card height="100%">
+      <VStack gap={3} height="100%" vAlign="between">
+        <HStack justify="between" vAlign="center" gap={2} height={56}>
+          <StackItem size="fill">
+            <VStack gap={1}>
+              <Heading level={3} maxLines={1}>{upstream.name}</Heading>
+              <HStack gap={1} vAlign="center" minHeight={28}>
+                {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary">{tokenExpiry}</Text>}
+                {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
+                {tokenRefresh?.status === 'reauth_required' && <Badge label="Reauth required" variant="error" />}
+              </HStack>
+            </VStack>
+          </StackItem>
           <HStack gap={1} vAlign="center">
             {Number.isInteger(upstream.priority) && <Badge label={`${ordinal(upstream.priority + 1)} priority`} variant="blue" />}
             <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
           </HStack>
         </HStack>
-        <VStack gap={1}>
-          <HStack justify="between" vAlign="center" gap={2} wrap="wrap"><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
+        <VStack gap={1} height={56}>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
           <ProgressBar
             label="Quota remaining"
             value={!quota ? 0 : quotaRemaining}
@@ -669,7 +667,7 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             variant={quotaVariant}
             style={trackBgMap[quotaVariant] ? { '--color-background-muted': trackBgMap[quotaVariant] } : undefined}
           />
-          {quotaCount(quota) && <Text type="supporting" color="secondary">{quotaCount(quota)}</Text>}
+          <Text type="supporting" color="secondary" minHeight={20}>{quotaCount(quota)}</Text>
         </VStack>
         <VStack gap={1}>
           <Text type="label" weight="bold">{capHeading}</Text>
@@ -686,13 +684,13 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             {recentActiveText && <Text type="supporting" color="secondary">{recentActiveText}</Text>}
           </HStack>
         </VStack>
-        <HStack gap={2} wrap="wrap">
-          <Button label="Refresh" size="sm" variant="secondary" onClick={() => onRefresh(upstream)} />
-          {upstream.type === 'codex' && <Button label="Refresh token" size="sm" variant="secondary" isLoading={isRefreshingToken} isDisabled={isRefreshingToken || tokenRefresh?.status === 'refreshing'} onClick={() => onRefreshToken(upstream)} />}
-          <Button label="Edit" size="sm" variant="secondary" onClick={() => onEdit(upstream)} />
-          <Button label="Set cap" size="sm" variant="secondary" onClick={() => onCap(upstream)} />
-          <Button label="Set priority" size="sm" variant="secondary" onClick={onPriority} />
-          <Button label="Delete" size="sm" variant="destructive" onClick={() => onDelete(upstream)} />
+        <HStack gap={1} vAlign="center">
+          <Button label="Refresh quota" tooltip="Refresh quota" icon="◷" isIconOnly size="sm" variant="secondary" onClick={() => onRefresh(upstream)} />
+          {upstream.type === 'codex' && <Button label="Refresh token" tooltip="Refresh token" icon="↻" isIconOnly size="sm" variant="secondary" isLoading={isRefreshingToken} isDisabled={isRefreshingToken || tokenRefresh?.status === 'refreshing'} onClick={() => onRefreshToken(upstream)} />}
+          <Button label="Edit upstream" tooltip="Edit upstream" icon="✎" isIconOnly size="sm" variant="secondary" onClick={() => onEdit(upstream)} />
+          <Button label="Set spending cap" tooltip="Set spending cap" icon="$" isIconOnly size="sm" variant="secondary" onClick={() => onCap(upstream)} />
+          <Button label="Set priority" tooltip="Set priority" icon="≡" isIconOnly size="sm" variant="secondary" onClick={onPriority} />
+          <Button label="Delete upstream" tooltip="Delete upstream" icon="×" isIconOnly size="sm" variant="destructive" onClick={() => onDelete(upstream)} />
         </HStack>
       </VStack>
     </Card>
@@ -786,6 +784,16 @@ async function run(action, success, show) {
   } catch (error) {
     show(error.message, true);
   }
+}
+
+function matchesSearch(values, query) {
+  return values.some((value) => {
+    const text = String(value || '').toLowerCase();
+    if (text.includes(query)) return true;
+    let index = 0;
+    for (const character of text) if (character === query[index]) index += 1;
+    return index === query.length;
+  });
 }
 
 function getQuotaBand(upstream) {
