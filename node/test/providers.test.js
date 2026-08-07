@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ensureProviderCredentials, refreshQuota } from '../src/providers.js';
+import { codexRefreshFailureCode, codexRefreshFailureDetail, ensureProviderCredentials, refreshQuota } from '../src/providers.js';
+
+test('classifies invalidated Codex refresh tokens as requiring reauthentication', () => {
+  assert.equal(codexRefreshFailureCode({ providerBody: { error: { code: 'refresh_token_invalidated' } } }), 'reauth_required');
+});
+
+test('extracts a safe Codex token refresh failure detail', () => {
+  assert.equal(codexRefreshFailureDetail({ providerBody: { error: { message: 'Your refresh token has already been used.' } } }), 'Your refresh token has already been used.');
+  assert.equal(codexRefreshFailureDetail(new Error('request failed')), 'request failed');
+});
 
 test('refreshes Codex quota using the account header', async () => {
   let request;
