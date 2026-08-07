@@ -463,7 +463,8 @@ function publicTokenRefresh(value) {
     startedAt: value.startedAt || null,
     finishedAt: value.finishedAt || null,
     trigger: value.trigger || null,
-    errorCode: value.errorCode || null
+    errorCode: value.errorCode || null,
+    errorDetail: text(value.errorDetail) || null
   };
 }
 

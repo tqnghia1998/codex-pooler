@@ -48,9 +48,14 @@ export async function refreshProviderCredentials(upstream, credentials, {
 export function codexRefreshFailureCode(error) {
   const body = error?.providerBody || {};
   const code = body.error?.code || body.error;
-  if (['invalid_grant', 'revoked', 'invalid_refresh_token', 'token_expired', 'refresh_token_reused'].includes(code)) return 'reauth_required';
+  if (['invalid_grant', 'revoked', 'invalid_refresh_token', 'token_expired', 'refresh_token_reused', 'refresh_token_invalidated'].includes(code)) return 'reauth_required';
   const text = [body.error_description, body.error_message, body.message, typeof body.error === 'string' ? body.error : ''].filter((value) => typeof value === 'string').join(' ').toLowerCase();
   return text.includes('refresh') && text.includes('token') && ['revoked', 'expired', 'invalid'].some((word) => text.includes(word)) ? 'reauth_required' : 'failed';
+}
+
+export function codexRefreshFailureDetail(error) {
+  const message = error?.providerBody?.error?.message || error?.providerBody?.error_description || error?.providerBody?.error_message || error?.message;
+  return typeof message === 'string' ? message.replace(/\s+/g, ' ').trim().slice(0, 300) || null : null;
 }
 
 async function refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentials, retried = false) {
