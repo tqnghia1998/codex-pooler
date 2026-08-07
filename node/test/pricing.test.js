@@ -24,6 +24,10 @@ test('keeps the served model across stream events', () => {
   assert.equal(priceUsage([merged.model], merged).settledCostMicros, 3_200);
 });
 
+test('prices usage when a provider total_tokens disagrees with input plus output', () => {
+  assert.equal(priceUsage(['gpt-5.6-terra'], { inputTokens: 1_000, outputTokens: 100, totalTokens: 900 }).settledCostMicros, 3_200);
+});
+
 test('merges partial stream usage and resolves dated model pricing by suffix', () => {
   const usage = mergeUsage(
     extractUsage({ response: { usage: { input_tokens: 1_000, input_tokens_details: { cached_tokens: 200 } } } }),
