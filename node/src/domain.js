@@ -29,7 +29,9 @@ export function number(value, label, { integer = false, min = 0 } = {}) {
 }
 
 export function dollarsToCredits(value) {
-  return Math.round(number(value, 'capDollars') * CREDITS_PER_DOLLAR);
+  const dollars = number(value, 'capDollars');
+  // Zero credits means "no cap", so a positive cap never rounds down into an unset one.
+  return Math.max(Math.round(dollars * CREDITS_PER_DOLLAR), dollars > 0 ? 1 : 0);
 }
 
 export function dollarsToMicros(value) {
