@@ -1,7 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
-import { defaultBaseUrl } from './domain.js';
+import { defaultBaseUrl, STATIC_MODEL_CATALOG } from './domain.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
@@ -52,11 +52,7 @@ const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
 const SESSION_HEADERS = ['x-codex-window-id', 'x-codex-session-id', 'session-id', 'x-session-id', 'x-session-affinity', 'session_id', 'x-codex-conversation-id'];
-const MODEL_CATALOG_TTL_MS = 60_000;
-const MODEL_CATALOG_CONCURRENCY = 3;
 const TERMINAL_EVENT_TYPE = Symbol('terminalEventType');
-const modelCatalogCache = new WeakMap();
-const modelCatalogLoads = new WeakMap();
 
 export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null }) {
   if (!validApiKey(req, apiKey)) {
@@ -1041,106 +1037,12 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
   }
-  const catalog = await loadModelCatalog(store, req, fetchImpl, res);
-  if (!catalog.eligibleCount) {
-    sendJson(res, 503, { error: { type: 'server_error', message: 'No eligible upstream is available' } });
-    return;
-  }
-  if (!catalog.data.length && catalog.lastError) {
-    sendFailure(res);
-    return;
-  }
-  if (path === '/v1/models') sendJson(res, 200, { object: 'list', data: catalog.data });
-  else sendJson(res, 200, { models: catalog.data }, { etag: catalog.etag });
+  if (path === '/v1/models') sendJson(res, 200, { object: 'list', data: STATIC_MODEL_CATALOG });
+  else sendJson(res, 200, { models: STATIC_MODEL_CATALOG }, { etag: modelEtag({ models: STATIC_MODEL_CATALOG }) });
 }
 
-async function loadModelCatalog(store, req, fetchImpl, res = null) {
-  const scopeId = requestScopeId(req);
-  const cached = modelCatalogCache.get(store)?.get(scopeId);
-  if (cached?.expiresAt > Date.now()) return cached;
-
-  const loads = modelCatalogLoads.get(store) || new Map();
-  const existing = loads.get(scopeId);
-  if (existing) return existing;
-
-  const load = fetchModelCatalog(store, req, fetchImpl, scopeId, res);
-  loads.set(scopeId, load);
-  modelCatalogLoads.set(store, loads);
-  try {
-    return await load;
-  } finally {
-    loads.delete(scopeId);
-    if (!loads.size) modelCatalogLoads.delete(store);
-  }
-}
-
-function cachedModelCatalog(store, scopeId) {
-  const cached = modelCatalogCache.get(store)?.get(scopeId);
-  return cached?.expiresAt > Date.now() ? cached : null;
-}
-
-async function fetchModelCatalog(store, req, fetchImpl, scopeId, res = null) {
-  const cache = modelCatalogCache.get(store);
-  const eligible = store.eligibility(null, scopeId).eligible;
-  const results = await mapConcurrent(eligible, MODEL_CATALOG_CONCURRENCY, async (record) => {
-    const upstream = store.get(record.id, scopeId);
-    if (!upstream) return { models: [] };
-    const credentials = store.credentials(record.id);
-    try {
-      await ensureProviderCredentials(upstream, credentials, {
-        fetchImpl,
-        saveCredentials: (updated, expiresAt) => store.persistCredentials(record.id, updated, expiresAt)
-      });
-      const target = upstream.type === 'compass' ? '/models' : `/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_HEADERS.version)}`;
-      let response = await requestUpstream({ method: 'GET', url: `${defaultBaseUrl(upstream.type)}${target}`, headers: rawHeaders(upstream, credentials, req) }, fetchImpl, { req, res });
-      persistResponseCookies(response, upstream, credentials, store);
-      if ((response.status === 401 || response.status === 403) && credentials.refreshToken) {
-        await refreshProviderCredentials(upstream, credentials, {
-          fetchImpl,
-          saveCredentials: (updated, expiresAt) => store.persistCredentials(record.id, updated, expiresAt)
-        });
-        response = await requestUpstream({ method: 'GET', url: `${defaultBaseUrl(upstream.type)}${target}`, headers: rawHeaders(upstream, credentials, req) }, fetchImpl, { req, res });
-        persistResponseCookies(response, upstream, credentials, store);
-      }
-      if (!response.ok) throw Object.assign(new Error(`Provider returned HTTP ${response.status}`), { statusCode: 502 });
-      const allowedModels = upstream.routing?.models || [];
-      return { models: normalizeModels(parseJson(await readResponseBytes(response, 4 * 1024 * 1024)), upstream)
-        .filter((model) => !allowedModels.length || allowedModels.includes(model.id.toLowerCase())) };
-    } catch (error) {
-      return { models: [], error };
-    }
-  });
-  const models = results.flatMap(({ models }) => models);
-  const lastError = results.every(({ error }) => error) ? results.find(({ error }) => error)?.error : null;
-  const data = dedupeModels(models).filter((model) => store.modelAllowed(scopeId, model.id));
-  const catalog = {
-    data,
-    eligibleCount: eligible.length,
-    lastError,
-    etag: data.length || !lastError ? modelEtag({ models: data }) : null,
-    expiresAt: Date.now() + MODEL_CATALOG_TTL_MS
-  };
-  if (catalog.etag) {
-    const scopes = modelCatalogCache.get(store) || new Map();
-    scopes.set(scopeId, catalog);
-    modelCatalogCache.set(store, scopes);
-  } else {
-    cache?.delete(scopeId);
-    if (!cache?.size) modelCatalogCache.delete(store);
-  }
-  return catalog;
-}
-
-async function mapConcurrent(items, limit, mapper) {
-  const results = Array(items.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await mapper(items[index]);
-    }
-  }));
-  return results;
+function cachedModelCatalog() {
+  return { etag: modelEtag({ models: STATIC_MODEL_CATALOG }) };
 }
 
 function modelEtag(body) {
@@ -1223,18 +1125,6 @@ function persistResponseCookies(response, upstream, credentials, store) {
   if (upstream.type === 'codex' && captureCodexCookies(response, credentials)) {
     store.persistCredentials(upstream.id, credentials, upstream.accessTokenExpiresAt);
   }
-}
-
-function normalizeModels(body, upstream) {
-  const values = Array.isArray(body?.data) ? body.data : Array.isArray(body?.models) ? body.models : [];
-  return values.map((model) => {
-    const id = typeof model === 'string' ? model : model?.id || model?.slug || model?.name;
-    return id ? { ...(typeof model === 'object' ? model : {}), id, object: 'model', owned_by: model?.owned_by || upstream.type } : null;
-  }).filter(Boolean);
-}
-
-function dedupeModels(models) {
-  return [...new Map(models.map((model) => [model.id, model])).values()];
 }
 
 async function streamPassthrough(response, res, onEvent = null, upstreamDeadlines = {}) {
