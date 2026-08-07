@@ -15,6 +15,15 @@ test('extracts Codex and Anthropic token/cache usage shapes', () => {
   }}}), { inputTokens: 160, cachedInputTokens: 10, cacheWriteTokens: 50, outputTokens: 20, serviceTier: null });
 });
 
+test('keeps the served model across stream events', () => {
+  const merged = mergeUsage(
+    extractUsage({ type: 'response.created', response: { model: 'gpt-5.6-terra', usage: { input_tokens: 1_000 } } }),
+    extractUsage({ type: 'response.completed', response: { usage: { input_tokens: 1_000, output_tokens: 100 } } })
+  );
+  assert.equal(merged.model, 'gpt-5.6-terra');
+  assert.equal(priceUsage([merged.model], merged).settledCostMicros, 3_200);
+});
+
 test('merges partial stream usage and resolves dated model pricing by suffix', () => {
   const usage = mergeUsage(
     extractUsage({ response: { usage: { input_tokens: 1_000, input_tokens_details: { cached_tokens: 200 } } } }),
