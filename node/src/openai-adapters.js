@@ -344,13 +344,19 @@ function normalizeInputItem(item) {
     if (![item.id, item.call_id, item.result].every((value) => typeof value === 'string') || !['completed', 'incomplete'].includes(item.status) || Object.keys(item).some((key) => !['type', 'id', 'call_id', 'result', 'status'].includes(key))) invalid('input item shape is not translatable', 'input');
     return [item];
   }
-  if (['tool_search_call', 'tool_search_output'].includes(item.type)) return [item];
-  if (item.type === 'item_reference') return [item];
+  // Known native Codex replay items with no locally-owned semantics (see codex-rs
+  // protocol::models::ResponseItem for the source of truth). Forwarded as-is.
+  if (['tool_search_call', 'tool_search_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'context_compaction', 'agent_message', 'item_reference'].includes(item.type)) return [item];
   if (item.type === 'input_file') {
     if (!(cleanString(item.file_id) || typeof item.file_data === 'string')) invalid('input item shape is not translatable', 'input');
     return [item];
   }
-  if (item.type === 'message' || item.role !== undefined || item.content !== undefined) return [normalizeResponseMessage(item)];
+  if (item.type === 'message' || item.type === undefined && (item.role !== undefined || item.content !== undefined)) return [normalizeResponseMessage(item)];
+  // Anything else with a type tag we don't recognize yet: forward untranslated rather
+  // than reject, so a newly added native Codex item type doesn't 400 until we get
+  // around to adding an explicit case above. Deliberately blocked shapes (e.g. remote
+  // MCP tools) are already rejected above/in additional_tools before this fallback.
+  if (cleanString(item.type)) return [item];
   invalid('input item shape is not translatable', 'input');
 }
 
@@ -526,6 +532,15 @@ function validateTool(tool) {
   }
   if (tool.type === 'image_generation') return tool;
   if (tool.type === 'web_search') return validateWebSearch(tool);
+  if (tool.type === 'tool_search') {
+    exactKeys(tool, ['type', 'execution', 'description', 'parameters'], 'tools');
+    if (!cleanString(tool.execution) || !cleanString(tool.description) || !plainObject(tool.parameters)) invalid('tool_search tool requires execution, description, and parameters', 'tools');
+    return tool;
+  }
+  // Any other native tool declaration (remote MCP is already rejected above) is
+  // forwarded untranslated instead of hand-listing every current and future Codex
+  // built-in tool type here.
+  if (cleanString(tool.type)) return tool;
   invalid('tool shape is not translatable', 'tools');
 }
 
