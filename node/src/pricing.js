@@ -93,8 +93,10 @@ function usageObject(body) {
   return usage && typeof usage === 'object' && !Array.isArray(usage) ? usage : null;
 }
 
+// totalTokens is reporting only: providers disagree on whether it counts cache tokens, and a mismatch there
+// must not discard priced input/output tokens, which would let the request escape the spending cap.
 function completeUsage(usage) {
-  return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens && (usage.totalTokens === undefined || usage.totalTokens === usage.inputTokens + usage.outputTokens);
+  return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens;
 }
 
 function resolvePrice(models, tier, timestamp, bucket) {
