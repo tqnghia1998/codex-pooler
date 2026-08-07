@@ -18,7 +18,7 @@ import {
   spendingSummary,
   updateUpstream
 } from './domain.js';
-import { codexRefreshFailureCode } from './providers.js';
+import { codexRefreshFailureCode, codexRefreshFailureDetail } from './providers.js';
 
 const SESSION_LIMIT = 1_000;
 const SESSION_ID_MAX_LENGTH = 200;
@@ -252,7 +252,7 @@ export class Store {
     const upstream = findOrThrow(db, id);
     if (expectedEpoch !== null && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return null;
     const status = codexRefreshFailureCode(error);
-    upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status };
+    upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status, errorDetail: codexRefreshFailureDetail(error) };
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
