@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "build": "vite build",
-    "start": "npm run build && node --env-file=.env src/server.js",
-    "dev": "npm run build && node --env-file=.env --watch src/server.js",
+    "start": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env src/server.js",
+    "dev": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env --watch src/server.js",
     "test": "node --test"
   },
   "dependencies": {

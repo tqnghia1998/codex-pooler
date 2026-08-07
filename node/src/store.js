@@ -692,7 +692,7 @@ export class Store {
 }
 
 function emptyDatabase() {
-  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [{ id: DEFAULT_SCOPE_ID, status: 'active', models: [] }], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [] };
+  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [] };
 }
 
 function normalizeDatabase(parsed) {
