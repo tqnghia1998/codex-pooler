@@ -47,6 +47,35 @@ test('selects a monthly Codex window and reports remaining percent', () => {
   assert.equal(unixReset.resetAt, '2027-01-15T08:00:00.000Z');
 });
 
+test('falls back to an exhausted monthly window when WHAM omits its percentage', () => {
+  const quota = parseCodexQuota({ rate_limit: {
+    allowed: false,
+    limit_reached: true,
+    primary_window: { limit_window_seconds: 2_592_000, reset_after_seconds: 60 }
+  }}, new Date('2026-07-15T00:00:00Z'));
+  assert.equal(quota.remainingPercent, 0);
+  assert.equal(quota.remainingUnits, null);
+  assert.equal(quota.limitUnits, null);
+  assert.equal(quota.resetAt, '2026-07-15T00:01:00.000Z');
+});
+
+test('keeps WHAM percentage-only quotas when absolute totals are unavailable', () => {
+  const quota = parseCodexQuota({
+    plan_type: 'free',
+    rate_limit: {
+      allowed: true,
+      limit_reached: false,
+      primary_window: { used_percent: 99, limit_window_seconds: 2_592_000, reset_after_seconds: 1_292_992, reset_at: 1_787_369_871 }
+    },
+    credits: { has_credits: false, balance: null },
+    spend_control: { reached: false, individual_limit: null }
+  });
+  assert.equal(quota.remainingPercent, 1);
+  assert.equal(quota.remainingDollars, null);
+  assert.equal(quota.limitDollars, null);
+  assert.equal(quota.resetAt, '2026-08-22T03:37:51.000Z');
+});
+
 test('uses Codex spend control as the monthly usage quota', () => {
   const quota = parseCodexQuota({
     rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 18_000 } },
