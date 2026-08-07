@@ -249,6 +249,33 @@ test('keeps a session preference until its spending cap is reached', async () =>
   }
 });
 
+test('rotates a session to the next upstream after five dollars of settled spend', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-rotation-'));
+  const authHeaders = [];
+  const fetchImpl = async (_url, options) => {
+    authHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'resp-session', output_text: 'ok', usage: { price_cost_usd: 5 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first@example.com', accountId: 'acct-first' }));
+  const second = store.create(codexInput({ email: 'second@example.com', accountId: 'acct-second' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.setPriorityList([first.id]);
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const headers = { 'x-codex-session-id': 'rotate-at-five' };
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'one' }, headers)).response.status, 200);
+    assert.equal(store.sessionUpstream('rotate-at-five'), null);
+    assert.equal(store.sessionRotationUpstream('rotate-at-five'), first.id);
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'two' }, headers)).response.status, 200);
+    assert.deepEqual(authHeaders, [`Bearer ${store.credentials(first.id).accessToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('routes by model preference, explicit type, and explicit upstream ID', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-routing-'));
   const urls = [];
