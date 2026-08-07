@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createUpstream, filterSpendCapEligible, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
+import { createUpstream, dollarsToCredits, filterSpendCapEligible, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -134,6 +134,12 @@ test('priced usage updates spend, replacement applies only its delta, and old at
   setSpendingCap(upstream, 200);
   assert.equal(spendingSummary(upstream.spending).spentCredits, 0);
   assert.equal(spendingSummary(upstream.spending).settlementCount, 0);
+});
+
+test('a positive cap never rounds down into an unset one', () => {
+  assert.equal(dollarsToCredits(0), 0);
+  assert.equal(dollarsToCredits(0.01), 1);
+  assert.equal(dollarsToCredits(100), 2_500);
 });
 
 test('usage settlements with reserved property names persist idempotently', () => {
