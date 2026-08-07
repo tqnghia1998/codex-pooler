@@ -97,12 +97,18 @@ function completeUsage(usage) {
 function resolvePrice(models, tier, timestamp, bucket) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
-    const matching = PRICES.filter((snapshot) => snapshot.model === candidate && snapshot.tier === tier && Date.parse(snapshot.effectiveAt) <= timestamp);
-    // Models without a long-context bucket (all Anthropic entries) keep their default rates.
-    const snapshots = matching.filter((snapshot) => snapshot.bucket === bucket).length ? matching.filter((snapshot) => snapshot.bucket === bucket) : matching.filter((snapshot) => snapshot.bucket === 'default');
+    const dated = PRICES.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
+    // A known model priced only at standard rates (no priority tier, no long-context bucket: all Anthropic entries)
+    // bills at those rates instead of going unpriced, which would let the request escape the spending cap.
+    const snapshots = preferred(preferred(dated, 'tier', tier, 'standard'), 'bucket', bucket, 'default');
     if (snapshots.length) return snapshots.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
   }
   return null;
+}
+
+function preferred(snapshots, key, wanted, fallback) {
+  const matching = snapshots.filter((snapshot) => snapshot[key] === wanted);
+  return matching.length ? matching : snapshots.filter((snapshot) => snapshot[key] === fallback);
 }
 
 function modelCandidates(models) {
