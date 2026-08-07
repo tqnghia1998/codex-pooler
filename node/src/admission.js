@@ -89,5 +89,8 @@ function ipValue(ip) {
   const rightParts = expandV4(suffix);
   parts.push(...Array(8 - parts.length - rightParts.length).fill('0'), ...rightParts);
   if (parts.length !== 8) return null;
-  return { bits: 128, value: parts.reduce((value, part) => value * 65536n + BigInt(`0x${part || '0'}`), 0n) };
+  const value = parts.reduce((value, part) => value * 65536n + BigInt(`0x${part || '0'}`), 0n);
+  return (value >> 32n) === 0xffffn
+    ? { bits: 32, value: value & 0xffffffffn }
+    : { bits: 128, value };
 }
