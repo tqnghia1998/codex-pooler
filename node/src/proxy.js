@@ -48,6 +48,17 @@ const BACKEND_METADATA_HEADERS = [
 ];
 const UNSUPPORTED_CODEX_RESPONSE_FIELDS = new Set(['max_output_tokens', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_p']);
 const PROMPT_CACHE_BREAKPOINT_TYPES = new Set(['input_text', 'input_image', 'input_file']);
+const COMPACT_PAYLOAD_FIELDS = new Set([
+  'model',
+  'instructions',
+  'input',
+  'tools',
+  'parallel_tool_calls',
+  'reasoning',
+  'service_tier',
+  'prompt_cache_key',
+  'text'
+]);
 const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
@@ -70,7 +81,13 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported OpenAI /v1 endpoint', param: null } });
     return;
   }
-  const sourcePath = normalizeProxyPath(path);
+  const compactionBridge = prepareCompactionTriggerBridge(path, payload);
+  if (compactionBridge?.error) {
+    sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_request', message: compactionBridge.error.message, param: compactionBridge.error.param } });
+    return;
+  }
+  const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
+  const dispatchPayload = compactionBridge?.payload || payload;
   let codexPayload = payload;
   try {
     if (path === '/v1/responses') codexPayload = adaptResponsesRequest(payload);
@@ -88,12 +105,12 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   const lifecycle = accounting.apiKeyId && (path === '/v1/responses' || path === '/v1/chat/completions')
     ? store.reserveGatewayRequest({ scopeId: authScopeId, apiKeyId: accounting.apiKeyId, endpoint: path, model, transport: payload?.stream === true ? 'http_sse' : 'http_json' })
     : null;
-  const candidates = chooseUpstreams(store, req, sourcePath, payload, path);
+  const candidates = chooseUpstreams(store, req, sourcePath, dispatchPayload, path);
   if (!candidates.length) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'no_compatible_backend', responseStatusCode: 503 });
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
-  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger });
+  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger });
   if (!dispatched) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
@@ -109,6 +126,20 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     const validAnthropic = response.status >= 400 && response.status < 500 && upstream.type === 'compass' && sourcePath === '/v1/messages' && validAnthropicError(errorBytes);
     if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
     else sendFailure(res);
+    return;
+  }
+  if (compactionBridge) {
+    const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+    const compactResult = parseJson(bytes);
+    const output = compactionBridgeSse(compactResult);
+    if (!output) {
+      finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'invalid_compaction_response', responseStatusCode: 502 });
+      sendJson(res, 502, { error: { type: 'server_error', code: 'invalid_compaction_response', message: 'Upstream compact response did not include encrypted compaction content', param: null } });
+      return;
+    }
+    settleUsage(store, upstream, attemptId, startedAt, compactResult, dispatchPayload, accounting, lifecycle, response.status);
+    res.writeHead(200, responseHeaders(response, 'text/event-stream', responseOptions));
+    res.end(output);
     return;
   }
   const publicCodex = upstream.type === 'codex' && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
@@ -162,6 +193,75 @@ function normalizeProxyPath(path) {
   if (path === '/backend-api/codex/responses/compact' || path === '/backend-api/codex/v1/responses/compact') return '/v1/responses/compact';
   if (path === '/backend-api/codex/v1/chat/completions') return '/v1/chat/completions';
   return path;
+}
+
+function prepareCompactionTriggerBridge(path, payload) {
+  if (!isBackendResponsesRoute(path) || payload?.stream !== true || !Array.isArray(payload?.input)) return null;
+  const triggerIndexes = payload.input.flatMap((item, index) => plainObject(item) && item.type === 'compaction_trigger' ? [index] : []);
+  if (!triggerIndexes.length) return null;
+  const singletonTrigger = payload.input.length === 1 && triggerIndexes[0] === 0;
+  if (!singletonTrigger && (triggerIndexes.length !== 1 || triggerIndexes[0] !== payload.input.length - 1 || !visibleCompactionInput(payload.input.slice(0, -1)))) {
+    return { error: { message: 'compaction_trigger must be the final input item and must follow visible input', param: 'input' } };
+  }
+  if (Object.hasOwn(payload, 'tools') && !Array.isArray(payload.tools)) return { error: { message: 'tools must be an array', param: 'tools' } };
+  if (Object.hasOwn(payload, 'parallel_tool_calls') && typeof payload.parallel_tool_calls !== 'boolean') {
+    return { error: { message: 'parallel_tool_calls must be a boolean', param: 'parallel_tool_calls' } };
+  }
+  if (Object.hasOwn(payload, 'text') && !plainObject(payload.text)) return { error: { message: 'text must be an object', param: 'text' } };
+  const projected = Object.fromEntries(Object.entries(payload).filter(([key]) => COMPACT_PAYLOAD_FIELDS.has(key)));
+  if (!Object.hasOwn(projected, 'prompt_cache_key') && Object.hasOwn(payload, 'promptCacheKey')) projected.prompt_cache_key = payload.promptCacheKey;
+  projected.input = payload.input.slice(0, -1);
+  return { payload: projected };
+}
+
+function visibleCompactionInput(input) {
+  return input.some((item) => {
+    if (typeof item === 'string') return item.trim().length > 0;
+    if (!plainObject(item) || item.type === 'reasoning' || item.type === 'compaction_trigger') return false;
+    if (visibleCompactionContent(item.content) || visibleCompactionContent(item.output)) return true;
+    return typeof item.text === 'string' && item.text.trim().length > 0;
+  });
+}
+
+function visibleCompactionContent(content) {
+  if (typeof content === 'string') return content.trim().length > 0;
+  if (!Array.isArray(content)) return false;
+  return content.some((part) => {
+    if (typeof part === 'string') return part.trim().length > 0;
+    if (!plainObject(part)) return false;
+    if (['input_text', 'text', 'output_text'].includes(part.type)) return typeof part.text === 'string' && part.text.trim().length > 0;
+    if (part.type === 'input_image') return cleanString(part.image_url) !== null || cleanString(part.file_id) !== null;
+    if (part.type === 'input_audio') return cleanString(part.audio_url) !== null;
+    if (part.type === 'input_file') return cleanString(part.file_id) !== null;
+    return false;
+  });
+}
+
+function compactionBridgeSse(decoded) {
+  if (!plainObject(decoded)) return null;
+  const sources = Array.isArray(decoded.output) ? decoded.output : [];
+  let source = sources.find((item) => plainObject(item) && ['compaction', 'compaction_summary'].includes(item.type) && typeof item.encrypted_content === 'string');
+  if (!source && plainObject(decoded.compaction_summary) && typeof decoded.compaction_summary.encrypted_content === 'string') source = decoded.compaction_summary;
+  if (!source) return null;
+  const item = {
+    type: 'compaction',
+    encrypted_content: source.encrypted_content,
+    ...(typeof source.id === 'string' ? { id: source.id } : {}),
+    ...(typeof source.internal_chat_message_metadata_passthrough?.turn_id === 'string'
+      ? { internal_chat_message_metadata_passthrough: { turn_id: source.internal_chat_message_metadata_passthrough.turn_id } }
+      : {})
+  };
+  const response = {
+    id: typeof decoded.id === 'string' ? decoded.id : 'resp_compaction',
+    status: 'completed',
+    output: [item],
+    ...(plainObject(decoded.usage) ? { usage: decoded.usage } : {})
+  };
+  return [
+    `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\n`,
+    `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response })}\n\n`,
+    'data: [DONE]\n\n'
+  ].join('');
 }
 
 function chooseUpstreams(store, req, path, payload, originalPath = path) {
