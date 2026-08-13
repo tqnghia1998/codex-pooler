@@ -171,6 +171,112 @@ test('retries compact without provider-rejected optional fields', async () => {
   }
 });
 
+test('bridges terminal backend compaction triggers through compact JSON and returns Responses SSE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compact-trigger-'));
+  const { store } = configuredStore(dir);
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, headers: options.headers, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({
+      id: 'resp-compact-trigger',
+      output: [{
+        id: 'cmp-1',
+        type: 'compaction_summary',
+        encrypted_content: 'encrypted-summary',
+        internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' },
+        plaintext: 'must-not-leak'
+      }],
+      usage: { input_tokens: 6, output_tokens: 2, total_tokens: 8 },
+      raw_compact_detail: 'must-not-leak'
+    }), { status: 200, headers: { 'content-type': 'application/json', 'x-codex-turn-state': 'response-turn' } });
+  };
+  const { server, base } = await start(store, fetchImpl);
+  try {
+    const response = await gatewayFetch(base, '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-codex-turn-state': 'request-turn' },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol',
+        instructions: 'compact this',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible history', prompt_cache_breakpoint: { mode: 'explicit' } }] },
+          { type: 'compaction_trigger' }
+        ],
+        stream: true,
+        tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object' } }],
+        parallel_tool_calls: true,
+        reasoning: { effort: 'low' },
+        service_tier: 'priority',
+        promptCacheKey: 'compact-cache',
+        text: { format: { type: 'text' } },
+        include: ['reasoning.encrypted_content'],
+        store: false,
+        previous_response_id: 'resp-old'
+      })
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/event-stream/);
+    assert.equal(response.headers.get('x-codex-turn-state'), 'response-turn');
+    assert.equal(new URL(calls[0].url).pathname, '/backend-api/codex/responses/compact');
+    assert.equal(calls[0].headers['x-codex-turn-state'], 'request-turn');
+    assert.deepEqual(calls[0].body, {
+      model: 'gpt-5.6-sol',
+      instructions: 'compact this',
+      input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible history' }] }],
+      tools: [{ type: 'function', name: 'lookup', parameters: { type: 'object', properties: {} } }],
+      parallel_tool_calls: true,
+      reasoning: { effort: 'low' },
+      service_tier: 'priority',
+      prompt_cache_key: 'compact-cache',
+      text: { format: { type: 'text' } }
+    });
+    assert.match(body, /event: response\.output_item\.done/);
+    assert.match(body, /event: response\.completed/);
+    assert.match(body, /"type":"compaction"/);
+    assert.match(body, /"encrypted_content":"encrypted-summary"/);
+    assert.match(body, /"turn_id":"turn-1"/);
+    assert.match(body, /data: \[DONE\]/);
+    assert.doesNotMatch(body, /must-not-leak/);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects misplaced or malformed compaction trigger requests before dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compact-trigger-invalid-'));
+  const { store } = configuredStore(dir);
+  let calls = 0;
+  const { server, base } = await start(store, async () => { calls += 1; return new Response('{}'); });
+  try {
+    const invalidTrigger = await gatewayFetch(base, '/backend-api/codex/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [{ type: 'compaction_trigger' }, { type: 'message', content: 'later' }], stream: true })
+    });
+    assert.equal(invalidTrigger.status, 400);
+    assert.equal((await invalidTrigger.json()).error.param, 'input');
+
+    const invalidTools = await gatewayFetch(base, '/backend-api/codex/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol',
+        input: [{ type: 'message', content: 'visible' }, { type: 'compaction_trigger' }],
+        stream: true,
+        tools: {}
+      })
+    });
+    assert.equal(invalidTools.status, 400);
+    assert.deepEqual(await invalidTools.json(), {
+      error: { type: 'invalid_request_error', code: 'invalid_request', message: 'tools must be an array', param: 'tools' }
+    });
+    assert.equal(calls, 0);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('implements the complete public file create, upload, finalize, list, and retrieve flow', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-files-'));
   const { store } = configuredStore(dir);
