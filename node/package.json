@@ -7,6 +7,7 @@
     "build": "vite build",
     "start": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env src/server.js",
     "dev": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env --watch src/server.js",
+    "pricing:refresh": "node scripts/refresh-openai-pricing.js",
     "test": "node --test"
   },
   "dependencies": {

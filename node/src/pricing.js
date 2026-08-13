@@ -1,16 +1,15 @@
+import {
+  OPENAI_PRICE_ROWS,
+  OPENAI_PRICING_EFFECTIVE_AT,
+  OPENAI_PRICING_VERSION
+} from './openai-pricing-snapshot.js';
+
 // OpenAI bills a separate long-context bucket once input exceeds this many tokens.
 const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
 
-const OPENAI_PRICES = [
-  ['gpt-5.6-luna', [0.2, 0.02, 0.25, 1.2], [0.4, 0.04, 0.5, 2.4], [0.4, 0.04, 0.5, 1.8], [0.8, 0.08, 1, 3.6]],
-  ['gpt-5.6-terra', [2, 0.2, 2.5, 12], [4, 0.4, 5, 24], [4, 0.4, 5, 18], [8, 0.8, 10, 36]],
-  ['gpt-5.6-sol', [5, 0.5, 6.25, 30], [10, 1, 12.5, 60], [10, 1, 12.5, 45], [20, 2, 25, 90]]
-].flatMap(([model, standard, priority, standardLong, priorityLong]) => [
-  price(model, standard, 'openai-2026-08-05'),
-  price(model, priority, 'openai-2026-08-05', 'priority'),
-  price(model, standardLong, 'openai-2026-08-05', 'standard', '2026-01-01T00:00:00Z', 'long_context'),
-  price(model, priorityLong, 'openai-2026-08-05', 'priority', '2026-01-01T00:00:00Z', 'long_context')
-]);
+const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket }) => (
+  price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket)
+));
 
 const ANTHROPIC_PRICES = [
   ['claude-opus-5', 5, 25, 6.25, 0.5], ['claude-opus-4-8', 5, 25, 6.25, 0.5], ['claude-opus-4-7', 5, 25, 6.25, 0.5], ['claude-opus-4-6', 5, 25, 6.25, 0.5], ['claude-opus-4-5', 5, 25, 6.25, 0.5],
@@ -168,5 +167,7 @@ function string(value) {
 
 function canonicalTier(value) {
   const tier = string(value)?.toLowerCase();
-  return tier === 'fast' || tier === 'priority' ? 'priority' : 'standard';
+  if (tier === 'fast' || tier === 'priority') return 'priority';
+  if (tier === 'flex') return 'flex';
+  return 'standard';
 }

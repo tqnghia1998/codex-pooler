@@ -47,13 +47,13 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
     settledCostMicros: 11_450,
     costSource: 'pricing_snapshot',
     model: 'gpt-5.6-sol',
-    priceVersion: 'openai-2026-08-05'
+    priceVersion: 'openai-2026-08-10'
   });
   assert.deepEqual(priceUsage(['gpt-5.6-sol'], { inputTokens: 272_001, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }), {
     settledCostMicros: 2_720_010,
     costSource: 'pricing_snapshot',
     model: 'gpt-5.6-sol',
-    priceVersion: 'openai-2026-08-05'
+    priceVersion: 'openai-2026-08-10'
   });
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 272_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }).settledCostMicros, 1_360_000);
   assert.equal(priceUsage(['claude-sonnet-5-20260101'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-08-31T23:59:59Z').settledCostMicros, 1_200);
@@ -62,6 +62,7 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   // A model priced only at standard rates still bills on a priority request instead of escaping the spending cap.
   assert.equal(priceUsage(['claude-sonnet-4-6'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'priority' }).settledCostMicros, 4_500);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, serviceTier: 'priority' }).settledCostMicros, 10_000);
+  assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, serviceTier: 'flex' }).settledCostMicros, 2_500);
   assert.equal(extractUsage({ usage: { input_tokens: 1_000, output_tokens: 100, price_cost_usd: null } }).upstreamCostMicros, undefined);
   assert.equal(extractUsage({ usage: { input_tokens: 100, cached_input_tokens: 100, cache_write_tokens: 100, output_tokens: 1 } }), null);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 100, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 1 }), null);
