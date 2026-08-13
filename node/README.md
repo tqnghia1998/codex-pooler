@@ -31,7 +31,7 @@ The Node proxy covers the client-visible local compatibility path:
 - There are no Pools, assignments, provider-quota routing, or bulkheads. Routing uses spending caps, explicit/session pins, model policy, and circuit state.
 - Public Responses WebSocket turns queue in-process while an active turn terminates. A process restart loses queued and in-flight socket state.
 - Credential preparation and refresh failures stay on the selected account instead of crossing accounts. Failover is allowed only after a refresh succeeds but that same account is still rejected, and only when the request is not explicitly or session pinned.
-- Pricing is a small static snapshot, not the Elixir catalog/database sync. Unknown or ambiguous models remain unpriced unless the provider reports `price_cost_usd`. Settlements are deduplicated per attempt across the 100 most recent settlements; a replay older than that window is counted again.
+- Pricing is a small generated snapshot, not the Elixir catalog/database sync. Refresh it explicitly with `npm run pricing:refresh`; unknown or ambiguous models remain unpriced unless the provider reports `price_cost_usd`. Settlements are deduplicated per attempt across the 100 most recent settlements; a replay older than that window is counted again.
 - Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility. `POST /v1/messages/count_tokens` is intentionally unsupported: Compass does not serve it and no local Claude tokenizer exists, so clients fall back to their own estimation.
 - The encrypted local SQLite store is suitable for one local process, not concurrent replicas or production high-availability storage.
 
@@ -113,6 +113,16 @@ Create a Codex upstream with `{ "type": "codex", "authJson": "..." }`, or a Comp
 Proxy routing prefers Codex, prefers Compass for `claude-*` models, and requires Compass for `/v1/messages`. Type preference is soft: `/v1/responses` and `/v1/chat/completions` fall through to the other upstream type when the preferred one is filtered out. Type requirements are hard: `/v1/messages` never reaches a Codex upstream and `/backend-api/codex/*` never reaches a Compass one, so a request with no eligible upstream of the required type fails with `no_compatible_backend` instead of failing over. The priority list is empty by default; upstreams added to it (dashboard **Set priority**, or `PUT /api/upstreams/priority`) are dispatched in list order ahead of unlisted upstreams of the same type, bypassing least-recent-success balancing. Unlisted upstreams are only reached once every listed upstream of that type is filtered out by its spending cap, and keep least-recent-success balancing among themselves. Use `x-upstream-type: codex|compass` or `x-upstream-id` to select explicitly. `x-codex-session-id` is an API-key-isolated soft upstream preference. Each pin rotates after $5 of settled, priced spend: the next ordinary request excludes the prior upstream once, then applies priority routing among the remaining eligible upstreams (or safely falls back to the same one when it is the only candidate). Thus priority `[A, B]` alternates sessions in $5 chunks: A → B → A → B, while both remain eligible. Response continuations retain their response pin. Codex Chat Completions are translated to Responses upstream and converted back, while Compass requests are sent directly to `/chat/completions`, `/responses`, or `/messages`.
 
 Public file creation performs the Codex create → upload → finalize protocol and stores only file metadata locally; file content and signed URLs are not persisted. Audio requests normalize OpenAI multipart fields for Codex transcription. Public image requests translate through the Responses image-generation tool and automatically select an image-capable Codex host model. The proxy binds to `127.0.0.1`. The API key is a single shared key, not a Pool or per-user key system.
+
+Backend Responses requests with `stream: true` may end their input with a `compaction_trigger`. The Node gateway validates that trigger, projects the compact-compatible request fields, dispatches to `/backend-api/codex/responses/compact` on the selected Codex account, and returns the encrypted compaction item as Responses SSE. The public `POST /v1/responses/compact` route remains intentionally unsupported.
+
+OpenAI billing rows and the advertised Codex model IDs come from `src/openai-pricing-snapshot.js`. Refresh that reviewable generated file from the configured upstream pricing feed with:
+
+```bash
+npm run pricing:refresh
+```
+
+Use `--source=<url-or-file-url>`, `--effective-at=<ISO-8601>`, or `--models=<comma-separated-ids>` when updating from a different vetted source or model selection.
 
 ## Check
 
