@@ -97,3 +97,44 @@ test('reserves authenticated public Responses and Chat requests before dispatch'
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('records real failed proxy phase timings without retaining account identity', async () => {
+  const { dir, store } = tempStore();
+  const upstream = store.create({ type: 'compass', projectId: 'diagnostic-project', projectKey: 'diagnostic-secret' });
+  store.setCap(upstream.id, { capDollars: 100 });
+  const server = createServer(createApp({
+    store,
+    apiKey: 'accounting-key',
+    fetchImpl: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      throw Object.assign(new Error('sensitive.example failed'), { code: 'ENOTFOUND' });
+    },
+    logger: { warn() {} }
+  }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer accounting-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'private prompt' })
+    });
+    assert.equal(response.status, 502);
+    const failure = store.gatewayDiagnostics().failures[0];
+    assert.equal(failure.errorCode, 'upstream_request_failed');
+    assert.equal(failure.attempts[0].errorCode, 'upstream_transport_failed');
+    assert.ok(Number.isInteger(failure.attempts[0].timings.credentialPreparationMs));
+    assert.ok(Number.isInteger(failure.attempts[0].timings.connectionMs));
+    assert.ok(Number.isInteger(failure.attempts[0].timings.terminalCompletionMs));
+    const persisted = store.sqlite.prepare(`
+      SELECT group_concat(value) AS result
+      FROM records
+      WHERE collection IN ('gatewayRequests', 'gatewayAttempts')
+    `).get().result || '';
+    for (const secret of [upstream.id, 'diagnostic-project', 'diagnostic-secret', 'sensitive.example', 'private prompt']) {
+      assert.equal(persisted.includes(secret), false);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

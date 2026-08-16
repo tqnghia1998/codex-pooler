@@ -1,10 +1,3 @@
-const RESPONSES_FIELDS = new Set([
-  'background', 'client_metadata', 'context_management', 'conversation', 'include', 'input', 'instructions',
-  'max_output_tokens', 'max_tool_calls', 'metadata', 'model', 'moderation', 'parallel_tool_calls',
-  'previous_response_id', 'prompt', 'prompt_cache_key', 'prompt_cache_options', 'prompt_cache_retention',
-  'reasoning', 'safety_identifier', 'service_tier', 'store', 'stream', 'stream_options', 'temperature',
-  'text', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'truncation', 'user'
-]);
 const RESPONSES_FORWARDED_FIELDS = new Set([
   'client_metadata', 'include', 'input', 'instructions', 'max_output_tokens', 'metadata', 'model',
   'moderation', 'parallel_tool_calls', 'previous_response_id', 'prompt_cache_key', 'prompt_cache_options',
@@ -40,10 +33,11 @@ export class AdapterError extends Error {
 
 export function adaptResponsesRequest(payload) {
   const normalized = structuredClone(payload);
-  rejectUnsupportedFields(normalized, RESPONSES_FIELDS);
+  if (Object.hasOwn(normalized, 'logprobs')) unsupported('logprobs');
   for (const field of Object.keys(normalized)) {
     if (RESPONSES_LOCAL_FIELDS.has(field)) unsupported(field);
   }
+  if (normalized.store !== undefined && normalized.store !== false) unsupported('store');
   requireModel(normalized);
   validatePromptCacheOptions(normalized.prompt_cache_options);
   validatePositiveInteger(normalized, 'max_output_tokens');
@@ -72,7 +66,7 @@ export function adaptResponsesRequest(payload) {
   validateText(normalized.text);
   validateStrictTargets(normalized);
   validateMedia(normalized.input);
-  return pick(normalized, RESPONSES_FORWARDED_FIELDS);
+  return defined(normalized);
 }
 
 export function adaptChatRequest(payload) {
@@ -246,6 +240,11 @@ function translateChatTools(tools) {
       if (!name || !plainObject(tool.function.parameters)) invalid('function tool requires nested function name and parameters', 'tools');
       return { type: 'function', name, parameters: tool.function.parameters, ...(tool.function.description !== undefined ? { description: tool.function.description } : {}), ...(tool.function.strict !== undefined ? { strict: tool.function.strict } : {}) };
     }
+    if (tool?.type === 'custom' && plainObject(tool.custom)) {
+      exactKeys(tool, ['type', 'custom'], 'tools');
+      exactKeys(tool.custom, ['name', 'description', 'format'], 'tools');
+      return { type: 'custom', ...tool.custom };
+    }
     if (['web_search_preview', 'image_generation'].includes(tool?.type)) return tool;
     invalid('tool shape is not translatable', 'tools');
   });
@@ -253,6 +252,13 @@ function translateChatTools(tools) {
 
 function translateChatToolChoice(choice) {
   if (plainObject(choice) && choice.type === 'function' && cleanString(choice.function?.name)) return { type: 'function', name: choice.function.name };
+  if (plainObject(choice) && choice.type === 'custom' && plainObject(choice.custom)) {
+    exactKeys(choice, ['type', 'custom'], 'tool_choice');
+    exactKeys(choice.custom, ['name'], 'tool_choice');
+    if (!cleanString(choice.custom.name)) invalid('tool_choice shape is not translatable', 'tool_choice');
+    return { type: 'custom', name: choice.custom.name };
+  }
+  if (plainObject(choice) && choice.type === 'custom') invalid('tool_choice shape is not translatable', 'tool_choice');
   return choice;
 }
 
@@ -394,7 +400,11 @@ function normalizeResponseContentPart(part, role) {
   if (typeof part === 'string') return { type: role === 'assistant' ? 'output_text' : 'input_text', text: part };
   if (!plainObject(part)) invalid('message content part is not translatable', 'input');
   if (role === 'assistant') {
-    if (['output_text', 'text'].includes(part.type) && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations'].includes(key))) return { type: 'output_text', text: part.text };
+    if (part.type === 'output_text' && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations'].includes(key))) {
+      if (part.annotations !== undefined) validateUrlCitations(part.annotations);
+      return { type: 'output_text', text: part.text, ...(part.annotations !== undefined ? { annotations: part.annotations } : {}) };
+    }
+    if (part.type === 'text' && typeof part.text === 'string' && part.annotations === undefined && Object.keys(part).every((key) => ['type', 'text'].includes(key))) return { type: 'output_text', text: part.text };
     if (part.type === 'thinking' && typeof part.thinking === 'string') return null;
     invalid('message content part is not translatable', 'input');
   }
@@ -407,6 +417,20 @@ function normalizeResponseContentPart(part, role) {
   if (part.type === 'input_file' && cleanString(part.filename) && typeof part.file_data === 'string' && Object.keys(part).every((key) => ['type', 'filename', 'file_data', 'prompt_cache_breakpoint'].includes(key))) return { ...part, ...breakpoint(part) };
   if (part.type === 'input_audio') return normalizeAudioPart(part);
   invalid('message content part is not translatable', 'input');
+}
+
+function validateUrlCitations(annotations) {
+  if (!Array.isArray(annotations)) invalid('input item shape is not translatable', 'input');
+  for (const annotation of annotations) {
+    if (!plainObject(annotation)) invalid('input item shape is not translatable', 'input');
+    exactKeys(annotation, ['type', 'start_index', 'end_index', 'url', 'title'], 'input');
+    if (annotation.type !== 'url_citation'
+      || typeof annotation.start_index !== 'number' || !Number.isFinite(annotation.start_index)
+      || typeof annotation.end_index !== 'number' || !Number.isFinite(annotation.end_index)
+      || typeof annotation.url !== 'string' || typeof annotation.title !== 'string') {
+      invalid('input item shape is not translatable', 'input');
+    }
+  }
 }
 
 function rejectReservedMetadata(input) {
@@ -560,6 +584,7 @@ function validateToolChoice(payload) {
     if (!names.includes(name)) invalid(`tool_choice references unknown ${choice.type} tool`, 'tool_choice');
     return;
   }
+  if (cleanString(choice.type)) return;
   invalid('tool_choice shape is not translatable', 'tool_choice');
 }
 
@@ -595,7 +620,7 @@ function validateText(text) {
   if (!plainObject(text)) invalid('text must be an object', 'text');
   if (text.verbosity !== undefined && (typeof text.verbosity !== 'string' || !['low', 'medium', 'high'].includes(text.verbosity.trim().toLowerCase()))) invalid('verbosity is not supported', 'text.verbosity');
   if (text.format !== undefined) {
-    if (!plainObject(text.format) || !['text', 'json_object', 'json_schema'].includes(text.format.type)) invalid('text format is not supported', 'text.format');
+    if (!plainObject(text.format) || !cleanString(text.format.type)) invalid('text format is not supported', 'text.format');
     if (text.format.type === 'json_schema' && !plainObject(text.format.schema)) invalid('text format json_schema must include a schema object', 'text.format.schema');
   }
 }
@@ -700,10 +725,9 @@ function validatePromptCacheOptions(options) {
 function validateReasoning(reasoning) {
   if (reasoning === undefined) return;
   if (!plainObject(reasoning)) invalid('reasoning must be an object', 'reasoning');
-  for (const key of Object.keys(reasoning)) if (!['effort', 'summary', 'context'].includes(key)) invalid('reasoning field is not supported', `reasoning.${key}`);
   validateReasoningEffort(reasoning.effort, 'reasoning.effort');
-  if (reasoning.summary !== undefined && (typeof reasoning.summary !== 'string' || !['auto', 'concise', 'detailed'].includes(reasoning.summary.trim().toLowerCase()))) invalid('reasoning summary is not supported', 'reasoning.summary');
-  if (reasoning.context !== undefined && (typeof reasoning.context !== 'string' || !['auto', 'current_turn', 'all_turns'].includes(reasoning.context.trim().toLowerCase()))) invalid('reasoning context is not supported', 'reasoning.context');
+  validateCompatibilityToken(reasoning.summary, 'reasoning summary is not supported', 'reasoning.summary');
+  validateCompatibilityToken(reasoning.context, 'reasoning context is not supported', 'reasoning.context');
 }
 
 function validateReasoningEffort(value, param) {
@@ -720,21 +744,24 @@ function validateModeration(moderation) {
 
 function normalizeServiceTier(payload) {
   if (payload.service_tier === undefined) return;
-  if (typeof payload.service_tier !== 'string') invalid('service_tier is not supported', 'service_tier');
+  validateCompatibilityToken(payload.service_tier, 'service_tier is not supported', 'service_tier');
   const tier = payload.service_tier.trim().toLowerCase() === 'fast' ? 'priority' : payload.service_tier.trim().toLowerCase();
-  if (!['auto', 'default', 'flex', 'priority', 'scale'].includes(tier)) invalid('service_tier is not supported', 'service_tier');
   payload.service_tier = tier;
 }
 
 function validateStreamOptions(options, allowedKey) {
   if (options === undefined) return;
   if (!plainObject(options)) invalid('stream_options must be an object', 'stream_options');
-  for (const key of Object.keys(options)) if (key !== allowedKey) invalid('stream_options field is not supported', `stream_options.${key}`);
   if (options[allowedKey] !== undefined && typeof options[allowedKey] !== 'boolean') invalid(`stream_options.${allowedKey} must be a boolean`, `stream_options.${allowedKey}`);
 }
 
 function validatePositiveInteger(payload, field) {
   if (payload[field] !== undefined && (!Number.isInteger(payload[field]) || payload[field] <= 0)) invalid(`${field} must be a positive integer`, field);
+}
+
+function validateCompatibilityToken(value, message, param) {
+  if (value === undefined) return;
+  if (typeof value !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value.trim())) invalid(message, param);
 }
 
 function validateWebSearch(tool) {
@@ -755,6 +782,7 @@ function validateCustomFormat(format) {
   if (!plainObject(format)) invalid('tool shape is not translatable', 'tools');
   if (format.type === 'text') return exactKeys(format, ['type'], 'tools');
   if (format.type === 'grammar' && cleanString(format.definition) && ['lark', 'regex'].includes(format.syntax)) return exactKeys(format, ['type', 'definition', 'syntax'], 'tools');
+  if (cleanString(format.type)) return;
   invalid('tool shape is not translatable', 'tools');
 }
 
@@ -803,6 +831,10 @@ function breakpoint(part) {
 
 function pick(object, fields) {
   return Object.fromEntries(Object.entries(object).filter(([key, value]) => fields.has(key) && value !== undefined));
+}
+
+function defined(object) {
+  return Object.fromEntries(Object.entries(object).filter(([, value]) => value !== undefined));
 }
 
 function stripKey(object, key) {

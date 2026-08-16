@@ -1,16 +1,22 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
-import { defaultBaseUrl, STATIC_MODEL_CATALOG } from './domain.js';
+import { defaultBaseUrl } from './domain.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
+import { modelCatalogForStore } from './codex-model-catalog.js';
+import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
 import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools } from './openai-adapters.js';
-import { upstreamFailure } from './public-errors.js';
+import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { extractUsage, mergeUsage, priceUsage } from './pricing.js';
 import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
+import { codexProtocolHeaders } from './protocol-compat.js';
+import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
+import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
+import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
 
@@ -32,11 +38,6 @@ const COMPASS_PATHS = {
   '/v1/chat/completions': '/chat/completions',
   '/v1/messages': '/messages'
 };
-const CODEX_HEADERS = {
-  'user-agent': 'codex_cli_rs/0.146.1',
-  originator: 'codex_cli_rs',
-  version: '0.146.1'
-};
 const ANTHROPIC_HEADERS = ['anthropic-version', 'anthropic-beta'];
 const BACKEND_METADATA_HEADERS = [
   'x-codex-turn-metadata',
@@ -46,7 +47,13 @@ const BACKEND_METADATA_HEADERS = [
   'x-codex-turn-state',
   'x-openai-subagent'
 ];
-const UNSUPPORTED_CODEX_RESPONSE_FIELDS = new Set(['max_output_tokens', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_p']);
+const CODEX_OPTIONAL_FALLBACK_FIELDS = new Set(['max_output_tokens', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_p']);
+const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(['temperature', 'top_k', 'top_p']);
+const COMPATIBILITY_FACT_TTL_MS = 24 * 60 * 60 * 1_000;
+const COMPATIBILITY_RETRY_LIMIT = Math.max(CODEX_OPTIONAL_FALLBACK_FIELDS.size, COMPASS_OPTIONAL_FALLBACK_FIELDS.size + 1);
+const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
+const ANTHROPIC_BETA_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const FORWARDED_HEADER_MAX_BYTES = 1024;
 const PROMPT_CACHE_BREAKPOINT_TYPES = new Set(['input_text', 'input_image', 'input_file']);
 const COMPACT_PAYLOAD_FIELDS = new Set([
   'model',
@@ -62,10 +69,11 @@ const COMPACT_PAYLOAD_FIELDS = new Set([
 const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
+const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
 const SESSION_HEADERS = ['x-codex-window-id', 'x-codex-session-id', 'session-id', 'x-session-id', 'x-session-affinity', 'session_id', 'x-codex-conversation-id'];
 const TERMINAL_EVENT_TYPE = Symbol('terminalEventType');
 
-export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null }) {
+export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store) }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
@@ -73,6 +81,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   const sessionId = sessionAffinity(req);
   const authScopeId = requestScopeId(req);
   const accounting = requestAccounting(req);
+  const modelCatalog = modelCatalogForStore(store);
   if (sessionId.length > MAX_SESSION_ID_LENGTH) {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_session_id', message: `x-codex-session-id must be at most ${MAX_SESSION_ID_LENGTH} characters`, param: 'x-codex-session-id' } });
     return;
@@ -88,58 +97,97 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
   const dispatchPayload = compactionBridge?.payload || payload;
+  if (sourcePath === '/v1/messages') {
+    const anthropicHeaderError = validateAnthropicHeaders(req);
+    if (anthropicHeaderError) {
+      sendJson(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: anthropicHeaderError } });
+      return;
+    }
+  }
   let codexPayload = payload;
+  let codexAdapterError = null;
   try {
     if (path === '/v1/responses') codexPayload = adaptResponsesRequest(payload);
     else if (sourcePath === '/v1/chat/completions') codexPayload = adaptChatRequest(payload);
   } catch (error) {
     if (!(error instanceof AdapterError)) throw error;
-    sendJson(res, 400, { error: { message: error.message, type: 'invalid_request_error', code: error.code, param: error.param } });
-    return;
+    codexAdapterError = error;
   }
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   if (model && !store.modelAllowed(authScopeId, model)) {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_model', message: `Model ${payload.model} is not available`, param: 'model' } });
     return;
   }
+  const routingPlan = chooseUpstreamPlan(store, req, sourcePath, dispatchPayload, path, modelCatalog);
+  let candidates = routingPlan.candidates;
+  if (codexAdapterError) {
+    candidates = candidates.filter((candidate) => store.get(candidate.id, authScopeId)?.type === 'compass');
+    if (!candidates.length) {
+      routingPlan.diagnostics.exclusions.push({ code: 'codex_adapter_incompatible' });
+      sendJson(res, 400, { error: { message: codexAdapterError.message, type: 'invalid_request_error', code: codexAdapterError.code, param: codexAdapterError.param } });
+      return;
+    }
+  }
   const lifecycle = accounting.apiKeyId && (path === '/v1/responses' || path === '/v1/chat/completions')
     ? store.reserveGatewayRequest({ scopeId: authScopeId, apiKeyId: accounting.apiKeyId, endpoint: path, model, transport: payload?.stream === true ? 'http_sse' : 'http_json' })
     : null;
-  const candidates = chooseUpstreams(store, req, sourcePath, dispatchPayload, path);
   if (!candidates.length) {
-    finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'no_compatible_backend', responseStatusCode: 503 });
+    finalizeGatewayFailure(store, lifecycle, null, {
+      errorCode: 'no_compatible_backend',
+      responseStatusCode: 503,
+      exclusionReasons: routingPlan.diagnostics.exclusions.map(({ code }) => code)
+    });
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
-  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger });
+  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth });
   if (!dispatched) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
-  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection } = dispatched;
+  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError } = dispatched;
+  if (pacingError) {
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
+    const failure = pacingUnavailable(pacingError);
+    sendJson(res, failure.status, failure.body, failure.headers);
+    return;
+  }
+  if (hostBlocked) {
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'codex_host_unavailable', responseStatusCode: 503 });
+    const failure = codexHostUnavailable(response.headers.get('retry-after'));
+    sendJson(res, failure.status, failure.body, failure.headers);
+    return;
+  }
   if (sessionId && !store.sessionUpstream(sessionId, authScopeId, accounting.apiKeyId)) store.pinSession(sessionId, upstream.id, authScopeId, accounting.apiKeyId);
-  const responseOptions = { relayTurnState: isBackendMetadataRoute(path) };
-  const modelsEtag = isBackendResponsesRoute(path) ? cachedModelCatalog(store, authScopeId)?.etag || null : null;
+  const responseOptions = {
+    relayTurnState: isBackendMetadataRoute(path),
+    nativeResponseControls: isBackendResponsesRoute(path)
+  };
+  const modelsEtag = isBackendResponsesRoute(path) ? modelCatalog.snapshot(authScopeId).etag : null;
 
   if (!response.ok) {
     const errorBytes = await readBoundedResponse(response);
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
     const validAnthropic = response.status >= 400 && response.status < 500 && upstream.type === 'compass' && sourcePath === '/v1/messages' && validAnthropicError(errorBytes);
     if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
-    else sendFailure(res);
+    else sendFailure(res, retryAfterHeader(response));
     return;
   }
   if (compactionBridge) {
     const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
     const compactResult = parseJson(bytes);
-    const output = compactionBridgeSse(compactResult);
-    if (!output) {
+    const compact = compactionBridgeResult(compactResult, path === '/v1/responses');
+    if (!compact) {
       finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'invalid_compaction_response', responseStatusCode: 502 });
       sendJson(res, 502, { error: { type: 'server_error', code: 'invalid_compaction_response', message: 'Upstream compact response did not include encrypted compaction content', param: null } });
       return;
     }
     settleUsage(store, upstream, attemptId, startedAt, compactResult, dispatchPayload, accounting, lifecycle, response.status);
-    res.writeHead(200, responseHeaders(response, 'text/event-stream', responseOptions));
-    res.end(output);
+    if (path === '/v1/responses' && payload.stream !== true) {
+      sendJson(res, 200, compact.response);
+    } else {
+      res.writeHead(200, responseHeaders(response, 'text/event-stream', responseOptions));
+      res.end(compact.sse);
+    }
     return;
   }
   const publicCodex = upstream.type === 'codex' && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
@@ -161,6 +209,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       responseStatusCode: response.status,
       responseOptions: { ...responseOptions, modelsEtag },
       upstreamDeadlines,
+      admission,
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId) : null,
       logger
     });
@@ -196,10 +245,11 @@ function normalizeProxyPath(path) {
 }
 
 function prepareCompactionTriggerBridge(path, payload) {
-  if (!isBackendResponsesRoute(path) || payload?.stream !== true || !Array.isArray(payload?.input)) return null;
+  const publicResponses = path === '/v1/responses';
+  if ((!isBackendResponsesRoute(path) || payload?.stream !== true) && !publicResponses || !Array.isArray(payload?.input)) return null;
   const triggerIndexes = payload.input.flatMap((item, index) => plainObject(item) && item.type === 'compaction_trigger' ? [index] : []);
   if (!triggerIndexes.length) return null;
-  const singletonTrigger = payload.input.length === 1 && triggerIndexes[0] === 0;
+  const singletonTrigger = !publicResponses && payload.input.length === 1 && triggerIndexes[0] === 0;
   if (!singletonTrigger && (triggerIndexes.length !== 1 || triggerIndexes[0] !== payload.input.length - 1 || !visibleCompactionInput(payload.input.slice(0, -1)))) {
     return { error: { message: 'compaction_trigger must be the final input item and must follow visible input', param: 'input' } };
   }
@@ -210,8 +260,8 @@ function prepareCompactionTriggerBridge(path, payload) {
   if (Object.hasOwn(payload, 'text') && !plainObject(payload.text)) return { error: { message: 'text must be an object', param: 'text' } };
   const projected = Object.fromEntries(Object.entries(payload).filter(([key]) => COMPACT_PAYLOAD_FIELDS.has(key)));
   if (!Object.hasOwn(projected, 'prompt_cache_key') && Object.hasOwn(payload, 'promptCacheKey')) projected.prompt_cache_key = payload.promptCacheKey;
-  projected.input = payload.input.slice(0, -1);
-  return { payload: projected };
+  projected.input = publicResponses ? payload.input : payload.input.slice(0, -1);
+  return { payload: projected, publicResponses };
 }
 
 function visibleCompactionInput(input) {
@@ -237,7 +287,7 @@ function visibleCompactionContent(content) {
   });
 }
 
-function compactionBridgeSse(decoded) {
+function compactionBridgeResult(decoded, publicResponses = false) {
   if (!plainObject(decoded)) return null;
   const sources = Array.isArray(decoded.output) ? decoded.output : [];
   let source = sources.find((item) => plainObject(item) && ['compaction', 'compaction_summary'].includes(item.type) && typeof item.encrypted_content === 'string');
@@ -253,18 +303,24 @@ function compactionBridgeSse(decoded) {
   };
   const response = {
     id: typeof decoded.id === 'string' ? decoded.id : 'resp_compaction',
+    ...(publicResponses ? { object: 'response' } : {}),
     status: 'completed',
     output: [item],
     ...(plainObject(decoded.usage) ? { usage: decoded.usage } : {})
   };
-  return [
+  const sse = [
     `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\n`,
     `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response })}\n\n`,
     'data: [DONE]\n\n'
   ].join('');
+  return { item, response, sse };
 }
 
-function chooseUpstreams(store, req, path, payload, originalPath = path) {
+function chooseUpstreams(store, req, path, payload, originalPath = path, modelCatalog = modelCatalogForStore(store)) {
+  return chooseUpstreamPlan(store, req, path, payload, originalPath, modelCatalog).candidates;
+}
+
+function chooseUpstreamPlan(store, req, path, payload, originalPath = path, modelCatalog = modelCatalogForStore(store)) {
   const scopeId = requestScopeId(req);
   const sessionId = sessionAffinity(req);
   const apiKeyId = requestAccounting(req).apiKeyId;
@@ -276,117 +332,227 @@ function chooseUpstreams(store, req, path, payload, originalPath = path) {
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
   const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
-  if (responsePinnedId && (requestedId && requestedId !== responsePinnedId || requestedType && store.get(responsePinnedId, scopeId)?.type !== requestedType)) return [];
-  const candidates = store.candidatePlan({
+  if (responsePinnedId && (requestedId && requestedId !== responsePinnedId || requestedType && store.get(responsePinnedId, scopeId)?.type !== requestedType)) {
+    return { candidates: [], diagnostics: { exclusions: [{ code: 'response_pin_conflict' }] } };
+  }
+  return store.candidatePlanDetails({
+    affinityId: pinnedId,
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
     requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : '',
     rotateFromId: pinnedId || responsePinnedId || requestedId || requestedType ? '' : rotationUpstreamId,
     model,
+    modelSupport: (upstreamId, requestedModel, generation) => modelCatalog.supports(upstreamId, requestedModel, generation),
     scopeId,
     requirements: requestRequirements(path, payload),
     routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http'
   });
-  return pinnedId ? [...candidates.filter((candidate) => candidate.id === pinnedId), ...candidates.filter((candidate) => candidate.id !== pinnedId)] : candidates;
 }
 
-async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null }) {
+async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store) }) {
   const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http' };
   const scopeId = requestScopeId(req);
-  for (const candidate of candidates) {
+  let terminalFailure = null;
+  let codexHostBlocked = false;
+  for (const [candidateIndex, candidate] of candidates.entries()) {
     const upstream = store.get(candidate.id, scopeId);
-    if (!upstream || !store.beginCircuit(upstream.id, scope)) continue;
+    if (codexHostBlocked && upstream?.type === 'codex') continue;
+    let admission = upstream && store.beginUpstreamAttempt(upstream.id, scope);
+    if (!upstream || !admission) continue;
     const credentials = store.credentials(upstream.id);
     const startedAt = new Date().toISOString();
     const attempt = lifecycle ? store.beginGatewayAttempt(lifecycle.id, upstream.id, startedAt) : { id: randomUUID(), startedAt };
     const attemptId = attempt.id;
+    const diagnostics = gatewayDiagnosticsForStore(store);
     let response;
     let collected;
+    const compatibilityKey = compatibilityFactKey(upstream, sourcePath, payload, req, path);
+    let compatibility = compatibilityState(upstream, store.compatibilityFact(upstream.id, compatibilityKey, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+    diagnostics.credentialStarted(attemptId);
     try {
-      await ensureProviderCredentials(upstream, credentials, {
+      const refreshed = await ensureProviderCredentials(upstream, credentials, {
         fetchImpl,
         saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
       });
+      if (refreshed) {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        admission = store.beginUpstreamAttempt(upstream.id, scope);
+        if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
+      }
     } catch (error) {
       logProxyFailure(logger, 'credentials', upstream.id, error);
-      store.releaseCircuit(upstream.id, scope);
+      store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
       return { upstream, attemptId, startedAt, response: new Response(null, { status: 502 }) };
+    } finally {
+      diagnostics.credentialPrepared(attemptId);
     }
     try {
-      let request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload);
-      response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines);
+      let request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
+      response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
+        store,
+        upstreamId: upstream.id,
+        model: payload?.model,
+        queue: candidateIndex === candidates.length - 1,
+        attemptId
+      });
       persistResponseCookies(response, upstream, credentials, store);
       let authenticationRetried = false;
       if ((response.status === 401 || response.status === 403) && upstream.type === 'codex' && credentials.refreshToken) {
         try {
-          await refreshProviderCredentials(upstream, credentials, {
+          const refreshed = await refreshProviderCredentials(upstream, credentials, {
             fetchImpl,
             saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
           });
-          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload);
-          response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines);
+          if (refreshed) {
+            store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+            admission = store.beginUpstreamAttempt(upstream.id, scope);
+            if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
+          }
+          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
+          response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
+            store,
+            upstreamId: upstream.id,
+            model: payload?.model,
+            queue: candidateIndex === candidates.length - 1,
+            attemptId
+          });
           persistResponseCookies(response, upstream, credentials, store);
           authenticationRetried = true;
         } catch {
-          store.releaseCircuit(upstream.id, scope);
-          return { upstream, attemptId, startedAt, response };
+          store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+          return { upstream, attemptId, startedAt, response, admission: null };
         }
       }
-      if (sourcePath === '/v1/responses/compact' && response.status === 400 && await unsupportedParameterResponse(response)) {
-        request = { ...request, body: JSON.stringify(stripUnsupportedCodexFields(JSON.parse(request.body))) };
-        response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines);
+      let inspectedSse = null;
+      for (let retries = 0; retries < COMPATIBILITY_RETRY_LIMIT; retries += 1) {
+        if (response.ok && isEventStream(response)) {
+          inspectedSse = await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId));
+          response = inspectedSse.response;
+        }
+        const compatibilityResponse = ['error', 'response.failed'].includes(inspectedSse?.firstEvent?.type)
+          ? new Response(JSON.stringify(inspectedSse.firstEvent), { status: 400, headers: { 'content-type': 'application/json' } })
+          : response;
+        const learned = await compatibilityFallback(compatibilityResponse, upstream, sourcePath, payload, request, compatibility);
+        if (!learned) break;
+        compatibility = learned;
+        store.rememberCompatibilityFact(upstream.id, compatibilityKey, compatibility);
+        void response.body?.cancel('Retrying with provider-directed compatibility fallback').catch(() => {});
+        request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
+        response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
+          store,
+          upstreamId: upstream.id,
+          model: payload?.model,
+          queue: candidateIndex === candidates.length - 1,
+          attemptId
+        });
         persistResponseCookies(response, upstream, credentials, store);
+        inspectedSse = null;
       }
       if (response.ok && isEventStream(response)) {
-        const inspected = await inspectInitialSseEvent(response, upstreamDeadlines);
+        const inspected = inspectedSse || await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId));
         response = inspected.response;
         if (sourcePath !== '/v1/responses/compact' && inspected.retryable) {
+          if (modelNotFoundFailure(inspected.firstEvent) && upstream.type === 'codex') {
+            modelCatalog.markUnsupported(upstream.id, payload?.model);
+          }
           void response.body?.cancel('Retrying a withheld first SSE event').catch(() => {});
-          store.recordCircuitFailure(upstream.id, scope);
+          store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent(inspected.firstEvent));
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_first_event_failed', responseStatusCode: response.status });
           continue;
         }
       }
       if (authenticationRetried && (response.status === 401 || response.status === 403) && sourcePath !== '/v1/responses/compact') {
         await readBoundedResponse(response);
-        store.recordCircuitFailure(upstream.id, scope);
+        store.settleUpstreamAttempt(upstream.id, admission, classifyHttpResponse(response));
         retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
         continue;
       }
-      const publicCodexCollection = response.ok && upstream.type === 'codex' && payload?.stream !== true && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
+      const publicCodexCollection = response.ok
+        && upstream.type === 'codex'
+        && payload?.stream !== true
+        && sourcePath !== '/v1/responses/compact'
+        && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
       if (publicCodexCollection) collected = await collectCodexResponse(response, upstreamDeadlines);
     } catch (error) {
+      if (error instanceof PacingError) {
+        try { store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false }); } catch {}
+        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: `local_pacing_${error.code}`, responseStatusCode: error.statusCode });
+        if (error.code === 'aborted') throw error;
+        if (['queue_full', 'queue_expired', 'would_wait'].includes(error.code)) {
+          terminalFailure = {
+            upstream,
+            attemptId,
+            startedAt,
+            response: localPacingResponse(error),
+            admission: null,
+            pacingError: error
+          };
+        }
+        continue;
+      }
       logProxyFailure(logger, 'dispatch', upstream.id, error);
-      store.recordCircuitFailure(upstream.id, scope);
+      if (error?.codexHostPreconnect || error?.codexHostCircuitOpen) {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'codex_host_unavailable' });
+        if (error.codexHostCircuitOpen) {
+          codexHostBlocked = true;
+          terminalFailure = {
+            upstream,
+            attemptId,
+            startedAt,
+            response: localHostFailureResponse(error.retryAfterSeconds),
+            admission: null,
+            hostBlocked: true
+          };
+          continue;
+        }
+        continue;
+      }
+      store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_transport_failed' });
       continue;
     }
     if (response.ok) {
-      store.completeCircuit(upstream.id, scope, true);
-      return { upstream, attemptId, startedAt, response, collected };
+      const streaming = isEventStream(response) || upstream.type === 'codex' && payload?.stream === true;
+      if (!streaming || collected) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
+      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null };
     }
-    if (sourcePath !== '/v1/responses/compact' && await retryableUpstreamResponse(response, upstream)) {
+    const body = parseJson(await readBoundedResponse(response.clone()));
+    const outcome = classifyHttpResponse(response, body);
+    const retryable = sourcePath !== '/v1/responses/compact' && outcome.retryable;
+    if (retryable) {
+      if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
       await readBoundedResponse(response);
-      store.recordCircuitFailure(upstream.id, scope);
+      store.settleUpstreamAttempt(upstream.id, admission, outcome);
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_retryable_response', responseStatusCode: response.status });
+      terminalFailure = {
+        upstream,
+        attemptId,
+        startedAt,
+        response: new Response(null, { status: response.status, headers: retryAfterHeader(response) }),
+        admission: null
+      };
       continue;
     }
-    store.releaseCircuit(upstream.id, scope);
-    return { upstream, attemptId, startedAt, response };
+    store.settleUpstreamAttempt(upstream.id, admission, outcome);
+    return { upstream, attemptId, startedAt, response, admission: null };
   }
-  return null;
+  return terminalFailure;
 }
 
 async function retryableUpstreamResponse(response, upstream) {
-  if (upstream.type === 'compass' && (response.status === 401 || response.status === 403)) return true;
-  if (response.status === 429 || response.status >= 500) return true;
-  if (![400, 404, 422].includes(response.status)) return false;
+  if (upstream.type === 'compass' && (response.status === 401 || response.status === 403)) return { modelNotFound: false };
+  if (response.status === 429 || response.status >= 500) return { modelNotFound: false };
+  if (![400, 404, 422].includes(response.status)) return null;
   const body = parseJson(await readBoundedResponse(response.clone()));
   const error = body?.error || body?.response?.error;
-  return error?.code === 'model_not_found' || error?.type === 'model_not_found' || error?.type === 'invalid_request_error' && error?.param === 'model';
+  const modelNotFound = error?.code === 'model_not_found'
+    || error?.type === 'model_not_found'
+    || error?.type === 'invalid_request_error' && error?.param === 'model';
+  return modelNotFound ? { modelNotFound: true } : null;
 }
 
-async function inspectInitialSseEvent(response, upstreamDeadlines = {}) {
+async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstEvent = null) {
   if (!response.body) return { response, retryable: true };
   const [probe, downstream] = response.body.tee();
   const reader = probe.getReader();
@@ -410,8 +576,9 @@ async function inspectInitialSseEvent(response, upstreamDeadlines = {}) {
       }
       for (const event of events) {
         if (!hasSseData(event)) continue;
+        onFirstEvent?.();
         const parsed = eventData(event);
-        if (parsed) return finish({ response: streamResponseClone(response, downstream), retryable: retryableSseFailure(parsed) });
+        if (parsed) return finish({ response: streamResponseClone(response, downstream), retryable: retryableSseFailure(parsed), firstEvent: parsed });
         if (event.includes('data: [DONE]')) return finish({ response: streamResponseClone(response, downstream), retryable: false });
         return finish({ response: streamResponseClone(response, downstream), retryable: false });
       }
@@ -436,60 +603,116 @@ function retryableSseFailure(event) {
   if (!['response.failed', 'error'].includes(event?.type)) return false;
   if (retryableFirstSseEvent(event)) return true;
   const error = event.error || event.response?.error || {};
-  return event.status === 429 || event.status_code === 429 || error.code === 'rate_limit_exceeded' || error.code === 'model_not_found' || error.type === 'model_not_found' || error.type === 'invalid_request_error' && error.param === 'model';
+  return event.status === 429 || event.status_code === 429 || error.code === 'rate_limit_exceeded' || modelNotFoundFailure(event);
 }
 
-function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload) {
+function modelNotFoundFailure(event) {
+  const error = event?.error || event?.response?.error || event?.status_details?.error || event?.response?.status_details?.error || {};
+  return error.code === 'model_not_found'
+    || error.type === 'model_not_found'
+    || error.type === 'invalid_request_error' && error.param === 'model';
+}
+
+function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}) {
   const direct = upstream.type === 'compass';
+  const publicCompaction = sourcePath === '/v1/responses/compact' && originalPath === '/v1/responses';
   const targetPath = direct
     ? COMPASS_PATHS[sourcePath]
-    : sourcePath === '/v1/responses/compact' ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
+    : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
   const normalizedBody = direct
-    ? directUpstreamPayload(payload, sourcePath)
+    ? directUpstreamPayload(payload, sourcePath, compatibility)
     : sourcePath === '/v1/chat/completions'
       ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
-      : originalPath === '/v1/responses'
-        ? publicResponsesPayload(codexPayload)
+      : publicCompaction
+        ? normalizeCodexInput(payload, { compact: true })
+        : originalPath === '/v1/responses'
+          ? publicResponsesPayload(codexPayload)
         : sourcePath === '/v1/responses/compact'
           ? normalizeCodexInput(payload, { compact: true, native: isBackendMetadataRoute(originalPath) })
           : normalizeCodexInput(payload, { native: isBackendMetadataRoute(originalPath) });
-  const body = !direct && sourcePath !== '/v1/responses/compact' ? stripUnsupportedCodexFields(normalizedBody) : normalizedBody;
+  const body = omitCompatibilityFields(
+    normalizedBody,
+    compatibility.unsupportedFields,
+    direct ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS
+  );
   const baseUrl = defaultBaseUrl(upstream.type);
   const headers = {
     'content-type': 'application/json',
     accept: body.stream ? 'text/event-stream' : 'application/json',
     authorization: `Bearer ${credentials.accessToken || credentials.projectKey}`
   };
-  if (!direct) Object.assign(headers, CODEX_HEADERS, codexCookieHeaders(credentials), upstream.accountId ? { 'chatgpt-account-id': upstream.accountId } : {});
+  if (!direct) Object.assign(
+    headers,
+    codexProtocolHeaders(req, { inheritClient: isBackendMetadataRoute(originalPath) }),
+    codexCookieHeaders(credentials),
+    upstream.accountId ? { 'chatgpt-account-id': upstream.accountId } : {}
+  );
   const forwarded = direct && sourcePath === '/v1/messages'
     ? ANTHROPIC_HEADERS
     : !direct && isBackendMetadataRoute(originalPath) && sourcePath !== '/v1/chat/completions'
       ? BACKEND_METADATA_HEADERS
       : [];
   for (const name of forwarded) {
-    const value = req.headers[name];
+    const value = direct ? anthropicHeader(req, name) : req.headers[name];
     if (typeof value === 'string' && value) headers[name] = projectMetadataHeader(name, value);
   }
+  if (direct && sourcePath === '/v1/messages' && !headers['anthropic-version']) headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
   return { url: `${baseUrl}${targetPath}`, headers, body: JSON.stringify(body) };
 }
 
-async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}) {
+async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}, codexHostHealth = null, pacing = null) {
   const abort = downstream ? downstreamAbortSignal(downstream.req, downstream.res) : null;
+  const diagnostics = pacing?.store && pacing.attemptId ? gatewayDiagnosticsForStore(pacing.store) : null;
   try {
-    return await fetchWithHeaderDeadline(fetchImpl, request.url, {
-      method: request.method || 'POST',
-      headers: request.headers,
-      ...(request.body === undefined ? {} : { body: request.body }),
-      signal: abort?.signal
-    }, upstreamDeadlines);
+    if (pacing?.store && pacing.upstreamId) {
+      const pacingResult = await upstreamPacerForStore(pacing.store).acquire(pacing.upstreamId, {
+        model: pacing.model,
+        signal: abort?.signal,
+        queue: pacing.queue
+      });
+      diagnostics?.queueWaited(pacing.attemptId, pacingResult.waitedMs);
+    }
+    diagnostics?.connectionStarted(pacing.attemptId);
+    const response = await withCodexHostHealth(codexHostHealth, request.url, () => fetchWithHeaderDeadline(fetchImpl, request.url, {
+        method: request.method || 'POST',
+        headers: request.headers,
+        ...(request.body === undefined ? {} : { body: request.body }),
+        signal: abort?.signal
+      }, upstreamDeadlines));
+    diagnostics?.responseHeaders(pacing.attemptId);
+    return response;
   } catch (error) {
+    if (error instanceof PacingError) throw error;
+    if (error?.codexHostCircuitOpen) throw error;
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
     const wrapped = new Error(timedOut ? 'Upstream request timed out' : 'Upstream request failed');
     wrapped.statusCode = 502;
+    wrapped.cause = error;
+    wrapped.upstreamFailureKind = abort?.signal.reason?.message === 'Downstream request closed'
+      ? 'cancelled'
+      : timedOut ? 'timeout' : 'transport';
+    if (error?.codexHostPreconnect) {
+      wrapped.codexHostPreconnect = true;
+      wrapped.codexHostPreconnectCode = error.codexHostPreconnectCode;
+    }
     throw wrapped;
   } finally {
     abort?.cleanup();
   }
+}
+
+function localHostFailureResponse(retryAfterSeconds) {
+  return new Response(null, {
+    status: 503,
+    headers: { 'retry-after': String(Math.max(1, Number(retryAfterSeconds) || 1)) }
+  });
+}
+
+function localPacingResponse(error) {
+  return new Response(null, {
+    status: 429,
+    headers: { 'retry-after': String(Math.max(1, Number(error?.retryAfterSeconds) || 1)) }
+  });
 }
 
 function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
@@ -508,28 +731,91 @@ function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
   };
 }
 
-async function unsupportedParameterResponse(response) {
-  try { return (await response.clone().text()).includes('Unsupported parameter'); } catch { return false; }
+async function compatibilityFallback(response, upstream, sourcePath, payload, request, current) {
+  if (![400, 422].includes(response.status)) return null;
+  let text;
+  let body;
+  try {
+    const bytes = await readBoundedResponse(response.clone());
+    text = bytes.toString('utf8');
+    body = parseJson(bytes);
+  } catch {
+    return null;
+  }
+  if (upstream.type === 'codex') {
+    const field = rejectedParameter(body, text);
+    const requestBody = parseJson(Buffer.from(request.body));
+    if (!CODEX_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(requestBody || {}, field) || current.unsupportedFields?.includes(field)) return null;
+    return { ...current, unsupportedFields: [...new Set([...(current.unsupportedFields || []), field])] };
+  }
+  if (upstream.type === 'compass'
+    && sourcePath === '/v1/messages'
+    && payload?.thinking?.type === 'enabled'
+    && current.adaptiveThinking !== true
+    && adaptiveThinkingRequired(body, text)) {
+    return { ...current, adaptiveThinking: true };
+  }
+  if (upstream.type === 'compass' && sourcePath === '/v1/messages') {
+    const field = rejectedParameter(body, text);
+    const requestBody = parseJson(Buffer.from(request.body));
+    if (!COMPASS_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(requestBody || {}, field) || current.unsupportedFields?.includes(field)) return null;
+    return { ...current, unsupportedFields: [...new Set([...(current.unsupportedFields || []), field])] };
+  }
+  return null;
 }
 
-function stripUnsupportedCodexFields(payload) {
-  return Object.fromEntries(Object.entries(payload).filter(([key]) => !UNSUPPORTED_CODEX_RESPONSE_FIELDS.has(key)));
+function adaptiveThinkingRequired(body, text) {
+  const messages = [body?.detail, body?.message, body?.error?.message, body?.response?.error?.message, text].filter((value) => typeof value === 'string');
+  return messages.some((message) => /\b(?:adaptive thinking (?:is )?required|use adaptive thinking|thinking(?:\.type)? (?:must|should) (?:use|be) adaptive)\b/i.test(message)
+    || /["'`]?thinking\.type\.enabled["'`]?\s+is not supported\b/i.test(message));
 }
 
-function directUpstreamPayload(payload, sourcePath) {
-  if (sourcePath !== '/v1/messages' || payload?.thinking?.type !== 'enabled' || !requiresAdaptiveThinking(payload.model)) return payload;
+function rejectedParameter(body, text) {
+  const param = cleanString(body?.error?.param || body?.response?.error?.param || body?.param);
+  if (param && /^[A-Za-z][A-Za-z0-9_]*$/.test(param)) return param;
+  const messages = [body?.detail, body?.message, body?.error?.message, body?.response?.error?.message, text].filter((value) => typeof value === 'string');
+  for (const message of messages) {
+    const match = /unsupported parameter(?:\s*[:=]\s*|\s+)[`'"]?([A-Za-z][A-Za-z0-9_]*)/i.exec(message);
+    if (match) return match[1];
+    const quoted = /["'`]([A-Za-z][A-Za-z0-9_]*)["'`]\s+(?:is|is currently)\s+not supported\b/i.exec(message);
+    if (quoted) return quoted[1];
+  }
+  return '';
+}
+
+function compatibilityFactKey(upstream, sourcePath, payload, req, originalPath) {
+  const modelHash = createHash('sha256').update(String(payload?.model || '').trim().toLowerCase()).digest('hex').slice(0, 24);
+  const protocol = upstream.type === 'codex'
+    ? codexProtocolHeaders(req, { inheritClient: isBackendMetadataRoute(originalPath) })
+    : {
+        version: anthropicHeader(req, 'anthropic-version') || DEFAULT_ANTHROPIC_VERSION,
+        beta: anthropicHeader(req, 'anthropic-beta')
+      };
+  const protocolHash = createHash('sha256').update(canonicalJson(protocol)).digest('hex').slice(0, 24);
+  return `${upstream.type}:${protocolHash}:${sourcePath}:${modelHash}`;
+}
+
+function compatibilityState(upstream, value) {
+  const allowed = upstream?.type === 'compass' ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS;
+  const unsupportedFields = Array.isArray(value?.unsupportedFields)
+    ? [...new Set(value.unsupportedFields.filter((field) => allowed.has(field)))]
+    : [];
+  return {
+    ...(unsupportedFields.length ? { unsupportedFields } : {}),
+    ...(upstream?.type === 'compass' && value?.adaptiveThinking === true ? { adaptiveThinking: true } : {})
+  };
+}
+
+function omitCompatibilityFields(payload, fields, allowed) {
+  const blocked = new Set(Array.isArray(fields) ? fields.filter((field) => allowed.has(field)) : []);
+  return Object.fromEntries(Object.entries(payload).filter(([key]) => !blocked.has(key)));
+}
+
+function directUpstreamPayload(payload, sourcePath, compatibility = {}) {
+  if (sourcePath !== '/v1/messages' || payload?.thinking?.type !== 'enabled' || compatibility.adaptiveThinking !== true) return payload;
   const thinking = { ...payload.thinking, type: 'adaptive' };
   delete thinking.budget_tokens;
   return { ...payload, thinking };
-}
-
-function requiresAdaptiveThinking(model) {
-  if (typeof model !== 'string') return false;
-  const match = /^claude-[a-z]+-(\d+)(?:-(\d{1,2})(?!\d))?/.exec(model);
-  if (!match) return false;
-  const major = Number(match[1]);
-  const minor = Number(match[2] || 0);
-  return major > 4 || major === 4 && minor >= 7;
 }
 
 function normalizeCodexInput(payload, { compact = false, native = false } = {}) {
@@ -727,16 +1013,56 @@ function projectMetadataHeader(name, value) {
   }
 }
 
+function validateAnthropicHeaders(req) {
+  const version = rawHeader(req, 'anthropic-version');
+  if (version !== null && (!version || Buffer.byteLength(version) > FORWARDED_HEADER_MAX_BYTES || !validDateHeader(version))) {
+    return 'anthropic-version must be a valid YYYY-MM-DD date';
+  }
+  const beta = rawHeader(req, 'anthropic-beta');
+  if (beta !== null && (!beta || Buffer.byteLength(beta) > FORWARDED_HEADER_MAX_BYTES
+    || beta.split(',').some((entry) => !ANTHROPIC_BETA_TOKEN_PATTERN.test(entry.trim())))) {
+    return 'anthropic-beta must be a comma-separated list of beta identifiers';
+  }
+  return null;
+}
+
+function validDateHeader(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const timestamp = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  const date = new Date(timestamp);
+  return date.getUTCFullYear() === Number(match[1])
+    && date.getUTCMonth() === Number(match[2]) - 1
+    && date.getUTCDate() === Number(match[3]);
+}
+
+function anthropicHeader(req, name) {
+  const value = rawHeader(req, name);
+  return value === null ? '' : value;
+}
+
+function rawHeader(req, name) {
+  const value = req?.headers?.[name];
+  if (value === undefined) return null;
+  return typeof value === 'string' && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : '';
+}
+
 function responsesToChat(response, chatPayload = {}) {
   const output = Array.isArray(response.output) ? response.output : [];
   const text = typeof response.output_text === 'string'
     ? response.output_text
     : output.flatMap((item) => item?.content || (typeof item?.text === 'string' ? [{ text: item.text }] : [])).map((item) => typeof item?.text === 'string' ? item.text : '').join('');
-  const calls = output.filter((item) => item?.type === 'function_call').map((item) => ({
-    id: item.call_id || item.id,
-    type: 'function',
-    function: { name: typeof item.name === 'string' ? item.name : 'tool', arguments: typeof item.arguments === 'string' ? item.arguments : '' }
-  }));
+  const calls = output.filter((item) => ['function_call', 'custom_tool_call'].includes(item?.type)).map((item) => item.type === 'custom_tool_call'
+    ? {
+        id: item.call_id || item.id,
+        type: 'custom',
+        custom: { name: typeof item.name === 'string' ? item.name : 'tool', input: typeof item.input === 'string' ? item.input : '' }
+      }
+    : {
+        id: item.call_id || item.id,
+        type: 'function',
+        function: { name: typeof item.name === 'string' ? item.name : 'tool', arguments: typeof item.arguments === 'string' ? item.arguments : '' }
+      });
   const usage = response.usage;
   const promptTokens = usage?.prompt_tokens ?? usage?.input_tokens;
   const completionTokens = usage?.completion_tokens ?? usage?.output_tokens;
@@ -787,16 +1113,23 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
-  if (!reader) return res.end();
+  if (!reader) {
+    if (transformChat) res.end(chatStreamFailure());
+    else if (sanitizePublicResponses) res.end(publicStreamFailure());
+    else res.end();
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_stream_failed', responseStatusCode });
+    return;
+  }
   let downstreamClosed = false;
   let visible = false;
   let terminal = false;
   let completed = false;
   let usage;
+  let healthOutcome = null;
   let buffer = '';
   const decoder = new TextDecoder();
   const publicState = sanitizePublicResponses ? createPublicResponsesState(publicResponsesNamespaces) : null;
@@ -809,6 +1142,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
   });
   const relayEvent = async (event) => {
     if (terminal || downstreamClosed) return;
+    if (hasSseData(event)) gatewayDiagnosticsForStore(store).firstSseEvent(attemptId);
     const decoded = decodeSseBlock(event);
     const parsed = decoded.kind === 'event' ? decoded.event : null;
     if (!parsed) {
@@ -831,6 +1165,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     usage = mergeUsage(usage, extractUsage(parsed));
     const successfulTerminal = (parsed.type === 'response.completed' || parsed.type === 'response.incomplete') && parsed.response?.status !== 'failed' && !parsed.error && !parsed.response?.error;
     if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
+    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     if (transformChat) {
       for (const chunk of normalizeChatEvent(parsed, chatState)) await writeChunk(res, chunk === '[DONE]' ? 'data: [DONE]\n\n' : `data: ${JSON.stringify(chunk)}\n\n`);
       visible ||= chatState.visible;
@@ -848,6 +1183,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     const type = parsed.type;
     if (type === 'response.failed' || type === 'error') {
       terminal = true;
+      healthOutcome = classifySseEvent(parsed);
       if (transformChat) await writeChunk(res, chatStreamFailure('upstream_response_failed', 'Upstream response failed'));
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else await writeChunk(res, `${event}\n\n`);
@@ -879,9 +1215,10 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
       if (transformChat) await writeChunk(res, chatStreamFailure());
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
     }
-    if (transformChat && completed && !downstreamClosed) await writeChunk(res, 'data: [DONE]\n\n');
+    if (transformChat && completed && !chatState.terminal && !downstreamClosed) await writeChunk(res, 'data: [DONE]\n\n');
   } catch (error) {
     logProxyFailure(logger, 'stream', upstream.id, error);
+    healthOutcome ||= classifyTransportError(error, { clientCancelled: downstreamClosed });
     if (!downstreamClosed && visible && !terminal) {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure());
@@ -893,6 +1230,12 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     if (completed) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
     else if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : 'upstream_stream_failed', responseStatusCode });
     else if (response.ok && usage) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+    if (admission) {
+      const outcome = healthOutcome || (downstreamClosed
+        ? { class: 'neutral', retryable: false, transport: 'cancelled' }
+        : { class: 'transient', retryable: true, transport: 'incomplete_stream' });
+      store.settleUpstreamAttempt(upstream.id, admission, outcome);
+    }
   }
 }
 
@@ -999,9 +1342,16 @@ function validAnthropicError(bytes) {
   return body?.type === 'error' && typeof body?.error?.type === 'string' && typeof body?.error?.message === 'string';
 }
 
-function sendFailure(res) {
+function sendFailure(res, extraHeaders = {}) {
   const failure = upstreamFailure();
-  sendJson(res, failure.status, failure.body);
+  sendJson(res, failure.status, failure.body, extraHeaders);
+}
+
+function retryAfterHeader(response) {
+  const value = response?.headers?.get?.('retry-after');
+  return typeof value === 'string' && value.length <= 1_024 && !/[\x00-\x1f\x7f]/.test(value)
+    ? { 'retry-after': value }
+    : {};
 }
 
 function isEventStream(response) {
@@ -1013,18 +1363,43 @@ function writeResponse(res, response, body, responseOptions = {}) {
   res.end(body);
 }
 
-function responseHeaders(response, contentType = null, { relayTurnState = false, modelsEtag = null } = {}) {
+function responseHeaders(response, contentType = null, { relayTurnState = false, modelsEtag = null, nativeResponseControls = false } = {}) {
   const headers = { 'content-type': contentType || response.headers.get('content-type') || 'application/json' };
-  for (const name of ['cache-control', 'content-disposition', 'x-request-id', 'anthropic-ratelimit-requests-limit', 'anthropic-ratelimit-requests-remaining']) {
+  for (const name of ['cache-control', 'content-disposition', 'request-id', 'retry-after', 'x-request-id']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
+  }
+  for (const [name, value] of response.headers) {
+    if ((name.startsWith('anthropic-ratelimit-') || name.startsWith('x-ratelimit-')) && validResponseControlValue(value, true)) headers[name] = value;
   }
   if (relayTurnState) {
     const turnState = response.headers.get('x-codex-turn-state');
     if (turnState) headers['x-codex-turn-state'] = turnState;
   }
+  if (nativeResponseControls) Object.assign(headers, nativeResponseControlHeaders(response.headers));
   if (modelsEtag) headers['x-models-etag'] = modelsEtag;
   return headers;
+}
+
+function nativeResponseControlHeaders(headers) {
+  const projected = {};
+  for (const [outputName, inputNames, presence = false] of [
+    ['openai-model', ['openai-model', 'x-openai-model']],
+    ['x-reasoning-included', ['x-reasoning-included'], true],
+    ['x-codex-safety-buffering-enabled', ['x-codex-safety-buffering-enabled'], true],
+    ['x-codex-safety-buffering-faster-model', ['x-codex-safety-buffering-faster-model']]
+  ]) {
+    const value = inputNames.map((name) => headers.get(name)).find((candidate) => validResponseControlValue(candidate, presence));
+    if (value !== undefined) projected[outputName] = presence ? 'true' : value;
+  }
+  return projected;
+}
+
+function validResponseControlValue(value, presence = false) {
+  return typeof value === 'string'
+    && Buffer.byteLength(value) >= (presence ? 0 : 1)
+    && Buffer.byteLength(value) <= 1024
+    && !/[\x00-\x1f\x7f]/.test(value);
 }
 
 function sessionAffinity(req) {
@@ -1072,7 +1447,7 @@ export function isAdditionalGatewayRoute(method, path) {
   ].includes(path);
 }
 
-export async function proxyRawRequest({ req, res, path, body, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {} }) {
+export async function proxyRawRequest({ req, res, path, body, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, codexHostHealth = codexHostHealthForStore(store) }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
@@ -1080,74 +1455,139 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   const upstream = chooseRawUpstream(store, req);
   if (!upstream) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
   const scope = { model: '', routeClass: 'raw_native' };
-  if (!store.beginCircuit(upstream.id, scope)) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
+  let admission = store.beginUpstreamAttempt(upstream.id, scope);
+  if (!admission) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
   const credentials = store.credentials(upstream.id);
   const startedAt = new Date().toISOString();
   const attemptId = randomUUID();
   let response;
   try {
-    await ensureProviderCredentials(upstream, credentials, {
+    const refreshed = await ensureProviderCredentials(upstream, credentials, {
       fetchImpl,
       saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
     });
-    let request = buildRawRequest(upstream, req, path, body, credentials);
-    response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines);
-    persistResponseCookies(response, upstream, credentials, store);
-    if ((response.status === 401 || response.status === 403) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
-      await refreshProviderCredentials(upstream, credentials, {
-        fetchImpl,
-        saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
-      });
-      request = buildRawRequest(upstream, req, path, body, credentials);
-      response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines);
-      persistResponseCookies(response, upstream, credentials, store);
+    if (refreshed) {
+      store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+      admission = store.beginUpstreamAttempt(upstream.id, scope);
+      if (!admission) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
     }
   } catch {
-    store.recordCircuitFailure(upstream.id, scope);
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+    sendFailure(res);
+    return;
+  }
+  try {
+    let request = buildRawRequest(upstream, req, path, body, credentials);
+    response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
+      store,
+      upstreamId: upstream.id
+    });
+    persistResponseCookies(response, upstream, credentials, store);
+    if ((response.status === 401 || response.status === 403) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
+      try {
+        const refreshed = await refreshProviderCredentials(upstream, credentials, {
+          fetchImpl,
+          saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
+        });
+        if (refreshed) {
+          store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+          admission = store.beginUpstreamAttempt(upstream.id, scope);
+          if (!admission) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
+        }
+      } catch {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        sendFailure(res);
+        return;
+      }
+      request = buildRawRequest(upstream, req, path, body, credentials);
+      response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
+        store,
+        upstreamId: upstream.id
+      });
+      persistResponseCookies(response, upstream, credentials, store);
+    }
+  } catch (error) {
+    if (error instanceof PacingError) {
+      try { store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false }); } catch {}
+      if (error.code === 'aborted') return;
+      if (error.code === 'account_removed') {
+        sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
+        return;
+      }
+      const failure = pacingUnavailable(error);
+      sendJson(res, failure.status, failure.body, failure.headers);
+      return;
+    }
+    if (error?.codexHostPreconnect || error?.codexHostCircuitOpen) {
+      store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+      if (error.codexHostCircuitOpen) {
+        const failure = codexHostUnavailable(error.retryAfterSeconds);
+        sendJson(res, failure.status, failure.body, failure.headers);
+      } else {
+        sendFailure(res);
+      }
+      return;
+    }
+    store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
     sendFailure(res);
     return;
   }
   if (!response.ok) {
-    if (await retryableUpstreamResponse(response)) store.recordCircuitFailure(upstream.id, scope);
-    else store.releaseCircuit(upstream.id, scope);
+    const structuredBody = parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines));
+    store.settleUpstreamAttempt(upstream.id, admission, classifyHttpResponse(response, structuredBody));
     await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
-    sendFailure(res);
+    sendFailure(res, retryAfterHeader(response));
     return;
   }
-  store.completeCircuit(upstream.id, scope, true);
   const sessionId = sessionAffinity(req);
   if (sessionId) store.pinSession(sessionId, upstream.id, requestScopeId(req), requestAccounting(req).apiKeyId);
   if (isEventStream(response)) {
     let streamUsage;
-    let terminal = false;
-    await streamPassthrough(response, res, (event) => {
-      streamUsage = mergeUsage(streamUsage, extractUsage(event));
-      terminal ||= ['response.completed', 'response.incomplete'].includes(event.type);
-    }, upstreamDeadlines);
-    if (terminal && streamUsage) settleUsage(store, upstream, attemptId, startedAt, streamUsage, {}, requestAccounting(req));
+    let terminalEvent = null;
+    try {
+      const streamed = await streamPassthrough(response, res, (event) => {
+        streamUsage = mergeUsage(streamUsage, extractUsage(event));
+        if (['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type)) terminalEvent = event;
+      }, upstreamDeadlines);
+      const outcome = streamed.cancelled
+        ? { class: 'neutral', retryable: false }
+        : terminalEvent
+          ? classifySseEvent(terminalEvent)
+          : { class: 'transient', retryable: true };
+      store.settleUpstreamAttempt(upstream.id, admission, outcome);
+      if (['response.completed', 'response.incomplete'].includes(terminalEvent?.type) && streamUsage) {
+        settleUsage(store, upstream, attemptId, startedAt, streamUsage, {}, requestAccounting(req));
+      }
+    } catch (error) {
+      store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
+      if (!res.headersSent) sendFailure(res);
+      else res.destroy();
+    }
     return;
   }
-  const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+  let bytes;
+  try {
+    bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+  } catch (error) {
+    store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error));
+    throw error;
+  }
+  store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
   settleUsage(store, upstream, attemptId, startedAt, parseJson(bytes), {}, requestAccounting(req));
   writeResponse(res, response, bytes);
 }
 
-export async function proxyModelsRequest({ req, res, path, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch }) {
+export async function proxyModelsRequest({ req, res, path, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, codexHostHealth = codexHostHealthForStore(store) }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
   }
-  if (path === '/v1/models') sendJson(res, 200, { object: 'list', data: STATIC_MODEL_CATALOG });
-  else sendJson(res, 200, { models: STATIC_MODEL_CATALOG }, { etag: modelEtag({ models: STATIC_MODEL_CATALOG }) });
-}
-
-function cachedModelCatalog() {
-  return { etag: modelEtag({ models: STATIC_MODEL_CATALOG }) };
-}
-
-function modelEtag(body) {
-  const digest = createHash('sha256').update(canonicalJson(body)).digest('hex');
-  return `W/"cp-models-v1-${digest}"`;
+  const catalog = await modelCatalogForStore(store).resolve(requestScopeId(req), { fetchImpl, upstreamDeadlines, codexHostHealth });
+  if (path === '/v1/models') {
+    sendJson(res, 200, { object: 'list', data: catalog.publicModels }, { etag: catalog.publicEtag });
+  } else {
+    sendJson(res, 200, { models: catalog.nativeModels }, { etag: catalog.etag });
+  }
 }
 
 function canonicalJson(value) {
@@ -1166,6 +1606,7 @@ function chooseRawUpstream(store, req) {
   const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const requestedId = header(req, 'x-upstream-id');
   const candidates = store.candidatePlan({
+    affinityId: pinnedId,
     requestedId,
     preferredType: 'codex',
     requiredType: 'codex',
@@ -1173,10 +1614,7 @@ function chooseRawUpstream(store, req) {
     scopeId,
     routeClass: 'raw_native'
   });
-  const ordered = pinnedId
-    ? [...candidates.filter((candidate) => candidate.id === pinnedId), ...candidates.filter((candidate) => candidate.id !== pinnedId)]
-    : candidates;
-  const chosen = ordered[0];
+  const chosen = candidates[0];
   return chosen ? store.get(chosen.id, scopeId) : null;
 }
 
@@ -1188,7 +1626,7 @@ function buildRawRequest(upstream, req, path, body, credentials) {
   return {
     method: req.method,
     url: `${defaultBaseUrl(upstream.type)}${rawTargetPath(path)}`,
-    headers: rawHeaders(upstream, credentials, req),
+    headers: rawHeaders(upstream, credentials, req, { inheritClient: true }),
     body: body.length ? body : undefined
   };
 }
@@ -1211,13 +1649,13 @@ function backendWebSocketMetadata(req) {
   return headers;
 }
 
-function rawHeaders(upstream, credentials, req) {
+function rawHeaders(upstream, credentials, req, protocolOptions = {}) {
   const headers = {
     authorization: `Bearer ${credentials.accessToken || credentials.projectKey}`,
     accept: typeof req.headers.accept === 'string' ? req.headers.accept : '*/*'
   };
   if (typeof req.headers['content-type'] === 'string') headers['content-type'] = req.headers['content-type'];
-  if (upstream.type === 'codex') Object.assign(headers, CODEX_HEADERS, codexCookieHeaders(credentials), upstream.accountId ? { 'chatgpt-account-id': upstream.accountId } : {});
+  if (upstream.type === 'codex') Object.assign(headers, codexProtocolHeaders(req, protocolOptions), codexCookieHeaders(credentials), upstream.accountId ? { 'chatgpt-account-id': upstream.accountId } : {});
   return headers;
 }
 
@@ -1230,8 +1668,12 @@ function persistResponseCookies(response, upstream, credentials, store) {
 async function streamPassthrough(response, res, onEvent = null, upstreamDeadlines = {}) {
   res.writeHead(response.status, responseHeaders(response));
   const reader = response.body?.getReader();
-  if (!reader) return res.end();
+  if (!reader) {
+    res.end();
+    return { cancelled: false };
+  }
   let buffer = '';
+  let downstreamClosed = false;
   const decoder = new TextDecoder();
   const observe = (chunk) => {
     if (!onEvent) return;
@@ -1247,7 +1689,10 @@ async function streamPassthrough(response, res, onEvent = null, upstreamDeadline
       if (decoded.kind === 'event') onEvent(decoded.event);
     }
   };
-  res.once('close', () => { void reader.cancel('Downstream closed').catch(() => {}); });
+  res.once('close', () => {
+    downstreamClosed = true;
+    void reader.cancel('Downstream closed').catch(() => {});
+  });
   try {
     while (true) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
@@ -1256,6 +1701,12 @@ async function streamPassthrough(response, res, onEvent = null, upstreamDeadline
       await writeChunk(res, Buffer.from(value));
     }
     observe(new Uint8Array());
+    return { cancelled: downstreamClosed };
+  } catch (error) {
+    if (downstreamClosed) {
+      throw Object.assign(new Error('Downstream closed', { cause: error }), { upstreamFailureKind: 'cancelled' });
+    }
+    throw error;
   } finally {
     reader.releaseLock();
     res.end();
@@ -1281,8 +1732,9 @@ export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {} } = {}) {
+export function attachWebSocketProxy(server, { store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store) } = {}) {
   const admission = admissionPolicy(ingress);
+  const modelCatalog = modelCatalogForStore(store);
   const websocketIdleMs = Number.isFinite(ingress.websocketIdleMs) && ingress.websocketIdleMs > 0 ? ingress.websocketIdleMs : 30 * 60 * 1000;
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_PENDING_BYTES });
   wss.on('headers', (headers, req) => {
@@ -1311,17 +1763,19 @@ export function attachWebSocketProxy(server, { store, apiKey = process.env.CODEX
         socket.destroy();
         return;
       }
-      if (isBackendResponsesRoute(path)) req.codexModelsEtag = cachedModelCatalog(store, requestScopeId(req))?.etag;
+      if (isBackendResponsesRoute(path)) {
+        req.codexModelsEtag = (await modelCatalog.resolve(requestScopeId(req), { fetchImpl, codexHostHealth })).etag;
+      }
       wss.handleUpgrade(req, socket, head, (client) => {
         wss.emit('connection', client, req);
       });
     })().catch(() => socket.destroy());
   });
-  wss.on('connection', (client, req) => relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs));
+  wss.on('connection', (client, req) => relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth));
   return wss;
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store)) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
@@ -1333,8 +1787,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   }
   let credentials = upstream && store.credentials(upstream.id);
   let targetSocket;
-  let retried = false;
-  let refreshing = false;
+  let targetUpstreamId = upstream?.id || null;
   let pendingBytes = 0;
   let publicSequence = 0;
   let publicTurnActive = false;
@@ -1344,30 +1797,201 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   let publicUsage;
   let publicState;
   let publicOutput = false;
+  let publicStreamId = null;
+  let publicGenerate = true;
+  let nativeResponseControls = {};
+  let nativeMetadataSent = false;
   let retriedTurn = false;
+  let publicCompatibilityRetries = 0;
   let activeFrame;
   let turnCandidates = [];
   let turnCandidateIndex = 0;
+  let publicAdmission = null;
+  const nativeCircuitScope = { model: '', routeClass: 'raw_native' };
+  let nativeConnectionAdmission = null;
+  let nativeAdmission = null;
   const pending = [];
   const queuedTurns = [];
   let queuedTurnBytes = 0;
   let idleTimer = null;
+  const pacingAbort = new AbortController();
+  let sendChain = Promise.resolve();
+  const socketPacingAborts = new WeakMap();
   const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
-  const failActiveTurn = (code, message) => {
+  const settlePublicAdmission = (outcome) => {
+    const active = publicAdmission;
+    publicAdmission = null;
+    if (!active) return;
+    try { store.settleUpstreamAttempt(active.upstreamId, active.admission, outcome); } catch {}
+  };
+  const settleNativeAdmission = (outcome) => {
+    const active = nativeAdmission;
+    nativeAdmission = null;
+    if (!active) return;
+    try { store.settleUpstreamAttempt(active.upstreamId, active.admission, outcome); } catch {}
+  };
+  const settleNativeConnectionAdmission = (outcome) => {
+    const active = nativeConnectionAdmission;
+    nativeConnectionAdmission = null;
+    if (!active) return;
+    try { store.settleUpstreamAttempt(active.upstreamId, active.admission, outcome); } catch {}
+  };
+  const renewPublicAdmission = (candidate) => {
+    settlePublicAdmission({ class: 'neutral', retryable: false });
+    const scope = { model: publicPayload?.model, routeClass: 'proxy_stream' };
+    const admission = store.beginUpstreamAttempt(candidate.id, scope);
+    if (!admission) return false;
+    publicAdmission = { upstreamId: candidate.id, admission };
+    return true;
+  };
+  const renewNativeAdmissions = (candidate) => {
+    const hadTurn = Boolean(nativeAdmission);
+    settleNativeAdmission({ class: 'neutral', retryable: false });
+    settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+    if (!hadTurn) return true;
+    const admission = store.beginUpstreamAttempt(candidate.id, nativeCircuitScope);
+    if (!admission) return false;
+    nativeAdmission = { upstreamId: candidate.id, admission };
+    return true;
+  };
+  const acquirePublicCandidate = (startIndex, scope) => {
+    for (let index = startIndex; index < turnCandidates.length; index += 1) {
+      const candidate = turnCandidates[index];
+      const admission = store.beginUpstreamAttempt(candidate.id, scope);
+      if (!admission) continue;
+      return { candidate, index, activeAdmission: { upstreamId: candidate.id, admission } };
+    }
+    return null;
+  };
+  const activatePublicCandidate = ({ candidate, index, activeAdmission }) => {
+    turnCandidateIndex = index;
+    publicAdmission = activeAdmission;
+    return candidate;
+  };
+  const publicWebSocketFrame = (candidate, payload, generate = publicGenerate) => {
+    const key = compatibilityFactKey(candidate, '/v1/responses', payload, req, '/v1/responses');
+    const compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, key, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+    return Buffer.from(JSON.stringify({
+      type: 'response.create',
+      ...omitCompatibilityFields(publicResponsesPayload(payload), compatibility.unsupportedFields, CODEX_OPTIONAL_FALLBACK_FIELDS),
+      generate
+    }));
+  };
+  const framePacingModel = (frame) => {
+    if (!frame || frame.isBinary) return '';
+    try {
+      const payload = JSON.parse(frame.data.toString());
+      return payload?.type === 'response.create' && typeof payload.model === 'string' ? payload.model : '';
+    } catch {
+      return '';
+    }
+  };
+  const sendFrame = (socket, frame, candidate) => {
+    const attemptId = publicResponses ? publicAttempt?.id : null;
+    const task = async () => {
+      if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
+      const model = framePacingModel(frame);
+      if (model) {
+        const pacingResult = await upstreamPacerForStore(store).acquire(candidate.id, {
+          model,
+          signal: socketPacingAborts.get(socket)?.signal || pacingAbort.signal
+        });
+        gatewayDiagnosticsForStore(store).queueWaited(attemptId, pacingResult.waitedMs);
+      }
+      if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
+      if (socket.bufferedAmount + frame.data.byteLength > MAX_WEBSOCKET_PENDING_BYTES) {
+        closeBoth(1009, 'Websocket backpressure limit exceeded');
+        return;
+      }
+      socket.send(frame.data, { binary: frame.isBinary });
+    };
+    sendChain = sendChain.then(task, task);
+    return sendChain;
+  };
+  const handleFramePacingFailure = (error) => {
+    if (!(error instanceof PacingError) || error.code === 'aborted') return;
+    const removed = error.code === 'account_removed';
+    if (publicResponses && publicTurnActive) {
+      settlePublicAdmission({ class: 'neutral', retryable: false });
+      finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, {
+        errorCode: removed ? 'no_eligible_backend' : `local_pacing_${error.code}`,
+        responseStatusCode: removed ? 503 : 429
+      });
+      publicWebSocketFailure(
+        client,
+        removed ? 'no_eligible_backend' : error.code === 'queue_expired' ? 'local_pacing_queue_expired' : 'local_pacing_queue_full',
+        removed ? 'No eligible Codex upstream is available' : error.message,
+        publicSequence++,
+        publicStreamId,
+        null,
+        removed ? 503 : 429
+      );
+      publicTurnActive = false;
+      activeFrame = null;
+      publicAttempt = null;
+      publicLifecycle = null;
+      publicUsage = null;
+      publicStreamId = null;
+      startNextPublicTurn();
+      return;
+    }
+    settleNativeAdmission({ class: 'neutral', retryable: false });
+    client.close(1013, 'Local pacing queue is unavailable');
+  };
+  const retryPublicWebSocketCompatibility = (frame, candidate) => {
+    if (!publicTurnActive || publicOutput || publicCompatibilityRetries >= COMPATIBILITY_RETRY_LIMIT) return false;
+    if (!['error', 'response.failed'].includes(frame?.type)) return false;
+    const field = rejectedParameter(frame, JSON.stringify(frame));
+    if (!CODEX_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(publicPayload || {}, field)) return false;
+    const key = compatibilityFactKey(candidate, '/v1/responses', publicPayload, req, '/v1/responses');
+    const compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, key, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+    if (compatibility.unsupportedFields?.includes(field)) return false;
+    store.rememberCompatibilityFact(candidate.id, key, {
+      ...compatibility,
+      unsupportedFields: [...new Set([...(compatibility.unsupportedFields || []), field])]
+    });
+    retryGatewayAttempt(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_compatibility_retry' });
+    publicAttempt = publicLifecycle
+      ? store.beginGatewayAttempt(publicLifecycle.id, candidate.id)
+      : { id: randomUUID(), startedAt: new Date().toISOString() };
+    gatewayDiagnosticsForStore(store).credentialStarted(publicAttempt.id);
+    gatewayDiagnosticsForStore(store).credentialPrepared(publicAttempt.id);
+    publicCompatibilityRetries += 1;
+    activeFrame = { data: publicWebSocketFrame(candidate, publicPayload), isBinary: false };
+    if (targetSocket?.readyState === WebSocket.OPEN) {
+      void sendFrame(targetSocket, activeFrame, candidate).catch(handleFramePacingFailure);
+    }
+    else {
+      pending.splice(0, pending.length, activeFrame);
+      pendingBytes = activeFrame.data.byteLength;
+    }
+    return true;
+  };
+  const failActiveTurn = (code, message, outcome = { class: 'transient', retryable: true }) => {
     if (!publicResponses || !publicTurnActive) return;
     publicTurnActive = false;
     activeFrame = null;
+    pending.length = 0;
+    pendingBytes = 0;
+    settlePublicAdmission(outcome);
     finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: code });
     publicAttempt = null;
     publicLifecycle = null;
     publicUsage = null;
-    publicWebSocketFailure(client, 'server_error', message, publicSequence++);
+    publicWebSocketFailure(
+      client,
+      code === 'codex_host_unavailable' ? code : 'server_error',
+      message,
+      publicSequence++,
+      publicStreamId
+    );
+    publicStreamId = null;
     startNextPublicTurn();
   };
   const resetIdle = () => {
     clearIdle();
     idleTimer = setTimeout(() => {
-      if (publicTurnActive) failActiveTurn('upstream_websocket_idle_timeout', 'Upstream websocket timed out');
+      if (publicTurnActive) failActiveTurn('upstream_websocket_idle_timeout', 'Upstream websocket timed out', classifyTransportError(Object.assign(new Error('WebSocket idle timeout'), { upstreamFailureKind: 'timeout' })));
       if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(1011, 'Upstream websocket timed out');
     }, websocketIdleMs);
   };
@@ -1375,13 +1999,16 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     const next = queuedTurns.shift();
     if (!next || client.readyState !== WebSocket.OPEN) return;
     queuedTurnBytes -= next.byteLength;
-    setImmediate(() => client.emit('message', next, false));
+    setImmediate(() => {
+      if (client.readyState === WebSocket.OPEN) client.emit('message', next, false);
+    });
   };
   const closeBoth = (code = 1000, reason = '') => {
     if (client.readyState === WebSocket.OPEN) client.close(code, reason);
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(code, reason);
   };
   client.on('message', (data, isBinary) => {
+    if (client.readyState !== WebSocket.OPEN) return;
     if (isBinary) return client.close(1003, 'Binary WebSocket frames are not supported');
     if (publicResponses) {
       try {
@@ -1394,42 +2021,87 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           queuedTurns.push(queued);
           return;
         }
-        const { type: _type, generate: _generate, ...request } = frame;
+        const streamId = validateStreamId(frame.stream_id);
+        const generate = validateGenerate(frame.generate);
+        const { type: _type, generate: _generate, stream_id: _streamId, ...request } = frame;
         const payload = adaptResponsesRequest({ ...request, stream: true });
-        turnCandidates = chooseUpstreams(store, req, '/v1/responses', payload).map((entry) => store.get(entry.id, requestScopeId(req))).filter((entry) => entry?.type === 'codex');
-        turnCandidateIndex = 0;
-        const candidate = turnCandidates[0];
-        if (!candidate) throw new AdapterError('No eligible Codex upstream');
-        const needsConnection = !targetSocket || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(targetSocket.readyState) || upstream?.id !== candidate.id;
-        if (needsConnection) {
-          if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
-          upstream = candidate;
-          credentials = store.credentials(upstream.id);
-          targetSocket = undefined;
-          void ensureProviderCredentials(upstream, credentials, { fetchImpl, saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt) }).then(connect).catch(() => failActiveTurn('upstream_credentials_failed', 'No eligible Codex upstream'));
-        }
-        data = Buffer.from(JSON.stringify({ type: 'response.create', ...publicResponsesPayload(payload), generate: true }));
+        const compactionBridge = prepareCompactionTriggerBridge('/v1/responses', payload);
+        if (compactionBridge?.error) throw new AdapterError(compactionBridge.error.message, compactionBridge.error.param);
+        turnCandidates = chooseUpstreams(store, req, '/v1/responses', payload, '/v1/responses', modelCatalog).map((entry) => store.get(entry.id, requestScopeId(req))).filter((entry) => entry?.type === 'codex');
+        const acquired = acquirePublicCandidate(0, { model: payload.model, routeClass: 'proxy_stream' });
+        if (!acquired) throw new AdapterError('No eligible Codex upstream');
+        const candidate = activatePublicCandidate(acquired);
+        const upstreamFrame = publicWebSocketFrame(candidate, payload, generate);
+        const lifecycle = accounting.apiKeyId
+          ? store.reserveGatewayRequest({ scopeId, apiKeyId: accounting.apiKeyId, endpoint: '/v1/responses', model: payload.model || '', transport: 'websocket' })
+          : null;
+        const attempt = lifecycle
+          ? store.beginGatewayAttempt(lifecycle.id, candidate.id)
+          : { id: randomUUID(), startedAt: new Date().toISOString() };
+        gatewayDiagnosticsForStore(store).credentialStarted(attempt.id);
+        data = upstreamFrame;
         publicTurnActive = true;
         publicSequence = 0;
         publicOutput = false;
+        publicStreamId = streamId;
+        publicGenerate = generate;
         publicPayload = payload;
         publicUsage = null;
         publicState = createPublicResponsesState(customToolNamespaces(payload.tools));
         retriedTurn = false;
-        activeFrame = { data, isBinary: false };
-        publicLifecycle = accounting.apiKeyId
-          ? store.reserveGatewayRequest({ scopeId, apiKeyId: accounting.apiKeyId, endpoint: '/v1/responses', model: payload.model || '', transport: 'websocket' })
-          : null;
-        publicAttempt = publicLifecycle
-          ? store.beginGatewayAttempt(publicLifecycle.id, candidate.id)
-          : { id: randomUUID(), startedAt: new Date().toISOString() };
+        publicCompatibilityRetries = 0;
+        activeFrame = { data: upstreamFrame, isBinary: false };
+        publicLifecycle = lifecycle;
+        publicAttempt = attempt;
+        if (compactionBridge) {
+          void executePublicWebSocketCompaction(compactionBridge.payload, candidate);
+          return;
+        }
+        const needsConnection = !compactionBridge
+          && (!targetSocket || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(targetSocket.readyState) || targetUpstreamId !== candidate.id);
+        upstream = candidate;
+        if (needsConnection) {
+          if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
+          credentials = store.credentials(upstream.id);
+          targetSocket = undefined;
+          targetUpstreamId = null;
+          void ensureProviderCredentials(upstream, credentials, { fetchImpl, saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt) }).then((refreshed) => {
+            gatewayDiagnosticsForStore(store).credentialPrepared(attempt.id);
+            if (refreshed && !renewPublicAdmission(upstream)) {
+              failActiveTurn('upstream_credentials_failed', 'No eligible Codex upstream', { class: 'neutral', retryable: false });
+              return;
+            }
+            void connect().catch(() => failActiveTurn('upstream_connect_failed', 'Upstream websocket connection failed'));
+          }).catch(() => {
+            gatewayDiagnosticsForStore(store).credentialPrepared(attempt.id);
+            failActiveTurn('upstream_credentials_failed', 'No eligible Codex upstream', { class: 'neutral', retryable: false });
+          });
+        } else {
+          gatewayDiagnosticsForStore(store).credentialPrepared(attempt.id);
+          gatewayDiagnosticsForStore(store).responseHeaders(attempt.id);
+        }
       } catch (error) {
-        return publicWebSocketFailure(client, 'invalid_request_error', 'Invalid response.create frame');
+        settlePublicAdmission({ class: 'neutral', retryable: false });
+        return publicWebSocketFailure(
+          client,
+          'invalid_request_error',
+          error instanceof AdapterError ? error.message : 'Invalid response.create frame',
+          0,
+          null,
+          error instanceof AdapterError ? error.param : null,
+          400
+        );
       }
     }
+    if (!publicResponses && !nativeAdmission && upstream) {
+      settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+      const admission = store.beginUpstreamAttempt(upstream.id, nativeCircuitScope);
+      if (!admission) return client.close(1013, 'No eligible Codex upstream is available');
+      nativeAdmission = { upstreamId: upstream.id, admission };
+    }
     if (targetSocket?.readyState === WebSocket.OPEN) {
-      if (targetSocket.bufferedAmount + data.byteLength > MAX_WEBSOCKET_PENDING_BYTES) closeBoth(1009, 'Websocket backpressure limit exceeded');
-      else targetSocket.send(data, { binary: isBinary });
+      const frame = { data, isBinary };
+      void sendFrame(targetSocket, frame, upstream).catch(handleFramePacingFailure);
     } else {
       pendingBytes += data.byteLength;
       if (pendingBytes > MAX_WEBSOCKET_PENDING_BYTES) client.close(1009, 'Pending websocket data exceeded limit');
@@ -1437,51 +2109,270 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     }
   });
   client.on('close', () => {
+    pacingAbort.abort(new DOMException('Downstream websocket closed', 'AbortError'));
+    if (targetSocket) socketPacingAborts.get(targetSocket)?.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     clearIdle();
-    if (publicTurnActive) finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'downstream_closed' });
+    if (publicTurnActive) {
+      settlePublicAdmission({ class: 'neutral', retryable: false });
+      finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'downstream_closed' });
+    }
+    settleNativeAdmission({ class: 'neutral', retryable: false });
+    settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
     publicTurnActive = false;
     publicLifecycle = null;
     publicAttempt = null;
+    publicStreamId = null;
+    pending.length = 0;
+    pendingBytes = 0;
+    queuedTurns.length = 0;
+    queuedTurnBytes = 0;
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
+    targetSocket = undefined;
+    targetUpstreamId = null;
   });
   client.on('error', () => closeBoth(1011, 'Client websocket error'));
 
-  const retryPublicTurn = () => {
+  const retryPublicTurn = (outcome = { class: 'transient', retryable: true }) => {
     if (!publicResponses || !publicTurnActive || publicOutput || retriedTurn || !activeFrame) return false;
+    settlePublicAdmission(outcome);
+    const acquired = acquirePublicCandidate(turnCandidateIndex + 1, { model: publicPayload.model, routeClass: 'proxy_stream' });
+    if (!acquired) return false;
     retryGatewayAttempt(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_websocket_retryable_failure' });
     retriedTurn = true;
-    const fallback = turnCandidates[turnCandidateIndex + 1];
-    if (fallback) {
-      turnCandidateIndex += 1;
-      upstream = fallback;
-      credentials = store.credentials(upstream.id);
-    }
+    const fallback = activatePublicCandidate(acquired);
+    upstream = fallback;
+    credentials = store.credentials(upstream.id);
     const previousSocket = targetSocket;
     targetSocket = undefined;
+    targetUpstreamId = null;
     if (previousSocket?.readyState === WebSocket.OPEN || previousSocket?.readyState === WebSocket.CONNECTING) previousSocket.close();
     publicAttempt = publicLifecycle
       ? store.beginGatewayAttempt(publicLifecycle.id, upstream.id)
       : { id: randomUUID(), startedAt: new Date().toISOString() };
+    const retryAttemptId = publicAttempt.id;
+    gatewayDiagnosticsForStore(store).credentialStarted(retryAttemptId);
+    activeFrame = { data: publicWebSocketFrame(upstream, publicPayload), isBinary: false };
     pending.splice(0, pending.length, activeFrame);
     pendingBytes = activeFrame.data.byteLength;
     void ensureProviderCredentials(upstream, credentials, {
       fetchImpl,
       saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
-    }).then(connect).catch(() => failActiveTurn('upstream_credentials_failed', 'Upstream response failed'));
+    }).then((refreshed) => {
+      gatewayDiagnosticsForStore(store).credentialPrepared(retryAttemptId);
+      if (refreshed && !renewPublicAdmission(upstream)) {
+        failActiveTurn('upstream_credentials_failed', 'Upstream response failed', { class: 'neutral', retryable: false });
+        return;
+      }
+      void connect().catch(() => failActiveTurn('upstream_connect_failed', 'Upstream websocket connection failed'));
+    }).catch(() => {
+      gatewayDiagnosticsForStore(store).credentialPrepared(retryAttemptId);
+      failActiveTurn('upstream_credentials_failed', 'Upstream response failed', { class: 'neutral', retryable: false });
+    });
     return true;
   };
 
-  const connect = () => {
-    const target = websocketUrl?.(upstream) || `${defaultBaseUrl(upstream.type).replace(/^http/, 'ws')}/backend-api/codex/responses`;
-    const socket = new WebSocket(target, {
-      headers: { ...rawHeaders(upstream, credentials, req), ...(publicResponses ? {} : backendWebSocketMetadata(req)), origin: 'https://chatgpt.com', 'openai-beta': 'responses_websockets=2026-02-06' },
-      handshakeTimeout: 120_000,
-      maxPayload: MAX_WEBSOCKET_PENDING_BYTES
-    });
+  const executePublicWebSocketCompaction = async (compactPayload, candidate) => {
+    try {
+      const candidateCredentials = store.credentials(candidate.id);
+      const refreshed = await ensureProviderCredentials(candidate, candidateCredentials, {
+        fetchImpl,
+        saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
+      });
+      if (refreshed && !renewPublicAdmission(candidate)) throw new Error('Codex upstream is not currently eligible');
+      if (!publicTurnActive || client.readyState !== WebSocket.OPEN) return;
+      const compatibilityKey = compatibilityFactKey(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
+      let compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, compatibilityKey, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+      let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+      let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
+        store,
+        upstreamId: candidate.id,
+        model: compactPayload?.model
+      });
+      if ((response.status === 401 || response.status === 403) && candidateCredentials.refreshToken) {
+        try {
+          const refreshed = await refreshProviderCredentials(candidate, candidateCredentials, {
+            fetchImpl,
+            saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
+          });
+          if (refreshed && !renewPublicAdmission(candidate)) throw new Error('Codex upstream is not currently eligible');
+          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+          response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
+            store,
+            upstreamId: candidate.id,
+            model: compactPayload?.model
+          });
+        } catch (error) {
+          settlePublicAdmission({ class: 'neutral', retryable: false });
+          throw Object.assign(error, { upstreamOutcomeSettled: true });
+        }
+      }
+      for (let retries = 0; retries < COMPATIBILITY_RETRY_LIMIT; retries += 1) {
+        const learned = await compatibilityFallback(response, candidate, '/v1/responses/compact', compactPayload, request, compatibility);
+        if (!learned) break;
+        compatibility = learned;
+        store.rememberCompatibilityFact(candidate.id, compatibilityKey, compatibility);
+        void response.body?.cancel('Retrying WebSocket compaction with provider-directed compatibility fallback').catch(() => {});
+        request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+        response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
+          store,
+          upstreamId: candidate.id,
+          model: compactPayload?.model
+        });
+      }
+      if (!response.ok) {
+        const body = parseJson(await readBoundedResponse(response.clone()));
+        const outcome = classifyHttpResponse(response, body);
+        settlePublicAdmission(outcome);
+        throw Object.assign(new Error('Upstream compact request failed'), { upstreamOutcomeSettled: true });
+      }
+      const decoded = parseJson(await readResponseBytes(response));
+      const compact = compactionBridgeResult(decoded, true);
+      if (!compact) throw new Error('Invalid upstream compact response');
+      const events = [
+        { type: 'response.output_item.done', item: compact.item, sequence_number: publicSequence++ },
+        { type: 'response.completed', response: compact.response, sequence_number: publicSequence++ }
+      ];
+      for (const event of events) {
+        const encoded = JSON.stringify(publicStreamId ? { ...event, stream_id: publicStreamId } : event);
+        if (client.readyState === WebSocket.OPEN) client.send(encoded);
+      }
+      if (sessionId) store.pinSession(sessionId, candidate.id, scopeId, accounting.apiKeyId);
+      learnResponsePin(store, compact.response, candidate.id, scopeId, accounting.apiKeyId);
+      if (publicAttempt) {
+        settleUsage(store, candidate, publicAttempt.id, publicAttempt.startedAt, decoded, publicPayload, accounting, publicLifecycle, response.status);
+      }
+      settlePublicAdmission({ class: 'success', retryable: false });
+      publicTurnActive = false;
+      activeFrame = null;
+      publicAttempt = null;
+      publicLifecycle = null;
+      publicUsage = null;
+      publicStreamId = null;
+      startNextPublicTurn();
+    } catch (error) {
+      if (error instanceof PacingError) {
+        settlePublicAdmission({ class: 'neutral', retryable: false });
+        const removed = error.code === 'account_removed';
+        if (client.readyState === WebSocket.OPEN) {
+          publicWebSocketFailure(
+            client,
+            removed ? 'no_eligible_backend' : error.code === 'queue_expired' ? 'local_pacing_queue_expired' : 'local_pacing_queue_full',
+            removed ? 'No eligible Codex upstream is available' : error.message,
+            publicSequence++,
+            publicStreamId,
+            null,
+            removed ? 503 : 429
+          );
+        }
+        publicTurnActive = false;
+        activeFrame = null;
+        publicAttempt = null;
+        publicLifecycle = null;
+        publicUsage = null;
+        publicStreamId = null;
+        startNextPublicTurn();
+        return;
+      }
+      failActiveTurn(
+        'invalid_compaction_response',
+        'Upstream compact response failed',
+        error?.upstreamOutcomeSettled ? { class: 'neutral', retryable: false } : classifyTransportError(error)
+      );
+    }
+  };
+
+  const connect = async (authenticationRetried = false, connectionUpstream = upstream, connectionCredentials = credentials) => {
+    if (client.readyState !== WebSocket.OPEN || publicResponses && (!publicTurnActive || upstream?.id !== connectionUpstream?.id)) return;
+    if (!publicResponses && !nativeConnectionAdmission && !nativeAdmission) {
+      const admission = store.beginUpstreamAttempt(connectionUpstream.id, nativeCircuitScope);
+      if (!admission) {
+        client.close(1013, 'No eligible Codex upstream is available');
+        return;
+      }
+      nativeConnectionAdmission = { upstreamId: connectionUpstream.id, admission };
+    }
+    try {
+      const pacingResult = await upstreamPacerForStore(store).acquire(connectionUpstream.id, {
+        model: publicResponses ? publicPayload?.model : '',
+        signal: pacingAbort.signal
+      });
+      if (publicResponses) gatewayDiagnosticsForStore(store).queueWaited(publicAttempt?.id, pacingResult.waitedMs);
+    } catch (error) {
+      if (error instanceof PacingError) {
+        if (publicResponses) handleFramePacingFailure(error);
+        else {
+          settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+          settleNativeAdmission({ class: 'neutral', retryable: false });
+          if (error.code !== 'aborted') client.close(1013, 'Local pacing queue is unavailable');
+        }
+        return;
+      }
+      throw error;
+    }
+    if (client.readyState !== WebSocket.OPEN || publicResponses && (!publicTurnActive || upstream?.id !== connectionUpstream?.id)) return;
+    const target = websocketUrl?.(connectionUpstream) || `${defaultBaseUrl(connectionUpstream.type).replace(/^http/, 'ws')}/backend-api/codex/responses`;
+    if (publicResponses) gatewayDiagnosticsForStore(store).connectionStarted(publicAttempt?.id);
+    const hostAdmission = codexHostHealth.begin(target);
+    if (!hostAdmission.admitted) {
+      const outcome = { class: 'neutral', retryable: false };
+      if (publicResponses && publicTurnActive) {
+        failActiveTurn('codex_host_unavailable', 'Codex host is temporarily unreachable', outcome);
+      } else {
+        settleNativeConnectionAdmission(outcome);
+        settleNativeAdmission(outcome);
+        client.close(1013, 'Codex host is temporarily unreachable');
+      }
+      return;
+    }
+    let socket;
+    try {
+      socket = new WebSocket(target, {
+        headers: {
+          ...rawHeaders(connectionUpstream, connectionCredentials, req, { inheritClient: !publicResponses, websocket: true }),
+          ...(publicResponses ? {} : backendWebSocketMetadata(req)),
+          origin: 'https://chatgpt.com'
+        },
+        handshakeTimeout: 120_000,
+        maxPayload: MAX_WEBSOCKET_PENDING_BYTES
+      });
+    } catch (error) {
+      codexHostHealth.release(hostAdmission.lease);
+      throw error;
+    }
+    let refreshingConnection = false;
+    let socketTransportOutcome = null;
+    let hostLease = hostAdmission.lease;
+    const socketPacingAbort = new AbortController();
+    socketPacingAborts.set(socket, socketPacingAbort);
+    const settleHostResponse = () => {
+      if (!hostLease) return;
+      codexHostHealth.settleResponse(hostLease);
+      hostLease = null;
+    };
+    const settleHostError = (error) => {
+      if (!hostLease) return { preconnect: false, open: false };
+      const outcome = codexHostHealth.settleError(hostLease, error);
+      hostLease = null;
+      return outcome;
+    };
+    const releaseHostLease = () => {
+      if (!hostLease) return;
+      codexHostHealth.release(hostLease);
+      hostLease = null;
+    };
     targetSocket = socket;
+    targetUpstreamId = connectionUpstream.id;
+    socket.on('upgrade', (response) => {
+      settleHostResponse();
+      if (publicResponses) gatewayDiagnosticsForStore(store).responseHeaders(publicAttempt?.id);
+      if (socket === targetSocket && !publicResponses) nativeResponseControls = nativeResponseControlHeaders(new Headers(response.headers));
+    });
     socket.on('open', () => {
+      settleHostResponse();
+      if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return socket.close();
+      if (!publicResponses) settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
       resetIdle();
-      for (const { data, isBinary } of pending.splice(0)) socket.send(data, { binary: isBinary });
+      for (const frame of pending.splice(0)) void sendFrame(socket, frame, connectionUpstream).catch(handleFramePacingFailure);
       pendingBytes = 0;
     });
     socket.on('message', (data, isBinary) => {
@@ -1491,7 +2382,13 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         let frame;
         try { frame = JSON.parse(data.toString()); } catch { return; }
         if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
-        if (!publicOutput && retryableSseFailure(frame) && retryPublicTurn()) return;
+        gatewayDiagnosticsForStore(store).firstSseEvent(publicAttempt?.id);
+        if (retryPublicWebSocketCompatibility(frame, connectionUpstream)) return;
+        const frameOutcome = classifySseEvent(frame);
+        if (!publicOutput && frameOutcome.retryable) {
+          if (modelNotFoundFailure(frame)) modelCatalog.markUnsupported(connectionUpstream.id, publicPayload?.model);
+          if (retryPublicTurn(frameOutcome)) return;
+        }
         const projected = normalizePublicResponsesEvent(frame, publicState);
         if (!projected.length) return;
         const events = projected.map((block) => decodeSseBlock(block)).filter((decoded) => decoded.kind === 'event').map((decoded) => decoded.event);
@@ -1499,83 +2396,247 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         publicOutput = true;
         publicUsage = mergeUsage(publicUsage, extractUsage(frame));
         const terminal = events.find((event) => ['response.completed', 'response.incomplete', 'response.failed'].includes(event.type));
-        if (sessionId && !terminal?.type?.endsWith('failed')) store.pinSession(sessionId, upstream.id, scopeId, requestAccounting(req).apiKeyId);
+        if (sessionId && !terminal?.type?.endsWith('failed')) store.pinSession(sessionId, connectionUpstream.id, scopeId, requestAccounting(req).apiKeyId);
         for (const event of events) {
-          const encoded = JSON.stringify(event);
+          const encoded = JSON.stringify(publicStreamId ? { ...event, stream_id: publicStreamId } : event);
           if (client.bufferedAmount + Buffer.byteLength(encoded) > MAX_WEBSOCKET_PENDING_BYTES) return closeBoth(1009, 'Websocket backpressure limit exceeded');
           client.send(encoded);
         }
         if (!terminal) return;
         publicTurnActive = false;
         activeFrame = null;
-        if (terminal.type === 'response.failed') finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_response_failed' });
+        if (terminal.type === 'response.failed') {
+          settlePublicAdmission(classifySseEvent(frame));
+          finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_response_failed' });
+        }
         else {
-          learnResponsePin(store, terminal.response, upstream.id, scopeId, accounting.apiKeyId);
-          if (publicAttempt) settleUsage(store, upstream, publicAttempt.id, publicAttempt.startedAt, publicUsage, publicPayload, accounting, publicLifecycle, 200);
+          settlePublicAdmission({ class: 'success', retryable: false });
+          learnResponsePin(store, terminal.response, connectionUpstream.id, scopeId, accounting.apiKeyId);
+          if (publicAttempt) settleUsage(store, connectionUpstream, publicAttempt.id, publicAttempt.startedAt, publicUsage, publicPayload, accounting, publicLifecycle, 200);
         }
         publicAttempt = null;
         publicLifecycle = null;
         publicUsage = null;
+        publicStreamId = null;
         clearIdle();
         startNextPublicTurn();
         return;
       }
-      if (client.bufferedAmount + data.byteLength > MAX_WEBSOCKET_PENDING_BYTES) closeBoth(1009, 'Websocket backpressure limit exceeded');
-      else client.send(data, { binary: isBinary });
+      let nativeFrame = null;
+      if (!isBinary) {
+        try { nativeFrame = JSON.parse(data.toString()); } catch {}
+      }
+      if (nativeFrame && ['error', 'response.failed'].includes(nativeFrame.type)) {
+        settleNativeAdmission(classifySseEvent(nativeFrame));
+      } else if (nativeFrame && ['response.completed', 'response.incomplete'].includes(nativeFrame.type)) {
+        settleNativeAdmission({ class: 'success', retryable: false });
+      }
+      if (!nativeMetadataSent) {
+        nativeMetadataSent = true;
+        const metadata = JSON.stringify({
+          type: 'codex.response.metadata',
+          headers: {
+            ...(req.codexModelsEtag ? { 'x-models-etag': req.codexModelsEtag } : {}),
+            ...(nativeResponseControls['openai-model'] ? { 'openai-model': nativeResponseControls['openai-model'] } : {})
+          }
+        });
+        if (client.bufferedAmount + Buffer.byteLength(metadata) > MAX_WEBSOCKET_PENDING_BYTES) return closeBoth(1009, 'Websocket backpressure limit exceeded');
+        client.send(metadata);
+      }
+      const sanitized = sanitizeNativeResponseControlFrame(data, isBinary);
+      if (client.bufferedAmount + sanitized.byteLength > MAX_WEBSOCKET_PENDING_BYTES) closeBoth(1009, 'Websocket backpressure limit exceeded');
+      else client.send(sanitized, { binary: isBinary });
     });
     socket.on('unexpected-response', async (_request, response) => {
+      settleHostResponse();
       response.resume();
-      if (!retried && credentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
-        retried = true;
-        refreshing = true;
+      if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return;
+      if (!authenticationRetried && connectionCredentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
+        refreshingConnection = true;
         try {
-          await refreshProviderCredentials(upstream, credentials, {
+          const refreshed = await refreshProviderCredentials(connectionUpstream, connectionCredentials, {
             fetchImpl,
-            saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
+            saveCredentials: (updated, expiresAt) => store.persistCredentials(connectionUpstream.id, updated, expiresAt)
           });
-          connect();
-          refreshing = false;
+          if (refreshed) {
+            const renewed = publicResponses
+              ? renewPublicAdmission(connectionUpstream)
+              : renewNativeAdmissions(connectionUpstream);
+            if (!renewed) throw new Error('Codex upstream is not currently eligible');
+          }
+          if (socket === targetSocket) {
+            targetSocket = undefined;
+            targetUpstreamId = null;
+          }
+          void connect(true, connectionUpstream, connectionCredentials).catch((error) => {
+            if (client.readyState !== WebSocket.OPEN) return;
+            if (publicResponses && publicTurnActive) failActiveTurn('upstream_connect_failed', 'Upstream websocket connection failed');
+            else closeBoth(1011, error.message || 'Upstream websocket connection failed');
+          });
         } catch (error) {
-          closeBoth(1011, error.message || 'Upstream websocket authentication failed');
+          if (client.readyState !== WebSocket.OPEN) return;
+          if (publicResponses && publicTurnActive) failActiveTurn('upstream_credentials_failed', 'Upstream websocket authentication failed', { class: 'neutral', retryable: false });
+          else {
+            settleNativeAdmission({ class: 'neutral', retryable: false });
+            settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+            closeBoth(1011, error.message || 'Upstream websocket authentication failed');
+          }
         }
-      } else if (!retryPublicTurn()) {
-        if (publicResponses && publicTurnActive) failActiveTurn('upstream_websocket_handshake_failed', 'Upstream websocket handshake failed');
-        else closeBoth(1011, 'Upstream websocket handshake failed');
+      } else {
+        const outcome = classifyHttpResponse({ statusCode: response.statusCode, headers: response.headers });
+        if (retryPublicTurn(outcome)) return;
+        if (publicResponses && publicTurnActive) {
+          if (socket === targetSocket) {
+            targetSocket = undefined;
+            targetUpstreamId = null;
+          }
+          failActiveTurn('upstream_websocket_handshake_failed', 'Upstream websocket handshake failed', outcome);
+        }
+        else {
+          settleNativeConnectionAdmission(outcome);
+          settleNativeAdmission(outcome);
+          closeBoth(1011, 'Upstream websocket handshake failed');
+        }
       }
     });
     socket.on('close', (code, reason) => {
-      if (socket !== targetSocket || refreshing || client.readyState !== WebSocket.OPEN) return;
+      socketPacingAbort.abort(new DOMException('Upstream websocket closed', 'AbortError'));
+      releaseHostLease();
+      if (socket !== targetSocket || refreshingConnection || client.readyState !== WebSocket.OPEN) return;
       targetSocket = undefined;
-      if (retryPublicTurn()) return;
+      targetUpstreamId = null;
+      const outcome = socketTransportOutcome || classifyTransportError(new Error('Upstream WebSocket closed'));
+      if (retryPublicTurn(outcome)) return;
       if (publicResponses && publicTurnActive) {
         clearIdle();
-        failActiveTurn('upstream_websocket_interrupted', 'Upstream response interrupted');
+        failActiveTurn('upstream_websocket_interrupted', 'Upstream response interrupted', outcome);
         return;
       }
+      if (publicResponses) {
+        clearIdle();
+        return;
+      }
+      settleNativeConnectionAdmission(outcome);
+      settleNativeAdmission(outcome);
       client.close(code, reason);
     });
-    socket.on('error', () => {
-      if (socket !== targetSocket || refreshing) return;
-      if (publicResponses && publicTurnActive && !publicOutput) return socket.close();
-      closeBoth(1011, 'Upstream websocket error');
+    socket.on('error', (error) => {
+      if (socket !== targetSocket || refreshingConnection) return;
+      const hostOutcome = settleHostError(error);
+      const outcome = hostOutcome.preconnect
+        ? { class: 'neutral', retryable: false }
+        : classifyTransportError(error);
+      socketTransportOutcome = outcome;
+      if (publicResponses) {
+        if (hostOutcome.preconnect) {
+          if (!hostOutcome.open && retryPublicTurn(outcome)) return;
+          if (publicTurnActive) {
+            targetSocket = undefined;
+            targetUpstreamId = null;
+            failActiveTurn(
+              hostOutcome.open ? 'codex_host_unavailable' : 'upstream_websocket_connect_failed',
+              hostOutcome.open ? 'Codex host is temporarily unreachable' : 'Upstream websocket connection failed',
+              outcome
+            );
+          }
+          return;
+        }
+        return socket.close();
+      }
+      settleNativeConnectionAdmission(outcome);
+      settleNativeAdmission(outcome);
+      closeBoth(hostOutcome.open ? 1013 : 1011, hostOutcome.open ? 'Codex host is temporarily unreachable' : 'Upstream websocket error');
     });
   };
 
   try {
     if (upstream) {
-      await ensureProviderCredentials(upstream, credentials, {
+      const refreshed = await ensureProviderCredentials(upstream, credentials, {
         fetchImpl,
         saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
       });
-      connect();
+      if (refreshed && !renewNativeAdmissions(upstream)) {
+        client.close(1013, 'No eligible Codex upstream is available');
+        return;
+      }
+      await connect();
     }
   } catch (error) {
+    settleNativeAdmission({ class: 'neutral', retryable: false });
+    settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
     client.close(1011, error.message || 'Upstream websocket connection failed');
   }
 }
 
-function publicWebSocketFailure(client, code, message, sequenceNumber = 0) {
-  if (client.readyState === WebSocket.OPEN) client.send(JSON.stringify({ type: 'error', sequence_number: sequenceNumber, error: { type: 'server_error', code, message, param: null } }));
+function publicWebSocketFailure(client, code, message, sequenceNumber = 0, streamId = null, param = null, status = null) {
+  if (client.readyState === WebSocket.OPEN) {
+    client.send(JSON.stringify({
+      type: 'error',
+      ...(status ? { status } : {}),
+      sequence_number: sequenceNumber,
+      error: { type: status === 400 ? 'invalid_request_error' : 'server_error', code, message, param },
+      ...(streamId ? { stream_id: streamId } : {})
+    }));
+  }
+}
+
+function sanitizeNativeResponseControlFrame(data, isBinary) {
+  if (isBinary) return data;
+  let event;
+  try { event = JSON.parse(data.toString()); } catch { return data; }
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return data;
+  let changed = false;
+  if (Object.hasOwn(event, 'headers')) {
+    event.headers = event.headers && typeof event.headers === 'object' && !Array.isArray(event.headers)
+      ? nativeResponseControlMap(event.headers)
+      : undefined;
+    if (event.headers === undefined) delete event.headers;
+    changed = true;
+  }
+  if (event.response && typeof event.response === 'object' && !Array.isArray(event.response) && Object.hasOwn(event.response, 'headers')) {
+    event.response = { ...event.response };
+    event.response.headers = event.response.headers && typeof event.response.headers === 'object' && !Array.isArray(event.response.headers)
+      ? nativeResponseControlMap(event.response.headers)
+      : undefined;
+    if (event.response.headers === undefined) delete event.response.headers;
+    changed = true;
+  }
+  return changed ? Buffer.from(JSON.stringify(event)) : data;
+}
+
+function nativeResponseControlMap(headers) {
+  const entries = Object.entries(headers);
+  const projected = {};
+  for (const [outputName, inputNames, presence = false] of [
+    ['openai-model', ['openai-model', 'x-openai-model']],
+    ['x-reasoning-included', ['x-reasoning-included'], true],
+    ['x-codex-safety-buffering-enabled', ['x-codex-safety-buffering-enabled'], true],
+    ['x-codex-safety-buffering-faster-model', ['x-codex-safety-buffering-faster-model']]
+  ]) {
+    const selected = inputNames.flatMap((inputName) => {
+      const exact = entries.filter(([name]) => name === inputName);
+      const folded = entries.filter(([name]) => name !== inputName && name.toLowerCase() === inputName);
+      return [...exact, ...folded];
+    }).map(([, value]) => value).find((value) => presence
+      ? (typeof value === 'string' && validResponseControlValue(value, true)) || typeof value === 'number' || typeof value === 'boolean'
+      : validResponseControlValue(value));
+    if (selected !== undefined) projected[outputName] = presence ? 'true' : selected;
+  }
+  return projected;
+}
+
+function validateStreamId(value) {
+  if (value === undefined) return null;
+  if (typeof value !== 'string' || !STREAM_ID_PATTERN.test(value)) {
+    throw new AdapterError('stream_id must be 1-256 ASCII characters matching [A-Za-z0-9_.-]+', 'stream_id');
+  }
+  return value;
+}
+
+function validateGenerate(value) {
+  if (value === undefined) return true;
+  if (typeof value !== 'boolean') throw new AdapterError('generate must be a boolean', 'generate');
+  return value;
 }
 
 function sendRoutingError(res, store, req, fallback = 'No eligible upstream is available', code = 'no_eligible_backend') {

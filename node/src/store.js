@@ -19,6 +19,9 @@ import {
   updateUpstream
 } from './domain.js';
 import { codexRefreshFailureCode, codexRefreshFailureDetail } from './providers.js';
+import { quotaCooldown } from './upstream-outcomes.js';
+import { normalizePacingPolicy } from './upstream-pacer.js';
+import { gatewayDiagnosticsForStore, sanitizeAttemptTimings, sanitizeExclusionReasons } from './gateway-diagnostics.js';
 
 const SESSION_LIMIT = 1_000;
 const SESSION_ID_MAX_LENGTH = 200;
@@ -29,10 +32,14 @@ const RESPONSE_PIN_TTL_MS = 24 * 60 * 60 * 1_000;
 const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CIRCUIT_COOLDOWN_MS = 60_000;
 const CIRCUIT_LIMIT = 100;
+const RESET_COOLDOWN_PROBE_INTERVAL_MS = 5 * 60_000;
+const COMPATIBILITY_FACT_LIMIT = 100;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
 const GATEWAY_ERROR_HISTORY_LIMIT = 100;
 const GATEWAY_USAGE_DAYS = 90;
 const GATEWAY_USAGE_ATTEMPT_LIMIT = 100;
+const ROUTING_STRATEGIES = new Set(['least-recent-success', 'most-remaining-quota']);
+export const ROUTING_QUOTA_FRESHNESS_MS = 5 * 60_000;
 export const DEFAULT_SCOPE_ID = 'default';
 
 export class Store {
@@ -176,6 +183,7 @@ export class Store {
 
     upstream.scopeId = scopeId;
     upstream.routing = normalizeRouting(input.routing);
+    upstream.pacing = normalizePacingPolicy(input.pacing);
     upstream.credentials = encryptCredentials(upstream.credentials, this.key);
     db.upstreams.push(upstream);
     this.save(db);
@@ -192,9 +200,14 @@ export class Store {
     updateUpstream(upstream, input);
     if (upstream.type === 'codex' && (input.authJson || input.accessToken)) {
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+      upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
       delete upstream.tokenRefresh;
+      clearHealthAfterCredentialReplacement(upstream);
+    } else if (upstream.type === 'compass' && input.projectKey !== undefined) {
+      clearHealthAfterCredentialReplacement(upstream);
     }
     if (input.routing !== undefined) upstream.routing = normalizeRouting(input.routing);
+    if (input.pacing !== undefined) upstream.pacing = normalizePacingPolicy(input.pacing);
     this.saveCredentials(upstream);
     this.save(db);
     this.notifyUpstreamsChange();
@@ -217,6 +230,19 @@ export class Store {
     return ordered.map(publicUpstream);
   }
 
+  routingPolicy() {
+    const policy = normalizeRoutingPolicy(this.load().routingPolicy);
+    return { ...policy, quotaFreshnessMs: ROUTING_QUOTA_FRESHNESS_MS };
+  }
+
+  setRoutingPolicy(input = {}) {
+    const db = this.load();
+    db.routingPolicy = normalizeRoutingPolicy(input);
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return { ...db.routingPolicy, quotaFreshnessMs: ROUTING_QUOTA_FRESHNESS_MS };
+  }
+
   remove(id) {
     const db = this.load();
     const index = db.upstreams.findIndex((upstream) => upstream.id === id);
@@ -236,6 +262,7 @@ export class Store {
     if (upstream.type === 'codex') {
       Object.defineProperties(credentials, {
         credentialEpoch: { value: Number(upstream.credentialEpoch) || 0, enumerable: false },
+        modelCatalogEpoch: { value: Number(upstream.modelCatalogEpoch) || 0, enumerable: false },
         onTokenRefreshFailure: { value: (error) => this.recordTokenRefreshFailure(id, error, Number(upstream.credentialEpoch) || 0), enumerable: false },
         onTokenRefreshSuccess: { value: () => this.clearTokenRefresh(id, Number(upstream.credentialEpoch) || 0), enumerable: false }
       });
@@ -288,10 +315,18 @@ export class Store {
     const upstream = findOrThrow(db, id);
     const expectedEpoch = credentials?.credentialEpoch;
     if (expectedEpoch !== undefined && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return false;
+    const previousCredentials = decryptCredentials(upstream.credentials, this.key);
+    const accessTokenChanged = upstream.type === 'codex'
+      && String(previousCredentials.accessToken || '') !== String(credentials?.accessToken || '');
+    const authenticationChanged = upstream.type === 'codex'
+      ? ['accessToken', 'refreshToken', 'idToken'].some((name) => String(previousCredentials[name] || '') !== String(credentials?.[name] || ''))
+      : String(previousCredentials.projectKey || '') !== String(credentials?.projectKey || '');
     upstream.credentials = encryptCredentials(credentials, this.key);
     if (accessTokenExpiresAt !== upstream.accessTokenExpiresAt) delete upstream.tokenRefresh;
     upstream.accessTokenExpiresAt = accessTokenExpiresAt;
     upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+    if (accessTokenChanged) upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
+    if (authenticationChanged) clearHealthAfterCredentialReplacement(upstream);
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
@@ -360,21 +395,35 @@ export class Store {
       responseStatusCode: null, errorCode: null
     };
     db.gatewayAttempts.push(attempt);
+    gatewayDiagnosticsForStore(this).beginAttempt(attempt.id, {
+      endpoint: request.endpoint,
+      transport: request.transport,
+      startedAt
+    });
     return { ...attempt };
   }
 
-  retryGatewayAttempt(requestId, attemptId, { responseStatusCode = null, errorCode = null, completedAt = new Date().toISOString() } = {}) {
+  retryGatewayAttempt(requestId, attemptId, { responseStatusCode = null, errorCode = null, timings = null, completedAt = new Date().toISOString() } = {}) {
     const db = this.load();
     const request = findGatewayRequest(db, requestId);
     const attempt = findGatewayAttempt(db, requestId, attemptId);
     if (request.completedAt || attempt.status !== 'in_progress') throw new Error('attempt is already finalized');
-    Object.assign(attempt, { status: 'retryable_failed', retryable: true, responseStatusCode, errorCode, completedAt });
+    const measured = gatewayDiagnosticsForStore(this).finishAttempt(attemptId, { status: 'failed', errorCode });
+    Object.assign(attempt, {
+      status: 'retryable_failed',
+      retryable: true,
+      responseStatusCode: safeStatusCode(responseStatusCode),
+      errorCode: safeDiagnosticCode(errorCode),
+      timings: sanitizeAttemptTimings(timings || measured),
+      completedAt
+    });
+    delete attempt.upstreamId;
     request.status = 'in_progress';
     request.retryCount += 1;
     return { ...attempt };
   }
 
-  finalizeGatewayRequest({ requestId, attemptId = null, status, responseStatusCode = null, errorCode = null, usage = null, settledCostMicros = null, costSource = null, completedAt = new Date().toISOString() } = {}) {
+  finalizeGatewayRequest({ requestId, attemptId = null, status, responseStatusCode = null, errorCode = null, exclusionReasons = [], timings = null, usage = null, settledCostMicros = null, costSource = null, completedAt = new Date().toISOString() } = {}) {
     if (!['succeeded', 'failed'].includes(status)) throw new Error('request status must be succeeded or failed');
     const db = this.load();
     const request = findGatewayRequest(db, requestId);
@@ -382,11 +431,34 @@ export class Store {
     const attempt = attemptId ? findGatewayAttempt(db, requestId, attemptId) : null;
     if (attempt && attempt.status !== 'in_progress') throw new Error('attempt is already finalized');
     if (status === 'succeeded' && !attempt) throw new Error('successful request requires an attempt');
-    if (attempt) Object.assign(attempt, { status: status === 'succeeded' ? 'succeeded' : 'failed', retryable: false, responseStatusCode, errorCode, completedAt });
+    if (attempt) {
+      const measured = gatewayDiagnosticsForStore(this).finishAttempt(attemptId, { status, errorCode });
+      Object.assign(attempt, {
+        status: status === 'succeeded' ? 'succeeded' : 'failed',
+        retryable: false,
+        responseStatusCode: safeStatusCode(responseStatusCode),
+        errorCode: safeDiagnosticCode(errorCode),
+        timings: sanitizeAttemptTimings(timings || measured),
+        completedAt
+      });
+      if (status === 'failed') delete attempt.upstreamId;
+    }
+    const attemptReasons = db.gatewayAttempts
+      .filter((item) => item.requestId === requestId)
+      .map((item) => item.errorCode)
+      .filter(Boolean);
     Object.assign(request, {
       status, usageStatus: usage ? 'usage_known' : status === 'succeeded' ? 'usage_unknown' : 'not_applicable',
-      responseStatusCode, lastErrorCode: errorCode, completedAt
+      responseStatusCode: safeStatusCode(responseStatusCode),
+      lastErrorCode: safeDiagnosticCode(errorCode),
+      exclusionReasons: sanitizeExclusionReasons([...exclusionReasons, ...attemptReasons]),
+      completedAt
     });
+    if (status === 'failed') {
+      delete request.scopeId;
+      delete request.apiKeyId;
+      delete request.model;
+    }
     if (status === 'succeeded') {
       addGatewayUsage(db, { scopeId: request.scopeId, apiKeyId: request.apiKeyId, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
       if (Number.isSafeInteger(settledCostMicros)) {
@@ -411,6 +483,39 @@ export class Store {
     return this.load().gatewayAttempts.filter((item) => item.requestId === requestId).map((item) => ({ ...item }));
   }
 
+  gatewayDiagnostics() {
+    const db = this.load();
+    const failures = db.gatewayRequests
+      .filter((request) => request.status === 'failed' && request.completedAt)
+      .slice(-GATEWAY_ERROR_HISTORY_LIMIT)
+      .reverse()
+      .map((request) => {
+        const attempts = db.gatewayAttempts.filter((attempt) => attempt.requestId === request.id);
+        return {
+          endpoint: safeEndpoint(request.endpoint),
+          transport: safeTransport(request.transport),
+          responseStatusCode: safeStatusCode(request.responseStatusCode),
+          errorCode: safeDiagnosticCode(request.lastErrorCode),
+          exclusionReasons: sanitizeExclusionReasons(request.exclusionReasons),
+          retryCount: Math.max(0, Math.min(100, Number(request.retryCount) || 0)),
+          completedAt: safeTimestamp(request.completedAt),
+          attempts: attempts.map((attempt) => ({
+            attemptNumber: Math.max(1, Math.min(100, Number(attempt.attemptNumber) || 1)),
+            status: ['retryable_failed', 'failed'].includes(attempt.status) ? attempt.status : 'failed',
+            responseStatusCode: safeStatusCode(attempt.responseStatusCode),
+            errorCode: safeDiagnosticCode(attempt.errorCode),
+            timings: sanitizeAttemptTimings(attempt.timings)
+          }))
+        };
+      });
+    return {
+      retainedFailureCount: failures.length,
+      retentionLimit: GATEWAY_ERROR_HISTORY_LIMIT,
+      failures,
+      runtime: gatewayDiagnosticsForStore(this).status()
+    };
+  }
+
   gatewayUsage(scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
     const db = this.load();
     const today = new Date().toISOString().slice(0, 10);
@@ -433,94 +538,197 @@ export class Store {
   }
 
   eligibility(continuationId = null, scopeId = null) {
-    const result = eligibilityFromUpstreams(scoped(this.load().upstreams, scopeId), continuationId);
+    const result = eligibilityFromUpstreams(scoped(this.load().upstreams, scopeId), continuationId, Date.now());
     return { ...result, eligible: result.eligible.map(publicUpstream), reserved: result.reserved.map(publicUpstream) };
   }
 
-  candidatePlan({ pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, routeClass = 'proxy_http', now = Date.now(), scopeId = null } = {}) {
-    const db = this.load();
-    const scope = scopeId ? activeScope(db, scopeId, false) : null;
-    if (scopeId && model && (!scope || scope.models.length && !scope.models.includes(String(model).toLowerCase()))) return [];
-    let candidates = eligibilityFromUpstreams(scoped(db.upstreams, scopeId), pinnedId).eligible;
-    if (requestedId) candidates = candidates.filter((upstream) => upstream.id === requestedId);
-    else if (requestedType) candidates = candidates.filter((upstream) => upstream.type === requestedType);
-    else if (pinnedId) candidates = candidates.filter((upstream) => upstream.id === pinnedId);
-    else {
-      const preferred = candidates.filter((upstream) => upstream.type === preferredType);
-      candidates = [...leastRecentlySuccessful(preferred), ...leastRecentlySuccessful(candidates.filter((upstream) => upstream.type !== preferredType))];
-    }
-    if (requiredType) candidates = candidates.filter((upstream) => upstream.type === requiredType);
-    const plan = candidates.filter((upstream) => candidateEligible(upstream, model, requirements) && circuitEligible(upstream, { model, routeClass }, now)).map(publicUpstream);
-    // A session past its rotation threshold skips its previous upstream unless nothing else is eligible.
-    const rotated = rotateFromId ? plan.filter((upstream) => upstream.id !== rotateFromId) : plan;
-    return rotated.length ? rotated : plan;
+  candidatePlan(options = {}) {
+    return this.candidatePlanDetails(options).candidates;
   }
 
-  beginCircuit(id, scope, now = Date.now()) {
+  routingDryRun(options = {}) {
+    const { candidates, diagnostics } = this.candidatePlanDetails(options);
+    return {
+      policy: { strategy: diagnostics.strategy, quotaFreshnessMs: ROUTING_QUOTA_FRESHNESS_MS },
+      candidates: diagnostics.candidates,
+      exclusions: diagnostics.exclusions,
+      candidateCount: candidates.length
+    };
+  }
+
+  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
+    const db = this.load();
+    const selectedStrategy = normalizeRoutingStrategy(strategy ?? db.routingPolicy?.strategy);
+    const upstreams = scoped(db.upstreams, scopeId);
+    const exclusions = new Map();
+    const exclude = (upstream, code) => {
+      if (upstream && !exclusions.has(upstream.id)) exclusions.set(upstream.id, routingDiagnostic(upstream, now, { code }));
+    };
+    const scope = scopeId ? activeScope(db, scopeId, false) : null;
+    if (scopeId && model && (!scope || scope.models.length && !scope.models.includes(String(model).toLowerCase()))) {
+      for (const upstream of upstreams) exclude(upstream, 'scope_model_not_allowed');
+      return routingPlanResult([], selectedStrategy, exclusions, now);
+    }
+    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now);
+    for (const item of eligibility.exclusions) {
+      exclude(upstreams.find((upstream) => upstream.id === item.id), item.code);
+    }
+    let candidates = eligibility.eligible;
+    const automatic = !requestedId && !pinnedId;
+    if (requestedId) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id === requestedId, exclude, 'not_explicitly_selected');
+    else if (requestedType) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.type === requestedType, exclude, 'upstream_type_not_selected');
+    else if (pinnedId) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id === pinnedId, exclude, 'not_affinity_selected');
+    if (requiredType) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.type === requiredType, exclude, 'required_type_mismatch');
+    candidates = candidates.filter((upstream) => {
+      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now });
+      if (code) exclude(upstream, code);
+      return !code;
+    });
+    // A session past its rotation threshold skips its previous upstream unless nothing else is eligible.
+    if (rotateFromId && candidates.some((upstream) => upstream.id !== rotateFromId)) {
+      candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id !== rotateFromId, exclude, 'session_rotation');
+    }
+    if (automatic) {
+      const preferred = candidates.filter((upstream) => upstream.type === preferredType);
+      candidates = [
+        ...orderRoutingCandidates(preferred, selectedStrategy, now),
+        ...orderRoutingCandidates(candidates.filter((upstream) => upstream.type !== preferredType), selectedStrategy, now)
+      ];
+      if (affinityId) {
+        candidates = [
+          ...candidates.filter((upstream) => upstream.id === affinityId),
+          ...candidates.filter((upstream) => upstream.id !== affinityId)
+        ];
+      }
+    }
+    return routingPlanResult(candidates, selectedStrategy, exclusions, now);
+  }
+
+  beginUpstreamAttempt(id, scope, now = Date.now()) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
-    const circuits = upstream.circuits ||= {};
-    const key = circuitKey(scope);
-    const state = circuits[key];
-    if (!state || state.status === 'closed') return true;
-    if (state.status === 'open') {
-      if (!Number.isFinite(Date.parse(state.nextProbeAt)) || Date.parse(state.nextProbeAt) > now) return false;
-      circuits[key] = { ...state, status: 'half_open', probeInFlight: 1, updatedAt: new Date(now).toISOString() };
-      this.save(db);
-      return true;
+    let health = upstream.health || {};
+    let generation = Math.max(0, Number(health.generation ?? upstream.healthGeneration) || 0);
+    const nextEligibleAt = Date.parse(health.nextEligibleAt);
+    let accountProbe = false;
+    if (health.status === 'reauth_required') return null;
+    if (health.status === 'cooldown' && Number.isFinite(nextEligibleAt) && nextEligibleAt <= now) {
+      generation += 1;
+      upstream.healthGeneration = generation;
+      delete upstream.health;
+      health = {};
     }
-    if (state.status === 'half_open') {
-      const stale = !Number.isFinite(Date.parse(state.updatedAt)) || Date.parse(state.updatedAt) + CIRCUIT_COOLDOWN_MS <= now;
-      if (state.probeInFlight && !stale) return false;
-      circuits[key] = { ...state, probeInFlight: 1, updatedAt: new Date(now).toISOString() };
-      this.save(db);
-      return true;
+    if (Number.isFinite(nextEligibleAt) && nextEligibleAt > now) {
+      const lastProbeAt = Date.parse(health.lastProbeAt || health.cooldownStartedAt);
+      const probeDue = health.cooldownSource === 'reset-derived'
+        && !health.probeInFlight
+        && Number.isFinite(lastProbeAt)
+        && lastProbeAt + RESET_COOLDOWN_PROBE_INTERVAL_MS <= now;
+      if (!probeDue) return null;
+      accountProbe = true;
+      upstream.health = { ...health, probeInFlight: true, lastProbeAt: new Date(now).toISOString() };
     }
+    const circuitLease = beginCircuitLease(upstream, scope, now);
+    if (!circuitLease) return null;
+    this.save(db);
+    return { accountGeneration: generation, accountProbe, circuitGeneration: circuitLease.generation, scope: { ...scope } };
+  }
+
+  settleUpstreamAttempt(id, admission, outcome, now = Date.now()) {
+    if (!admission || !outcome) return false;
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    const health = upstream.health || {};
+    const accountGeneration = Math.max(0, Number(health.generation ?? upstream.healthGeneration) || 0);
+    const accountCurrent = admission.accountGeneration === accountGeneration;
+    if (outcome.class === 'quota') {
+      if (accountCurrent) {
+        const cooldown = quotaCooldown(outcome, now);
+        upstream.health = {
+          status: 'cooldown',
+          failureClass: 'quota',
+          generation: accountGeneration + 1,
+          cooldownSource: cooldown.cooldownSource,
+          cooldownStartedAt: new Date(now).toISOString(),
+          nextEligibleAt: new Date(cooldown.nextEligibleAt).toISOString(),
+          probeInFlight: false
+        };
+        upstream.healthGeneration = accountGeneration + 1;
+        clearSessionPinsForUpstream(db, id);
+      }
+      releaseCircuitLease(upstream, admission, now);
+    } else if (outcome.class === 'credential') {
+      if (accountCurrent) {
+        upstream.health = {
+          status: 'reauth_required',
+          failureClass: 'credential',
+          generation: accountGeneration + 1,
+          cooldownSource: null,
+          cooldownStartedAt: new Date(now).toISOString(),
+          nextEligibleAt: null,
+          probeInFlight: false
+        };
+        upstream.healthGeneration = accountGeneration + 1;
+        if (upstream.type === 'codex') {
+          upstream.tokenRefresh = { status: 'reauth_required', finishedAt: new Date(now).toISOString(), trigger: 'runtime', errorCode: 'reauth_required' };
+        }
+        clearSessionPinsForUpstream(db, id);
+      }
+      releaseCircuitLease(upstream, admission, now);
+    } else if (outcome.class === 'transient') {
+      recordCircuitLeaseFailure(upstream, admission, now, 'transient');
+      if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
+    } else if (outcome.class === 'success') {
+      completeCircuitLease(upstream, admission, now);
+      if (accountCurrent && upstream.health && (admission.accountProbe || Date.parse(health.nextEligibleAt) <= now)) {
+        upstream.healthGeneration = accountGeneration + 1;
+        delete upstream.health;
+      }
+      upstream.lastSuccessfulAt = new Date(now).toISOString();
+    } else {
+      releaseCircuitLease(upstream, admission, now);
+      if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
+    }
+    upstream.updatedAt = new Date(now).toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
     return true;
   }
 
-  recordCircuitFailure(id, scope, now = Date.now()) {
+  clearUpstreamCooldown(id) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
-    const circuits = upstream.circuits ||= {};
-    const key = circuitKey(scope);
-    const prior = circuits[key] || {};
-    const failures = Math.max(0, Number(prior.failures) || 0) + 1;
-    circuits[key] = {
-      status: failures >= CIRCUIT_FAILURE_THRESHOLD ? 'open' : 'closed',
-      failures,
-      probeInFlight: 0,
-      updatedAt: new Date(now).toISOString(),
-      ...(failures >= CIRCUIT_FAILURE_THRESHOLD ? { nextProbeAt: new Date(now + CIRCUIT_COOLDOWN_MS).toISOString() } : {})
-    };
-    pruneCircuits(circuits);
+    if (upstream.health?.status !== 'cooldown') return publicUpstream(upstream);
+    const generation = Math.max(0, Number(upstream.health?.generation ?? upstream.healthGeneration) || 0);
+    delete upstream.health;
+    upstream.healthGeneration = generation + 1;
+    upstream.updatedAt = new Date().toISOString();
     this.save(db);
+    this.notifyUpstreamsChange();
+    return publicUpstream(upstream);
   }
 
-  completeCircuit(id, scope, success, now = Date.now()) {
-    const db = this.load();
-    const upstream = findOrThrow(db, id);
-    const circuits = upstream.circuits ||= {};
-    const key = circuitKey(scope);
-    if (success) {
-      delete circuits[key];
-      upstream.lastSuccessfulAt = new Date(now).toISOString();
-      return;
-    } else {
-      const state = circuits[key] || {};
-      const failures = Math.max(0, Number(state.failures) || 0) + 1;
-      circuits[key] = { status: 'open', failures, probeInFlight: 0, updatedAt: new Date(now).toISOString(), nextProbeAt: new Date(now + CIRCUIT_COOLDOWN_MS).toISOString() };
-    }
-    this.save(db);
+  compatibilityFact(id, key, { maxAgeMs = 24 * 60 * 60 * 1_000, now = Date.now() } = {}) {
+    const upstream = this.get(id);
+    if (!upstream || typeof key !== 'string' || !key || key.length > 160) return null;
+    const fact = upstream.compatibility?.facts?.[key];
+    const observedAt = Date.parse(fact?.observedAt);
+    if (!fact || !Number.isFinite(observedAt) || observedAt + maxAgeMs <= now) return null;
+    return structuredClone(fact.value);
   }
 
-  releaseCircuit(id, scope, now = Date.now()) {
+  rememberCompatibilityFact(id, key, value, now = Date.now()) {
+    if (typeof key !== 'string' || !key || key.length > 160) throw new Error('compatibility key is invalid');
     const db = this.load();
     const upstream = findOrThrow(db, id);
-    const circuits = upstream.circuits ||= {};
-    const key = circuitKey(scope);
-    if (circuits[key]?.status === 'half_open') circuits[key] = { ...circuits[key], probeInFlight: 0, updatedAt: new Date(now).toISOString() };
+    const facts = (upstream.compatibility ||= { facts: {} }).facts ||= {};
+    facts[key] = { value: structuredClone(value), observedAt: new Date(now).toISOString() };
+    const overflow = Object.entries(facts)
+      .sort(([, left], [, right]) => Date.parse(right.observedAt || 0) - Date.parse(left.observedAt || 0))
+      .slice(COMPATIBILITY_FACT_LIMIT);
+    for (const [expiredKey] of overflow) delete facts[expiredKey];
     this.save(db);
+    return structuredClone(facts[key].value);
   }
 
   sessionUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
@@ -643,8 +851,10 @@ export class Store {
         if (Array.isArray(target)) target.push(JSON.parse(value));
         else target[key] = JSON.parse(value);
       }
+      const persisted = structuredClone(db);
       this.db = normalizeDatabase(db);
-      this.persisted = structuredClone(this.db);
+      this.persisted = persisted;
+      this.save(this.db);
       return this.db;
     } catch (error) {
       throw new Error(`Could not read ${this.dbPath}: ${error.message}`);
@@ -692,7 +902,7 @@ export class Store {
 }
 
 function emptyDatabase() {
-  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [] };
+  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [], routingPolicy: { strategy: 'least-recent-success' } };
 }
 
 function normalizeDatabase(parsed) {
@@ -705,15 +915,35 @@ function normalizeDatabase(parsed) {
   parsed.gatewayRequests ||= [];
   parsed.gatewayAttempts ||= [];
   parsed.responsePins ||= {};
+  parsed.routingPolicy = normalizeRoutingPolicy(parsed.routingPolicy);
   if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
   parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
+  for (const request of parsed.gatewayRequests) {
+    request.responseStatusCode = safeStatusCode(request.responseStatusCode);
+    request.lastErrorCode = safeDiagnosticCode(request.lastErrorCode);
+    request.exclusionReasons = sanitizeExclusionReasons(request.exclusionReasons);
+    if (request.status === 'failed' && request.completedAt) {
+      delete request.scopeId;
+      delete request.apiKeyId;
+      delete request.model;
+    }
+  }
+  for (const attempt of parsed.gatewayAttempts) {
+    attempt.responseStatusCode = safeStatusCode(attempt.responseStatusCode);
+    attempt.errorCode = safeDiagnosticCode(attempt.errorCode);
+    attempt.timings = sanitizeAttemptTimings(attempt.timings);
+    if (['failed', 'retryable_failed'].includes(attempt.status)) delete attempt.upstreamId;
+  }
   pruneGatewayHistory(parsed);
   if (!parsed.sessions || typeof parsed.sessions !== 'object' || Array.isArray(parsed.sessions) || !parsed.responsePins || typeof parsed.responsePins !== 'object' || Array.isArray(parsed.responsePins)) throw new Error('invalid session database');
   if (!parsed.scopes.some((scope) => scope.id === DEFAULT_SCOPE_ID)) parsed.scopes.push({ id: DEFAULT_SCOPE_ID, status: 'active', models: [] });
   for (const scope of parsed.scopes) scope.models = normalizeModels(scope.models || []);
   for (const upstream of parsed.upstreams) {
     upstream.scopeId ||= DEFAULT_SCOPE_ID;
+    upstream.credentialEpoch = Math.max(1, Number(upstream.credentialEpoch) || 1);
+    upstream.modelCatalogEpoch = Math.max(1, Number(upstream.modelCatalogEpoch) || 1);
     upstream.routing = normalizeRouting(upstream.routing);
+    upstream.pacing = normalizePacingPolicy(upstream.pacing);
     upstream.baseUrl = defaultBaseUrl(upstream.type);
     upstream.name = deriveUpstreamName(upstream.type, upstream);
   }
@@ -733,6 +963,7 @@ function databaseRecords(db) {
   for (const attempt of db.gatewayAttempts) add('gatewayAttempts', attempt.id, attempt);
   for (const [key, value] of Object.entries(db.sessions)) add('sessions', key, value);
   for (const [key, value] of Object.entries(db.responsePins)) add('responsePins', key, value);
+  for (const [key, value] of Object.entries(normalizeRoutingPolicy(db.routingPolicy))) add('routingPolicy', key, value);
   return records;
 }
 
@@ -740,14 +971,31 @@ function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
 }
 
-function eligibilityFromUpstreams(upstreams, continuationId) {
+function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now()) {
   for (const upstream of upstreams) ensureSpending(upstream);
-  const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status));
+  const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
+    || upstream.health?.status === 'reauth_required'
+    || accountCooldownBlocks(upstream.health, now));
   const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId });
   return {
     ...result,
-    exclusions: [...result.exclusions, ...blocked.map((upstream) => ({ id: upstream.id, name: upstream.name, code: `token_refresh_${upstream.tokenRefresh.status}` }))]
+    exclusions: [...result.exclusions, ...blocked.map((upstream) => ({
+      id: upstream.id,
+      name: upstream.name,
+      code: upstream.health?.status === 'reauth_required' ? 'upstream_reauth_required'
+        : Number.isFinite(Date.parse(upstream.health?.nextEligibleAt)) && Date.parse(upstream.health.nextEligibleAt) > now ? 'upstream_cooldown'
+          : `token_refresh_${upstream.tokenRefresh.status}`,
+      nextEligibleAt: upstream.health?.nextEligibleAt || null
+    }))]
   };
+}
+
+function accountCooldownBlocks(health, now) {
+  const nextEligibleAt = Date.parse(health?.nextEligibleAt);
+  if (!Number.isFinite(nextEligibleAt) || nextEligibleAt <= now) return false;
+  if (health.cooldownSource !== 'reset-derived' || health.probeInFlight) return true;
+  const lastProbeAt = Date.parse(health.lastProbeAt || health.cooldownStartedAt);
+  return !Number.isFinite(lastProbeAt) || lastProbeAt + RESET_COOLDOWN_PROBE_INTERVAL_MS > now;
 }
 
 function pruneGatewayHistory(db, keepActive = false) {
@@ -815,6 +1063,28 @@ function findGatewayAttempt(db, requestId, attemptId) {
   return attempt;
 }
 
+function safeStatusCode(value) {
+  const status = Number(value);
+  return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+function safeDiagnosticCode(value) {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9_.-]{0,79}$/.test(value) ? value : null;
+}
+
+function safeEndpoint(value) {
+  return typeof value === 'string' && /^\/[A-Za-z0-9_./:-]{0,159}$/.test(value) ? value : '';
+}
+
+function safeTransport(value) {
+  return typeof value === 'string' && /^[a-z0-9_]{1,40}$/.test(value) ? value : '';
+}
+
+function safeTimestamp(value) {
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+}
+
 function dbUpstreamLimits(upstreams, scopeId) {
   return scoped(upstreams, scopeId).flatMap(({ quota }) => {
     if (!quota || typeof quota !== 'object') return [];
@@ -846,18 +1116,133 @@ function normalizeRouting(value = {}) {
   return { models: normalizeModels(value.models || []), responses: boolean('responses'), streaming: boolean('streaming'), tools: boolean('tools'), imageInput: boolean('imageInput'), reasoning: boolean('reasoning'), serviceTiers };
 }
 
-function leastRecentlySuccessful(upstreams) {
-  const rank = (upstream) => Number.isInteger(upstream.priority) ? upstream.priority : Infinity;
-  return [...upstreams].sort((left, right) => rank(left) - rank(right) || (Date.parse(left.lastSuccessfulAt) || 0) - (Date.parse(right.lastSuccessfulAt) || 0));
+function normalizeRoutingPolicy(value = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('routing policy must be an object');
+  return { strategy: normalizeRoutingStrategy(value.strategy) };
 }
 
-function candidateEligible(upstream, model, requirements) {
+function normalizeRoutingStrategy(value) {
+  const strategy = value === undefined || value === null ? 'least-recent-success' : value;
+  if (!ROUTING_STRATEGIES.has(strategy)) throw new Error(`strategy must be one of ${[...ROUTING_STRATEGIES].join(', ')}`);
+  return strategy;
+}
+
+function priorityTier(upstream) {
+  return Number.isInteger(upstream.priority) ? upstream.priority : Infinity;
+}
+
+function leastRecentRank(upstream) {
+  return Date.parse(upstream.lastSuccessfulAt) || 0;
+}
+
+function orderRoutingCandidates(upstreams, strategy, now) {
+  const stableOrder = new Map(upstreams.map((upstream, index) => [upstream.id, index]));
+  const tieBreak = (left, right) => leastRecentRank(left) - leastRecentRank(right)
+    || stableOrder.get(left.id) - stableOrder.get(right.id);
+  if (strategy === 'least-recent-success') {
+    return [...upstreams].sort((left, right) => priorityTier(left) - priorityTier(right) || tieBreak(left, right));
+  }
+  const medians = new Map();
+  for (const tier of new Set(upstreams.map(priorityTier))) {
+    const known = upstreams
+      .filter((upstream) => priorityTier(upstream) === tier)
+      .map((upstream) => quotaOrderingMetadata(upstream, now))
+      .filter(({ status }) => status === 'known')
+      .map(({ remainingPercent }) => remainingPercent)
+      .sort((left, right) => left - right);
+    const middle = Math.floor(known.length / 2);
+    medians.set(tier, !known.length ? 50 : known.length % 2 ? known[middle] : (known[middle - 1] + known[middle]) / 2);
+  }
+  const score = (upstream) => {
+    const quota = quotaOrderingMetadata(upstream, now);
+    return quota.status === 'known' ? quota.remainingPercent : medians.get(priorityTier(upstream));
+  };
+  return [...upstreams].sort((left, right) => (
+    priorityTier(left) - priorityTier(right)
+    || score(right) - score(left)
+    || tieBreak(left, right)
+  ));
+}
+
+function quotaOrderingMetadata(upstream, now) {
+  const raw = Number(upstream.quota?.remainingPercent);
+  if (!Number.isFinite(raw)) return { status: 'unknown', remainingPercent: null, observedAt: null };
+  const observedAt = Date.parse(upstream.quota?.observedAt);
+  const remainingPercent = Math.max(0, Math.min(100, raw));
+  if (!Number.isFinite(observedAt) || observedAt + ROUTING_QUOTA_FRESHNESS_MS <= now) {
+    return { status: 'stale', remainingPercent, observedAt: upstream.quota?.observedAt || null };
+  }
+  return { status: 'known', remainingPercent, observedAt: upstream.quota.observedAt };
+}
+
+function filterRoutingCandidates(candidates, predicate, exclude, code) {
+  const kept = [];
+  for (const upstream of candidates) {
+    if (predicate(upstream)) kept.push(upstream);
+    else exclude(upstream, code);
+  }
+  return kept;
+}
+
+function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now }) {
+  if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions })) {
+    const routing = normalizeRouting(upstream.routing);
+    if (!ignoreModelRestrictions && routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return 'upstream_model_not_allowed';
+    if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return 'quota_exhausted';
+    return 'capability_not_supported';
+  }
+  if (!dynamicallySupportsModel(upstream, model, modelSupport)) return 'model_not_supported';
+  if (!circuitEligible(upstream, { model, routeClass }, now)) return 'circuit_open';
+  return null;
+}
+
+function routingDiagnostic(upstream, now, extra = {}) {
+  const quota = quotaOrderingMetadata(upstream, now);
+  return {
+    id: upstream.id,
+    name: upstream.name,
+    type: upstream.type,
+    priority: Number.isInteger(upstream.priority) ? upstream.priority : null,
+    priorityTier: Number.isInteger(upstream.priority) ? upstream.priority : 'unlisted',
+    lastSuccessfulAt: upstream.lastSuccessfulAt || null,
+    quota,
+    ...extra
+  };
+}
+
+function routingPlanResult(upstreams, strategy, exclusions, now) {
+  return {
+    candidates: upstreams.map(publicUpstream),
+    diagnostics: {
+      strategy,
+      candidates: upstreams.map((upstream, index) => ({
+        ...routingDiagnostic(upstream, now),
+        order: index + 1,
+        reason: strategy === 'most-remaining-quota' && quotaOrderingMetadata(upstream, now).status !== 'known'
+          ? 'quota_unknown_fairness'
+          : strategy
+      })),
+      exclusions: [...exclusions.values()].sort((left, right) => left.id.localeCompare(right.id))
+    }
+  };
+}
+
+function candidateEligible(upstream, model, requirements, { ignoreModelRestrictions = false } = {}) {
   if (!upstream) return false;
   const routing = normalizeRouting(upstream.routing);
-  if (routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return false;
+  if (!ignoreModelRestrictions && routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return false;
   if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
+}
+
+function dynamicallySupportsModel(upstream, model, modelSupport) {
+  if (upstream?.type !== 'codex' || !model || typeof modelSupport !== 'function') return true;
+  return modelSupport(
+    upstream.id,
+    String(model).toLowerCase(),
+    Math.max(1, Number(upstream.modelCatalogEpoch) || 1)
+  ) !== false;
 }
 
 function activeScope(db, scopeId, required = true) {
@@ -913,6 +1298,74 @@ function circuitEligible(upstream, scope, now) {
     return !state.probeInFlight || !Number.isFinite(updatedAt) || updatedAt + CIRCUIT_COOLDOWN_MS <= now;
   }
   return false;
+}
+
+function beginCircuitLease(upstream, scope, now) {
+  const circuits = upstream.circuits ||= {};
+  const key = circuitKey(scope);
+  const state = circuits[key] || {};
+  const generation = Math.max(0, Number(state.generation) || 0);
+  if (!state.status || state.status === 'closed') return { generation };
+  if (state.status === 'open') {
+    if (!Number.isFinite(Date.parse(state.nextProbeAt)) || Date.parse(state.nextProbeAt) > now) return null;
+    circuits[key] = { ...state, status: 'half_open', probeInFlight: 1, generation, updatedAt: new Date(now).toISOString() };
+    return { generation };
+  }
+  if (state.status === 'half_open') {
+    const stale = !Number.isFinite(Date.parse(state.updatedAt)) || Date.parse(state.updatedAt) + CIRCUIT_COOLDOWN_MS <= now;
+    if (state.probeInFlight && !stale) return null;
+    circuits[key] = { ...state, probeInFlight: 1, generation, updatedAt: new Date(now).toISOString() };
+    return { generation };
+  }
+  return { generation };
+}
+
+function recordCircuitLeaseFailure(upstream, admission, now, failureClass) {
+  const circuits = upstream.circuits ||= {};
+  const key = circuitKey(admission.scope);
+  const prior = circuits[key] || {};
+  if (Math.max(0, Number(prior.generation) || 0) !== admission.circuitGeneration) return;
+  const failures = Math.max(0, Number(prior.failures) || 0) + 1;
+  const open = failures >= CIRCUIT_FAILURE_THRESHOLD;
+  circuits[key] = {
+    status: open ? 'open' : 'closed',
+    failures,
+    failureClass,
+    generation: admission.circuitGeneration + (open ? 1 : 0),
+    probeInFlight: 0,
+    updatedAt: new Date(now).toISOString(),
+    ...(open ? { nextProbeAt: new Date(now + CIRCUIT_COOLDOWN_MS).toISOString() } : {})
+  };
+  pruneCircuits(circuits);
+}
+
+function completeCircuitLease(upstream, admission, now) {
+  const circuits = upstream.circuits ||= {};
+  const key = circuitKey(admission.scope);
+  const state = circuits[key];
+  if (!state) return;
+  if (Math.max(0, Number(state.generation) || 0) !== admission.circuitGeneration) return;
+  delete circuits[key];
+}
+
+function releaseCircuitLease(upstream, admission, now) {
+  const circuits = upstream.circuits ||= {};
+  const key = circuitKey(admission.scope);
+  const state = circuits[key];
+  if (!state || Math.max(0, Number(state.generation) || 0) !== admission.circuitGeneration) return;
+  if (state.status === 'half_open') circuits[key] = { ...state, probeInFlight: 0, updatedAt: new Date(now).toISOString() };
+}
+
+function clearSessionPinsForUpstream(db, upstreamId) {
+  for (const [key, entry] of Object.entries(db.sessions)) {
+    if (entry === upstreamId || entry?.upstreamId === upstreamId || entry?.rotationUpstreamId === upstreamId) delete db.sessions[key];
+  }
+}
+
+function clearHealthAfterCredentialReplacement(upstream) {
+  const generation = Math.max(0, Number(upstream.health?.generation ?? upstream.healthGeneration) || 0);
+  delete upstream.health;
+  upstream.healthGeneration = generation + 1;
 }
 
 function pruneCircuits(circuits) {
