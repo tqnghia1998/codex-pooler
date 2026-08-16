@@ -140,6 +140,17 @@ export class CodexModelCatalog {
     return entry.modelIds.has(normalized);
   }
 
+  supportsServiceTier(upstreamId, model, tier, expectedGeneration = null) {
+    const normalized = normalizeModelId(model);
+    if (!normalized || tier !== 'ultrafast') return null;
+    const entry = expectedGeneration !== null
+      ? this.entryMatchingGeneration(upstreamId, expectedGeneration)
+      : this.currentEntry(upstreamId);
+    if (!entry?.hasCatalog) return false;
+    const row = entry.models.find(({ id }) => id === normalized)?.native;
+    return advertisedServiceTiers(row).includes(tier);
+  }
+
   markUnsupported(upstreamId, model) {
     const normalized = normalizeModelId(model);
     const upstream = this.store.get(upstreamId);
@@ -457,6 +468,17 @@ function normalizeModelId(value) {
   if (typeof value !== 'string') return '';
   const id = value.trim();
   return MODEL_ID_PATTERN.test(id) ? id.toLowerCase() : '';
+}
+
+function advertisedServiceTiers(row) {
+  if (!plainObject(row)) return [];
+  return ['service_tiers', 'additional_speed_tiers'].flatMap((key) => {
+    const values = Array.isArray(row[key]) ? row[key] : [];
+    return values.flatMap((value) => {
+      const tier = typeof value === 'string' ? value : plainObject(value) ? value.id : null;
+      return typeof tier === 'string' && tier === tier.trim().toLowerCase() ? [tier] : [];
+    });
+  });
 }
 
 function aggregateCatalog(accountModels, modelAllowed) {
