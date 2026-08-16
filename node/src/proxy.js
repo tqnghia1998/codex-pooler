@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import WebSocket, { WebSocketServer } from 'ws';
 import { defaultBaseUrl } from './domain.js';
@@ -13,10 +13,16 @@ import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { extractUsage, mergeUsage, priceUsage } from './pricing.js';
 import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
-import { codexProtocolHeaders } from './protocol-compat.js';
+import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
+import {
+  compatibilityLearningForStore,
+  compatibilityContext,
+  compatibilityEvidenceFeature
+} from './compatibility-learning.js';
+import { compatibilityOptionalFields } from './compatibility-policy.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
 
@@ -47,11 +53,9 @@ const BACKEND_METADATA_HEADERS = [
   'x-codex-turn-state',
   'x-openai-subagent'
 ];
-const CODEX_OPTIONAL_FALLBACK_FIELDS = new Set(['max_output_tokens', 'prompt_cache_retention', 'safety_identifier', 'temperature', 'top_p']);
-const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(['temperature', 'top_k', 'top_p']);
-const COMPATIBILITY_FACT_TTL_MS = 24 * 60 * 60 * 1_000;
+const CODEX_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('codex'));
+const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('compass'));
 const COMPATIBILITY_RETRY_LIMIT = Math.max(CODEX_OPTIONAL_FALLBACK_FIELDS.size, COMPASS_OPTIONAL_FALLBACK_FIELDS.size + 1);
-const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';
 const ANTHROPIC_BETA_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORWARDED_HEADER_MAX_BYTES = 1024;
 const PROMPT_CACHE_BREAKPOINT_TYPES = new Set(['input_text', 'input_image', 'input_file']);
@@ -366,8 +370,9 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const diagnostics = gatewayDiagnosticsForStore(store);
     let response;
     let collected;
-    const compatibilityKey = compatibilityFactKey(upstream, sourcePath, payload, req, path);
-    let compatibility = compatibilityState(upstream, store.compatibilityFact(upstream.id, compatibilityKey, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+    const compatibilityService = compatibilityLearningForStore(store);
+    let compatibilityScope = compatibilityFactContext(upstream, sourcePath, payload, req, path);
+    let compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
     diagnostics.credentialStarted(attemptId);
     try {
       const refreshed = await ensureProviderCredentials(upstream, credentials, {
@@ -378,6 +383,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
         admission = store.beginUpstreamAttempt(upstream.id, scope);
         if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
+        compatibilityScope = compatibilityFactContext(store.get(upstream.id) || upstream, sourcePath, payload, req, path);
+        compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
       }
     } catch (error) {
       logProxyFailure(logger, 'credentials', upstream.id, error);
@@ -407,6 +414,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
             admission = store.beginUpstreamAttempt(upstream.id, scope);
             if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
+            compatibilityScope = compatibilityFactContext(store.get(upstream.id) || upstream, sourcePath, payload, req, path);
+            compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
           }
           request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
           response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
@@ -434,8 +443,15 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           : response;
         const learned = await compatibilityFallback(compatibilityResponse, upstream, sourcePath, payload, request, compatibility);
         if (!learned) break;
+        const feature = compatibilityEvidenceFeature(compatibility, learned);
         compatibility = learned;
-        store.rememberCompatibilityFact(upstream.id, compatibilityKey, compatibility);
+        compatibilityService.observe({
+          upstream: store.get(upstream.id) || upstream,
+          context: compatibilityScope,
+          value: compatibility,
+          feature,
+          observationId: attemptId
+        });
         void response.body?.cancel('Retrying with provider-directed compatibility fallback').catch(() => {});
         request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
         response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
@@ -615,26 +631,14 @@ function modelNotFoundFailure(event) {
 
 function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}) {
   const direct = upstream.type === 'compass';
-  const publicCompaction = sourcePath === '/v1/responses/compact' && originalPath === '/v1/responses';
-  const targetPath = direct
-    ? COMPASS_PATHS[sourcePath]
-    : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
-  const normalizedBody = direct
-    ? directUpstreamPayload(payload, sourcePath, compatibility)
-    : sourcePath === '/v1/chat/completions'
-      ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
-      : publicCompaction
-        ? normalizeCodexInput(payload, { compact: true })
-        : originalPath === '/v1/responses'
-          ? publicResponsesPayload(codexPayload)
-        : sourcePath === '/v1/responses/compact'
-          ? normalizeCodexInput(payload, { compact: true, native: isBackendMetadataRoute(originalPath) })
-          : normalizeCodexInput(payload, { native: isBackendMetadataRoute(originalPath) });
-  const body = omitCompatibilityFields(
-    normalizedBody,
-    compatibility.unsupportedFields,
-    direct ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS
-  );
+  const { targetPath, body } = projectProxyRequest({
+    upstreamType: upstream.type,
+    sourcePath,
+    payload,
+    originalPath,
+    codexPayload,
+    compatibility
+  });
   const baseUrl = defaultBaseUrl(upstream.type);
   const headers = {
     'content-type': 'application/json',
@@ -658,6 +662,48 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
   }
   if (direct && sourcePath === '/v1/messages' && !headers['anthropic-version']) headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
   return { url: `${baseUrl}${targetPath}`, headers, body: JSON.stringify(body) };
+}
+
+export function projectProxyRequest({
+  upstreamType,
+  sourcePath,
+  payload,
+  originalPath = sourcePath,
+  codexPayload = payload,
+  compatibility = {}
+}) {
+  const direct = upstreamType === 'compass';
+  const publicCompaction = sourcePath === '/v1/responses/compact' && originalPath === '/v1/responses';
+  const targetPath = direct
+    ? COMPASS_PATHS[sourcePath]
+    : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
+  const normalizedBody = direct
+    ? directUpstreamPayload(payload, sourcePath, compatibility)
+    : sourcePath === '/v1/chat/completions'
+      ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
+      : publicCompaction
+        ? normalizeCodexInput(payload, { compact: true })
+        : originalPath === '/v1/responses'
+          ? publicResponsesPayload(codexPayload)
+        : sourcePath === '/v1/responses/compact'
+          ? normalizeCodexInput(payload, { compact: true, native: isBackendMetadataRoute(originalPath) })
+          : normalizeCodexInput(payload, { native: isBackendMetadataRoute(originalPath) });
+  return {
+    targetPath,
+    body: omitCompatibilityFields(
+      normalizedBody,
+      compatibility.unsupportedFields,
+      direct ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS
+    )
+  };
+}
+
+export function projectPublicWebSocketFrame(payload, { generate = true, compatibility = {} } = {}) {
+  return {
+    type: 'response.create',
+    ...omitCompatibilityFields(publicResponsesPayload(payload), compatibility.unsupportedFields, CODEX_OPTIONAL_FALLBACK_FIELDS),
+    generate
+  };
 }
 
 async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}, codexHostHealth = null, pacing = null) {
@@ -783,16 +829,16 @@ function rejectedParameter(body, text) {
   return '';
 }
 
-function compatibilityFactKey(upstream, sourcePath, payload, req, originalPath) {
-  const modelHash = createHash('sha256').update(String(payload?.model || '').trim().toLowerCase()).digest('hex').slice(0, 24);
-  const protocol = upstream.type === 'codex'
-    ? codexProtocolHeaders(req, { inheritClient: isBackendMetadataRoute(originalPath) })
-    : {
-        version: anthropicHeader(req, 'anthropic-version') || DEFAULT_ANTHROPIC_VERSION,
-        beta: anthropicHeader(req, 'anthropic-beta')
-      };
-  const protocolHash = createHash('sha256').update(canonicalJson(protocol)).digest('hex').slice(0, 24);
-  return `${upstream.type}:${protocolHash}:${sourcePath}:${modelHash}`;
+function compatibilityFactContext(upstream, sourcePath, payload, req, originalPath, { websocket = false } = {}) {
+  return compatibilityContext(upstream, {
+    req,
+    inheritClient: isBackendMetadataRoute(originalPath),
+    websocket,
+    sourcePath,
+    model: payload?.model,
+    anthropicVersion: anthropicHeader(req, 'anthropic-version'),
+    anthropicBeta: anthropicHeader(req, 'anthropic-beta')
+  });
 }
 
 function compatibilityState(upstream, value) {
@@ -1590,14 +1636,6 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
   }
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  if (value && typeof value === 'object') {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function chooseRawUpstream(store, req) {
   const scopeId = requestScopeId(req);
   const sessionId = sessionAffinity(req);
@@ -1868,14 +1906,16 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     publicAdmission = activeAdmission;
     return candidate;
   };
-  const publicWebSocketFrame = (candidate, payload, generate = publicGenerate) => {
-    const key = compatibilityFactKey(candidate, '/v1/responses', payload, req, '/v1/responses');
-    const compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, key, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
-    return Buffer.from(JSON.stringify({
-      type: 'response.create',
-      ...omitCompatibilityFields(publicResponsesPayload(payload), compatibility.unsupportedFields, CODEX_OPTIONAL_FALLBACK_FIELDS),
-      generate
-    }));
+  const publicWebSocketFrame = (candidate, payload, generate = publicGenerate, compatibilityOverride = null) => {
+    const context = compatibilityFactContext(candidate, '/v1/responses', payload, req, '/v1/responses', { websocket: true });
+    const compatibility = compatibilityState(candidate, compatibilityOverride || compatibilityLearningForStore(store).activeFact(candidate.id, context));
+    return Buffer.from(JSON.stringify(projectPublicWebSocketFrame(payload, { generate, compatibility })));
+  };
+  const replacePendingPublicFrame = (candidate) => {
+    if (!publicTurnActive || !publicPayload) return;
+    activeFrame = { data: publicWebSocketFrame(candidate, publicPayload), isBinary: false };
+    pending.splice(0, pending.length, activeFrame);
+    pendingBytes = activeFrame.data.byteLength;
   };
   const framePacingModel = (frame) => {
     if (!frame || frame.isBinary) return '';
@@ -1943,12 +1983,19 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     if (!['error', 'response.failed'].includes(frame?.type)) return false;
     const field = rejectedParameter(frame, JSON.stringify(frame));
     if (!CODEX_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(publicPayload || {}, field)) return false;
-    const key = compatibilityFactKey(candidate, '/v1/responses', publicPayload, req, '/v1/responses');
-    const compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, key, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+    const context = compatibilityFactContext(candidate, '/v1/responses', publicPayload, req, '/v1/responses', { websocket: true });
+    const compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, context));
     if (compatibility.unsupportedFields?.includes(field)) return false;
-    store.rememberCompatibilityFact(candidate.id, key, {
+    const learned = {
       ...compatibility,
       unsupportedFields: [...new Set([...(compatibility.unsupportedFields || []), field])]
+    };
+    compatibilityLearningForStore(store).observe({
+      upstream: store.get(candidate.id) || candidate,
+      context,
+      value: learned,
+      feature: `unsupported_field:${field}`,
+      observationId: publicAttempt?.id || ''
     });
     retryGatewayAttempt(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_compatibility_retry' });
     publicAttempt = publicLifecycle
@@ -1957,7 +2004,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     gatewayDiagnosticsForStore(store).credentialStarted(publicAttempt.id);
     gatewayDiagnosticsForStore(store).credentialPrepared(publicAttempt.id);
     publicCompatibilityRetries += 1;
-    activeFrame = { data: publicWebSocketFrame(candidate, publicPayload), isBinary: false };
+    activeFrame = { data: publicWebSocketFrame(candidate, publicPayload, publicGenerate, learned), isBinary: false };
     if (targetSocket?.readyState === WebSocket.OPEN) {
       void sendFrame(targetSocket, activeFrame, candidate).catch(handleFramePacingFailure);
     }
@@ -2071,6 +2118,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
               failActiveTurn('upstream_credentials_failed', 'No eligible Codex upstream', { class: 'neutral', retryable: false });
               return;
             }
+            if (refreshed) replacePendingPublicFrame(upstream);
             void connect().catch(() => failActiveTurn('upstream_connect_failed', 'Upstream websocket connection failed'));
           }).catch(() => {
             gatewayDiagnosticsForStore(store).credentialPrepared(attempt.id);
@@ -2163,6 +2211,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         failActiveTurn('upstream_credentials_failed', 'Upstream response failed', { class: 'neutral', retryable: false });
         return;
       }
+      if (refreshed) replacePendingPublicFrame(upstream);
       void connect().catch(() => failActiveTurn('upstream_connect_failed', 'Upstream websocket connection failed'));
     }).catch(() => {
       gatewayDiagnosticsForStore(store).credentialPrepared(retryAttemptId);
@@ -2180,8 +2229,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       });
       if (refreshed && !renewPublicAdmission(candidate)) throw new Error('Codex upstream is not currently eligible');
       if (!publicTurnActive || client.readyState !== WebSocket.OPEN) return;
-      const compatibilityKey = compatibilityFactKey(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
-      let compatibility = compatibilityState(candidate, store.compatibilityFact(candidate.id, compatibilityKey, { maxAgeMs: COMPATIBILITY_FACT_TTL_MS }));
+      let compatibilityScope = compatibilityFactContext(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
+      let compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
       let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
       let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
         store,
@@ -2195,6 +2244,10 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
             saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
           });
           if (refreshed && !renewPublicAdmission(candidate)) throw new Error('Codex upstream is not currently eligible');
+          if (refreshed) {
+            compatibilityScope = compatibilityFactContext(store.get(candidate.id) || candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
+            compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
+          }
           request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
           response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
             store,
@@ -2209,8 +2262,15 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       for (let retries = 0; retries < COMPATIBILITY_RETRY_LIMIT; retries += 1) {
         const learned = await compatibilityFallback(response, candidate, '/v1/responses/compact', compactPayload, request, compatibility);
         if (!learned) break;
+        const feature = compatibilityEvidenceFeature(compatibility, learned);
         compatibility = learned;
-        store.rememberCompatibilityFact(candidate.id, compatibilityKey, compatibility);
+        compatibilityLearningForStore(store).observe({
+          upstream: store.get(candidate.id) || candidate,
+          context: compatibilityScope,
+          value: compatibility,
+          feature,
+          observationId: publicAttempt?.id || ''
+        });
         void response.body?.cancel('Retrying WebSocket compaction with provider-directed compatibility fallback').catch(() => {});
         request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
         response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
@@ -2463,6 +2523,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
               ? renewPublicAdmission(connectionUpstream)
               : renewNativeAdmissions(connectionUpstream);
             if (!renewed) throw new Error('Codex upstream is not currently eligible');
+            if (publicResponses) replacePendingPublicFrame(connectionUpstream);
           }
           if (socket === targetSocket) {
             targetSocket = undefined;
