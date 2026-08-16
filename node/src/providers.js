@@ -120,7 +120,7 @@ async function refreshCodexCredentials(upstream, credentials, fetchImpl, saveCre
     ...(updated.refreshToken ? { refreshToken: updated.refreshToken } : {}),
     ...(updated.idToken ? { idToken: updated.idToken } : {})
   };
-  for (const key of ['credentialEpoch', 'onTokenRefreshFailure', 'onTokenRefreshSuccess']) {
+  for (const key of ['credentialEpoch', 'modelCatalogEpoch', 'onTokenRefreshFailure', 'onTokenRefreshSuccess']) {
     const descriptor = Object.getOwnPropertyDescriptor(credentials, key);
     if (descriptor) Object.defineProperty(nextCredentials, key, descriptor);
   }

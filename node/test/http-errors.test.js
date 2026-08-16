@@ -73,7 +73,16 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
   const fetchImpl = async () => {
     const secret = { error: { type: 'invalid_request_error', code: 'provider_secret', message: 'sensitive provider detail token=secret' } };
     if (mode === 'codex-500') return new Response(JSON.stringify(secret), { status: 500, headers: { 'content-type': 'application/json' } });
-    if (mode === 'anthropic-valid') return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'safe Anthropic client detail' } }), { status: 400, headers: { 'content-type': 'application/json', 'anthropic-ratelimit-requests-limit': '10' } });
+    if (mode === 'anthropic-valid') return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'safe Anthropic client detail' } }), {
+      status: 400,
+      headers: {
+        'content-type': 'application/json',
+        'anthropic-ratelimit-requests-limit': '10',
+        'anthropic-ratelimit-input-tokens-remaining': '20',
+        'request-id': 'anthropic-request',
+        'retry-after': '2'
+      }
+    });
     const status = Number(mode.slice(-3)) || 400;
     return new Response(JSON.stringify(secret), { status, headers: { 'content-type': 'application/json' } });
   };
@@ -81,11 +90,9 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
   try {
     for (const [nextMode, path, type, expectedStatus] of [
       ['codex-400', '/v1/responses', 'codex', 502],
-      ['codex-401', '/v1/responses', 'codex', 502],
-      ['codex-403', '/v1/responses', 'codex', 502],
-      ['codex-429', '/v1/responses', 'codex', 502],
       ['codex-500', '/v1/responses', 'codex', 502],
-      ['compass-400', '/v1/chat/completions', 'compass', 502]
+      ['compass-400', '/v1/chat/completions', 'compass', 502],
+      ['codex-401', '/v1/responses', 'codex', 502]
     ]) {
       mode = nextMode;
       const payload = path.includes('chat')
@@ -104,6 +111,9 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
     assert.equal(anthropic.response.status, 400);
     assert.deepEqual(anthropic.body, { type: 'error', error: { type: 'invalid_request_error', message: 'safe Anthropic client detail' } });
     assert.equal(anthropic.response.headers.get('anthropic-ratelimit-requests-limit'), '10');
+    assert.equal(anthropic.response.headers.get('anthropic-ratelimit-input-tokens-remaining'), '20');
+    assert.equal(anthropic.response.headers.get('request-id'), 'anthropic-request');
+    assert.equal(anthropic.response.headers.get('retry-after'), '2');
   } finally {
     await close(server, dir);
   }

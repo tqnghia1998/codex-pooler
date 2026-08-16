@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { CodexHostHealth } from '../src/codex-host-health.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -13,6 +14,12 @@ function jwt(payload) {
 
 async function runningServer(store, fetchImpl, apiKey = '') {
   const server = createServer(createApp({ store, apiKey, fetchImpl }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function runningServerWithOptions(store, options = {}) {
+  const server = createServer(createApp({ store, ...options }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return { server, base: `http://127.0.0.1:${server.address().port}` };
 }
@@ -123,7 +130,7 @@ test('validates public OpenAI adapters before dispatch and supports Chat input f
 
     const invalidCases = [
       ['/v1/responses', { model: 'gpt-5.6-sol', input: [] }, 'invalid_request', 'input'],
-      ['/v1/responses', { model: 'gpt-5.6-sol', input: 'x', unknown: true }, 'unsupported_parameter', 'unknown'],
+      ['/v1/responses', { model: 'gpt-5.6-sol', input: 'x', store: true }, 'unsupported_parameter', 'store'],
       ['/v1/chat/completions', { model: 'gpt-5.6-sol' }, 'invalid_request', 'messages'],
       ['/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'x' }], functions: [] }, 'invalid_request', 'functions'],
       ['/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'x' }], max_tokens: 0 }, 'invalid_request', 'max_tokens']
@@ -357,6 +364,7 @@ test('fails over after a successful same-account refresh is still rejected', asy
     assert.equal(result.response.status, 200);
     assert.equal(result.body.id, 'auth-fallback');
     assert.deepEqual(providerCalls, [`Bearer ${firstToken}`, 'Bearer rotated-but-rejected', `Bearer ${secondToken}`]);
+    assert.equal(store.get(first.id).health.status, 'reauth_required');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -443,6 +451,58 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
     ]);
     assert.equal(calls[0].options.headers.authorization, 'Bearer project-secret');
     assert.equal(store.getPublic(created.id).spending.spentDollars, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('passes Compass-only OpenAI options through without Codex adapter rejection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-openai-options-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ path: new URL(url).pathname, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ id: 'compass-options', choices: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'options-project', projectKey: 'options-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const chat = await request(base, '/v1/chat/completions', {
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      n: 2
+    }, { 'x-upstream-type': 'compass' });
+    assert.equal(chat.response.status, 200);
+
+    const responses = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello',
+      background: true
+    }, { 'x-upstream-type': 'compass' });
+    assert.equal(responses.response.status, 200);
+    assert.deepEqual(calls, [
+      {
+        path: '/compass-api/v1/chat/completions',
+        body: {
+          model: 'claude-sonnet-4-6',
+          messages: [{ role: 'user', content: 'hello' }],
+          n: 2
+        }
+      },
+      {
+        path: '/compass-api/v1/responses',
+        body: {
+          model: 'claude-sonnet-4-6',
+          input: 'hello',
+          background: true
+        }
+      }
+    ]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -573,6 +633,32 @@ test('settles streamed Codex usage when the upstream omits its content type', as
   }
 });
 
+test('finalizes Codex streaming accounting when the upstream returns no body', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-empty-stream-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(null, { status: 200 }), 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'empty', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /"code":"server_error"/);
+    const requests = store.load().gatewayRequests;
+    assert.equal(requests.some(({ status }) => status === 'in_progress'), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].status, 'failed');
+    assert.equal(requests[0].lastErrorCode, 'upstream_stream_failed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('normalizes Codex envelopes and scopes metadata headers to backend routes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-envelope-'));
   const calls = [];
@@ -653,11 +739,32 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
   }
 });
 
-test('converts legacy Anthropic thinking only for Claude 4.7 and newer', async () => {
+test('learns explicit Compass adaptive-thinking requirements without model-name guesses', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-adaptive-thinking-'));
-  const bodies = [];
+  const calls = [];
   const fetchImpl = async (_url, options) => {
-    bodies.push(JSON.parse(options.body));
+    const body = JSON.parse(options.body);
+    calls.push({ body, headers: options.headers });
+    if (body.model === 'claude-legacy-99') {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: '"thinking.type.adaptive" is not supported on this model' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (body.thinking?.type === 'enabled') {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: '"thinking.type.enabled" is not supported on this model' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    for (const field of ['temperature', 'top_p', 'top_k']) {
+      if (Object.hasOwn(body, field)) {
+        return new Response(JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: `"${field}" is not supported for this model` }
+        }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+    }
     return new Response(JSON.stringify({ id: 'msg-1', content: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const store = new Store(dir);
@@ -665,15 +772,111 @@ test('converts legacy Anthropic thinking only for Claude 4.7 and newer', async (
   store.setCap(created.id, { capDollars: 100 });
   const { server, base } = await runningServer(store, fetchImpl);
   try {
-    for (const model of ['claude-sonnet-4-6', 'claude-sonnet-4-7', 'claude-fable-5']) {
+    for (let index = 0; index < 2; index += 1) {
       const result = await request(base, '/v1/messages', {
-        model, messages: [], thinking: { type: 'enabled', budget_tokens: 2048, extra: true }
+        model: 'claude-future-99',
+        messages: [],
+        thinking: { type: 'enabled', budget_tokens: 2048, extra: true },
+        temperature: 0.4,
+        top_p: 0.8,
+        top_k: 20
       });
       assert.equal(result.response.status, 200);
     }
-    assert.deepEqual(bodies[0].thinking, { type: 'enabled', budget_tokens: 2048, extra: true });
-    assert.deepEqual(bodies[1].thinking, { type: 'adaptive', extra: true });
-    assert.deepEqual(bodies[2].thinking, { type: 'adaptive', extra: true });
+    assert.deepEqual(calls.slice(0, 6).map(({ body }) => body.thinking), [
+      { type: 'enabled', budget_tokens: 2048, extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true }
+    ]);
+    assert.deepEqual(calls.slice(0, 6).map(({ body }) => [
+      Object.hasOwn(body, 'temperature'),
+      Object.hasOwn(body, 'top_p'),
+      Object.hasOwn(body, 'top_k')
+    ]), [
+      [true, true, true],
+      [true, true, true],
+      [false, true, true],
+      [false, false, true],
+      [false, false, false],
+      [false, false, false]
+    ]);
+    assert.deepEqual(calls.slice(0, 6).map(({ headers }) => headers['anthropic-version']), Array(6).fill('2023-06-01'));
+
+    const unsupportedAdaptive = await request(base, '/v1/messages', {
+      model: 'claude-legacy-99',
+      messages: [],
+      thinking: { type: 'enabled', budget_tokens: 2048 }
+    });
+    assert.equal(unsupportedAdaptive.response.status, 400);
+    assert.equal(calls.at(-1).body.thinking.type, 'enabled');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validates Compass Anthropic negotiation headers before dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-anthropic-headers-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'headers-project', projectKey: 'headers-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: 'msg-headers', content: [] }), { headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const invalidVersion = await request(base, '/v1/messages', {
+      model: 'claude-fable-5', messages: [], max_tokens: 16
+    }, { 'anthropic-version': '2026-02-30' });
+    assert.equal(invalidVersion.response.status, 400);
+    assert.equal(invalidVersion.body.type, 'error');
+
+    const invalidBeta = await request(base, '/v1/messages', {
+      model: 'claude-fable-5', messages: [], max_tokens: 16
+    }, { 'anthropic-beta': 'valid-beta,bad beta' });
+    assert.equal(invalidBeta.response.status, 400);
+    assert.equal(invalidBeta.body.type, 'error');
+    assert.equal(calls, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('learns explicit compatibility rejections from the withheld first SSE event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-compatibility-'));
+  const bodies = [];
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (Object.hasOwn(body, 'temperature')) {
+      return new Response(
+        'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","param":"temperature","message":"Unsupported parameter: temperature"}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } }
+      );
+    }
+    return new Response(
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-sse-compatible","status":"completed","output":[]}}\n\n',
+      { headers: { 'content-type': 'text/event-stream' } }
+    );
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', input: 'hello', temperature: 0.2
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'resp-sse-compatible');
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0].temperature, 0.2);
+    assert.equal('temperature' in bodies[1], false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -785,7 +988,7 @@ test('fails over only safe pre-output failures while preserving explicit pins an
     store.pinSession('pinned-failover', first.id);
     result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' }, { 'x-codex-session-id': 'pinned-failover' });
     assert.equal(result.response.status, 200);
-    assert.deepEqual(calls, [`Bearer ${firstToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
+    assert.deepEqual(calls, [`Bearer ${store.credentials(second.id).accessToken}`]);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -820,6 +1023,104 @@ test('fails over pre-output transport, rate-limit, and model-unavailable failure
     }
   }
 });
+
+test('stops a shared DNS outage before iterating every Codex account without penalizing accounts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-'));
+  const store = new Store(dir);
+  const upstreams = Array.from({ length: 4 }, (_, index) => {
+    const upstream = store.create(codexInput({ email: `host-${index}@example.com`, accountId: `host-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+    return upstream;
+  });
+  let calls = 0;
+  const hostHealth = new CodexHostHealth({ failureThreshold: 2, cooldownMs: 30_000 });
+  const fetchImpl = async () => {
+    calls += 1;
+    throw codedFetchError('ENOTFOUND');
+  };
+  const { server, base } = await runningServerWithOptions(store, { fetchImpl, codexHostHealth: hostHealth });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'dns outage' });
+    assert.equal(result.response.status, 503);
+    assert.equal(result.response.headers.get('retry-after'), '30');
+    assert.equal(result.body.error.code, 'codex_host_unavailable');
+    assert.equal(calls, 2);
+    const blocked = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'still blocked' });
+    assert.equal(blocked.response.status, 503);
+    assert.equal(blocked.response.headers.get('retry-after'), '30');
+    assert.equal(calls, 2);
+    for (const upstream of upstreams) {
+      assert.equal(store.get(upstream.id).health, undefined);
+    }
+    assert.equal(hostHealth.status().openOriginCount, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skips remaining Codex accounts after a host outage but still permits Compass fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-compass-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 3; index += 1) {
+    const upstream = store.create(codexInput({ email: `mixed-${index}@example.com`, accountId: `mixed-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  const compass = store.create({ type: 'compass', projectId: 'host-fallback', projectKey: 'compass-secret' });
+  store.setCap(compass.id, { capDollars: 100 });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(new URL(url).origin);
+    if (new URL(url).hostname === 'chatgpt.com') throw codedFetchError('ENOTFOUND');
+    return new Response(JSON.stringify({ id: 'compass-fallback', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    codexHostHealth: new CodexHostHealth({ failureThreshold: 2, cooldownMs: 30_000 })
+  });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'fallback' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'compass-fallback');
+    assert.deepEqual(calls, ['https://chatgpt.com', 'https://chatgpt.com', 'https://compass.llm.shopee.io']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('disabled shared host health preserves ordinary account failover', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-disabled-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 3; index += 1) {
+    const upstream = store.create(codexInput({ email: `disabled-${index}@example.com`, accountId: `disabled-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    throw codedFetchError('ENOTFOUND');
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    codexHostHealth: new CodexHostHealth({ enabled: false })
+  });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'ordinary failover' });
+    assert.equal(result.response.status, 502);
+    assert.equal(calls, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function codedFetchError(code) {
+  return new TypeError('fetch failed', { cause: Object.assign(new Error('connect failed'), { code }) });
+}
 
 test('rejects oversized session IDs before dispatch', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-id-limit-'));
@@ -916,7 +1217,7 @@ test('fails over only an initial retryable SSE terminal event', async () => {
     const collected = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry', stream: false });
     assert.equal(collected.response.status, 200);
     assert.equal(collected.body.id, 'fallback');
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -1126,7 +1427,32 @@ test('converts split UTF-8 Codex SSE to Chat Completions SSE', async () => {
     assert.match(text, /chat\.completion\.chunk/);
     assert.match(text, /"content":"hello 🌏"/);
     assert.match(text, /"finish_reason":"stop"/);
-    assert.match(text, /data: \[DONE\]/);
+    assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('emits one Chat completion sentinel when Codex terminates with only DONE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-chat-done-only-'));
+  const fetchImpl = async () => new Response('data: [DONE]\n\n', {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' }
+  });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-codex', messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -1238,6 +1564,112 @@ test('strips unsupported explicit prompt cache controls before Codex egress whil
       assert.equal('prompt_cache_breakpoint' in body.input[0].content[0], false, path);
       assert.equal('prompt_cache_breakpoint' in body.input[0].content[1], false, path);
     }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns local pacing 429s, cancels queued requests, and preserves account health', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-http-pacing-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({
+    ...codexInput(),
+    pacing: { enabled: true, minStartIntervalMs: 60_000, maxQueueDepth: 1, maxQueueAgeMs: 120_000 }
+  });
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: `resp-${calls}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' })).response.status, 200);
+    const controller = new AbortController();
+    const queued = fetch(base + '/v1/responses', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'queued' })
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    const overflow = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'overflow' });
+    assert.equal(overflow.response.status, 429);
+    assert.equal(overflow.body.error.code, 'local_pacing_queue_full');
+    assert.ok(Number(overflow.response.headers.get('retry-after')) >= 1);
+    assert.equal(calls, 1);
+    controller.abort();
+    await assert.rejects(queued, /abort/i);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns a local pacing 429 when a queued HTTP request expires', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-http-pacing-expired-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({
+    ...codexInput(),
+    pacing: { enabled: true, minStartIntervalMs: 5_000, maxQueueDepth: 2, maxQueueAgeMs: 100 }
+  });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: `resp-${calls}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  });
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' })).response.status, 200);
+    const expired = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'expire' });
+    assert.equal(expired.response.status, 429);
+    assert.equal(expired.body.error.code, 'local_pacing_queue_expired');
+    assert.ok(Number(expired.response.headers.get('retry-after')) >= 1);
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skips a paced automatic candidate when another account can start immediately', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-pacing-failover-'));
+  const store = new Store(dir);
+  const first = store.create({
+    ...codexInput({ email: 'paced-first@example.com', accountId: 'acct-paced-first' }),
+    pacing: { enabled: true, minStartIntervalMs: 5_000, maxQueueDepth: 2, maxQueueAgeMs: 10_000 }
+  });
+  const second = store.create(codexInput({ email: 'paced-second@example.com', accountId: 'acct-paced-second' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.setPriorityList([first.id, second.id]);
+  const accounts = [];
+  const fetchImpl = async (_url, options) => {
+    accounts.push(options.headers['chatgpt-account-id']);
+    return new Response(JSON.stringify({ id: `resp-${accounts.length}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const prime = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' }, { 'x-upstream-id': first.id });
+    assert.equal(prime.response.status, 200);
+    const fallback = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'fallback' });
+    assert.equal(fallback.response.status, 200);
+    assert.deepEqual(accounts, ['acct-paced-first', 'acct-paced-second']);
+    assert.equal(store.get(first.id).health, undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
