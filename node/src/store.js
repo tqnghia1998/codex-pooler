@@ -19,6 +19,7 @@ import {
   updateUpstream
 } from './domain.js';
 import { codexRefreshFailureCode, codexRefreshFailureDetail } from './providers.js';
+import { safeCompatibilityValue, validCompatibilityFeature } from './compatibility-policy.js';
 import { quotaCooldown } from './upstream-outcomes.js';
 import { normalizePacingPolicy } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore, sanitizeAttemptTimings, sanitizeExclusionReasons } from './gateway-diagnostics.js';
@@ -34,6 +35,8 @@ const CIRCUIT_COOLDOWN_MS = 60_000;
 const CIRCUIT_LIMIT = 100;
 const RESET_COOLDOWN_PROBE_INTERVAL_MS = 5 * 60_000;
 const COMPATIBILITY_FACT_LIMIT = 100;
+const COMPATIBILITY_FACT_SCHEMA_VERSION = 3;
+const COMPATIBILITY_FACT_ID_PATTERN = /^cf_[A-Za-z0-9_-]{20,64}$/;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
 const GATEWAY_ERROR_HISTORY_LIMIT = 100;
 const GATEWAY_USAGE_DAYS = 90;
@@ -200,11 +203,16 @@ export class Store {
     updateUpstream(upstream, input);
     if (upstream.type === 'codex' && (input.authJson || input.accessToken)) {
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+      upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
       upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
       delete upstream.tokenRefresh;
       clearHealthAfterCredentialReplacement(upstream);
+      delete upstream.compatibility;
     } else if (upstream.type === 'compass' && input.projectKey !== undefined) {
+      upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+      upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
       clearHealthAfterCredentialReplacement(upstream);
+      delete upstream.compatibility;
     }
     if (input.routing !== undefined) upstream.routing = normalizeRouting(input.routing);
     if (input.pacing !== undefined) upstream.pacing = normalizePacingPolicy(input.pacing);
@@ -314,8 +322,13 @@ export class Store {
     const db = this.load();
     const upstream = findOrThrow(db, id);
     const expectedEpoch = credentials?.credentialEpoch;
-    if (expectedEpoch !== undefined && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return false;
     const previousCredentials = decryptCredentials(upstream.credentials, this.key);
+    if (expectedEpoch !== undefined && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) {
+      if (!sameAuthentication(upstream.type, previousCredentials, credentials)) return false;
+      for (const key of Object.keys(credentials)) delete credentials[key];
+      Object.assign(credentials, previousCredentials);
+      return true;
+    }
     const accessTokenChanged = upstream.type === 'codex'
       && String(previousCredentials.accessToken || '') !== String(credentials?.accessToken || '');
     const authenticationChanged = upstream.type === 'codex'
@@ -326,7 +339,11 @@ export class Store {
     upstream.accessTokenExpiresAt = accessTokenExpiresAt;
     upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
     if (accessTokenChanged) upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
-    if (authenticationChanged) clearHealthAfterCredentialReplacement(upstream);
+    if (authenticationChanged) {
+      upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
+      clearHealthAfterCredentialReplacement(upstream);
+      delete upstream.compatibility;
+    }
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
@@ -631,7 +648,12 @@ export class Store {
     const circuitLease = beginCircuitLease(upstream, scope, now);
     if (!circuitLease) return null;
     this.save(db);
-    return { accountGeneration: generation, accountProbe, circuitGeneration: circuitLease.generation, scope: { ...scope } };
+    return {
+      accountGeneration: generation,
+      accountProbe,
+      circuitGeneration: circuitLease.generation,
+      scope: { ...scope }
+    };
   }
 
   settleUpstreamAttempt(id, admission, outcome, now = Date.now()) {
@@ -708,27 +730,97 @@ export class Store {
     return publicUpstream(upstream);
   }
 
-  compatibilityFact(id, key, { maxAgeMs = 24 * 60 * 60 * 1_000, now = Date.now() } = {}) {
+  compatibilityFactRecord(id, key, {
+    now = Date.now(),
+    protocolFingerprintHash = null,
+    generation = null
+  } = {}) {
     const upstream = this.get(id);
     if (!upstream || typeof key !== 'string' || !key || key.length > 160) return null;
     const fact = upstream.compatibility?.facts?.[key];
-    const observedAt = Date.parse(fact?.observedAt);
-    if (!fact || !Number.isFinite(observedAt) || observedAt + maxAgeMs <= now) return null;
-    return structuredClone(fact.value);
+    if (!fact) return null;
+    const expiresAt = Date.parse(fact.expiresAt);
+    if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
+    if (protocolFingerprintHash && fact.protocolFingerprintHash !== protocolFingerprintHash) return null;
+    if (!sameCompatibilityGeneration(upstream, fact.generation)) return null;
+    if (generation && !sameCompatibilityGeneration(upstream, generation)) return null;
+    return structuredClone(fact);
   }
 
-  rememberCompatibilityFact(id, key, value, now = Date.now()) {
+  promoteCompatibilityFact(id, key, record, expectedGeneration = null) {
     if (typeof key !== 'string' || !key || key.length > 160) throw new Error('compatibility key is invalid');
     const db = this.load();
     const upstream = findOrThrow(db, id);
-    const facts = (upstream.compatibility ||= { facts: {} }).facts ||= {};
-    facts[key] = { value: structuredClone(value), observedAt: new Date(now).toISOString() };
-    const overflow = Object.entries(facts)
-      .sort(([, left], [, right]) => Date.parse(right.observedAt || 0) - Date.parse(left.observedAt || 0))
-      .slice(COMPATIBILITY_FACT_LIMIT);
-    for (const [expiredKey] of overflow) delete facts[expiredKey];
+    if (expectedGeneration && !sameCompatibilityGeneration(upstream, expectedGeneration)) return null;
+    const compatibility = upstream.compatibility ||= { facts: {} };
+    const facts = compatibility.facts ||= {};
+    const normalized = normalizeCompatibilityFactRecord({
+      ...record,
+      id: compatibilityFactId(id, key),
+      schemaVersion: COMPATIBILITY_FACT_SCHEMA_VERSION,
+      status: 'active'
+    }, key);
+    if (!normalized) throw new Error('compatibility fact is invalid');
+    const current = facts[key];
+    facts[key] = current
+      ? {
+          ...current,
+          ...normalized,
+          id: current.id,
+          createdAt: current.createdAt || normalized.createdAt,
+          evidenceCount: Math.max(Number(current.evidenceCount) || 0, normalized.evidenceCount)
+        }
+      : normalized;
+    pruneCompatibility(compatibility);
     this.save(db);
-    return structuredClone(facts[key].value);
+    return { status: 'active', fact: structuredClone(facts[key]), replaced: Boolean(current) };
+  }
+
+  removeCompatibilityFact(factId) {
+    if (!COMPATIBILITY_FACT_ID_PATTERN.test(String(factId || ''))) return false;
+    const db = this.load();
+    for (const upstream of db.upstreams) {
+      const compatibility = upstream.compatibility;
+      if (!compatibility) continue;
+      const entry = Object.entries(compatibility.facts || {}).find(([, fact]) => fact?.id === factId);
+      if (!entry) continue;
+      const [key, fact] = entry;
+      delete compatibility.facts[key];
+      this.save(db);
+      return { upstreamId: upstream.id, key, fact: structuredClone(fact) };
+    }
+    return false;
+  }
+
+  clearCompatibilityFacts() {
+    const db = this.load();
+    let removed = 0;
+    for (const upstream of db.upstreams) {
+      const compatibility = upstream.compatibility;
+      if (!compatibility) continue;
+      removed += Object.keys(compatibility.facts || {}).length;
+      delete upstream.compatibility;
+    }
+    if (removed) this.save(db);
+    return removed;
+  }
+
+  compatibilityRecords({ now = Date.now(), fingerprints = {} } = {}) {
+    const active = [];
+    const stale = [];
+    for (const upstream of this.load().upstreams) {
+      for (const fact of Object.values(upstream.compatibility?.facts || {})) {
+        if (!fact) continue;
+        const expectedHash = fact.protocolScope === 'default'
+          ? fingerprints[fact.protocolProfile]?.hash
+          : null;
+        const expired = Number.isFinite(Date.parse(fact.expiresAt)) && Date.parse(fact.expiresAt) <= now;
+        const generationChanged = !sameCompatibilityGeneration(upstream, fact.generation);
+        if (expired || generationChanged || expectedHash && fact.protocolFingerprintHash !== expectedHash) stale.push(structuredClone(fact));
+        else active.push(structuredClone(fact));
+      }
+    }
+    return { active, stale };
   }
 
   sessionUpstream(sessionId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
@@ -941,9 +1033,12 @@ function normalizeDatabase(parsed) {
   for (const upstream of parsed.upstreams) {
     upstream.scopeId ||= DEFAULT_SCOPE_ID;
     upstream.credentialEpoch = Math.max(1, Number(upstream.credentialEpoch) || 1);
+    upstream.compatibilityEpoch = Math.max(1, Number(upstream.compatibilityEpoch) || 1);
     upstream.modelCatalogEpoch = Math.max(1, Number(upstream.modelCatalogEpoch) || 1);
     upstream.routing = normalizeRouting(upstream.routing);
     upstream.pacing = normalizePacingPolicy(upstream.pacing);
+    upstream.compatibility = normalizeCompatibilityState(upstream.compatibility);
+    if (!Object.keys(upstream.compatibility.facts).length) delete upstream.compatibility;
     upstream.baseUrl = defaultBaseUrl(upstream.type);
     upstream.name = deriveUpstreamName(upstream.type, upstream);
   }
@@ -1366,6 +1461,87 @@ function clearHealthAfterCredentialReplacement(upstream) {
   const generation = Math.max(0, Number(upstream.health?.generation ?? upstream.healthGeneration) || 0);
   delete upstream.health;
   upstream.healthGeneration = generation + 1;
+}
+
+function normalizeCompatibilityState(value) {
+  const result = { facts: {} };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return result;
+  for (const [key, fact] of Object.entries(value.facts || {})) {
+    if (typeof key !== 'string' || !key || key.length > 160) continue;
+    const normalized = normalizeCompatibilityFactRecord(fact, key);
+    if (normalized) result.facts[key] = normalized;
+  }
+  pruneCompatibility(result);
+  return result;
+}
+
+function normalizeCompatibilityFactRecord(record, key) {
+  if (!record || record.schemaVersion !== COMPATIBILITY_FACT_SCHEMA_VERSION || !safeCompatibilityValue(record.value)) return null;
+  if (typeof key !== 'string' || !key || key.length > 160) return null;
+  if (!COMPATIBILITY_FACT_ID_PATTERN.test(String(record.id || ''))) return null;
+  if (!['codex', 'compass'].includes(record.providerType)) return null;
+  if (!['responses', 'responses_compact', 'chat_completions', 'messages'].includes(record.routeClass)) return null;
+  if (!['default', 'client'].includes(record.protocolScope)) return null;
+  if (!['codex', 'codexWebsocket', 'compass'].includes(record.protocolProfile)) return null;
+  if (!/^[a-f0-9]{24}$/.test(record.capabilityHash || '')) return null;
+  if (!/^[a-f0-9]{32}$/.test(record.protocolFingerprintHash || '')) return null;
+  if (!Number.isInteger(record.protocolFingerprintVersion) || record.protocolFingerprintVersion < 1) return null;
+  if (record.status !== 'active') return null;
+  if (!validCompatibilityFeature(record.providerType, record.feature, record.value)) return null;
+  const createdAt = Date.parse(record.createdAt);
+  const lastValidatedAt = Date.parse(record.lastValidatedAt);
+  const expiresAt = Date.parse(record.expiresAt);
+  if (![createdAt, lastValidatedAt, expiresAt].every(Number.isFinite) || expiresAt <= createdAt) return null;
+  const evidenceCount = Number(record.evidenceCount);
+  const generation = record.generation;
+  if (!Number.isInteger(evidenceCount) || evidenceCount < 1) return null;
+  if (!generation || !Number.isInteger(generation.compatibilityEpoch) || generation.compatibilityEpoch < 1
+    || !Number.isInteger(generation.modelCatalogEpoch) || generation.modelCatalogEpoch < 1) return null;
+  return {
+    id: record.id,
+    key,
+    schemaVersion: COMPATIBILITY_FACT_SCHEMA_VERSION,
+    status: record.status,
+    protocolFingerprintVersion: record.protocolFingerprintVersion,
+    protocolFingerprintHash: record.protocolFingerprintHash,
+    providerType: record.providerType,
+    routeClass: record.routeClass,
+    capabilityHash: record.capabilityHash,
+    protocolScope: record.protocolScope,
+    protocolProfile: record.protocolProfile,
+    feature: record.feature,
+    evidenceCount,
+    createdAt: new Date(createdAt).toISOString(),
+    lastValidatedAt: new Date(lastValidatedAt).toISOString(),
+    expiresAt: new Date(expiresAt).toISOString(),
+    generation: {
+      compatibilityEpoch: generation.compatibilityEpoch,
+      modelCatalogEpoch: generation.modelCatalogEpoch
+    },
+    value: structuredClone(record.value)
+  };
+}
+
+function compatibilityFactId(upstreamId, key) {
+  return `cf_${createHash('sha256').update(`${upstreamId}\u0000${key}`).digest('base64url').slice(0, 32)}`;
+}
+
+function sameCompatibilityGeneration(upstream, generation) {
+  return Math.max(1, Number(upstream.compatibilityEpoch) || 1) === generation.compatibilityEpoch
+    && Math.max(1, Number(upstream.modelCatalogEpoch) || 1) === generation.modelCatalogEpoch;
+}
+
+function sameAuthentication(type, left, right) {
+  const fields = type === 'codex' ? ['accessToken', 'refreshToken', 'idToken'] : ['projectKey'];
+  return fields.every((field) => String(left?.[field] || '') === String(right?.[field] || ''));
+}
+
+function pruneCompatibility(compatibility) {
+  const facts = compatibility.facts ||= {};
+  const overflow = Object.entries(facts)
+    .sort(([, left], [, right]) => Date.parse(right.lastValidatedAt || 0) - Date.parse(left.lastValidatedAt || 0))
+    .slice(COMPATIBILITY_FACT_LIMIT);
+  for (const [key] of overflow) delete facts[key];
 }
 
 function pruneCircuits(circuits) {

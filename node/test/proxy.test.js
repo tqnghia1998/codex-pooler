@@ -8,6 +8,7 @@ import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
+import { compatibilityContext, compatibilityLearningForStore } from '../src/compatibility-learning.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -337,6 +338,52 @@ test('retries Codex proxy requests with a rotated access token after 401', async
     const result = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
     assert.equal(result.response.status, 200);
     assert.deepEqual(authHeaders, ['Bearer ' + jwt({ email: 'proxy@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-proxy' } }), 'Bearer rotated-access-token']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuilds compatibility projection after automatic Codex credential refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compatibility-refresh-'));
+  const bodies = [];
+  const fetchImpl = async (url, options) => {
+    if (url === 'https://auth.openai.com/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'fresh-compatibility-token', expires_in: 3600 }), { status: 200 });
+    }
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ id: 'fresh-compatibility', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput({ refreshToken: 'refresh-token' }));
+  store.setCap(created.id, { capDollars: 100 });
+  store.persistCredentials(created.id, store.credentials(created.id), new Date(Date.now() - 1_000).toISOString());
+  const upstream = store.get(created.id);
+  const context = compatibilityContext(upstream, { sourcePath: '/v1/responses', model: 'gpt-5-codex' });
+  const learning = compatibilityLearningForStore(store);
+  const observation = {
+    upstream,
+    context,
+    value: { unsupportedFields: ['max_output_tokens'] },
+    feature: 'unsupported_field:max_output_tokens'
+  };
+  learning.observe({ ...observation, observationId: 'old-token-one', now: 1_000 });
+  learning.observe({ ...observation, observationId: 'old-token-two', now: 1_001 });
+
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5-codex',
+      input: 'hello',
+      max_output_tokens: 321
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].max_output_tokens, 321);
+    assert.equal(store.get(created.id).compatibility, undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -773,7 +820,7 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
   store.setCap(created.id, { capDollars: 100 });
   const { server, base } = await runningServer(store, fetchImpl);
   try {
-    for (let index = 0; index < 2; index += 1) {
+    for (let index = 0; index < 3; index += 1) {
       const result = await request(base, '/v1/messages', {
         model: 'claude-future-99',
         messages: [],
@@ -784,7 +831,12 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
       });
       assert.equal(result.response.status, 200);
     }
-    assert.deepEqual(calls.slice(0, 6).map(({ body }) => body.thinking), [
+    assert.deepEqual(calls.slice(0, 11).map(({ body }) => body.thinking), [
+      { type: 'enabled', budget_tokens: 2048, extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
+      { type: 'adaptive', extra: true },
       { type: 'enabled', budget_tokens: 2048, extra: true },
       { type: 'adaptive', extra: true },
       { type: 'adaptive', extra: true },
@@ -792,7 +844,7 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
       { type: 'adaptive', extra: true },
       { type: 'adaptive', extra: true }
     ]);
-    assert.deepEqual(calls.slice(0, 6).map(({ body }) => [
+    assert.deepEqual(calls.slice(0, 11).map(({ body }) => [
       Object.hasOwn(body, 'temperature'),
       Object.hasOwn(body, 'top_p'),
       Object.hasOwn(body, 'top_k')
@@ -802,9 +854,14 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
       [false, true, true],
       [false, false, true],
       [false, false, false],
+      [true, true, true],
+      [true, true, true],
+      [false, true, true],
+      [false, false, true],
+      [false, false, false],
       [false, false, false]
     ]);
-    assert.deepEqual(calls.slice(0, 6).map(({ headers }) => headers['anthropic-version']), Array(6).fill('2023-06-01'));
+    assert.deepEqual(calls.slice(0, 11).map(({ headers }) => headers['anthropic-version']), Array(11).fill('2023-06-01'));
 
     const unsupportedAdaptive = await request(base, '/v1/messages', {
       model: 'claude-legacy-99',
