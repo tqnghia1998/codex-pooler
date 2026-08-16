@@ -18,14 +18,22 @@ test('normalizes native Codex input without converting string input', async () =
   const upstream = store.create({ type: 'codex', authJson: authJson() });
   store.setCap(upstream.id, { capDollars: 100 });
   let forwarded;
+  let forwardedHeaders;
   const server = createServer(createApp({ store, apiKey: 'native-key', fetchImpl: async (_url, options) => {
     forwarded = JSON.parse(options.body);
+    forwardedHeaders = options.headers;
     return new Response(JSON.stringify({ id: 'resp-native', output: [] }), { headers: { 'content-type': 'application/json' } });
   } }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const response = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
-      method: 'POST', headers: { authorization: 'Bearer native-key', 'content-type': 'application/json' },
+      method: 'POST', headers: {
+        authorization: 'Bearer native-key',
+        'content-type': 'application/json',
+        version: '9.8.7',
+        originator: 'codex_cli_rs',
+        'openai-beta': 'future_responses=2026-08-01'
+      },
       body: JSON.stringify({ model: 'gpt-5.6-sol', input: [
         { type: 'message', id: 'plainid', content: 'keep' },
         { type: 'message', id: 'msg_keep', content: 'keep' },
@@ -41,6 +49,10 @@ test('normalizes native Codex input without converting string input', async () =
     ]);
     assert.equal('previous_response_id' in forwarded, false);
     assert.deepEqual(forwarded.tools[0].parameters, { type: 'object', properties: { x: { type: 'string' } } });
+    assert.equal(forwardedHeaders.version, '9.8.7');
+    assert.equal(forwardedHeaders.originator, 'codex_cli_rs');
+    assert.equal(forwardedHeaders['user-agent'], 'codex_cli_rs/9.8.7');
+    assert.equal(forwardedHeaders['openai-beta'], 'future_responses=2026-08-01');
 
     const stringResponse = await fetch(`http://127.0.0.1:${server.address().port}/backend-api/codex/responses`, {
       method: 'POST', headers: { authorization: 'Bearer native-key', 'content-type': 'application/json' },
