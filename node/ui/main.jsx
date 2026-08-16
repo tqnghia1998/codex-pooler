@@ -18,6 +18,7 @@ import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Theme } from '@astryxdesign/core/theme';
@@ -65,7 +66,14 @@ const FILTER_OPTIONS = {
   ]
 };
 
-const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', quotaSource: 'compass' };
+const DEFAULT_PACING = {
+  enabled: false,
+  minStartIntervalMs: 0,
+  modelIntervals: [],
+  maxQueueDepth: 20,
+  maxQueueAgeMs: 30000
+};
+const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
 
 function useStoredValue(key, fallback = '') {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? fallback);
@@ -188,6 +196,11 @@ function App() {
   const [capValue, setCapValue] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [priorityOpen, setPriorityOpen] = useState(false);
+  const [routingOpen, setRoutingOpen] = useState(false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [routingPolicy, setRoutingPolicy] = useState({ strategy: 'least-recent-success', quotaFreshnessMs: 300000 });
   const [bulkMode, setBulkMode] = useState('rules');
   const [bulkCapValue, setBulkCapValue] = useState(100);
   const [bulkRules, setBulkRules] = useState(DEFAULT_BULK_RULES);
@@ -215,8 +228,9 @@ function App() {
     loadingRef.current = true;
     if (manual) setIsManualReloading(true);
     try {
-      const data = await api('/api/upstreams');
-      setUpstreams(data.upstreams);
+      const [upstreamData, routingData] = await Promise.all([api('/api/upstreams'), api('/api/routing')]);
+      setUpstreams(upstreamData.upstreams);
+      setRoutingPolicy(routingData.policy);
     } catch (error) {
       show(error.message, true);
     } finally {
@@ -329,9 +343,23 @@ function App() {
   const metricCount = 6 + (filterType !== 'compass' ? 1 : 0) + (filterType !== 'codex' ? 1 : 0);
 
   const updateForm = (field, value) => setFormValues((current) => ({ ...current, [field]: value }));
+  const updatePacing = (field, value) => setFormValues((current) => ({
+    ...current,
+    pacing: { ...DEFAULT_PACING, ...(current.pacing || {}), [field]: value }
+  }));
+  const updateModelInterval = (index, field, value) => setFormValues((current) => ({
+    ...current,
+    pacing: {
+      ...DEFAULT_PACING,
+      ...(current.pacing || {}),
+      modelIntervals: (current.pacing?.modelIntervals || []).map((entry, currentIndex) => (
+        currentIndex === index ? { ...entry, [field]: value } : entry
+      ))
+    }
+  }));
   const resetForm = useCallback(() => {
     editingIdRef.current = null;
-    setFormValues(FORM_DEFAULTS);
+    setFormValues({ ...FORM_DEFAULTS, pacing: { ...DEFAULT_PACING, modelIntervals: [] } });
     setFormDialog((s) => ({ ...s, isOpen: false }));
   }, []);
 
@@ -341,7 +369,16 @@ function App() {
   };
 
   const saveUpstream = async (values, mode, id) => {
-    const data = { ...values };
+    const data = {
+      ...values,
+      pacing: {
+        ...DEFAULT_PACING,
+        ...(values.pacing || {}),
+        modelIntervals: (values.pacing?.modelIntervals || [])
+          .map((entry) => ({ model: String(entry.model || '').trim(), minStartIntervalMs: entry.minStartIntervalMs ?? 0 }))
+          .filter((entry) => entry.model)
+      }
+    };
     if (!data.authJson) delete data.authJson;
     if (!data.projectKey) delete data.projectKey;
     try {
@@ -361,7 +398,13 @@ function App() {
   const edit = async (upstream) => {
     editingIdRef.current = upstream.id;
 
-    const initialValues = { ...upstream, authJson: '', projectKey: '', quotaSource: upstream.quotaSource || 'compass' };
+    const initialValues = {
+      ...upstream,
+      authJson: '',
+      projectKey: '',
+      quotaSource: upstream.quotaSource || 'compass',
+      pacing: { ...DEFAULT_PACING, ...(upstream.pacing || {}), modelIntervals: [...(upstream.pacing?.modelIntervals || [])] }
+    };
     setFormValues(initialValues);
     setFormDialog({ isOpen: true, mode: 'edit', upstream });
 
@@ -471,6 +514,24 @@ function App() {
     await load();
   }, 'Priority list updated', show);
 
+  const saveRouting = (strategy) => run(async () => {
+    const data = await api('/api/routing', { method: 'PUT', body: JSON.stringify({ strategy }) });
+    setRoutingPolicy(data.policy);
+    setRoutingOpen(false);
+  }, 'Routing strategy updated', show);
+
+  const openDiagnostics = async () => {
+    setDiagnosticsOpen(true);
+    setDiagnosticsLoading(true);
+    try {
+      setDiagnostics(await api('/api/diagnostics'));
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setDiagnosticsLoading(false);
+    }
+  };
+
   const openBulkCaps = () => {
     setBulkMode('rules');
     setBulkCapValue(100);
@@ -560,6 +621,8 @@ function App() {
             <HStack align="center" justify="between">
               <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
               <HStack gap={2}>
+                <Button label="Diagnostics" size="sm" variant="secondary" onClick={() => void openDiagnostics()} />
+                <Button label="Routing" size="sm" variant="secondary" onClick={() => setRoutingOpen(true)} />
                 <Button label="Set Priority" size="sm" variant="secondary" onClick={() => setPriorityOpen(true)} />
                 <Button label="Bulk set caps" size="sm" variant="secondary" onClick={() => setBulkOpen(true)} />
                 <Button label="Add upstream" size="sm" variant="primary" onClick={add} />
@@ -595,6 +658,14 @@ function App() {
           />
 
           <PriorityDialog isOpen={priorityOpen} upstreams={upstreams} onClose={() => setPriorityOpen(false)} onSave={savePriority} />
+          <RoutingDialog isOpen={routingOpen} policy={routingPolicy} api={api} onClose={() => setRoutingOpen(false)} onSave={saveRouting} />
+          <DiagnosticsDialog
+            isOpen={diagnosticsOpen}
+            diagnostics={diagnostics}
+            isLoading={diagnosticsLoading}
+            onRefresh={openDiagnostics}
+            onClose={() => setDiagnosticsOpen(false)}
+          />
           <BulkCapDialog
             open={bulkOpen}
             mode={bulkMode}
@@ -674,6 +745,95 @@ function App() {
                             <Text type="supporting" color="secondary">The account name is derived from the project ID. AISwitch quota is managed outside this gateway.</Text>
                           </GridSpan>
                         </Grid>
+                      )}
+                      <Switch
+                        label="Request pacing"
+                        description="Space outbound starts for this account."
+                        value={Boolean(formValues.pacing?.enabled)}
+                        onChange={(value) => updatePacing('enabled', value)}
+                        labelSpacing="spread"
+                      />
+                      {formValues.pacing?.enabled && (
+                        <VStack gap={3}>
+                          <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={3}>
+                            <NumberInput
+                              label="Account interval"
+                              description="Minimum milliseconds between starts."
+                              value={formValues.pacing?.minStartIntervalMs ?? 0}
+                              onChange={(value) => updatePacing('minStartIntervalMs', value ?? 0)}
+                              min={0}
+                              max={300000}
+                              step={100}
+                              isIntegerOnly
+                            />
+                            <NumberInput
+                              label="Queue depth"
+                              description="Maximum waiting requests."
+                              value={formValues.pacing?.maxQueueDepth ?? 20}
+                              onChange={(value) => updatePacing('maxQueueDepth', value ?? 20)}
+                              min={1}
+                              max={100}
+                              step={1}
+                              isIntegerOnly
+                            />
+                            <NumberInput
+                              label="Queue age"
+                              description="Maximum wait in milliseconds."
+                              value={formValues.pacing?.maxQueueAgeMs ?? 30000}
+                              onChange={(value) => updatePacing('maxQueueAgeMs', value ?? 30000)}
+                              min={100}
+                              max={600000}
+                              step={100}
+                              isIntegerOnly
+                            />
+                          </Grid>
+                          <VStack gap={2}>
+                            <HStack justify="between" vAlign="center">
+                              <Text type="label" weight="bold">Model intervals</Text>
+                              <Button
+                                label="Add model interval"
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => updatePacing('modelIntervals', [
+                                  ...(formValues.pacing?.modelIntervals || []),
+                                  { model: '', minStartIntervalMs: 0 }
+                                ])}
+                              />
+                            </HStack>
+                            {(formValues.pacing?.modelIntervals || []).map((entry, index) => (
+                              <Grid key={index} columns={{ minWidth: 220, max: 2, repeat: 'fit' }} gap={3} align="end">
+                                <TextInput
+                                  label="Model"
+                                  value={entry.model || ''}
+                                  onChange={(value) => updateModelInterval(index, 'model', value)}
+                                  placeholder="gpt-5.6-sol"
+                                />
+                                <HStack gap={2} align="end">
+                                  <NumberInput
+                                    width="100%"
+                                    label="Minimum interval"
+                                    value={entry.minStartIntervalMs ?? 0}
+                                    onChange={(value) => updateModelInterval(index, 'minStartIntervalMs', value ?? 0)}
+                                    min={0}
+                                    max={300000}
+                                    step={100}
+                                    isIntegerOnly
+                                  />
+                                  <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
+                                    <Button
+                                      label="Remove model interval"
+                                      tooltip="Remove model interval"
+                                      variant="ghost"
+                                      isIconOnly
+                                      icon="×"
+                                      onClick={() => updatePacing('modelIntervals', (formValues.pacing?.modelIntervals || []).filter((_, current) => current !== index))}
+                                    />
+                                  </Field>
+                                </HStack>
+                              </Grid>
+                            ))}
+                          </VStack>
+                        </VStack>
                       )}
                     </VStack>
                   </form>
@@ -1068,6 +1228,241 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
       </Layout>
     </Dialog>
   );
+}
+
+function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
+  const [strategy, setStrategy] = useState('least-recent-success');
+  const [preferredType, setPreferredType] = useState('codex');
+  const [model, setModel] = useState('');
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setStrategy(policy.strategy);
+    setDiagnostics(null);
+    setError('');
+  }, [isOpen, policy.strategy]);
+
+  const dryRun = async () => {
+    setIsRunning(true);
+    setError('');
+    try {
+      const data = await api('/api/routing/dry-run', {
+        method: 'POST',
+        body: JSON.stringify({ strategy, preferredType, model: model.trim() })
+      });
+      setDiagnostics(data.routing);
+    } catch (runError) {
+      setError(runError.message);
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  const submit = (event) => {
+    event.preventDefault();
+    onSave(strategy);
+  };
+
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={onClose} purpose="form" width={640}>
+      <Layout
+        header={<DialogHeader title="Routing strategy" subtitle="Policy and dry-run diagnostics" onOpenChange={onClose} hasDivider />}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="end" gap={2}>
+              <Button label="Cancel" variant="secondary" onClick={onClose} />
+              <Button label="Save routing" variant="primary" type="submit" form="routing-form" />
+            </HStack>
+          </LayoutFooter>
+        )}
+      >
+        <LayoutContent>
+          <form id="routing-form" onSubmit={submit}>
+            <VStack gap={4}>
+              <SegmentedControl label="Strategy" value={strategy} onChange={setStrategy}>
+                <SegmentedControlItem value="least-recent-success" label="Least recent success" />
+                <SegmentedControlItem value="most-remaining-quota" label="Most remaining quota" />
+              </SegmentedControl>
+              <HStack gap={2} vAlign="end" wrap="wrap">
+                <StackItem size="fill">
+                  <Selector
+                    label="Preferred provider"
+                    value={preferredType}
+                    options={[
+                      { value: 'codex', label: 'Codex' },
+                      { value: 'compass', label: 'Compass' }
+                    ]}
+                    onChange={setPreferredType}
+                  />
+                </StackItem>
+                <StackItem size="fill">
+                  <TextInput label="Model" value={model} onChange={setModel} placeholder="Optional model ID" />
+                </StackItem>
+                <Button label="Dry run" variant="secondary" isLoading={isRunning} onClick={dryRun} />
+              </HStack>
+              {error && <Banner title="Dry run failed" description={error} status="error" />}
+              {diagnostics && (
+                <VStack gap={3}>
+                  <HStack justify="between" vAlign="center">
+                    <Heading level={3}>Candidate order</Heading>
+                    <Badge label={`${diagnostics.candidateCount} eligible`} variant="blue" />
+                  </HStack>
+                  {diagnostics.candidates.length ? diagnostics.candidates.map((candidate) => (
+                    <Card key={candidate.id}>
+                      <HStack justify="between" gap={2} vAlign="center">
+                        <VStack gap={1}>
+                          <Text type="label" weight="bold">{candidate.order}. {candidate.name}</Text>
+                          <Text type="supporting" color="secondary">{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
+                        </VStack>
+                        <Badge
+                          label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : candidate.quota.status}
+                          variant={candidate.quota.status === 'known' ? 'green' : 'neutral'}
+                        />
+                      </HStack>
+                    </Card>
+                  )) : <EmptyState title="No eligible upstreams" description="The current routing context excludes every upstream." />}
+                  {diagnostics.exclusions.length > 0 && (
+                    <VStack gap={2}>
+                      <Heading level={3}>Excluded</Heading>
+                      {diagnostics.exclusions.map((candidate) => (
+                        <HStack key={candidate.id} justify="between" gap={2}>
+                          <Text type="supporting">{candidate.name}</Text>
+                          <Badge label={candidate.code} variant="neutral" />
+                        </HStack>
+                      ))}
+                    </VStack>
+                  )}
+                </VStack>
+              )}
+            </VStack>
+          </form>
+        </LayoutContent>
+      </Layout>
+    </Dialog>
+  );
+}
+
+function DiagnosticsDialog({ isOpen, diagnostics, isLoading, onRefresh, onClose }) {
+  const readiness = diagnostics?.readiness;
+  const gateway = diagnostics?.gateway;
+  const checks = readiness?.checks ? Object.entries(readiness.checks) : [];
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={onClose} width={760}>
+      <Layout
+        header={<DialogHeader title="Diagnostics" subtitle="Sanitized readiness and gateway failure history" onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            <VStack gap={4}>
+              <VStack gap={2}>
+                <HStack justify="between" vAlign="center">
+                  <Heading level={3}>Readiness</Heading>
+                  <Badge label={readiness?.status || 'loading'} variant={diagnosticVariant(readiness?.status)} />
+                </HStack>
+                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                  {checks.map(([name, status]) => (
+                    <Card key={name} variant="muted" padding={2}>
+                      <HStack justify="between" vAlign="center" gap={2}>
+                        <Text type="supporting">{readinessLabel(name)}</Text>
+                        <Badge label={status} variant={diagnosticVariant(status)} />
+                      </HStack>
+                    </Card>
+                  ))}
+                </Grid>
+              </VStack>
+
+              <VStack gap={2}>
+                <Heading level={3}>Gateway</Heading>
+                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                  <Metric label="Active attempts" value={gateway?.runtime?.activeAttemptCount ?? 0} />
+                  <Metric label="Retained failures" value={`${gateway?.retainedFailureCount ?? 0}/${gateway?.retentionLimit ?? 100}`} />
+                  <Metric label="Recent successes" value={gateway?.runtime?.recentSuccesses?.length ?? 0} />
+                </Grid>
+              </VStack>
+
+              <VStack gap={2}>
+                <Heading level={3}>Terminal failures</Heading>
+                {gateway?.failures?.length ? gateway.failures.map((failure, index) => (
+                  <Card key={`${failure.completedAt}-${index}`} padding={3}>
+                    <VStack gap={2}>
+                      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+                        <Text weight="bold">{failure.endpoint || 'Gateway request'}</Text>
+                        <HStack gap={1} vAlign="center">
+                          {failure.responseStatusCode && <Badge label={String(failure.responseStatusCode)} variant="error" />}
+                          <Badge label={failure.errorCode || 'failed'} variant="error" />
+                        </HStack>
+                      </HStack>
+                      <Text type="supporting" color="secondary">
+                        {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {failure.retryCount} retries
+                      </Text>
+                      {failure.exclusionReasons?.length > 0 && (
+                        <Text type="supporting">Reasons: {failure.exclusionReasons.join(', ')}</Text>
+                      )}
+                      {failure.attempts?.map((attempt) => (
+                        <Text key={attempt.attemptNumber} type="supporting" color="secondary">
+                          Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
+                        </Text>
+                      ))}
+                    </VStack>
+                  </Card>
+                )) : (
+                  <EmptyState title="No terminal failures" description="The retained diagnostic window is clear." />
+                )}
+              </VStack>
+            </VStack>
+          </LayoutContent>
+        )}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="end" gap={2}>
+              <Button label="Close" variant="secondary" onClick={onClose} />
+              <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+            </HStack>
+          </LayoutFooter>
+        )}
+      />
+    </Dialog>
+  );
+}
+
+function diagnosticVariant(status) {
+  if (status === 'ready') return 'success';
+  if (status === 'failed') return 'error';
+  if (status === 'pending' || status === 'degraded') return 'warning';
+  return 'neutral';
+}
+
+function readinessLabel(name) {
+  return {
+    storage: 'Storage',
+    apiKey: 'API key',
+    tokenRecovery: 'Token recovery',
+    quotaRefresh: 'Quota refresh',
+    modelCatalog: 'Model catalog'
+  }[name] || name;
+}
+
+function formatDiagnosticTime(value) {
+  if (!value) return 'unknown time';
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? 'unknown time' : timestamp.toLocaleString();
+}
+
+function formatTimings(timings = {}) {
+  const labels = {
+    queueWaitMs: 'queue',
+    credentialPreparationMs: 'credentials',
+    connectionMs: 'connect',
+    firstResponseHeaderMs: 'headers',
+    firstSseEventMs: 'first event',
+    terminalCompletionMs: 'terminal'
+  };
+  const values = Object.entries(labels).flatMap(([name, label]) => (
+    Number.isFinite(timings[name]) ? [`${label} ${timings[name]}ms`] : []
+  ));
+  return values.length ? values.join(', ') : 'timing unavailable';
 }
 
 createRoot(document.getElementById('root')).render(<App />);

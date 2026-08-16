@@ -7,8 +7,9 @@ test('extracts Codex and Anthropic token/cache usage shapes', () => {
     input_tokens: 1_000,
     input_tokens_details: { cached_tokens: 200, cache_write_tokens: 100 },
     output_tokens: 50,
+    output_tokens_details: { reasoning_tokens: 25 },
     service_tier: 'priority'
-  }}), { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, serviceTier: 'priority' });
+  }}), { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, reasoningTokens: 25, serviceTier: 'priority' });
 
   assert.deepEqual(extractUsage({ message: { usage: {
     input_tokens: 100, cache_read_input_tokens: 10, cache_creation_input_tokens: 50, output_tokens: 20

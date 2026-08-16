@@ -37,8 +37,9 @@ export function extractUsage(body) {
   const output = integer(first(usage, ['output_tokens'], ['completion_tokens']));
   const cached = integer(first(usage, ['cached_input_tokens'], ['cache_read_input_tokens'], ['input_tokens_details', 'cached_tokens'], ['prompt_tokens_details', 'cached_tokens']));
   const cacheWrite = integer(first(usage, ['cache_write_tokens'], ['cache_creation_input_tokens'], ['input_tokens_details', 'cache_write_tokens'], ['prompt_tokens_details', 'cache_write_tokens']));
+  const reasoning = integer(first(usage, ['output_tokens_details', 'reasoning_tokens'], ['reasoning_tokens']));
   const total = integer(usage.total_tokens);
-  if ([input, output, cached, cacheWrite, total].some((value) => value === false)) return null;
+  if ([input, output, cached, cacheWrite, reasoning, total].some((value) => value === false)) return null;
   if ([input, output, cached, cacheWrite].every((value) => value === undefined) && upstreamCostMicros(usage) === undefined) return null;
   const anthropic = Object.hasOwn(usage, 'cache_read_input_tokens') || Object.hasOwn(usage, 'cache_creation_input_tokens');
   const inputTokens = input === undefined ? undefined : input + (anthropic ? (cached || 0) + (cacheWrite || 0) : 0);
@@ -51,6 +52,7 @@ export function extractUsage(body) {
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(cached === undefined ? {} : { cachedInputTokens: cached }),
     ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
+    ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
     ...(total === undefined ? {} : { totalTokens: total }),
     serviceTier: string(body?.service_tier ?? body?.response?.service_tier ?? usage.service_tier),
     ...(upstreamCostMicros(usage) === undefined ? {} : { upstreamCostMicros: upstreamCostMicros(usage) })
