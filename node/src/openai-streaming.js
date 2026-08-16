@@ -2,10 +2,69 @@ import { randomUUID } from 'node:crypto';
 import { publicMisalignmentError } from './policy-failures.js';
 
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
+export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 const RETRY_CODES = new Set(['upstream_request_timeout', 'stream_incomplete', 'server_error', 'overloaded_error', 'server_is_overloaded', 'websocket_connection_limit_reached']);
 const FAILURE_REASONS = new Set([...RETRY_CODES, 'invalid_api_key', 'invalid_authentication', 'context_length_exceeded', 'insufficient_quota', 'invalid_previous_response_id', 'invalid_request', 'invalid_request_error', 'previous_response_not_found', 'rate_limit_exceeded', 'unauthorized', 'usage_limit_exceeded', 'usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_owner_usage_limit_reached']);
 
 export function splitSseBlocks(value) { return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n\n'); }
+
+export function createSseParserState() {
+  return { parts: [], bytes: 0, pendingLf: false, skipLeadingLf: false };
+}
+
+export function consumeSseChunk(state, value) {
+  const parser = state?.parts && Number.isFinite(state.bytes) ? state : createSseParserState();
+  const input = typeof value === 'string' ? value : '';
+  const start = parser.skipLeadingLf && input.startsWith('\n') ? 1 : 0;
+  const normalized = input.slice(start).replace(/\r\n?/g, '\n');
+  const blocks = [];
+  let cursor = 0;
+  while (cursor < normalized.length) {
+    const newline = normalized.indexOf('\n', cursor);
+    const end = newline === -1 ? normalized.length : newline;
+    if (end > cursor) {
+      if (parser.pendingLf) {
+        parser.parts.push('\n');
+        parser.bytes += 1;
+        parser.pendingLf = false;
+      }
+      const part = normalized.slice(cursor, end);
+      parser.parts.push(part);
+      parser.bytes += Buffer.byteLength(part);
+      if (parser.bytes > MAX_SSE_EVENT_BYTES) return overflowResult();
+    }
+    if (newline === -1) break;
+    if (parser.pendingLf) {
+      blocks.push(parser.parts.join(''));
+      parser.parts = [];
+      parser.bytes = 0;
+      parser.pendingLf = false;
+    } else {
+      parser.pendingLf = true;
+      if (parser.bytes + 1 > MAX_SSE_EVENT_BYTES) return overflowResult();
+    }
+    cursor = newline + 1;
+  }
+  parser.skipLeadingLf = input.endsWith('\r');
+  return {
+    blocks,
+    overflow: false,
+    state: parser
+  };
+}
+
+export function pendingSseBlock(state) {
+  if (!state?.parts) return '';
+  return `${state.parts.join('')}${state.pendingLf ? '\n' : ''}`;
+}
+
+function overflowResult() {
+  return {
+    blocks: [],
+    overflow: true,
+    state: createSseParserState()
+  };
+}
 
 export function decodeSseBlock(block) {
   const lines = block.split(/\r?\n/);
