@@ -164,14 +164,17 @@ export function start(port = Number(process.env.PORT) || 3000, {
     if (polling) return;
     polling = true;
     try {
-      return await refreshAllQuotas(store, { fetchImpl, compassGatewayToken });
+      const results = await refreshAllQuotas(store, { fetchImpl, compassGatewayToken });
+      readiness.set('quotaRefresh', results.some(({ status }) => status === 'rejected') ? 'degraded' : 'ready');
+      return results;
+    } catch {
+      readiness.set('quotaRefresh', 'degraded');
+      return [];
     } finally {
       polling = false;
     }
   };
-  const initialQuotaRefresh = poll()
-    .then((results) => readiness.set('quotaRefresh', results?.some(({ status }) => status === 'rejected') ? 'degraded' : 'ready'))
-    .catch(() => readiness.set('quotaRefresh', 'degraded'));
+  const initialQuotaRefresh = poll();
   const timer = setInterval(poll, pollIntervalMs);
   timer.unref?.();
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl, compassGatewayToken });
