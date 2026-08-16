@@ -9,19 +9,24 @@ import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
 import { AlertDialog } from '@astryxdesign/core/AlertDialog';
+import { Collapsible } from '@astryxdesign/core/Collapsible';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
 import { EmptyState } from '@astryxdesign/core/EmptyState';
 import { Field } from '@astryxdesign/core/Field';
 import { Grid, GridSpan } from '@astryxdesign/core/Grid';
 import { Heading, Text } from '@astryxdesign/core/Text';
+import { Icon } from '@astryxdesign/core/Icon';
+import { MoreMenu } from '@astryxdesign/core/MoreMenu';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
+import { Skeleton } from '@astryxdesign/core/Skeleton';
 import { Switch } from '@astryxdesign/core/Switch';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Theme } from '@astryxdesign/core/theme';
+import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
@@ -44,6 +49,7 @@ const FILTER_OPTIONS = {
     { value: '', label: 'Any status' },
     { value: 'reauth_required', label: 'Reauth required' },
     { value: 'refresh_failed', label: 'Refresh failed' },
+    { value: 'cooling_down', label: 'Cooling down' },
     { value: 'exhausted', label: 'Exhausted' },
     { value: 'uncapped', label: 'Uncapped' }
   ],
@@ -185,13 +191,20 @@ function VirtualGrid({ items, renderItem }) {
   );
 }
 
-function App() {
+function Dashboard({ themeMode, setThemeMode }) {
   const { api, apiKey } = useApi();
+  const toast = useToast();
   const [upstreams, setUpstreams] = useState([]);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState('');
   const [isManualReloading, setIsManualReloading] = useState(false);
-  const [message, setMessage] = useState({ text: '', error: false });
+  const [pacing, setPacing] = useState([]);
   const [formDialog, setFormDialog] = useState({ isOpen: false, mode: 'add', upstream: null });
   const [formValues, setFormValues] = useState(FORM_DEFAULTS);
+  const [credentialTarget, setCredentialTarget] = useState(null);
+  const [credentialValue, setCredentialValue] = useState('');
+  const [credentialSaving, setCredentialSaving] = useState(false);
+  const [credentialError, setCredentialError] = useState('');
   const [capUpstream, setCapUpstream] = useState(null);
   const [capValue, setCapValue] = useState(null);
   const [bulkOpen, setBulkOpen] = useState(false);
@@ -200,6 +213,17 @@ function App() {
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnostics, setDiagnostics] = useState(null);
   const [diagnosticsLoading, setDiagnosticsLoading] = useState(false);
+  const [diagnosticsError, setDiagnosticsError] = useState('');
+  const [compatibilityOpen, setCompatibilityOpen] = useState(false);
+  const [compatibility, setCompatibility] = useState(null);
+  const [compatibilityLoading, setCompatibilityLoading] = useState(false);
+  const [compatibilityError, setCompatibilityError] = useState('');
+  const [compatibilityResetTarget, setCompatibilityResetTarget] = useState(null);
+  const [compatibilityActionLoading, setCompatibilityActionLoading] = useState(false);
+  const [systemStatusOpen, setSystemStatusOpen] = useState(false);
+  const [systemStatus, setSystemStatus] = useState(null);
+  const [systemStatusLoading, setSystemStatusLoading] = useState(false);
+  const [systemStatusError, setSystemStatusError] = useState('');
   const [routingPolicy, setRoutingPolicy] = useState({ strategy: 'least-recent-success', quotaFreshnessMs: 300000 });
   const [bulkMode, setBulkMode] = useState('rules');
   const [bulkCapValue, setBulkCapValue] = useState(100);
@@ -210,36 +234,82 @@ function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshTokenTarget, setRefreshTokenTarget] = useState(null);
   const [isRefreshingToken, setIsRefreshingToken] = useState(false);
+  const [cooldownTarget, setCooldownTarget] = useState(null);
+  const [isClearingCooldown, setIsClearingCooldown] = useState(false);
   const [filterQuery, setFilterQuery] = useStoredValue('codex_filter_filter-query');
   const [filterType, setFilterType] = useStoredValue('codex_filter_filter-type');
   const [filterStatus, setFilterStatus] = useStoredValue('codex_filter_filter-status');
   const [filterQuota, setFilterQuota] = useStoredValue('codex_filter_filter-quota');
   const [filterSort, setFilterSort] = useStoredValue('codex_filter_filter-sort', 'recent_active');
-  const [themeMode, setThemeMode] = useStoredValue('codex_theme_mode', 'dark');
   const reloadTimer = useRef(null);
   const loadingRef = useRef(false);
-  const editingIdRef = useRef(null);
+  const hasLoadedRef = useRef(false);
 
   const show = useCallback((text, error = false) => {
-    setMessage({ text, error });
-  }, []);
-  const load = useCallback(async (manual = false) => {
+    toast({
+      body: text,
+      type: error ? 'error' : 'info',
+      isAutoHide: !error,
+      uniqueID: error ? 'relaydeck-error' : undefined
+    });
+  }, [toast]);
+  const loadSystemStatus = useCallback(async (pacingRows = null) => {
+    const [diagnosticsData, catalogData, hostData, compatibilityData, pacingData] = await Promise.all([
+      api('/api/diagnostics'),
+      api('/api/model-catalog'),
+      api('/api/codex-host-health'),
+      api('/api/compatibility'),
+      pacingRows === null ? api('/api/pacing') : { pacing: pacingRows }
+    ]);
+    const nextPacing = pacingData.pacing || [];
+    setDiagnostics(diagnosticsData);
+    setCompatibility(compatibilityData.compatibility);
+    setPacing(nextPacing);
+    setSystemStatus({
+      diagnostics: diagnosticsData,
+      catalog: catalogData.catalog,
+      hostHealth: hostData.hostHealth,
+      pacing: nextPacing,
+      compatibility: compatibilityData.compatibility
+    });
+  }, [api]);
+  const load = useCallback(async (manual = false, includeSystemStatus = false) => {
     if (loadingRef.current) return;
     loadingRef.current = true;
     if (manual) setIsManualReloading(true);
     try {
-      const [upstreamData, routingData] = await Promise.all([api('/api/upstreams'), api('/api/routing')]);
+      const [upstreamData, routingData, pacingData] = await Promise.all([
+        api('/api/upstreams'),
+        api('/api/routing'),
+        api('/api/pacing')
+      ]);
       setUpstreams(upstreamData.upstreams);
       setRoutingPolicy(routingData.policy);
+      setPacing(pacingData.pacing || []);
+      setLoadError('');
+      if (includeSystemStatus) {
+        try {
+          await loadSystemStatus(pacingData.pacing || []);
+          setSystemStatusError('');
+        } catch (error) {
+          setSystemStatusError(error.message);
+          if (manual) show(error.message, true);
+        }
+      } else {
+        setSystemStatus((current) => current ? { ...current, pacing: pacingData.pacing || [] } : current);
+      }
     } catch (error) {
-      show(error.message, true);
+      setLoadError(error.message);
+      if (hasLoadedRef.current || manual) show(error.message, true);
     } finally {
       loadingRef.current = false;
+      hasLoadedRef.current = true;
+      setHasLoaded(true);
       if (manual) setIsManualReloading(false);
     }
-  }, [api, show]);
+  }, [api, loadSystemStatus, show]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(false, true); }, [load]);
 
   useEffect(() => {
     let cancelled = false;
@@ -294,9 +364,11 @@ function App() {
     } else if (filterStatus === 'uncapped') {
       filtered = filtered.filter((upstream) => !upstream.spending || upstream.spending.capCredits <= 0);
     } else if (filterStatus === 'reauth_required') {
-      filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'reauth_required');
+      filtered = filtered.filter(isReauthRequired);
     } else if (filterStatus === 'refresh_failed') {
       filtered = filtered.filter((upstream) => upstream.tokenRefresh?.status === 'failed');
+    } else if (filterStatus === 'cooling_down') {
+      filtered = filtered.filter(hasActiveCooldown);
     }
     if (filterQuota) filtered = filtered.filter((upstream) => getQuotaBand(upstream) === filterQuota);
     return filtered.sort((a, b) => sortUpstreams(a, b, filterSort));
@@ -305,6 +377,7 @@ function App() {
   // Metrics reflect the current filters (e.g. Type=Codex shows Codex-only counts), not the full pool.
   const stats = useMemo(() => {
     let reauth = 0;
+    let coolingDown = 0;
     let lowQuota = 0;
     let uncapped = 0;
     let exhausted = 0;
@@ -315,7 +388,7 @@ function App() {
     let totalCompass = 0;
     let activeCompass = 0;
     filteredUpstreams.forEach((upstream) => {
-      const active = !['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status) && upstream.spending?.status === 'normal';
+      const active = isUpstreamActive(upstream);
       if (upstream.type === 'codex') {
         totalCodex += 1;
         if (active) activeCodex += 1;
@@ -324,7 +397,8 @@ function App() {
         totalCompass += 1;
         if (active) activeCompass += 1;
       }
-      if (upstream.tokenRefresh?.status === 'reauth_required') reauth += 1;
+      if (isReauthRequired(upstream)) reauth += 1;
+      if (hasActiveCooldown(upstream)) coolingDown += 1;
       const quotaBand = getQuotaBand(upstream);
       if (quotaBand === 'exhausted') exhausted += 1;
       if (quotaBand === 'low') lowQuota += 1;
@@ -336,11 +410,8 @@ function App() {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { totalCodex, activeCodex, totalCompass, activeCompass, reauth, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { totalCodex, activeCodex, totalCompass, activeCompass, reauth, coolingDown, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [filteredUpstreams]);
-
-  // A type card whose type is filtered out would always read 0/0, so drop it and shrink the grid to match, keeping cards stretched full width.
-  const metricCount = 6 + (filterType !== 'compass' ? 1 : 0) + (filterType !== 'codex' ? 1 : 0);
 
   const updateForm = (field, value) => setFormValues((current) => ({ ...current, [field]: value }));
   const updatePacing = (field, value) => setFormValues((current) => ({
@@ -358,7 +429,6 @@ function App() {
     }
   }));
   const resetForm = useCallback(() => {
-    editingIdRef.current = null;
     setFormValues({ ...FORM_DEFAULTS, pacing: { ...DEFAULT_PACING, modelIntervals: [] } });
     setFormDialog((s) => ({ ...s, isOpen: false }));
   }, []);
@@ -395,45 +465,45 @@ function App() {
     }
   };
 
-  const edit = async (upstream) => {
-    editingIdRef.current = upstream.id;
-
-    const initialValues = {
+  const edit = (upstream) => {
+    setFormValues({
       ...upstream,
       authJson: '',
       projectKey: '',
       quotaSource: upstream.quotaSource || 'compass',
       pacing: { ...DEFAULT_PACING, ...(upstream.pacing || {}), modelIntervals: [...(upstream.pacing?.modelIntervals || [])] }
-    };
-    setFormValues(initialValues);
+    });
     setFormDialog({ isOpen: true, mode: 'edit', upstream });
-
-    try {
-      const res = await api(`/api/upstreams/${upstream.id}/credentials`);
-      if (editingIdRef.current !== upstream.id) return;
-      const creds = res?.credentials || {};
-      let updatedJson = '';
-      let updatedProjectKey = '';
-      if (upstream.type === 'codex') {
-        const tokens = {
-          access_token: creds.accessToken || '',
-          refresh_token: creds.refreshToken || '',
-          id_token: creds.idToken || '',
-          account_id: upstream.accountId || ''
-        };
-        updatedJson = JSON.stringify({ tokens }, null, 2);
-      } else if (upstream.type === 'compass') {
-        updatedProjectKey = creds.projectKey || creds.apiKey || '';
-      }
-      setFormValues((prev) => ({
-        ...prev,
-        authJson: updatedJson,
-        projectKey: updatedProjectKey
-      }));
-    } catch {}
   };
 
+  const replaceCredentials = (upstream) => {
+    setCredentialTarget(upstream);
+    setCredentialValue('');
+    setCredentialError('');
+  };
 
+  const saveCredentials = async (event) => {
+    event.preventDefault();
+    if (!credentialTarget) return;
+    setCredentialSaving(true);
+    setCredentialError('');
+    try {
+      await api(`/api/upstreams/${credentialTarget.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify(credentialTarget.type === 'codex'
+          ? { authJson: credentialValue }
+          : { projectKey: credentialValue })
+      });
+      setCredentialTarget(null);
+      setCredentialValue('');
+      show('Credentials replaced');
+      await load();
+    } catch (error) {
+      setCredentialError(error.message);
+    } finally {
+      setCredentialSaving(false);
+    }
+  };
 
   const refresh = (upstream) => {
     setRefreshTarget(upstream);
@@ -471,6 +541,25 @@ function App() {
     } finally {
       await load();
       setIsRefreshingToken(false);
+    }
+  };
+
+  const clearCooldown = (upstream) => {
+    setCooldownTarget(upstream);
+  };
+
+  const confirmClearCooldown = async () => {
+    if (!cooldownTarget) return;
+    setIsClearingCooldown(true);
+    try {
+      await api(`/api/upstreams/${cooldownTarget.id}/clear-cooldown`, { method: 'POST' });
+      setCooldownTarget(null);
+      show('Cooldown cleared');
+      await load();
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setIsClearingCooldown(false);
     }
   };
 
@@ -523,12 +612,58 @@ function App() {
   const openDiagnostics = async () => {
     setDiagnosticsOpen(true);
     setDiagnosticsLoading(true);
+    setDiagnosticsError('');
     try {
       setDiagnostics(await api('/api/diagnostics'));
     } catch (error) {
-      show(error.message, true);
+      setDiagnosticsError(error.message);
     } finally {
       setDiagnosticsLoading(false);
+    }
+  };
+
+  const openCompatibility = async () => {
+    setCompatibilityOpen(true);
+    setCompatibilityLoading(true);
+    setCompatibilityError('');
+    try {
+      const data = await api('/api/compatibility');
+      setCompatibility(data.compatibility);
+    } catch (error) {
+      setCompatibilityError(error.message);
+    } finally {
+      setCompatibilityLoading(false);
+    }
+  };
+
+  const resetCompatibility = async () => {
+    if (!compatibilityResetTarget) return;
+    setCompatibilityActionLoading(true);
+    try {
+      const path = compatibilityResetTarget.all
+        ? '/api/compatibility/facts'
+        : `/api/compatibility/facts/${compatibilityResetTarget.id}`;
+      await api(path, { method: 'DELETE' });
+      show(compatibilityResetTarget.all ? 'Compatibility facts reset' : 'Compatibility fact reset');
+      setCompatibilityResetTarget(null);
+      await openCompatibility();
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setCompatibilityActionLoading(false);
+    }
+  };
+
+  const openSystemStatus = async () => {
+    setSystemStatusOpen(true);
+    setSystemStatusLoading(true);
+    setSystemStatusError('');
+    try {
+      await loadSystemStatus();
+    } catch (error) {
+      setSystemStatusError(error.message);
+    } finally {
+      setSystemStatusLoading(false);
     }
   };
 
@@ -559,9 +694,14 @@ function App() {
     }, 'Bulk caps updated', show);
   };
 
+  const pacingByUpstream = useMemo(
+    () => new Map(pacing.map((entry) => [entry.upstreamId, entry])),
+    [pacing]
+  );
+  const systemSummary = summarizeSystemStatus(systemStatus, upstreams, systemStatusError);
+
   return (
-    <Theme theme={neutralTheme} mode={themeMode}>
-      <AppShell variant="elevated" height="auto" contentPadding={4} mobileNav={false}>
+    <AppShell variant="elevated" height="auto" contentPadding={4} mobileNav={false}>
         <VStack gap={6}>
           <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
             <VStack gap={1}>
@@ -574,7 +714,7 @@ function App() {
                 variant="secondary"
                 onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
               />
-              <Button label="Reload" variant="secondary" isLoading={isManualReloading} onClick={() => void load(true)} />
+              <Button label="Reload" variant="secondary" isLoading={isManualReloading} onClick={() => void load(true, true)} />
             </HStack>
           </HStack>
 
@@ -605,49 +745,79 @@ function App() {
 
           <VStack gap={2}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
-            <Grid columns={metricCount} gap={2}>
-              {filterType !== 'compass' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
-              {filterType !== 'codex' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
-              <Metric label="Reauth required" value={stats.reauth} />
-              <Metric label="Low quota (<30%)" value={stats.lowQuota} />
-              <Metric label="Uncapped" value={stats.uncapped} />
-              <Metric label="Exhausted" value={stats.exhausted} />
-              <Metric label="Spending cap left" value={`$${formatNumber(stats.capLeft)}`} />
-              <Metric label="Spending cap spent" value={`$${formatNumber(stats.capSpent)}`} />
-            </Grid>
+            {!hasLoaded ? (
+              <MetricSkeletons />
+            ) : (
+              <Grid columns={{ minWidth: 132, max: 9, repeat: 'fit' }} gap={2}>
+                {filterType !== 'compass' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
+                {filterType !== 'codex' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
+                <Metric label="Cooling down" value={stats.coolingDown} />
+                <Metric label="Reauth required" value={stats.reauth} />
+                <Metric label="Low quota (<30%)" value={stats.lowQuota} />
+                <Metric label="Uncapped" value={stats.uncapped} />
+                <Metric label="Exhausted" value={stats.exhausted} />
+                <Metric label="Spending cap left" value={`$${formatNumber(stats.capLeft)}`} />
+                <Metric label="Spending cap spent" value={`$${formatNumber(stats.capSpent)}`} />
+              </Grid>
+            )}
           </VStack>
 
           <VStack gap={2}>
-            <HStack align="center" justify="between">
+            <HStack align="center" justify="between" gap={2} wrap="wrap">
               <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
-              <HStack gap={2}>
-                <Button label="Diagnostics" size="sm" variant="secondary" onClick={() => void openDiagnostics()} />
+              <HStack gap={2} wrap="wrap">
+                <Button
+                  label="System status"
+                  size="sm"
+                  variant="secondary"
+                  endContent={systemSummary.warningCount > 0 ? <Badge label={String(systemSummary.warningCount)} variant="warning" /> : undefined}
+                  onClick={() => void openSystemStatus()}
+                />
                 <Button label="Routing" size="sm" variant="secondary" onClick={() => setRoutingOpen(true)} />
-                <Button label="Set Priority" size="sm" variant="secondary" onClick={() => setPriorityOpen(true)} />
-                <Button label="Bulk set caps" size="sm" variant="secondary" onClick={() => setBulkOpen(true)} />
+                <MoreMenu
+                  label="Management actions"
+                  size="sm"
+                  variant="secondary"
+                  items={[
+                    { label: 'Compatibility', onClick: () => void openCompatibility() },
+                    { label: 'Diagnostics', onClick: () => void openDiagnostics() },
+                    { type: 'divider' },
+                    { label: 'Set priority', onClick: () => setPriorityOpen(true) },
+                    { label: 'Bulk set caps', onClick: openBulkCaps }
+                  ]}
+                />
                 <Button label="Add upstream" size="sm" variant="primary" onClick={add} />
               </HStack>
             </HStack>
-            {filteredUpstreams.length ? (
+            {loadError && hasLoaded && <Banner title="Could not load upstreams" description={loadError} status="error" />}
+            {!hasLoaded ? (
+              <UpstreamSkeletons />
+            ) : loadError && upstreams.length === 0 ? (
+              <EmptyState title="Upstreams unavailable" description="Reload the dashboard after the management API is available." />
+            ) : filteredUpstreams.length ? (
               <VirtualGrid
                 items={filteredUpstreams}
-                renderItem={(upstream) => <UpstreamCard key={upstream.id} upstream={upstream} onRefresh={refresh} onRefreshToken={promptRefreshToken} isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id} onEdit={edit} onCap={openCap} onPriority={() => setPriorityOpen(true)} onDelete={remove} />}
+                renderItem={(upstream) => (
+                  <UpstreamCard
+                    key={upstream.id}
+                    upstream={upstream}
+                    pacing={pacingByUpstream.get(upstream.id)}
+                    onRefresh={refresh}
+                    onRefreshToken={promptRefreshToken}
+                    isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id}
+                    onClearCooldown={clearCooldown}
+                    onEdit={edit}
+                    onReplaceCredentials={replaceCredentials}
+                    onCap={openCap}
+                    onPriority={() => setPriorityOpen(true)}
+                    onDelete={remove}
+                  />
+                )}
               />
             ) : (
               <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex or Compass upstream to start routing requests.'} />
             )}
           </VStack>
-
-          <AlertDialog
-            isOpen={Boolean(message.text)}
-            onOpenChange={(isOpen) => { if (!isOpen) setMessage({ text: '', error: false }); }}
-            title={message.error ? 'Error' : 'Notification'}
-            description={message.text}
-            actionLabel="OK"
-            actionVariant={message.error ? 'destructive' : 'primary'}
-            onAction={() => setMessage({ text: '', error: false })}
-          />
-
 
           <CapDialog
             upstream={capUpstream}
@@ -663,8 +833,19 @@ function App() {
             isOpen={diagnosticsOpen}
             diagnostics={diagnostics}
             isLoading={diagnosticsLoading}
+            error={diagnosticsError}
             onRefresh={openDiagnostics}
             onClose={() => setDiagnosticsOpen(false)}
+          />
+          <CompatibilityDialog
+            isOpen={compatibilityOpen}
+            compatibility={compatibility}
+            isLoading={compatibilityLoading}
+            error={compatibilityError}
+            onResetFact={(fact) => setCompatibilityResetTarget(fact)}
+            onResetAll={() => setCompatibilityResetTarget({ all: true })}
+            onRefresh={openCompatibility}
+            onClose={() => setCompatibilityOpen(false)}
           />
           <BulkCapDialog
             open={bulkOpen}
@@ -676,6 +857,49 @@ function App() {
             onRulesChange={setBulkRules}
             onClose={() => setBulkOpen(false)}
             onSubmit={saveBulkCaps}
+          />
+          <SystemStatusDialog
+            isOpen={systemStatusOpen}
+            status={systemStatus}
+            summary={systemSummary}
+            isLoading={systemStatusLoading}
+            error={systemStatusError}
+            onRefresh={openSystemStatus}
+            onOpenDiagnostics={() => {
+              setSystemStatusOpen(false);
+              void openDiagnostics();
+            }}
+            onOpenCompatibility={() => {
+              setSystemStatusOpen(false);
+              void openCompatibility();
+            }}
+            onClose={() => setSystemStatusOpen(false)}
+          />
+          <CredentialDialog
+            upstream={credentialTarget}
+            value={credentialValue}
+            isSaving={credentialSaving}
+            error={credentialError}
+            onValueChange={setCredentialValue}
+            onClose={() => {
+              if (credentialSaving) return;
+              setCredentialTarget(null);
+              setCredentialValue('');
+              setCredentialError('');
+            }}
+            onSubmit={saveCredentials}
+          />
+          <AlertDialog
+            isOpen={Boolean(compatibilityResetTarget)}
+            onOpenChange={(isOpen) => { if (!isOpen && !compatibilityActionLoading) setCompatibilityResetTarget(null); }}
+            title={compatibilityResetTarget?.all ? 'Reset all compatibility facts?' : 'Reset compatibility fact?'}
+            description={compatibilityResetTarget?.all
+              ? 'Remove every learned compatibility fact. Requests will relearn allowlisted behavior from new evidence.'
+              : `Remove the learned ${compatibilityResetTarget?.features?.join(', ') || 'compatibility'} behavior for future requests?`}
+            actionLabel="Reset"
+            actionVariant="destructive"
+            isActionLoading={compatibilityActionLoading}
+            onAction={resetCompatibility}
           />
           <AlertDialog
             isOpen={Boolean(deleteTarget)}
@@ -707,6 +931,16 @@ function App() {
             isActionLoading={isRefreshingToken}
             onAction={confirmRefreshToken}
           />
+          <AlertDialog
+            isOpen={Boolean(cooldownTarget)}
+            onOpenChange={(isOpen) => { if (!isOpen && !isClearingCooldown) setCooldownTarget(null); }}
+            title="Clear upstream cooldown?"
+            description={cooldownTarget ? `Allow "${cooldownTarget.name}" to receive traffic before its current cooldown ends?` : ''}
+            actionLabel="Clear cooldown"
+            actionVariant="primary"
+            isActionLoading={isClearingCooldown}
+            onAction={confirmClearCooldown}
+          />
           <Dialog isOpen={formDialog.isOpen} onOpenChange={() => setFormDialog((s) => ({ ...s, isOpen: false }))} width={640} purpose="form">
             <Layout
               header={<DialogHeader title={formDialog.mode === 'edit' ? 'Edit upstream' : 'Add upstream'} hasDivider />}
@@ -726,7 +960,7 @@ function App() {
                         isDisabled={formDialog.mode === 'edit'}
                         width="100%"
                       />
-                      {formValues.type === 'codex' ? (
+                      {formDialog.mode === 'add' && formValues.type === 'codex' ? (
                         <TextArea
                           label="Codex auth.json"
                           description="The account name is derived from the JWT email."
@@ -736,22 +970,21 @@ function App() {
                           rows={20}
                           htmlName="authJson"
                         />
-                      ) : (
+                      ) : formValues.type === 'compass' ? (
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
                           <TextInput label="Project ID" value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
-                          <TextInput label="Project key" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />
+                          {formDialog.mode === 'add' && <TextInput label="Project key" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />}
                           <Selector label="Quota source" options={[{ value: 'compass', label: 'Compass' }, { value: 'aiswitch', label: 'AISwitch' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
                           <GridSpan columns="full">
                             <Text type="supporting" color="secondary">The account name is derived from the project ID. AISwitch quota is managed outside this gateway.</Text>
                           </GridSpan>
                         </Grid>
-                      )}
+                      ) : null}
                       <Switch
                         label="Request pacing"
                         description="Space outbound starts for this account."
                         value={Boolean(formValues.pacing?.enabled)}
                         onChange={(value) => updatePacing('enabled', value)}
-                        labelSpacing="spread"
                       />
                       {formValues.pacing?.enabled && (
                         <VStack gap={3}>
@@ -800,38 +1033,40 @@ function App() {
                                 ])}
                               />
                             </HStack>
-                            {(formValues.pacing?.modelIntervals || []).map((entry, index) => (
-                              <Grid key={index} columns={{ minWidth: 220, max: 2, repeat: 'fit' }} gap={3} align="end">
-                                <TextInput
-                                  label="Model"
-                                  value={entry.model || ''}
-                                  onChange={(value) => updateModelInterval(index, 'model', value)}
-                                  placeholder="gpt-5.6-sol"
-                                />
-                                <HStack gap={2} align="end">
-                                  <NumberInput
-                                    width="100%"
-                                    label="Minimum interval"
-                                    value={entry.minStartIntervalMs ?? 0}
-                                    onChange={(value) => updateModelInterval(index, 'minStartIntervalMs', value ?? 0)}
-                                    min={0}
-                                    max={300000}
-                                    step={100}
-                                    isIntegerOnly
+                            <ScrollList count={formValues.pacing?.modelIntervals?.length || 0}>
+                              {(formValues.pacing?.modelIntervals || []).map((entry, index) => (
+                                <Grid key={index} columns={{ minWidth: 220, max: 2, repeat: 'fit' }} gap={3} align="end">
+                                  <TextInput
+                                    label="Model"
+                                    value={entry.model || ''}
+                                    onChange={(value) => updateModelInterval(index, 'model', value)}
+                                    placeholder="gpt-5.6-sol"
                                   />
-                                  <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
-                                    <Button
-                                      label="Remove model interval"
-                                      tooltip="Remove model interval"
-                                      variant="ghost"
-                                      isIconOnly
-                                      icon="×"
-                                      onClick={() => updatePacing('modelIntervals', (formValues.pacing?.modelIntervals || []).filter((_, current) => current !== index))}
+                                  <HStack gap={2} align="end">
+                                    <NumberInput
+                                      width="100%"
+                                      label="Minimum interval"
+                                      value={entry.minStartIntervalMs ?? 0}
+                                      onChange={(value) => updateModelInterval(index, 'minStartIntervalMs', value ?? 0)}
+                                      min={0}
+                                      max={300000}
+                                      step={100}
+                                      isIntegerOnly
                                     />
-                                  </Field>
-                                </HStack>
-                              </Grid>
-                            ))}
+                                    <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
+                                      <Button
+                                        label="Remove model interval"
+                                        tooltip="Remove model interval"
+                                        variant="ghost"
+                                        isIconOnly
+                                        icon="×"
+                                        onClick={() => updatePacing('modelIntervals', (formValues.pacing?.modelIntervals || []).filter((_, current) => current !== index))}
+                                      />
+                                    </Field>
+                                  </HStack>
+                                </Grid>
+                              ))}
+                            </ScrollList>
                           </VStack>
                         </VStack>
                       )}
@@ -851,7 +1086,6 @@ function App() {
           </Dialog>
         </VStack>
       </AppShell>
-    </Theme>
   );
 }
 
@@ -866,7 +1100,55 @@ function Metric({ label, value }) {
   );
 }
 
-function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, onEdit, onCap, onPriority, onDelete }) {
+function MetricSkeletons() {
+  return (
+    <Grid columns={{ minWidth: 132, max: 9, repeat: 'fit' }} gap={2}>
+      {Array.from({ length: 8 }, (_, index) => (
+        <Card key={index} variant="muted" padding={2}>
+          <VStack gap={2}>
+            <Skeleton width="70%" height={14} index={index} />
+            <Skeleton width="45%" height={28} index={index + 1} />
+          </VStack>
+        </Card>
+      ))}
+    </Grid>
+  );
+}
+
+function UpstreamSkeletons() {
+  return (
+    <Grid columns={UPSTREAM_GRID_COLUMNS} gap={3}>
+      {Array.from({ length: 4 }, (_, index) => (
+        <Card key={index}>
+          <VStack gap={3}>
+            <Skeleton width="65%" height={24} index={index} />
+            <Skeleton height={56} index={index + 1} />
+            <Skeleton height={56} index={index + 2} />
+            <HStack gap={2}>
+              <Skeleton width={28} height={28} radius={1} index={index + 3} />
+              <Skeleton width={28} height={28} radius={1} index={index + 4} />
+              <Skeleton width={28} height={28} radius={1} index={index + 5} />
+            </HStack>
+          </VStack>
+        </Card>
+      ))}
+    </Grid>
+  );
+}
+
+function UpstreamCard({
+  upstream,
+  pacing,
+  onRefresh,
+  onRefreshToken,
+  isRefreshingToken,
+  onClearCooldown,
+  onEdit,
+  onReplaceCredentials,
+  onCap,
+  onPriority,
+  onDelete
+}) {
   const quota = upstream.quota;
   const spending = upstream.spending || {};
   const quotaRemaining = quota ? Math.min(100, Math.max(0, quota.remainingPercent)) : 0;
@@ -883,6 +1165,9 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
     : 'Set a cap to make this upstream routable';
   const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
+  const coolingDown = hasActiveCooldown(upstream);
+  const pacingEnabled = Boolean(upstream.pacing?.enabled);
+  const queuedRequests = pacing?.queueDepth || 0;
   const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'success';
   const progressStyleMap = {
@@ -897,10 +1182,12 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
           <StackItem size="fill">
             <VStack gap={1}>
               <Heading level={3} maxLines={1}>{upstream.name}</Heading>
-              <HStack gap={1} vAlign="center" minHeight={28}>
+              <HStack gap={1} vAlign="center" minHeight={28} wrap="wrap">
                 {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary">{tokenExpiry}</Text>}
+                {coolingDown && <Badge label={`Cooling down until ${formatShortTime(upstream.health.nextEligibleAt)}`} variant="warning" />}
+                {pacingEnabled && <Badge label={queuedRequests ? `${queuedRequests} queued` : 'Pacing enabled'} variant={queuedRequests ? 'warning' : 'neutral'} />}
                 {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
-                {tokenRefresh?.status === 'reauth_required' && <Badge label={<>Reauth required{tokenRefresh.errorDetail && <> <span title={tokenRefresh.errorDetail} aria-label={`Refresh failure: ${tokenRefresh.errorDetail}`}>(!)</span></>}</>} variant="error" />}
+                {isReauthRequired(upstream) && <Badge label="Reauth required" variant="error" />}
               </HStack>
             </VStack>
           </StackItem>
@@ -936,13 +1223,61 @@ function UpstreamCard({ upstream, onRefresh, onRefreshToken, isRefreshingToken, 
             {recentActiveText && <Text type="supporting" color="secondary">{recentActiveText}</Text>}
           </HStack>
         </VStack>
-        <HStack gap={1} vAlign="center">
-          <Button label="Refresh quota" tooltip="Refresh quota" icon="◷" isIconOnly size="sm" variant="secondary" onClick={() => onRefresh(upstream)} />
-          {upstream.type === 'codex' && <Button label="Refresh token" tooltip="Refresh token" icon="↻" isIconOnly size="sm" variant="secondary" isLoading={isRefreshingToken} isDisabled={isRefreshingToken || tokenRefresh?.status === 'refreshing'} onClick={() => onRefreshToken(upstream)} />}
-          <Button label="Edit upstream" tooltip="Edit upstream" icon="✎" isIconOnly size="sm" variant="secondary" onClick={() => onEdit(upstream)} />
-          <Button label="Set spending cap" tooltip="Set spending cap" icon="$" isIconOnly size="sm" variant="secondary" onClick={() => onCap(upstream)} />
-          <Button label="Set priority" tooltip="Set priority" icon="≡" isIconOnly size="sm" variant="secondary" onClick={onPriority} />
-          <Button label="Delete upstream" tooltip="Delete upstream" icon="×" isIconOnly size="sm" variant="destructive" onClick={() => onDelete(upstream)} />
+        <HStack gap={1} vAlign="center" wrap="wrap">
+          <Button
+            label="Refresh quota"
+            tooltip="Refresh quota"
+            icon={<Icon icon="clock" size="sm" />}
+            isIconOnly
+            size="sm"
+            variant="secondary"
+            onClick={() => onRefresh(upstream)}
+          />
+          {upstream.type === 'codex' && (
+            <Button
+              label="Refresh token"
+              tooltip="Refresh token"
+              icon={<Icon icon="arrowsUpDown" size="sm" />}
+              isIconOnly
+              size="sm"
+              variant="secondary"
+              isLoading={isRefreshingToken}
+              isDisabled={isRefreshingToken || tokenRefresh?.status === 'refreshing'}
+              onClick={() => onRefreshToken(upstream)}
+            />
+          )}
+          {coolingDown && (
+            <Button
+              label="Clear cooldown"
+              size="sm"
+              variant="secondary"
+              icon={<Icon icon="warning" size="sm" />}
+              onClick={() => onClearCooldown(upstream)}
+            />
+          )}
+          <MoreMenu
+            label={`Actions for ${upstream.name}`}
+            size="sm"
+            variant="secondary"
+            items={[
+              {
+                type: 'section',
+                title: 'Manage',
+                items: [
+                  { label: 'Edit upstream', onClick: () => onEdit(upstream) },
+                  { label: 'Replace credentials', onClick: () => onReplaceCredentials(upstream) },
+                  { label: 'Set spending cap', onClick: () => onCap(upstream) },
+                  { label: 'Set priority', onClick: onPriority }
+                ]
+              },
+              { type: 'divider' },
+              {
+                type: 'section',
+                title: 'Danger zone',
+                items: [{ label: 'Delete upstream', onClick: () => onDelete(upstream) }]
+              }
+            ]}
+          />
         </HStack>
       </VStack>
     </Card>
@@ -977,6 +1312,62 @@ function CapDialog({ upstream, value, onValueChange, onClose, onSubmit }) {
   );
 }
 
+function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onClose, onSubmit }) {
+  return (
+    <Dialog isOpen={Boolean(upstream)} onOpenChange={onClose} purpose="form" width={640}>
+      <Layout
+        header={<DialogHeader title="Replace credentials" subtitle={upstream ? `For ${upstream.name}` : undefined} onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            <form id="credential-form" onSubmit={onSubmit}>
+              <VStack gap={3}>
+                <Banner
+                  title="Credential replacement"
+                  description="Saving replaces the stored authentication material for this upstream."
+                  status="warning"
+                />
+                {error && <Banner title="Could not replace credentials" description={error} status="error" />}
+                {upstream?.type === 'codex' ? (
+                  <TextArea
+                    label="Codex auth.json"
+                    value={value}
+                    onChange={onValueChange}
+                    placeholder="Paste auth.json here"
+                    rows={20}
+                    htmlName="authJson"
+                  />
+                ) : (
+                  <TextInput
+                    label="Project key"
+                    value={value}
+                    onChange={onValueChange}
+                    placeholder="Enter the replacement project key"
+                  />
+                )}
+              </VStack>
+            </form>
+          </LayoutContent>
+        )}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="end" gap={2}>
+              <Button label="Cancel" variant="secondary" isDisabled={isSaving} onClick={onClose} />
+              <Button
+                label="Replace credentials"
+                variant="primary"
+                type="submit"
+                form="credential-form"
+                isLoading={isSaving}
+                isDisabled={!value.trim()}
+              />
+            </HStack>
+          </LayoutFooter>
+        )}
+      />
+    </Dialog>
+  );
+}
+
 function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueChange, onRulesChange, onClose, onSubmit }) {
   const updateRule = (index, field, value) => onRulesChange(rules.map((rule, current) => current === index ? { ...rule, [field]: value } : rule));
   return (
@@ -996,17 +1387,19 @@ function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueCh
                 />
                 {mode === 'rules' ? (
                   <VStack gap={2}>
-                    {rules.map((rule, index) => (
-                      <Grid key={index} gap={4} columns={2} align="end">
-                        <NumberInput label="Monthly quota left" value={rule.minQuotaLeft} onChange={(value) => updateRule(index, 'minQuotaLeft', value)} min={0} step={0.01} hasClear />
-                        <HStack align="end" gap={4}>
-                          <NumberInput width="100%" label="Spend cap" value={rule.capDollars} onChange={(value) => updateRule(index, 'capDollars', value)} min={0} step={0.01} hasClear />
-                          <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
-                            <Button label="Remove rule" tooltip="Remove rule" size="md" variant="ghost" isIconOnly icon="×" onClick={() => onRulesChange(rules.filter((_, current) => current !== index))} />
-                          </Field>
-                        </HStack>
-                      </Grid>
-                    ))}
+                    <ScrollList count={rules.length}>
+                      {rules.map((rule, index) => (
+                        <Grid key={index} gap={4} columns={{ minWidth: 180, max: 2, repeat: 'fit' }} align="end">
+                          <NumberInput label="Monthly quota left" value={rule.minQuotaLeft} onChange={(value) => updateRule(index, 'minQuotaLeft', value)} min={0} step={0.01} hasClear />
+                          <HStack align="end" gap={4}>
+                            <NumberInput width="100%" label="Spend cap" value={rule.capDollars} onChange={(value) => updateRule(index, 'capDollars', value)} min={0} step={0.01} hasClear />
+                            <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
+                              <Button label="Remove rule" tooltip="Remove rule" size="md" variant="ghost" isIconOnly icon="×" onClick={() => onRulesChange(rules.filter((_, current) => current !== index))} />
+                            </Field>
+                          </HStack>
+                        </Grid>
+                      ))}
+                    </ScrollList>
                     <Button label="Add rule" variant="secondary" onClick={() => onRulesChange([...rules, { minQuotaLeft: null, capDollars: null }])} />
                   </VStack>
                 ) : (
@@ -1055,6 +1448,24 @@ function getQuotaBand(upstream) {
   if (remaining < 30) return 'low';
   if (remaining < 70) return 'moderate';
   return 'plenty';
+}
+
+function hasActiveCooldown(upstream) {
+  const health = upstream?.health;
+  if (health?.status !== 'cooldown') return false;
+  const nextEligibleAt = Date.parse(health.nextEligibleAt);
+  return !Number.isFinite(nextEligibleAt) || nextEligibleAt > Date.now();
+}
+
+function isReauthRequired(upstream) {
+  return upstream?.tokenRefresh?.status === 'reauth_required' || upstream?.health?.status === 'reauth_required';
+}
+
+function isUpstreamActive(upstream) {
+  return upstream?.eligibility === 'normal'
+    && !['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
+    && !isReauthRequired(upstream)
+    && !hasActiveCooldown(upstream);
 }
 
 function getExpiryTs(upstream) {
@@ -1114,6 +1525,10 @@ function quotaCount(quota) {
   return `$${formatNumber(remaining)} left of $${formatNumber(quota.limitDollars)}`;
 }
 function formatDate(value) { return value ? new Date(value).toLocaleString() : 'unknown'; }
+function formatShortTime(value) {
+  const timestamp = new Date(value);
+  return Number.isNaN(timestamp.getTime()) ? 'later' : timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
 function formatTokenExpiry(value) {
   const hours = Math.floor((new Date(value).getTime() - Date.now()) / (60 * 60 * 1000));
   if (hours < 0) return `Expired ${Math.ceil(-hours / 24)} day${Math.ceil(-hours / 24) === 1 ? '' : 's'} ago`;
@@ -1212,11 +1627,11 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
               {listed.length ? (
                 <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToVerticalAxis, restrictToParentElement]} onDragEnd={onDragEnd}>
                   <SortableContext items={ids} strategy={verticalListSortingStrategy}>
-                    <VStack gap={2}>
+                    <ScrollList count={listed.length}>
                       {listed.map((upstream, index) => (
                         <SortableRow key={upstream.id} upstream={upstream} index={index} onRemove={(id) => setIds((current) => current.filter((item) => item !== id))} />
                       ))}
-                    </VStack>
+                    </ScrollList>
                   </SortableContext>
                 </DndContext>
               ) : (
@@ -1282,10 +1697,12 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
         <LayoutContent>
           <form id="routing-form" onSubmit={submit}>
             <VStack gap={4}>
-              <SegmentedControl label="Strategy" value={strategy} onChange={setStrategy}>
-                <SegmentedControlItem value="least-recent-success" label="Least recent success" />
-                <SegmentedControlItem value="most-remaining-quota" label="Most remaining quota" />
-              </SegmentedControl>
+              <StackItem size="static" crossAlignSelf="start">
+                <SegmentedControl label="Strategy" value={strategy} layout="hug" onChange={setStrategy}>
+                  <SegmentedControlItem value="least-recent-success" label="Least recent success" />
+                  <SegmentedControlItem value="most-remaining-quota" label="Most remaining quota" />
+                </SegmentedControl>
+              </StackItem>
               <HStack gap={2} vAlign="end" wrap="wrap">
                 <StackItem size="fill">
                   <Selector
@@ -1310,29 +1727,35 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
                     <Heading level={3}>Candidate order</Heading>
                     <Badge label={`${diagnostics.candidateCount} eligible`} variant="blue" />
                   </HStack>
-                  {diagnostics.candidates.length ? diagnostics.candidates.map((candidate) => (
-                    <Card key={candidate.id}>
-                      <HStack justify="between" gap={2} vAlign="center">
-                        <VStack gap={1}>
-                          <Text type="label" weight="bold">{candidate.order}. {candidate.name}</Text>
-                          <Text type="supporting" color="secondary">{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
-                        </VStack>
-                        <Badge
-                          label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : candidate.quota.status}
-                          variant={candidate.quota.status === 'known' ? 'green' : 'neutral'}
-                        />
-                      </HStack>
-                    </Card>
-                  )) : <EmptyState title="No eligible upstreams" description="The current routing context excludes every upstream." />}
+                  {diagnostics.candidates.length ? (
+                    <ScrollList count={diagnostics.candidates.length}>
+                      {diagnostics.candidates.map((candidate) => (
+                        <Card key={candidate.id}>
+                          <HStack justify="between" gap={2} vAlign="center">
+                            <VStack gap={1}>
+                              <Text type="label" weight="bold">{candidate.order}. {candidate.name}</Text>
+                              <Text type="supporting" color="secondary">{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
+                            </VStack>
+                            <Badge
+                              label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : candidate.quota.status}
+                              variant={candidate.quota.status === 'known' ? 'green' : 'neutral'}
+                            />
+                          </HStack>
+                        </Card>
+                      ))}
+                    </ScrollList>
+                  ) : <EmptyState title="No eligible upstreams" description="The current routing context excludes every upstream." />}
                   {diagnostics.exclusions.length > 0 && (
                     <VStack gap={2}>
                       <Heading level={3}>Excluded</Heading>
-                      {diagnostics.exclusions.map((candidate) => (
-                        <HStack key={candidate.id} justify="between" gap={2}>
-                          <Text type="supporting">{candidate.name}</Text>
-                          <Badge label={candidate.code} variant="neutral" />
-                        </HStack>
-                      ))}
+                      <ScrollList count={diagnostics.exclusions.length} height={240}>
+                        {diagnostics.exclusions.map((candidate) => (
+                          <HStack key={candidate.id} justify="between" gap={2}>
+                            <Text type="supporting">{candidate.name}</Text>
+                            <Badge label={candidate.code} variant="neutral" />
+                          </HStack>
+                        ))}
+                      </ScrollList>
                     </VStack>
                   )}
                 </VStack>
@@ -1345,7 +1768,127 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
   );
 }
 
-function DiagnosticsDialog({ isOpen, diagnostics, isLoading, onRefresh, onClose }) {
+function SystemStatusDialog({
+  isOpen,
+  status,
+  summary,
+  isLoading,
+  error,
+  onRefresh,
+  onOpenDiagnostics,
+  onOpenCompatibility,
+  onClose
+}) {
+  const readiness = status?.diagnostics?.readiness;
+  const gateway = status?.diagnostics?.gateway;
+  const catalog = status?.catalog;
+  const hostHealth = status?.hostHealth;
+  const pacingRows = status?.pacing || [];
+  const compatibility = status?.compatibility;
+  const queueDepth = pacingRows.reduce((total, entry) => total + (entry.queueDepth || 0), 0);
+  const checks = readiness?.checks ? Object.entries(readiness.checks) : [];
+  const readinessState = readinessDisplayState(readiness);
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={onClose} width={820}>
+      <Layout
+        header={<DialogHeader title="System status" subtitle="Gateway readiness, compatibility, discovery, and local pacing" onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            <VStack gap={4}>
+              {error && <Banner title="System status unavailable" description={error} status="error" />}
+              {isLoading && !status ? (
+                <VStack gap={3}>
+                  <Skeleton height={72} />
+                  <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                    <Skeleton height={88} />
+                    <Skeleton height={88} />
+                    <Skeleton height={88} />
+                  </Grid>
+                </VStack>
+              ) : (
+                <>
+                  <Banner
+                    title={summary.warningCount ? `${summary.warningCount} item${summary.warningCount === 1 ? ' needs' : 's need'} attention` : 'All monitored systems are ready'}
+                    description={summary.message}
+                    status={summary.warningCount ? 'warning' : 'success'}
+                  />
+                  <Grid columns={{ minWidth: 160, max: 4, repeat: 'fit' }} gap={2}>
+                    <StatusMetric label="Readiness" value={readinessStatusLabel(readinessState)} variant={diagnosticVariant(readinessState)} />
+                    <StatusMetric label="Model catalog" value={catalog ? `${catalog.modelCount} models` : 'unknown'} variant={catalogVariant(catalog)} />
+                    <StatusMetric label="Codex host circuit" value={hostHealth?.openOriginCount ? `${hostHealth.openOriginCount} open` : 'closed'} variant={hostHealth?.openOriginCount ? 'warning' : 'success'} />
+                    <StatusMetric label="Pacing queue" value={queueDepth ? `${queueDepth} queued` : 'clear'} variant={queueDepth ? 'warning' : 'success'} />
+                  </Grid>
+
+                  <Card variant="muted">
+                    <Collapsible trigger="Readiness checks" defaultIsOpen>
+                      <Grid columns={{ minWidth: 170, max: 3, repeat: 'fit' }} gap={2}>
+                        {checks.map(([name, checkStatus]) => (
+                          <ReadinessCheck key={name} name={name} status={checkStatus} />
+                        ))}
+                      </Grid>
+                    </Collapsible>
+                  </Card>
+
+                  <Card variant="muted">
+                    <Collapsible trigger="Operational details" defaultIsOpen={false}>
+                      <Grid columns={{ minWidth: 190, max: 3, repeat: 'fit' }} gap={3}>
+                        <VStack gap={1}>
+                          <Text type="label" weight="bold">Gateway</Text>
+                          <Text type="supporting" color="secondary">{gateway?.runtime?.activeAttemptCount ?? 0} active attempts</Text>
+                          <Text type="supporting" color="secondary">{gateway?.retainedFailureCount ?? 0} retained failures</Text>
+                        </VStack>
+                        <VStack gap={1}>
+                          <Text type="label" weight="bold">Model discovery</Text>
+                          <Text type="supporting" color="secondary">{catalog?.source || 'unknown'} source, {catalog?.freshness || 'unknown'} freshness</Text>
+                          <Text type="supporting" color="secondary">{catalog?.freshAccountCount ?? 0}/{catalog?.accountCount ?? 0} account catalogs fresh</Text>
+                        </VStack>
+                        <VStack gap={1}>
+                          <Text type="label" weight="bold">Compatibility</Text>
+                          <Text type="supporting" color="secondary">{compatibility?.counts?.active ?? 0} learned rules</Text>
+                          <Text type="supporting" color="secondary">{compatibility?.counts?.observations ?? 0} pending evidence records</Text>
+                        </VStack>
+                      </Grid>
+                    </Collapsible>
+                  </Card>
+                </>
+              )}
+            </VStack>
+          </LayoutContent>
+        )}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="between" gap={2} wrap="wrap">
+              <HStack gap={2} wrap="wrap">
+                <Button label="Diagnostics" variant="secondary" onClick={onOpenDiagnostics} />
+                <Button label="Compatibility" variant="secondary" onClick={onOpenCompatibility} />
+              </HStack>
+              <HStack gap={2}>
+                <Button label="Close" variant="secondary" onClick={onClose} />
+                <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+              </HStack>
+            </HStack>
+          </LayoutFooter>
+        )}
+      />
+    </Dialog>
+  );
+}
+
+function StatusMetric({ label, value, variant }) {
+  return (
+    <Card variant="muted" padding={2}>
+      <VStack gap={2}>
+        <Text type="supporting" color="secondary">{label}</Text>
+        <HStack justify="between" vAlign="center" gap={2}>
+          <Text type="label" weight="bold">{value}</Text>
+          <Badge label={variant === 'success' ? 'OK' : variant === 'warning' ? 'Check' : 'Unknown'} variant={variant} />
+        </HStack>
+      </VStack>
+    </Card>
+  );
+}
+
+function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, onClose }) {
   const readiness = diagnostics?.readiness;
   const gateway = diagnostics?.gateway;
   const checks = readiness?.checks ? Object.entries(readiness.checks) : [];
@@ -1356,18 +1899,16 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, onRefresh, onClose 
         content={(
           <LayoutContent>
             <VStack gap={4}>
+              {error && <Banner title="Diagnostics unavailable" description={error} status="error" />}
               <VStack gap={2}>
                 <HStack justify="between" vAlign="center">
                   <Heading level={3}>Readiness</Heading>
-                  <Badge label={readiness?.status || 'loading'} variant={diagnosticVariant(readiness?.status)} />
+                  <Badge label={readinessStatusLabel(readiness?.status || 'pending')} variant={diagnosticVariant(readiness?.status)} />
                 </HStack>
                 <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
                   {checks.map(([name, status]) => (
                     <Card key={name} variant="muted" padding={2}>
-                      <HStack justify="between" vAlign="center" gap={2}>
-                        <Text type="supporting">{readinessLabel(name)}</Text>
-                        <Badge label={status} variant={diagnosticVariant(status)} />
-                      </HStack>
+                      <ReadinessCheck name={name} status={status} />
                     </Card>
                   ))}
                 </Grid>
@@ -1384,30 +1925,34 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, onRefresh, onClose 
 
               <VStack gap={2}>
                 <Heading level={3}>Terminal failures</Heading>
-                {gateway?.failures?.length ? gateway.failures.map((failure, index) => (
-                  <Card key={`${failure.completedAt}-${index}`} padding={3}>
-                    <VStack gap={2}>
-                      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                        <Text weight="bold">{failure.endpoint || 'Gateway request'}</Text>
-                        <HStack gap={1} vAlign="center">
-                          {failure.responseStatusCode && <Badge label={String(failure.responseStatusCode)} variant="error" />}
-                          <Badge label={failure.errorCode || 'failed'} variant="error" />
-                        </HStack>
-                      </HStack>
-                      <Text type="supporting" color="secondary">
-                        {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {failure.retryCount} retries
-                      </Text>
-                      {failure.exclusionReasons?.length > 0 && (
-                        <Text type="supporting">Reasons: {failure.exclusionReasons.join(', ')}</Text>
-                      )}
-                      {failure.attempts?.map((attempt) => (
-                        <Text key={attempt.attemptNumber} type="supporting" color="secondary">
-                          Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
-                        </Text>
-                      ))}
-                    </VStack>
-                  </Card>
-                )) : (
+                {gateway?.failures?.length ? (
+                  <ScrollList count={gateway.failures.length}>
+                    {gateway.failures.map((failure, index) => (
+                      <Card key={`${failure.completedAt}-${index}`} padding={3}>
+                        <VStack gap={2}>
+                          <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+                            <Text weight="bold">{failure.endpoint || 'Gateway request'}</Text>
+                            <HStack gap={1} vAlign="center">
+                              {failure.responseStatusCode && <Badge label={String(failure.responseStatusCode)} variant="error" />}
+                              <Badge label={failure.errorCode || 'failed'} variant="error" />
+                            </HStack>
+                          </HStack>
+                          <Text type="supporting" color="secondary">
+                            {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {failure.retryCount} retries
+                          </Text>
+                          {failure.exclusionReasons?.length > 0 && (
+                            <Text type="supporting">Reasons: {failure.exclusionReasons.join(', ')}</Text>
+                          )}
+                          {failure.attempts?.map((attempt) => (
+                            <Text key={attempt.attemptNumber} type="supporting" color="secondary">
+                              Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
+                            </Text>
+                          ))}
+                        </VStack>
+                      </Card>
+                    ))}
+                  </ScrollList>
+                ) : (
                   <EmptyState title="No terminal failures" description="The retained diagnostic window is clear." />
                 )}
               </VStack>
@@ -1427,11 +1972,162 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, onRefresh, onClose 
   );
 }
 
+function CompatibilityDialog({ isOpen, compatibility, isLoading, error, onResetFact, onResetAll, onRefresh, onClose }) {
+  const facts = compatibility?.facts || [];
+  return (
+    <Dialog isOpen={isOpen} onOpenChange={onClose} width={820}>
+      <Layout
+        header={<DialogHeader title="Compatibility" subtitle="Protocol fingerprints and bounded learned behavior" onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            <VStack gap={4}>
+              {error && <Banner title="Compatibility status unavailable" description={error} status="error" />}
+              <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                <Metric label="Learned compatibility rules" value={compatibility?.counts?.active ?? 0} />
+                <Metric label="Stale" value={compatibility?.counts?.stale ?? 0} />
+                <Metric label="Pending evidence" value={compatibility?.counts?.observations ?? 0} />
+              </Grid>
+
+              <VStack gap={2}>
+                <HStack justify="between" vAlign="center">
+                  <Heading level={3}>Passive learning</Heading>
+                  <Badge
+                    label={compatibility?.passiveEnabled ? 'enabled' : 'disabled'}
+                    variant={compatibility?.passiveEnabled ? 'success' : 'neutral'}
+                  />
+                </HStack>
+              </VStack>
+
+              <Card variant="muted">
+                <Collapsible trigger="Protocol fingerprint details" defaultIsOpen={false}>
+                  <Grid columns={{ minWidth: 260, max: 2, repeat: 'fit' }} gap={2}>
+                    {Object.entries(compatibility?.fingerprints || {}).map(([provider, fingerprint]) => (
+                      <VStack key={provider} gap={1}>
+                        <HStack justify="between" vAlign="center">
+                          <Text type="label" weight="bold">{provider}</Text>
+                          <Badge label={`v${fingerprint.version}`} variant="neutral" />
+                        </HStack>
+                        <Text type="supporting" color="secondary">{fingerprint.hash}</Text>
+                      </VStack>
+                    ))}
+                  </Grid>
+                </Collapsible>
+              </Card>
+
+              <CompatibilityFactList title="Learned compatibility rules" facts={facts} onResetFact={onResetFact} />
+            </VStack>
+          </LayoutContent>
+        )}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="between" gap={2} wrap="wrap">
+              <Button label="Reset all" variant="destructive" isDisabled={!facts.length} onClick={onResetAll} />
+              <HStack justify="end" gap={2}>
+                <Button label="Close" variant="secondary" onClick={onClose} />
+                <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+              </HStack>
+            </HStack>
+          </LayoutFooter>
+        )}
+      />
+    </Dialog>
+  );
+}
+
+function CompatibilityFactList({ title, facts, onResetFact }) {
+  return (
+    <VStack gap={2}>
+      <HStack justify="between" vAlign="center">
+        <Heading level={3}>{title}</Heading>
+        <Badge label={String(facts.length)} variant="neutral" />
+      </HStack>
+      {facts.length ? (
+        <ScrollList count={facts.length}>
+          {facts.map((fact) => (
+            <Card key={fact.id} padding={3}>
+              <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
+                <VStack gap={1}>
+                  <HStack gap={1} vAlign="center" wrap="wrap">
+                    <Text weight="bold">{fact.features.join(', ')}</Text>
+                    <Badge label={fact.provider} variant={fact.provider === 'codex' ? 'purple' : 'teal'} />
+                    <Badge label={fact.route} variant="neutral" />
+                  </HStack>
+                  <Text type="supporting" color="secondary">
+                    {fact.evidenceCount} observations · expires {formatDiagnosticTime(fact.expiresAt)}
+                  </Text>
+                </VStack>
+                <Button label="Reset fact" variant="destructive" size="sm" onClick={() => onResetFact(fact)} />
+              </HStack>
+            </Card>
+          ))}
+        </ScrollList>
+      ) : <EmptyState title={`No ${title.toLowerCase()}`} description="No learned records are present in this category." />}
+    </VStack>
+  );
+}
+
+function ScrollList({ children, count, height = 320 }) {
+  const bounded = count > 5;
+  return (
+    <VStack gap={2} height={bounded ? height : undefined} isScrollable={bounded} paddingInline={bounded ? 1 : undefined}>
+      {children}
+    </VStack>
+  );
+}
+
+function ReadinessCheck({ name, status }) {
+  const description = readinessDescription(name, status);
+  return (
+    <VStack gap={1}>
+      <HStack justify="between" vAlign="center" gap={2}>
+        <Text type="supporting">{readinessLabel(name)}</Text>
+        <Badge label={readinessStatusLabel(status)} variant={diagnosticVariant(status)} />
+      </HStack>
+      {description && <Text type="supporting" color="secondary">{description}</Text>}
+    </VStack>
+  );
+}
+
 function diagnosticVariant(status) {
   if (status === 'ready') return 'success';
   if (status === 'failed') return 'error';
   if (status === 'pending' || status === 'degraded') return 'warning';
   return 'neutral';
+}
+
+function catalogVariant(catalog) {
+  if (!catalog) return 'neutral';
+  if (catalog.freshness === 'stale' || catalog.lastFailureAt && !catalog.lastSuccessAt) return 'warning';
+  return 'success';
+}
+
+function readinessDisplayState(readiness) {
+  const states = Object.values(readiness?.checks || {});
+  if (states.includes('failed')) return 'failed';
+  if (states.includes('pending')) return 'pending';
+  if (states.includes('degraded')) return 'degraded';
+  return readiness?.status || 'unknown';
+}
+
+function summarizeSystemStatus(status, upstreams, error = '') {
+  if (!status) {
+    return error
+      ? { warningCount: 1, message: 'System status could not be loaded.' }
+      : { warningCount: 0, message: 'Open system status for current gateway health.' };
+  }
+  const warnings = [];
+  if (error) warnings.push('status refresh');
+  if (readinessDisplayState(status.diagnostics?.readiness) !== 'ready') warnings.push('gateway readiness');
+  if (status.hostHealth?.openOriginCount > 0) warnings.push('Codex host circuit');
+  if (status.catalog?.freshness === 'stale') warnings.push('model catalog');
+  if ((status.pacing || []).some((entry) => entry.queueDepth > 0)) warnings.push('pacing queue');
+  if (upstreams.some(hasActiveCooldown)) warnings.push('upstream cooldowns');
+  const retainedFailures = status.diagnostics?.gateway?.retainedFailureCount || 0;
+  if (retainedFailures > 0) warnings.push('recent gateway failures');
+  return {
+    warningCount: warnings.length,
+    message: warnings.length ? `Review ${warnings.join(', ')}.` : 'Readiness, discovery, host health, compatibility, and pacing are clear.'
+  };
 }
 
 function readinessLabel(name) {
@@ -1442,6 +2138,24 @@ function readinessLabel(name) {
     quotaRefresh: 'Quota refresh',
     modelCatalog: 'Model catalog'
   }[name] || name;
+}
+
+function readinessStatusLabel(status) {
+  return {
+    ready: 'Ready',
+    degraded: 'Fallback active',
+    pending: 'Starting',
+    failed: 'Failed'
+  }[status] || 'Unknown';
+}
+
+function readinessDescription(name, status) {
+  if (status !== 'degraded') return '';
+  return {
+    tokenRecovery: 'Some credentials could not be refreshed. Other upstreams remain available.',
+    quotaRefresh: 'One or more quota reads failed. Scheduled refreshes will keep retrying.',
+    modelCatalog: 'Live discovery is unavailable or incomplete. Static or last-known models remain available.'
+  }[name] || 'The gateway is available with reduced supporting data.';
 }
 
 function formatDiagnosticTime(value) {
@@ -1463,6 +2177,17 @@ function formatTimings(timings = {}) {
     Number.isFinite(timings[name]) ? [`${label} ${timings[name]}ms`] : []
   ));
   return values.length ? values.join(', ') : 'timing unavailable';
+}
+
+function App() {
+  const [themeMode, setThemeMode] = useStoredValue('codex_theme_mode', 'dark');
+  return (
+    <Theme theme={neutralTheme} mode={themeMode}>
+      <ToastViewport position="bottomEnd" maxVisible={3}>
+        <Dashboard themeMode={themeMode} setThemeMode={setThemeMode} />
+      </ToastViewport>
+    </Theme>
+  );
 }
 
 createRoot(document.getElementById('root')).render(<App />);

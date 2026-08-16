@@ -121,6 +121,38 @@ test('start refreshes quota immediately, repeats on the configured interval, and
   }
 });
 
+test('scheduled quota refresh recovers readiness after an initial failure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-readiness-recovery-'));
+  const store = new Store(dir);
+  store.create({ type: 'codex', accessToken: 'poll-token' });
+  let quotaCalls = 0;
+  const fetchImpl = async (url) => {
+    if (!String(url).includes('/usage')) return new Response('{}', { status: 500 });
+    quotaCalls += 1;
+    if (quotaCalls === 1) return new Response('{}', { status: 500 });
+    return new Response(JSON.stringify({
+      rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 2_592_000 } }
+    }), { status: 200 });
+  };
+  const server = start(0, { store, apiKey: 'poll-key', fetchImpl, pollIntervalMs: 20 });
+  try {
+    await new Promise((resolve) => server.once('listening', resolve));
+    const port = server.address().port;
+    const deadline = Date.now() + 1_000;
+    let readiness;
+    while (Date.now() < deadline) {
+      readiness = await fetch(`http://127.0.0.1:${port}/readyz`).then((response) => response.json());
+      if (quotaCalls >= 2 && readiness.checks.quotaRefresh === 'ready') break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(quotaCalls >= 2);
+    assert.equal(readiness.checks.quotaRefresh, 'ready');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('streams upstream changes after the initial ready event', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-upstream-events-'));
   const store = new Store(dir);
