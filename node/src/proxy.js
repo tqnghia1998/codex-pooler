@@ -15,6 +15,7 @@ import { createChatStreamState, createPublicResponsesState, decodeSseBlock, norm
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
+import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, publicMisalignmentError } from './policy-failures.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 import {
@@ -76,6 +77,16 @@ const MAX_SESSION_ID_LENGTH = 200;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
 const SESSION_HEADERS = ['x-codex-window-id', 'x-codex-session-id', 'session-id', 'x-session-id', 'x-session-affinity', 'session_id', 'x-codex-conversation-id'];
 const TERMINAL_EVENT_TYPE = Symbol('terminalEventType');
+const POLICY_ROUTES = new Set([
+  '/v1/responses',
+  '/v1/chat/completions',
+  '/backend-api/codex/responses',
+  '/backend-api/codex/v1/responses',
+  '/backend-api/codex/v1/chat/completions',
+  '/v1/responses/compact',
+  '/backend-api/codex/responses/compact',
+  '/backend-api/codex/v1/responses/compact'
+]);
 
 export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store) }) {
   if (!validApiKey(req, apiKey)) {
@@ -101,6 +112,10 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
   const dispatchPayload = compactionBridge?.payload || payload;
+  if (sourcePath === '/v1/chat/completions' && normalizedServiceTier(payload?.service_tier) === 'ultrafast') {
+    sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_request', message: 'service_tier is not supported', param: 'service_tier' } });
+    return;
+  }
   if (sourcePath === '/v1/messages') {
     const anthropicHeaderError = validateAnthropicHeaders(req);
     if (anthropicHeaderError) {
@@ -170,9 +185,11 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
 
   if (!response.ok) {
     const errorBytes = await readBoundedResponse(response);
-    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
+    const policyError = publicPolicyError(errorBytes, path, sourcePath);
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: policyError?.code || 'upstream_response_failed', responseStatusCode: response.status });
     const validAnthropic = response.status >= 400 && response.status < 500 && upstream.type === 'compass' && sourcePath === '/v1/messages' && validAnthropicError(errorBytes);
-    if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
+    if (policyError) sendJson(res, response.status, { error: policyError });
+    else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
     else sendFailure(res, retryAfterHeader(response));
     return;
   }
@@ -294,14 +311,20 @@ function visibleCompactionContent(content) {
 function compactionBridgeResult(decoded, publicResponses = false) {
   if (!plainObject(decoded)) return null;
   const sources = Array.isArray(decoded.output) ? decoded.output : [];
-  let source = sources.find((item) => plainObject(item) && ['compaction', 'compaction_summary'].includes(item.type) && typeof item.encrypted_content === 'string');
-  if (!source && plainObject(decoded.compaction_summary) && typeof decoded.compaction_summary.encrypted_content === 'string') source = decoded.compaction_summary;
+  const validContent = (item) => publicResponses ? cleanString(item?.encrypted_content) : typeof item?.encrypted_content === 'string';
+  let source = publicResponses
+    ? sources.find((item) => plainObject(item) && ['compaction', 'compaction_summary'].includes(item.type))
+    : sources.find((item) => plainObject(item) && ['compaction', 'compaction_summary'].includes(item.type) && validContent(item));
+  if (source && !validContent(source)) return null;
+  if (!source && plainObject(decoded.compaction_summary) && validContent(decoded.compaction_summary)) source = decoded.compaction_summary;
   if (!source) return null;
   const item = {
     type: 'compaction',
     encrypted_content: source.encrypted_content,
-    ...(typeof source.id === 'string' ? { id: source.id } : {}),
-    ...(typeof source.internal_chat_message_metadata_passthrough?.turn_id === 'string'
+    ...(publicResponses
+      ? source.id === null || typeof source.id === 'string' ? { id: source.id } : {}
+      : typeof source.id === 'string' ? { id: source.id } : {}),
+    ...(!publicResponses && typeof source.internal_chat_message_metadata_passthrough?.turn_id === 'string'
       ? { internal_chat_message_metadata_passthrough: { turn_id: source.internal_chat_message_metadata_passthrough.turn_id } }
       : {})
   };
@@ -335,7 +358,8 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   const responsePinnedId = originalPath === '/v1/responses' ? store.responseUpstream(payload?.previous_response_id, scopeId, apiKeyId) : null;
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
-  const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
+  const ultrafast = normalizedServiceTier(payload?.service_tier) === 'ultrafast';
+  const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
   if (responsePinnedId && (requestedId && requestedId !== responsePinnedId || requestedType && store.get(responsePinnedId, scopeId)?.type !== requestedType)) {
     return { candidates: [], diagnostics: { exclusions: [{ code: 'response_pin_conflict' }] } };
   }
@@ -343,10 +367,16 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
     affinityId: pinnedId,
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
-    requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex ? 'codex' : '',
+    requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
     rotateFromId: pinnedId || responsePinnedId || requestedId || requestedType ? '' : rotationUpstreamId,
     model,
-    modelSupport: (upstreamId, requestedModel, generation) => modelCatalog.supports(upstreamId, requestedModel, generation),
+    modelSupport: (upstreamId, requestedModel, generation) => {
+      const supported = modelCatalog.supports(upstreamId, requestedModel, generation);
+      if (supported === false) return false;
+      return ultrafast
+        ? modelCatalog.supportsServiceTier(upstreamId, requestedModel, 'ultrafast', generation)
+        : supported;
+    },
     scopeId,
     requirements: requestRequirements(path, payload),
     routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http'
@@ -404,7 +434,10 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       });
       persistResponseCookies(response, upstream, credentials, store);
       let authenticationRetried = false;
-      if ((response.status === 401 || response.status === 403) && upstream.type === 'codex' && credentials.refreshToken) {
+      const initialPolicyFailure = policyRoute(path, sourcePath) && [400, 403].includes(response.status)
+        ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
+        : null;
+      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && upstream.type === 'codex' && credentials.refreshToken) {
         try {
           const refreshed = await refreshProviderCredentials(upstream, credentials, {
             fetchImpl,
@@ -472,14 +505,24 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             modelCatalog.markUnsupported(upstream.id, payload?.model);
           }
           void response.body?.cancel('Retrying a withheld first SSE event').catch(() => {});
-          store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent(inspected.firstEvent));
+          store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent(inspected.firstEvent, {
+            allowMisalignmentPolicy: policyRoute(path, sourcePath)
+          }));
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_first_event_failed', responseStatusCode: response.status });
           continue;
         }
       }
       if (authenticationRetried && (response.status === 401 || response.status === 403) && sourcePath !== '/v1/responses/compact') {
+        const body = parseJson(await readBoundedResponse(response.clone()));
+        const outcome = classifyHttpResponse(response, body, {
+          allowMisalignmentPolicy: policyRoute(path, sourcePath)
+        });
+        if (outcome.errorCode === MISALIGNMENT_POLICY_CODE) {
+          store.settleUpstreamAttempt(upstream.id, admission, outcome);
+          return { upstream, attemptId, startedAt, response, admission: null };
+        }
         await readBoundedResponse(response);
-        store.settleUpstreamAttempt(upstream.id, admission, classifyHttpResponse(response));
+        store.settleUpstreamAttempt(upstream.id, admission, outcome);
         retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
         continue;
       }
@@ -488,7 +531,25 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         && payload?.stream !== true
         && sourcePath !== '/v1/responses/compact'
         && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
-      if (publicCodexCollection) collected = await collectCodexResponse(response, upstreamDeadlines);
+      if (publicCodexCollection) {
+        collected = await collectCodexResponse(response, upstreamDeadlines);
+        const policyFailure = collected?.[TERMINAL_EVENT_TYPE] === 'response.failed'
+          ? misalignmentPolicyFailure({ response: collected })
+          : null;
+        if (policyFailure) {
+          store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false, errorCode: policyFailure.code });
+          return {
+            upstream,
+            attemptId,
+            startedAt,
+            response: new Response(JSON.stringify({ error: policyFailure }), {
+              status: 403,
+              headers: { 'content-type': 'application/json' }
+            }),
+            admission: null
+          };
+        }
+      }
     } catch (error) {
       if (error instanceof PacingError) {
         try { store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false }); } catch {}
@@ -534,7 +595,9 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null };
     }
     const body = parseJson(await readBoundedResponse(response.clone()));
-    const outcome = classifyHttpResponse(response, body);
+    const outcome = classifyHttpResponse(response, body, {
+      allowMisalignmentPolicy: policyRoute(path, sourcePath)
+    });
     const retryable = sourcePath !== '/v1/responses/compact' && outcome.retryable;
     if (retryable) {
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
@@ -1135,8 +1198,13 @@ function responsesToChat(response, chatPayload = {}) {
 async function collectCodexResponse(response, upstreamDeadlines = {}) {
   const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
   const collected = collectEventStreamText(bytes.toString('utf8')) || parseJson(bytes);
+  const policyFailure = collected?.[TERMINAL_EVENT_TYPE] === 'response.failed'
+    && misalignmentPolicyFailure({ response: collected });
+  if (policyFailure) return collected;
   const validJsonResponse = collected && typeof collected === 'object' && !Array.isArray(collected) && typeof collected.id === 'string' && !collected.error;
-  if (!validJsonResponse || collected.status === 'failed' || collected[TERMINAL_EVENT_TYPE] === 'response.failed') throw new Error('Invalid upstream response terminal');
+  if (!validJsonResponse || collected.status === 'failed' || collected[TERMINAL_EVENT_TYPE] === 'response.failed') {
+    throw new Error('Invalid upstream response terminal');
+  }
   return collected;
 }
 
@@ -1210,6 +1278,11 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     }
     usage = mergeUsage(usage, extractUsage(parsed));
     const successfulTerminal = (parsed.type === 'response.completed' || parsed.type === 'response.incomplete') && parsed.response?.status !== 'failed' && !parsed.error && !parsed.response?.error;
+    if (['response.failed', 'error'].includes(parsed.type) || parsed.type === 'response.incomplete' && !successfulTerminal) {
+      healthOutcome = classifySseEvent(parsed, {
+        allowMisalignmentPolicy: transformChat || sanitizePublicResponses
+      });
+    }
     if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
     if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     if (transformChat) {
@@ -1229,7 +1302,9 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     const type = parsed.type;
     if (type === 'response.failed' || type === 'error') {
       terminal = true;
-      healthOutcome = classifySseEvent(parsed);
+      healthOutcome = classifySseEvent(parsed, {
+        allowMisalignmentPolicy: transformChat || sanitizePublicResponses
+      });
       if (transformChat) await writeChunk(res, chatStreamFailure('upstream_response_failed', 'Upstream response failed'));
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else await writeChunk(res, `${event}\n\n`);
@@ -1274,7 +1349,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
     reader.releaseLock();
     if (!res.writableEnded && !res.destroyed) res.end();
     if (completed) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
-    else if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : 'upstream_stream_failed', responseStatusCode });
+    else if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
     else if (response.ok && usage) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
     if (admission) {
       const outcome = healthOutcome || (downstreamClosed
@@ -2027,10 +2102,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     publicUsage = null;
     publicWebSocketFailure(
       client,
-      code === 'codex_host_unavailable' ? code : 'server_error',
+      code === 'codex_host_unavailable' || code === MISALIGNMENT_POLICY_CODE ? code : 'server_error',
       message,
       publicSequence++,
-      publicStreamId
+      publicStreamId,
+      null,
+      code === MISALIGNMENT_POLICY_CODE ? 403 : null
     );
     publicStreamId = null;
     startNextPublicTurn();
@@ -2237,7 +2314,10 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         upstreamId: candidate.id,
         model: compactPayload?.model
       });
-      if ((response.status === 401 || response.status === 403) && candidateCredentials.refreshToken) {
+      const initialPolicyFailure = [400, 403].includes(response.status)
+        ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
+        : null;
+      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && candidateCredentials.refreshToken) {
         try {
           const refreshed = await refreshProviderCredentials(candidate, candidateCredentials, {
             fetchImpl,
@@ -2281,9 +2361,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       }
       if (!response.ok) {
         const body = parseJson(await readBoundedResponse(response.clone()));
-        const outcome = classifyHttpResponse(response, body);
+        const outcome = classifyHttpResponse(response, body, { allowMisalignmentPolicy: true });
         settlePublicAdmission(outcome);
-        throw Object.assign(new Error('Upstream compact request failed'), { upstreamOutcomeSettled: true });
+        throw Object.assign(new Error('Upstream compact request failed'), {
+          upstreamOutcomeSettled: true,
+          policyFailure: [400, 403].includes(response.status) ? misalignmentPolicyFailure(body) : null
+        });
       }
       const decoded = parseJson(await readResponseBytes(response));
       const compact = compactionBridgeResult(decoded, true);
@@ -2331,6 +2414,14 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         publicUsage = null;
         publicStreamId = null;
         startNextPublicTurn();
+        return;
+      }
+      if (error?.policyFailure) {
+        failActiveTurn(error.policyFailure.code, error.policyFailure.message, {
+          class: 'neutral',
+          retryable: false,
+          errorCode: error.policyFailure.code
+        });
         return;
       }
       failActiveTurn(
@@ -2444,7 +2535,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
         gatewayDiagnosticsForStore(store).firstSseEvent(publicAttempt?.id);
         if (retryPublicWebSocketCompatibility(frame, connectionUpstream)) return;
-        const frameOutcome = classifySseEvent(frame);
+        const frameOutcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
         if (!publicOutput && frameOutcome.retryable) {
           if (modelNotFoundFailure(frame)) modelCatalog.markUnsupported(connectionUpstream.id, publicPayload?.model);
           if (retryPublicTurn(frameOutcome)) return;
@@ -2466,8 +2557,11 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         publicTurnActive = false;
         activeFrame = null;
         if (terminal.type === 'response.failed') {
-          settlePublicAdmission(classifySseEvent(frame));
-          finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_response_failed' });
+          const outcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
+          settlePublicAdmission(outcome);
+          finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, {
+            errorCode: outcome.errorCode === MISALIGNMENT_POLICY_CODE ? outcome.errorCode : 'upstream_response_failed'
+          });
         }
         else {
           settlePublicAdmission({ class: 'success', retryable: false });
@@ -2509,9 +2603,18 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     });
     socket.on('unexpected-response', async (_request, response) => {
       settleHostResponse();
-      response.resume();
+      if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) {
+        response.resume();
+        return;
+      }
+      const body = await readWebSocketHandshakeBody(response);
       if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return;
-      if (!authenticationRetried && connectionCredentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
+      const policyFailure = publicResponses && [400, 403].includes(response.statusCode)
+        ? misalignmentPolicyFailure(body)
+        : null;
+      if (policyFailure && publicTurnActive) {
+        failActiveTurn(policyFailure.code, policyFailure.message, { class: 'neutral', retryable: false, errorCode: policyFailure.code });
+      } else if (!authenticationRetried && connectionCredentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
         refreshingConnection = true;
         try {
           const refreshed = await refreshProviderCredentials(connectionUpstream, connectionCredentials, {
@@ -2544,7 +2647,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           }
         }
       } else {
-        const outcome = classifyHttpResponse({ statusCode: response.statusCode, headers: response.headers });
+        const outcome = classifyHttpResponse({ statusCode: response.statusCode, headers: response.headers }, body, {
+          allowMisalignmentPolicy: publicResponses
+        });
         if (retryPublicTurn(outcome)) return;
         if (publicResponses && publicTurnActive) {
           if (socket === targetSocket) {
@@ -2635,7 +2740,7 @@ function publicWebSocketFailure(client, code, message, sequenceNumber = 0, strea
       type: 'error',
       ...(status ? { status } : {}),
       sequence_number: sequenceNumber,
-      error: { type: status === 400 ? 'invalid_request_error' : 'server_error', code, message, param },
+      error: { type: status >= 400 && status < 500 ? 'invalid_request_error' : 'server_error', code, message, param },
       ...(streamId ? { stream_id: streamId } : {})
     }));
   }
@@ -2698,6 +2803,33 @@ function validateGenerate(value) {
   if (value === undefined) return true;
   if (typeof value !== 'boolean') throw new AdapterError('generate must be a boolean', 'generate');
   return value;
+}
+
+function normalizedServiceTier(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function policyRoute(path, sourcePath) {
+  return POLICY_ROUTES.has(path) || POLICY_ROUTES.has(sourcePath);
+}
+
+function publicPolicyError(bytes, path, sourcePath) {
+  return policyRoute(path, sourcePath) ? publicMisalignmentError(parseJson(bytes)) : null;
+}
+
+async function readWebSocketHandshakeBody(response, maxBytes = 1024 * 1024) {
+  const chunks = [];
+  let size = 0;
+  try {
+    for await (const chunk of response) {
+      size += chunk.length;
+      if (size > maxBytes) return null;
+      chunks.push(Buffer.from(chunk));
+    }
+    return parseJson(Buffer.concat(chunks, size));
+  } catch {
+    return null;
+  }
 }
 
 function sendRoutingError(res, store, req, fallback = 'No eligible upstream is available', code = 'no_eligible_backend') {
