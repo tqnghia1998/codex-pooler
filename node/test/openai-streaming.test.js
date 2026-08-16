@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent } from '../src/openai-streaming.js';
+import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
 
 const decode = (chunk) => JSON.parse(chunk.match(/^data: (.+)$/m)[1]);
 
@@ -9,6 +9,7 @@ test('strictly decodes SSE labels and retries only legacy retry codes', () => {
   assert.equal(decodeSseBlock('data: [DONE]').kind, 'done');
   assert.equal(retryableFirstSseEvent({ error: { code: 'server_error' } }), true);
   assert.equal(retryableFirstSseEvent({ error: { code: 'rate_limit_exceeded' } }), false);
+  assert.deepEqual(splitSseBlocks('data: one\r\rdata: two\r\r'), ['data: one', 'data: two', '']);
 });
 
 test('projects failed terminals without provider fields and latches', () => {
@@ -48,10 +49,17 @@ test('translates Chat tool arguments, moderation, incomplete usage, and early fa
   const tool = normalizeChatEvent({ type: 'response.output_item.added', output_index: 4, item: { type: 'function_call', call_id: 'call_4', name: 'lookup', arguments: '{"q":1}' } }, state)[0];
   assert.deepEqual(tool.choices[0].delta.tool_calls[0], { index: 4, id: 'call_4', type: 'function', function: { name: 'lookup', arguments: '{"q":1}' } });
   assert.deepEqual(normalizeChatEvent({ type: 'response.function_call_arguments.delta', output_index: 4, delta: '}' }, state)[0].choices[0].delta.tool_calls[0], { index: 4, function: { arguments: '}' } });
+  assert.deepEqual(normalizeChatEvent({ type: 'response.output_item.added', output_index: 5, item: { type: 'custom_tool_call', call_id: 'call_5', name: 'code_exec', input: 'print(' } }, state)[0].choices[0].delta.tool_calls[0], { index: 5, id: 'call_5', type: 'custom', custom: { name: 'code_exec', input: 'print(' } });
+  assert.deepEqual(normalizeChatEvent({ type: 'response.custom_tool_call_input.delta', output_index: 5, delta: ')' }, state)[0].choices[0].delta.tool_calls[0], { index: 5, custom: { input: ')' } });
   assert.deepEqual(normalizeChatEvent({ type: 'response.output_text.delta', delta: 'x', moderation: { flagged: true } }, state)[0].choices, []);
   const terminal = normalizeChatEvent({ type: 'response.incomplete', response: { incomplete_details: { reason: 'content-filter' }, usage: { input_tokens: 2, output_tokens: 3 } } }, state);
   assert.equal(terminal.at(-1), '[DONE]');
   assert.equal(terminal.at(-2).usage.total_tokens, 5);
   assert.equal(terminal.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'content_filter');
   assert.deepEqual(normalizeChatEvent({ type: 'response.failed', response: { error: { message: 'secret' } } }, createChatStreamState({ model: 'gpt' })), [{ error: { type: 'server_error', code: 'upstream_response_failed', message: 'Upstream response failed', param: null } }]);
+
+  const completedToolState = createChatStreamState({ model: 'gpt' });
+  normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call_done', name: 'lookup', arguments: '{}' } }, completedToolState);
+  const completedTool = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed' } }, completedToolState);
+  assert.equal(completedTool.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
 });
