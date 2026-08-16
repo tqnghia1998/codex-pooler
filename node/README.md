@@ -23,6 +23,10 @@ The Node proxy covers the client-visible local compatibility path:
 | Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, authoritative `price_cost_usd`, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js` |
 | Routing | Ordered spend-cap-eligible candidates, per-account discovered Codex model support, an optional operator-managed priority list ahead of least-recent-success balancing, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output failover, immediate account cooldown for quota responses, reauthentication blocking, shared Codex-origin reachability protection, and durable model/route circuit recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/codex-model-catalog.test.js`, `test/codex-host-health.test.js`, `test/upstream-outcomes.test.js`, `test/store.test.js` |
 | Pacing | Optional per-account and per-model minimum start intervals, bounded abort-aware queues, local `429`/`Retry-After`, and sanitized runtime diagnostics | `test/upstream-pacer.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/server.test.js` |
+| Compatibility learning | Passive structured evidence, versioned HTTP/WebSocket protocol fingerprints, repeated-evidence promotion, sanitized status/reset APIs, and dashboard controls | `test/compatibility-learning.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js` |
+| Compatibility fixtures | Offline sanitized Codex/Claude client captures replayed through live request projection, with deterministic fingerprint/route/shape/rejection drift reports | `test/compatibility-fixtures.test.js` |
+| Compatibility intake | Bounded local capture sanitization, closest-fixture matching, deterministic drift classification, review suggestions, draft output, and CI failure mode | `test/compatibility-intake.test.js` |
+| Client release gate | Reviewed npm manifest, latest-version discovery, integrity-pinned platform packages, loopback-only synthetic client execution, and sanitized intake reports | `test/compatibility-release-gate.test.js` |
 | Readiness and diagnostics | Immediate liveness, startup-settled readiness with documented degradation, bounded sanitized terminal failure reasons, and phase timing summaries | `test/readiness.test.js`, `test/gateway-diagnostics.test.js`, `test/server.test.js`, `test/accounting-lifecycle.test.js` |
 | SSE | Incremental UTF-8/SSE parsing, bounded incomplete events, first-event failover, public Responses sequencing, Chat translation, terminal sanitization, cancellation and usage settlement | `test/proxy.test.js` |
 | Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, bounded frames/pending output, pre-output reconnect, sanitized terminals and terminal usage settlement | `test/gateway-routes.test.js` |
@@ -34,7 +38,10 @@ The Node proxy covers the client-visible local compatibility path:
 - Public Responses WebSocket turns queue in-process while an active turn terminates. A process restart loses queued and in-flight socket state.
 - Credential preparation and refresh failures stay on the selected account instead of crossing accounts. Failover is allowed only after a refresh succeeds but that same account is still rejected, and only when the request is not explicitly or session pinned.
 - Pricing is a small generated snapshot, not the Elixir catalog/database sync. Refresh it explicitly with `npm run pricing:refresh`; unknown or ambiguous models remain unpriced unless the provider reports `price_cost_usd`. Settlements are deduplicated per attempt across the 100 most recent settlements; a replay older than that window is counted again.
-- Compatibility learning is deliberately narrow. A provider may teach the proxy that one allowlisted optional Codex field is rejected, that a Compass Messages model requires adaptive thinking, or that it rejects one of the optional sampling controls `temperature`, `top_p`, or `top_k`. Those per-upstream/model/protocol facts expire after 24 hours, are revalidated before use, and never suppress arbitrary fields even if persisted state is malformed.
+- Compatibility learning is deliberately narrow. A provider may teach the proxy that one allowlisted optional Codex field is rejected, that a Compass Messages model requires adaptive thinking, or that it rejects one of the optional sampling controls `temperature`, `top_p`, or `top_k`. The current request retries immediately, but later requests change only after two independent structured observations. Versioned per-upstream/model/protocol facts expire after 24 hours, and persisted state is validated against fixed code allowlists.
+- Compatibility fixtures are deliberately content-free. They reject credentials, hosts, real model/account/project IDs, request text, provider messages, and unknown schema fields. Fixture drift never updates runtime compatibility facts or fallback allowlists automatically.
+- Compatibility intake reads raw captures only from a local file. Reports and drafts replace content, credentials, IDs, URLs, binary data, dynamic schema/tool-argument keys, and provider messages with deterministic markers. A review suggestion is never permission to expand a fallback allowlist.
+- The client release gate executes only reviewed, integrity-pinned npm packages inside a supported loopback-only network sandbox. A newer registry release is reported but not executed; unsupported isolation fails closed.
 - Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility. `POST /v1/messages/count_tokens` is intentionally unsupported: Compass does not serve it and no local Claude tokenizer exists, so clients fall back to their own estimation.
 - The encrypted local SQLite store is suitable for one local process, not concurrent replicas or production high-availability storage.
 
@@ -55,13 +62,73 @@ By default, the server binds `127.0.0.1` and accepts only localhost Host headers
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
 
+Passive compatibility observation is enabled by default with `CODEX_POOLER_COMPATIBILITY_PASSIVE_ENABLED=true`. It retains at most 256 content-free observations in memory and promotes only allowlisted structured rejections after independent requests. Synthetic probes are intentionally omitted because model and quota refresh already cover metadata routes without testing request compatibility.
+
+Sanitized release fixtures live in `fixtures/compatibility/` and cover Codex public HTTP/SSE,
+native HTTP, compact HTTP, public/native WebSockets, and Compass Anthropic Messages. Run
+`npm run compatibility:check` for a deterministic offline drift report. After adding or deliberately
+changing a sanitized fixture, run `npm run compatibility:update`, inspect the expectation diff, then
+run the check again. Expectations contain only target routes, normalized protocol fingerprints,
+sorted JSON paths/types, `type` discriminator values, and structured rejection status/code/param
+fields. The capture checklist and safety contract are in `COMPATIBILITY_FIXTURE_PLAN.md`.
+
+For a new Codex or Claude client release, create a local capture file using the bounded envelope
+below. Raw capture files may contain sensitive data and should stay outside the repository. The
+committed files in `fixtures/compatibility-intake/` are synthetic test corpus entries only.
+
+```json
+{
+  "schemaVersion": 1,
+  "profile": "codex-public-sse",
+  "client": { "family": "codex", "version": "0.200.0" },
+  "request": {
+    "path": "/v1/responses",
+    "headers": {},
+    "body": { "model": "gpt-example", "input": "example", "stream": true }
+  },
+  "response": {
+    "status": 400,
+    "body": { "error": { "type": "invalid_request_error", "code": "unsupported_parameter", "param": "example" } }
+  }
+}
+```
+
+Run intake without writing anything:
+
+```bash
+npm run compatibility:intake -- --capture=/absolute/path/to/capture.json
+```
+
+Add `--json` for machine-readable output, or `--fail-on-review` to return exit code 1 unless the
+capture exactly matches its closest same-profile fixture. Write a new sanitized draft with
+`--output=/absolute/path/to/draft.json`; the command refuses to overwrite an existing file.
+`draftReady: false` means the live adapter rejected the sanitized shape and the draft has no
+generated expectation yet. Review the report and draft manually before moving it into
+`fixtures/compatibility/` and running `npm run compatibility:check`.
+
+The client release gate uses `fixtures/compatibility-releases.json` as a reviewed allowlist for
+Codex CLI and Claude Code versions, root-package integrity, and per-platform executable packages:
+
+```bash
+npm run compatibility:release-check
+```
+
+Online mode discovers the latest published versions, verifies the reviewed root and platform
+package metadata, downloads only exact pinned packages, verifies SHA-512, and executes each client
+against a temporary loopback synthetic endpoint. A newer release is reported as `new_release` but
+is not executed until its exact provenance is reviewed and added to the manifest. Client execution
+requires platform network isolation that denies external traffic; unsupported hosts fail closed.
+Temporary client state, raw captures, and output are deleted after Phase 9 sanitization. Use
+`--client=codex` or `--client=claude-code`, `--json`, `--fail-on-review`, or `--offline` for a
+verified cache-only run. The full contract is in `COMPATIBILITY_RELEASE_GATE_PLAN.md`.
+
 Shared Codex host health is enabled conservatively by default. Two proven pre-connect failures within 30 seconds open a 15-second circuit for the normalized Codex origin; requests receive a local retryable `503 codex_host_unavailable` with `Retry-After`, and one half-open probe is admitted after cooldown. Only `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `ENETDOWN`, and `EHOSTUNREACH` count. Timeouts, resets, broken pipes, TLS failures, HTTP responses, and authentication failures remain account-attributed, while any actual HTTP response clears host reachability evidence. Configure this with `CODEX_POOLER_CODEX_HOST_CIRCUIT_ENABLED`, `CODEX_POOLER_CODEX_HOST_FAILURE_THRESHOLD`, `CODEX_POOLER_CODEX_HOST_FAILURE_WINDOW_MS`, `CODEX_POOLER_CODEX_HOST_COOLDOWN_MS`, and `CODEX_POOLER_CODEX_HOST_MAX_ENTRIES`.
 
 Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; when it is expired or rejected, the server refreshes it through `https://auth.openai.com/oauth/token` using OpenAI's Codex client ID and persists rotated tokens. Independently, it checks refreshable Codex tokens at startup and hourly, refreshing those that expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. The dashboard also offers a manual Codex token refresh. The server refreshes all upstream quotas immediately and every minute.
 
 Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key` and are never returned by the API or rendered in the browser. `db.sqlite` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Existing `db.json` files migrate automatically on startup. Back up `.data/.key` and `db.sqlite` together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
 
-`GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only the fixed `pending|ready|failed` state plus sanitized per-check states.
+`GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only sanitized fixed states.
 
 Spending caps use 25 credits per dollar, rounded to whole credits, and a positive cap is never rounded down to zero (which would read as no cap). A cap update starts a new cap period and resets spend. Proxy requests require a positive cap: accounts remain eligible until they reach 100%, and a `previous_response_id` continuation stays pinned to its original account below 125%. Valid provider-reported `usage.price_cost_usd` is authoritative, accepted only as a plain non-negative decimal; otherwise supported Codex and Anthropic token usage is priced from the local snapshot, which applies OpenAI's long-context rates above 272,000 input tokens. A known model with no snapshot for the requested service tier or context bucket bills at its standard default rates rather than going unpriced, and a provider `total_tokens` that disagrees with input plus output is reported as received without discarding the priced tokens. The usage endpoint remains available for other integrations.
 
@@ -74,6 +141,9 @@ GET    /api/model-catalog                 # sanitized discovery source/freshness
 GET    /api/codex-host-health             # sanitized aggregate shared-origin circuit status
 GET    /api/pacing                       # sanitized per-account runtime queue/start status
 GET    /api/diagnostics                  # readiness, memory-only successes, and bounded terminal failures
+GET    /api/compatibility                # sanitized fingerprints, counts, and allowlisted facts
+DELETE /api/compatibility/facts          # reset all learned compatibility state
+DELETE /api/compatibility/facts/:id      # reset one opaque compatibility fact
 GET    /api/routing                       # persisted routing strategy
 PUT    /api/routing                       { "strategy": "least-recent-success|most-remaining-quota" }
 POST   /api/routing/dry-run               # sanitized live-planner candidate/exclusion diagnostics
@@ -139,6 +209,8 @@ Request pacing is disabled by default and configured per upstream through create
 
 `GET /api/diagnostics` and the dashboard **Diagnostics** dialog expose readiness plus at most 100 terminal gateway failures. Failure records contain only endpoint class, transport, HTTP status, stable error/exclusion codes, retry count, and integer phase durations for queue wait, credential preparation, connection, first response headers, first SSE/WebSocket event, and terminal completion. Account IDs, upstream IDs, API-key IDs, scope IDs, requested models, hostnames, credentials, request bodies, response bodies, and raw exceptions are removed. Detailed successful traces are process-local and limited to the 20 most recent successes; they are never persisted.
 
+`GET /api/compatibility` and the dashboard **Compatibility** dialog expose only protocol fingerprint version/hash, aggregate active/stale counts, counters, and allowlisted fact metadata. They do not expose upstream/account IDs, model IDs, hostnames, credentials, request/response bodies, or raw errors. Persisted compatibility state is limited to 100 facts per upstream; credential identity replacement clears it.
+
 Proxy routing prefers Codex, prefers Compass for `claude-*` models, and requires Compass for `/v1/messages`. Type preference is soft: `/v1/responses` and `/v1/chat/completions` fall through to the other upstream type when the preferred one is filtered out. Type requirements are hard: `/v1/messages` never reaches a Codex upstream and `/backend-api/codex/*` never reaches a Compass one, so a request with no eligible upstream of the required type fails with `no_compatible_backend` instead of failing over.
 
 The persisted routing strategy defaults to `least-recent-success`, preserving the existing behavior. `most-remaining-quota` is optional and compares normalized remaining percentages only within the same strict priority tier. Quota observations are fresh for five minutes, matching the automatic one-minute refresh cycle with room for transient refresh failures. Missing or stale quota remains eligible and receives the median fresh score in its tier, so unknown providers are not categorically placed last; least-recent-success and stable persisted order break ties. Configure the strategy in dashboard **Routing** or with `GET/PUT /api/routing`. `POST /api/routing/dry-run` uses the live planner and returns sanitized ordered candidates, quota freshness, and exclusion codes without credentials or provider bodies.
@@ -160,5 +232,7 @@ Use `--source=<url-or-file-url>`, `--effective-at=<ISO-8601>`, or `--models=<com
 ## Check
 
 ```bash
+npm run compatibility:check
+npm run compatibility:release-check
 npm test
 ```
