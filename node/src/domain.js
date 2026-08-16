@@ -143,6 +143,7 @@ export function createUpstream(input) {
     email: '',
     accessTokenExpiresAt: null,
     credentialEpoch: 1,
+    compatibilityEpoch: 1,
     modelCatalogEpoch: 1,
     projectId: '',
     quota: null,

@@ -260,13 +260,13 @@ test('records malformed successful compatibility responses as transient evidence
   }
 });
 
-test('retries only the provider-rejected Codex field and remembers it per upstream', async () => {
+test('retries one rejected Codex field immediately and promotes it after independent evidence', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compact-fallback-'));
   const { store, codexUpstream } = configuredStore(dir);
   const bodies = [];
   const fetchImpl = async (_url, options) => {
     bodies.push(JSON.parse(options.body));
-    if (bodies.length === 1) return new Response('{"detail":"Unsupported parameter: max_output_tokens"}', { status: 400 });
+    if (Object.hasOwn(bodies.at(-1), 'max_output_tokens')) return new Response('{"detail":"Unsupported parameter: max_output_tokens"}', { status: 400 });
     return new Response(JSON.stringify({ object: 'response.compaction' }), { status: 200, headers: { 'content-type': 'application/json' } });
   };
   const { server, base } = await start(store, fetchImpl);
@@ -281,20 +281,26 @@ test('retries only the provider-rejected Codex field and remembers it per upstre
     assert.equal('reasoning' in bodies[1], false);
     assert.equal('max_output_tokens' in bodies[1], false);
     assert.equal(bodies[1].temperature, 0.2);
-    const [compatibilityKey] = Object.keys(store.get(codexUpstream.id).compatibility.facts);
-    store.rememberCompatibilityFact(codexUpstream.id, compatibilityKey, {
-      unsupportedFields: ['model', 'max_output_tokens', 'arbitrary_future_field']
-    });
-
     const learned = await gatewayFetch(base, '/backend-api/codex/responses/compact', {
       method: 'POST', headers: { 'content-type': 'application/json', version: 'v'.repeat(128) },
       body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'compact again', max_output_tokens: 256, temperature: 0.4 })
     });
     assert.equal(learned.status, 200);
-    assert.equal(bodies.length, 3);
-    assert.equal(bodies[2].model, 'gpt-5.6-sol');
-    assert.equal('max_output_tokens' in bodies[2], false);
-    assert.equal(bodies[2].temperature, 0.4);
+    assert.equal(bodies.length, 4);
+    assert.equal(bodies[2].max_output_tokens, 256);
+    assert.equal('max_output_tokens' in bodies[3], false);
+    const facts = Object.values(store.get(codexUpstream.id).compatibility.facts);
+    assert.equal(facts.some(({ value }) => value.unsupportedFields?.includes('max_output_tokens')), true);
+
+    const promoted = await gatewayFetch(base, '/backend-api/codex/responses/compact', {
+      method: 'POST', headers: { 'content-type': 'application/json', version: 'v'.repeat(128) },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'compact promoted', max_output_tokens: 512, temperature: 0.6 })
+    });
+    assert.equal(promoted.status, 200);
+    assert.equal(bodies.length, 5);
+    assert.equal(bodies[4].model, 'gpt-5.6-sol');
+    assert.equal('max_output_tokens' in bodies[4], false);
+    assert.equal(bodies[4].temperature, 0.6);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
@@ -987,11 +993,12 @@ test('preserves public Responses WebSocket warmups and validates generate', asyn
   }
 });
 
-test('learns an explicit pre-output Codex WebSocket field rejection and retries the same turn', async () => {
+test('recovers WebSocket compatibility immediately and promotes it after independent turns', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-compatibility-'));
   const { store } = configuredStore(dir);
   const upstreamFrames = [];
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  let completed = 0;
   target.on('connection', (socket) => socket.on('message', (data) => {
     const frame = JSON.parse(data);
     upstreamFrames.push(frame);
@@ -1002,15 +1009,12 @@ test('learns an explicit pre-output Codex WebSocket field rejection and retries 
       }));
       return;
     }
-    if (upstreamFrames.length === 2) {
-      socket.send(JSON.stringify({
-        type: 'response.completed',
-        error: { param: 'temperature', message: 'Unsupported parameter: temperature' },
-        response: { id: 'must-not-retry', status: 'completed', output: [] }
-      }));
-      return;
-    }
-    socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'ws-compatible', status: 'completed', output: [] } }));
+    completed += 1;
+    socket.send(JSON.stringify({
+      type: 'response.completed',
+      error: { param: 'temperature', message: 'Unsupported parameter: temperature' },
+      response: { id: `ws-compatible-${completed}`, status: 'completed', output: [] }
+    }));
   }));
   await new Promise((resolve) => target.once('listening', resolve));
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
@@ -1022,7 +1026,7 @@ test('learns an explicit pre-output Codex WebSocket field rejection and retries 
   });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   try {
-    const result = await new Promise((resolve, reject) => {
+    const turn = () => new Promise((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
         headers: { authorization: `Bearer ${API_KEY}` }
       });
@@ -1039,13 +1043,24 @@ test('learns an explicit pre-output Codex WebSocket field rejection and retries 
       });
       client.once('error', reject);
     });
-    assert.equal(result.type, 'response.completed');
-    assert.equal(result.response.id, 'must-not-retry');
-    assert.equal(upstreamFrames.length, 2);
-    assert.equal(upstreamFrames[0].max_output_tokens, 128);
-    assert.equal('max_output_tokens' in upstreamFrames[1], false);
+    const first = await turn();
+    assert.equal(first.response.id, 'ws-compatible-1');
+    assert.equal(store.get(store.list()[0].id).compatibility, undefined);
+
+    const second = await turn();
+    assert.equal(second.response.id, 'ws-compatible-2');
     const facts = Object.values(store.get(store.list()[0].id).compatibility.facts);
     assert.equal(facts.some(({ value }) => value.unsupportedFields?.includes('max_output_tokens')), true);
+
+    const result = await turn();
+    assert.equal(result.type, 'response.completed');
+    assert.equal(result.response.id, 'ws-compatible-3');
+    assert.equal(upstreamFrames.length, 5);
+    assert.equal(upstreamFrames[0].max_output_tokens, 128);
+    assert.equal('max_output_tokens' in upstreamFrames[1], false);
+    assert.equal(upstreamFrames[2].max_output_tokens, 128);
+    assert.equal('max_output_tokens' in upstreamFrames[3], false);
+    assert.equal('max_output_tokens' in upstreamFrames[4], false);
     assert.equal(store.load().gatewayRequests.some(({ status }) => status === 'in_progress'), false);
   } finally {
     relay.close();
