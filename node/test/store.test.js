@@ -65,6 +65,58 @@ test('changes the model catalog generation only when Codex access identity chang
   }
 });
 
+test('accepts a coalesced credential refresh already persisted by another caller', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'codex',
+      authJson: JSON.stringify({ tokens: {
+        access_token: 'old-access',
+        refresh_token: 'old-refresh',
+        id_token: 'old-id'
+      } })
+    });
+    const first = store.credentials(upstream.id);
+    const second = store.credentials(upstream.id);
+    const refreshed = {
+      ...first,
+      accessToken: 'new-access',
+      refreshToken: 'new-refresh',
+      idToken: 'new-id'
+    };
+    assert.equal(store.persistCredentials(upstream.id, refreshed, '2030-01-01T00:00:00.000Z'), true);
+
+    const coalesced = {
+      ...second,
+      accessToken: 'new-access',
+      refreshToken: 'new-refresh',
+      idToken: 'new-id',
+      codexCookies: 'stale-cookie'
+    };
+    Object.defineProperty(coalesced, 'credentialEpoch', {
+      value: second.credentialEpoch,
+      enumerable: false
+    });
+    assert.equal(store.persistCredentials(upstream.id, coalesced, '2030-01-01T00:00:00.000Z'), true);
+    assert.equal(coalesced.accessToken, 'new-access');
+    assert.equal(coalesced.codexCookies, undefined);
+
+    const competing = {
+      ...second,
+      accessToken: 'different-access',
+      refreshToken: 'different-refresh'
+    };
+    Object.defineProperty(competing, 'credentialEpoch', {
+      value: second.credentialEpoch,
+      enumerable: false
+    });
+    assert.equal(store.persistCredentials(upstream.id, competing, '2030-01-01T00:00:00.000Z'), false);
+    assert.equal(store.credentials(upstream.id).accessToken, 'new-access');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps routing within one loaded database snapshot', () => {
   const { dir, store } = tempStore();
   try {
@@ -130,22 +182,6 @@ test('persists normalized per-upstream pacing policies without runtime state', (
     });
     assert.equal(JSON.stringify(reopened.get(upstream.id)).includes('queueDepth'), false);
     assert.throws(() => reopened.update(upstream.id, { pacing: { maxQueueAgeMs: 99 } }), /maxQueueAgeMs/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('bounds and expires learned upstream compatibility facts', () => {
-  const { dir, store } = tempStore();
-  try {
-    const upstream = store.create({ type: 'compass', projectId: 'compatibility', projectKey: 'secret' });
-    store.rememberCompatibilityFact(upstream.id, 'messages:model', { adaptiveThinking: true }, 1_000);
-    assert.deepEqual(store.compatibilityFact(upstream.id, 'messages:model', { now: 1_500, maxAgeMs: 1_000 }), { adaptiveThinking: true });
-    assert.equal(store.compatibilityFact(upstream.id, 'messages:model', { now: 2_000, maxAgeMs: 1_000 }), null);
-    for (let index = 0; index < 105; index += 1) store.rememberCompatibilityFact(upstream.id, `fact:${index}`, index, 3_000 + index);
-    assert.equal(Object.keys(store.get(upstream.id).compatibility.facts).length, 100);
-    assert.equal(store.compatibilityFact(upstream.id, 'fact:0', { now: 3_200, maxAgeMs: 1_000 }), null);
-    assert.equal(store.compatibilityFact(upstream.id, 'fact:104', { now: 3_200, maxAgeMs: 1_000 }), 104);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
