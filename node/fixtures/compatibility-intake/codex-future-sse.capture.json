@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "profile": "codex-public-sse",
+  "client": {
+    "family": "codex",
+    "version": "0.200.0"
+  },
+  "request": {
+    "path": "/v1/responses",
+    "headers": {
+      "authorization": "fixture-auth-value",
+      "cookie": "fixture-cookie-value",
+      "version": "0.200.0",
+      "originator": "codex_cli_rs",
+      "openai-beta": "future_responses=2026-08-16"
+    },
+    "body": {
+      "model": "gpt-private-preview",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "synthetic customer prompt"
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "future_option": {
+        "mode": "future_mode",
+        "enabled": true,
+        "client_secret": "fixture-client-secret",
+        "sessionToken": "fixture-session-token"
+      },
+      "tools": [
+        {
+          "type": "future_tool",
+          "name": "private_tool_name",
+          "description": "private tool description",
+          "future_capability": true
+        }
+      ]
+    }
+  }
+}
