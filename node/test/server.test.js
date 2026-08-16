@@ -6,6 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp, refreshAllQuotas, start } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { CodexHostHealth } from '../src/codex-host-health.js';
+import { upstreamPacerForStore } from '../src/upstream-pacer.js';
+import { Readiness } from '../src/readiness.js';
 
 async function runningServer(store, options = {}) {
   const server = createServer(createApp({ store, ...options }));
@@ -198,6 +201,10 @@ test('serves unauthenticated health checks but protects usage with the single AP
     const health = await fetch(base + '/healthz');
     assert.equal(health.status, 200);
     assert.deepEqual(await health.json(), { status: 'ok' });
+    const ready = await fetch(base + '/readyz');
+    assert.equal(ready.status, 200);
+    assert.equal((await ready.json()).status, 'ready');
+    assert.equal((await fetch(base + '/readyz', { method: 'POST' })).status, 404);
     assert.equal(await statusWithHost(server.address().port, 'attacker.example'), 403);
     const badOrigin = await fetch(base + '/api/upstreams', {
       method: 'POST', headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
@@ -220,6 +227,74 @@ test('serves unauthenticated health checks but protects usage with the single AP
     assert.equal(filtered.status, 400);
     assert.equal((await filtered.json()).error.code, 'unsupported_parameter');
     assert.throws(() => start(0, { store, apiKey: '' }), /CODEX_POOLER_API_KEY is required/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves sanitized pending and degraded readiness states', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-readiness-'));
+  const readiness = new Readiness({ storage: 'ready', apiKey: 'ready' });
+  const { server, base } = await runningServer(new Store(dir), { apiKey: 'readiness-key', readiness });
+  try {
+    let response = await fetch(base + '/readyz');
+    assert.equal(response.status, 503);
+    assert.equal(response.headers.get('retry-after'), '1');
+    assert.equal((await response.json()).status, 'pending');
+    readiness.set('tokenRecovery', 'degraded');
+    readiness.set('quotaRefresh', 'degraded');
+    readiness.set('modelCatalog', 'degraded');
+    response = await fetch(base + '/readyz');
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      status: 'ready',
+      checks: {
+        storage: 'ready',
+        apiKey: 'ready',
+        tokenRecovery: 'degraded',
+        quotaRefresh: 'degraded',
+        modelCatalog: 'degraded'
+      }
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves sanitized gateway diagnostics without persisted identities', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-diagnostics-api-'));
+  const store = new Store(dir);
+  const key = store.configureApiKey('diagnostics-key');
+  const upstream = store.create({ type: 'compass', projectId: 'sensitive-project', projectKey: 'sensitive-token' });
+  const requestRecord = store.reserveGatewayRequest({
+    scopeId: key.scopeId,
+    apiKeyId: key.id,
+    endpoint: '/v1/responses',
+    model: 'secret-model'
+  });
+  const attempt = store.beginGatewayAttempt(requestRecord.id, upstream.id);
+  store.finalizeGatewayRequest({
+    requestId: requestRecord.id,
+    attemptId: attempt.id,
+    status: 'failed',
+    errorCode: 'upstream_transport_failed',
+    responseStatusCode: 502,
+    exclusionReasons: ['model_not_supported', 'bad token value'],
+    timings: { queueWaitMs: 2, connectionMs: 4, hostname: 'sensitive.example' }
+  });
+  const { server, base } = await runningServer(store, { apiKey: 'diagnostics-key' });
+  try {
+    const response = await request(base, '/api/diagnostics');
+    assert.equal(response.response.status, 200);
+    assert.equal(response.data.gateway.retainedFailureCount, 1);
+    assert.deepEqual(response.data.gateway.failures[0].exclusionReasons, ['model_not_supported', 'upstream_transport_failed']);
+    assert.deepEqual(response.data.gateway.failures[0].attempts[0].timings, { queueWaitMs: 2, connectionMs: 4 });
+    const encoded = JSON.stringify(response.data);
+    for (const secret of [key.id, upstream.id, 'sensitive-project', 'sensitive-token', 'secret-model', 'sensitive.example']) {
+      assert.equal(encoded.includes(secret), false);
+    }
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -249,8 +324,9 @@ test('returns client errors for invalid management request bodies', async () => 
 
 test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-http-'));
+  const store = new Store(dir);
   const providerFetch = async () => new Response(JSON.stringify({ retcode: 0, data: { project: { budget_type: 'recurring', quota_detail: { applied_balance: 100, balance: 75 } } } }), { status: 200 });
-  const { server, base } = await runningServer(new Store(dir), { fetchImpl: providerFetch, compassGatewayToken: 'gateway-token' });
+  const { server, base } = await runningServer(store, { fetchImpl: providerFetch, compassGatewayToken: 'gateway-token' });
   try {
     const created = await request(base, '/api/upstreams', {
       method: 'POST',
@@ -279,9 +355,30 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     const spending = await request(base, `/api/upstreams/${id}/spending`);
     assert.equal(spending.data.spending.spentDollars, 4);
 
+    const admission = store.beginUpstreamAttempt(id, { routeClass: 'test', model: '' });
+    store.settleUpstreamAttempt(id, admission, { class: 'quota', retryable: true });
+    assert.equal(store.get(id).health.status, 'cooldown');
+    const cleared = await request(base, `/api/upstreams/${id}/clear-cooldown`, { method: 'POST', body: '{}' });
+    assert.equal(cleared.response.status, 200);
+    assert.equal(cleared.data.upstream.health, null);
+
     const eligibility = await request(base, '/api/upstreams/eligibility');
     assert.equal(eligibility.response.status, 200);
     assert.equal(eligibility.data.eligible.length, 1);
+
+    const catalog = await request(base, '/api/model-catalog');
+    assert.equal(catalog.response.status, 200);
+    assert.deepEqual(catalog.data.catalog, {
+      source: 'static',
+      freshness: 'fallback',
+      accountCount: 0,
+      attemptedAccountCount: 0,
+      freshAccountCount: 0,
+      modelCount: 8,
+      lastSuccessAt: null,
+      lastFailureAt: null,
+      lastFailureClass: null
+    });
 
     const bulk = await request(base, '/api/spending-caps/bulk', {
       method: 'POST',
@@ -296,6 +393,66 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     const missing = await request(base, `/api/upstreams/${id}`);
     assert.equal(missing.response.status, 404);
   } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves sanitized aggregate Codex host-health diagnostics', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-api-'));
+  const store = new Store(dir);
+  const hostHealth = new CodexHostHealth({ failureThreshold: 2, cooldownMs: 30_000 });
+  hostHealth.settleError(
+    hostHealth.begin('https://sensitive.example/backend-api/codex/responses').lease,
+    Object.assign(new Error('dns'), { code: 'ENOTFOUND' })
+  );
+  const { server, base } = await runningServer(store, { apiKey: 'host-health-key', codexHostHealth: hostHealth });
+  try {
+    const response = await request(base, '/api/codex-host-health', {
+      headers: { authorization: 'Bearer host-health-key' }
+    });
+    assert.equal(response.response.status, 200);
+    assert.equal(response.data.hostHealth.enabled, true);
+    assert.equal(response.data.hostHealth.trackedOriginCount, 1);
+    assert.equal(response.data.hostHealth.openOriginCount, 0);
+    assert.equal(JSON.stringify(response.data).includes('sensitive.example'), false);
+    assert.equal(JSON.stringify(response.data).includes('ENOTFOUND'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves sanitized pacing diagnostics and accepts pacing configuration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-pacing-api-'));
+  const store = new Store(dir);
+  const upstream = store.create({
+    type: 'compass',
+    projectId: 'pacing-api',
+    projectKey: 'secret',
+    pacing: { enabled: true, minStartIntervalMs: 1_000, maxQueueDepth: 2, maxQueueAgeMs: 5_000 }
+  });
+  const pacer = upstreamPacerForStore(store);
+  await pacer.acquire(upstream.id);
+  const queued = pacer.acquire(upstream.id);
+  const { server, base } = await runningServer(store);
+  try {
+    const response = await request(base, '/api/pacing');
+    assert.equal(response.response.status, 200);
+    assert.equal(response.data.pacing.length, 1);
+    assert.deepEqual(Object.keys(response.data.pacing[0]).sort(), ['lastStartAt', 'nextSlotAt', 'queueDepth', 'upstreamId']);
+    assert.equal(response.data.pacing[0].queueDepth, 1);
+    assert.equal(JSON.stringify(response.data).includes('secret'), false);
+
+    const patched = await request(base, `/api/upstreams/${upstream.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ pacing: { enabled: false } })
+    });
+    assert.equal(patched.data.upstream.pacing.enabled, false);
+    await queued;
+    assert.deepEqual((await request(base, '/api/pacing')).data.pacing, []);
+  } finally {
+    pacer.close();
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
   }
@@ -338,6 +495,59 @@ test('serves the upstream priority list API', async () => {
     assert.match(notArray.data.error.message, /ids must be an array/);
     assert.deepEqual(await priorities(), [['first', null], ['second', null]]);
 
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves persisted routing policy and sanitized dry-run diagnostics', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-routing-http-'));
+  const store = new Store(dir);
+  const { server, base } = await runningServer(store);
+  const now = Date.parse('2026-08-16T08:00:00Z');
+  try {
+    const create = async (projectId, projectKey) => (await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'compass', projectId, projectKey })
+    })).data.upstream;
+    const first = await create('first', 'sensitive-first');
+    const second = await create('second', 'sensitive-second');
+    store.setCap(first.id, { capDollars: 10 });
+    store.setCap(second.id, { capDollars: 10 });
+    store.setQuota(first.id, { remainingPercent: 15, observedAt: new Date(now).toISOString() });
+    store.setQuota(second.id, { remainingPercent: 85, observedAt: new Date(now).toISOString() });
+
+    let response = await request(base, '/api/routing');
+    assert.equal(response.data.policy.strategy, 'least-recent-success');
+    response = await request(base, '/api/routing', {
+      method: 'PUT',
+      body: JSON.stringify({ strategy: 'most-remaining-quota' })
+    });
+    assert.equal(response.data.policy.strategy, 'most-remaining-quota');
+
+    response = await request(base, '/api/routing/dry-run', {
+      method: 'POST',
+      body: JSON.stringify({ preferredType: 'compass', requiredType: 'compass', now })
+    });
+    assert.equal(response.response.status, 200);
+    assert.deepEqual(response.data.routing.candidates.map(({ id }) => id), [second.id, first.id]);
+    assert.equal(response.data.routing.candidates[0].quota.status, 'known');
+    assert.equal(JSON.stringify(response.data).includes('sensitive-first'), false);
+
+    const invalid = await request(base, '/api/routing', {
+      method: 'PUT',
+      body: JSON.stringify({ strategy: 'fill-first' })
+    });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.data.error.code, 'invalid_request');
+
+    const invalidDryRun = await request(base, '/api/routing/dry-run', {
+      method: 'POST',
+      body: JSON.stringify({ preferredType: 'codxe' })
+    });
+    assert.equal(invalidDryRun.response.status, 400);
+    assert.match(invalidDryRun.data.error.message, /preferredType must be codex or compass/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

@@ -7,8 +7,12 @@ import { upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
 import { extractUsage, upstreamCostMicros } from './pricing.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
+import { codexProtocolHeaders } from './protocol-compat.js';
+import { modelCatalogForStore } from './codex-model-catalog.js';
+import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
+import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
+import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 
-const CODEX_VERSION = '0.146.1';
 const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2']);
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
@@ -25,18 +29,18 @@ export function isCompatibilityRoute(method, path) {
   return method === 'POST' && ['/v1/files', '/v1/audio/transcriptions', '/v1/images/generations', '/v1/images/edits'].includes(path);
 }
 
-export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch, upstreamDeadlines = {} }) {
+export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store) }) {
   if (path === '/v1/files') {
     if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: store.listFiles(requestScopeId(req)) });
-    return createFile({ req, res, body, store, fetchImpl, upstreamDeadlines });
+    return createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
   }
   const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);
   if (fileMatch) return fileOperation({ req, res, store, id: decodeURIComponent(fileMatch[1]), content: Boolean(fileMatch[2]) });
-  if (path === '/v1/audio/transcriptions') return transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines });
-  return image({ req, res, path, body, store, fetchImpl, upstreamDeadlines });
+  if (path === '/v1/audio/transcriptions') return transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
+  return image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
 }
 
-async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines }) {
+async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth }) {
   const form = await multipart(req, body);
   const unexpected = unsupportedFormField(form, new Set(['file', 'purpose']));
   if (unexpected) return invalid(res, `${unexpected} is not supported`, unexpected);
@@ -45,7 +49,7 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines 
   const file = form.get('file');
   if (!(file instanceof Blob)) return invalid(res, 'file is required', 'file');
 
-  const provider = await codexContext(store, req, fetchImpl, upstreamDeadlines);
+  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { codexHostHealth });
   if (!provider) return noCodex(res);
   const filename = safeFilename(file.name || 'upload.bin');
   const created = await codexFetch(provider, '/backend-api/files', {
@@ -53,8 +57,8 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines 
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ file_name: filename, file_size: file.size, use_case: 'codex' })
   });
-  const createdBody = await responseJson(created, provider.upstreamDeadlines);
-  if (!created.ok) return sendFailure(res);
+  const createdBody = await responseJson(created, provider.upstreamDeadlines, provider);
+  if (!created.ok) return sendFailure(res, retryAfterHeader(created));
   const fileId = text(createdBody?.file_id);
   const uploadUrl = text(createdBody?.upload_url);
   if (!fileId || !uploadUrl) return sendFailure(res);
@@ -69,7 +73,7 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines 
   if (!upload.ok) return sendFailure(res);
 
   const { response: finalized, body: finalizedBody } = await finalizeFile(provider, fileId);
-  if (!finalized.ok) return sendFailure(res);
+  if (!finalized.ok) return sendFailure(res, retryAfterHeader(finalized));
   if (finalizedBody?.status !== 'success' || !text(finalizedBody?.download_url)) return sendFailure(res);
   pinCompatibilitySession(provider);
 
@@ -95,7 +99,7 @@ function fileOperation({ req, res, store, id, content }) {
   return sendError(res, 404, 'unsupported_endpoint', 'Unsupported OpenAI /v1 endpoint');
 }
 
-async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines }) {
+async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth }) {
   const form = await multipart(req, body);
   const unexpected = unsupportedFormField(form, new Set(['file', 'model', 'language', 'prompt', 'response_format', 'temperature', 'keywords', 'keywords[]', 'languages', 'languages[]']));
   if (unexpected) return invalid(res, `${unexpected} is not supported`, unexpected);
@@ -105,7 +109,7 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines 
   }
   const file = form.get('file');
   if (!(file instanceof Blob)) return invalid(res, 'file is required', 'file');
-  const provider = await codexContext(store, req, fetchImpl, upstreamDeadlines);
+  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { codexHostHealth });
   if (!provider) return noCodex(res);
 
   const upstreamForm = new FormData();
@@ -119,9 +123,9 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines 
       upstreamForm.append(target, value);
     }
   }
-  const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm });
-  const responseBody = await responseJson(response, provider.upstreamDeadlines);
-  if (!response.ok) return sendFailure(res);
+  const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm }, { pacingModel: 'gpt-4o-transcribe' });
+  const responseBody = await responseJson(response, provider.upstreamDeadlines, provider);
+  if (!response.ok) return sendFailure(res, retryAfterHeader(response));
   if (!responseBody) return sendFailure(res);
   pinCompatibilitySession(provider);
   delete responseBody.languages;
@@ -129,7 +133,7 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines 
   sendJson(res, response.status, responseBody, responseHeaders(response));
 }
 
-async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines }) {
+async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth }) {
   const edit = path.endsWith('/edits');
   let payload;
   let images = [];
@@ -147,10 +151,9 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
   }
   const error = validateImage(payload, edit);
   if (error) return invalid(res, error.message, error.param);
-  const provider = await codexContext(store, req, fetchImpl, upstreamDeadlines);
+  const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { modelCatalog, requireImageModel: true, codexHostHealth });
   if (!provider) return noCodex(res);
-  const hostModel = await imageHostModel(provider);
-  if (!hostModel) return sendFailure(res);
+  const hostModel = provider.hostModel;
 
   const requestBody = imageResponsesPayload(payload, hostModel);
   if (edit) {
@@ -169,10 +172,24 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
 
   const response = await codexFetch(provider, '/backend-api/codex/responses', {
     method: 'POST', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(requestBody)
-  });
-  const textBody = (await responseBytes(response, 32 * 1024 * 1024, provider.upstreamDeadlines)).toString('utf8');
-  if (!response.ok) return sendFailure(res);
-  const result = imageResponse(parseSse(textBody));
+  }, { deferSettlement: true, pacingModel: hostModel });
+  let textBody;
+  try {
+    textBody = (await responseBytes(response, 32 * 1024 * 1024, provider.upstreamDeadlines)).toString('utf8');
+  } catch (error) {
+    settleCodexFetch(provider, response, classifyTransportError(error));
+    throw error;
+  }
+  if (!response.ok) {
+    let structuredBody = null;
+    try { structuredBody = JSON.parse(textBody); } catch {}
+    settleCodexFetch(provider, response, classifyHttpResponse(response, structuredBody));
+    return sendFailure(res, retryAfterHeader(response));
+  }
+  const events = parseSse(textBody);
+  const terminal = events.findLast((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type));
+  settleCodexFetch(provider, response, terminal ? classifySseEvent(terminal) : { class: 'transient', retryable: true });
+  const result = imageResponse(events);
   if (result.error) return sendError(res, result.error.status, result.error.code, result.error.message, result.error.param);
   pinCompatibilitySession(provider);
   settleCost(store, provider.upstream, result.costBody, req);
@@ -216,15 +233,6 @@ function imageResponsesPayload(payload, hostModel) {
 
 async function imagePart(file) {
   return { type: 'input_image', image_url: `data:${file.type || 'application/octet-stream'};base64,${Buffer.from(await file.arrayBuffer()).toString('base64')}` };
-}
-
-async function imageHostModel(provider) {
-  const response = await codexFetch(provider, `/backend-api/codex/models?client_version=${encodeURIComponent(CODEX_VERSION)}`, { method: 'GET' });
-  if (!response.ok) return null;
-  const body = await responseJson(response, provider.upstreamDeadlines);
-  const models = Array.isArray(body?.models) ? body.models : Array.isArray(body?.data) ? body.data : [];
-  const model = models.find((item) => Array.isArray(item?.input_modalities) && item.input_modalities.includes('image')) || models[0];
-  return text(model?.slug || model?.id);
 }
 
 function imageResponse(events) {
@@ -277,7 +285,7 @@ async function finalizeFile(provider, fileId) {
     response = await codexFetch(provider, `/backend-api/files/${encodeURIComponent(fileId)}/uploaded`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}'
     });
-    body = await responseJson(response, provider.upstreamDeadlines);
+    body = await responseJson(response, provider.upstreamDeadlines, provider);
     if (!response.ok || body?.status === 'success' || !['retry', 'retrying', 'pending'].includes(text(body?.status))) return { response, body };
     if (Date.now() >= deadline) return { response, body };
     await new Promise((resolve) => setTimeout(resolve, 1_000));
@@ -292,19 +300,15 @@ function unsupportedFormField(form, allowed) {
 
 const COMPATIBILITY_CIRCUIT_SCOPE = { routeClass: 'compatibility_native', model: '' };
 
-async function codexContext(store, req, fetchImpl, upstreamDeadlines = {}) {
+async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, { modelCatalog = modelCatalogForStore(store), requireImageModel = false, codexHostHealth = codexHostHealthForStore(store) } = {}) {
   const scopeId = requestScopeId(req);
   const apiKeyId = req.proxyAuth?.id || null;
   const sessionId = sessionAffinity(req);
   const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
   const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const requestedId = text(req.headers['x-upstream-id']);
-  const candidates = store.candidatePlan({ requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
-  const ordered = pinnedId && !requestedId
-    ? [...candidates.filter((candidate) => candidate.id === pinnedId), ...candidates.filter((candidate) => candidate.id !== pinnedId)]
-    : candidates;
-  for (const candidate of ordered) {
-    if (!store.beginCircuit(candidate.id, COMPATIBILITY_CIRCUIT_SCOPE)) continue;
+  const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
+  for (const candidate of candidates) {
     const upstream = store.get(candidate.id, scopeId);
     const credentials = store.credentials(candidate.id);
     try {
@@ -312,44 +316,78 @@ async function codexContext(store, req, fetchImpl, upstreamDeadlines = {}) {
         fetchImpl,
         saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
       });
-      return { upstream, credentials, store, fetchImpl, scopeId, apiKeyId, sessionId, upstreamDeadlines };
-    } catch {
-      store.recordCircuitFailure(candidate.id, COMPATIBILITY_CIRCUIT_SCOPE);
+      const hostModel = requireImageModel
+        ? await modelCatalog.imageModel(candidate.id, { fetchImpl, upstreamDeadlines, codexHostHealth })
+        : null;
+      if (requireImageModel && !hostModel) continue;
+      return { upstream, credentials, store, fetchImpl, req, res, scopeId, apiKeyId, sessionId, upstreamDeadlines, hostModel, codexHostHealth };
+    } catch (error) {
+      if (error?.codexHostCircuitOpen) throw error;
     }
   }
   return null;
-}
-
-function completeCompatibilityCircuit(context, success) {
-  if (!context) return;
-  context.store.completeCircuit(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE, success);
 }
 
 function pinCompatibilitySession(context) {
   if (context?.sessionId) context.store.pinSession(context.sessionId, context.upstream.id, context.scopeId, context.apiKeyId);
 }
 
-async function codexFetch(context, path, options) {
+async function codexFetch(context, path, options, { deferSettlement = false, pacingModel = '' } = {}) {
+  let admission = context.store.beginUpstreamAttempt(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+  if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
+  const abort = downstreamAbortSignal(context.req, context.res);
   let response;
   try {
-    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, options), context.fetchImpl, context.upstreamDeadlines);
+    await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
     persistCookies(response, context);
     if ((response.status === 401 || response.status === 403) && context.credentials.refreshToken) {
-      await refreshProviderCredentials(context.upstream, context.credentials, {
-        fetchImpl: context.fetchImpl,
-        saveCredentials: (updated, expiresAt) => context.store.persistCredentials(context.upstream.id, updated, expiresAt)
-      });
-      response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, options), context.fetchImpl, context.upstreamDeadlines);
+      try {
+        const refreshed = await refreshProviderCredentials(context.upstream, context.credentials, {
+          fetchImpl: context.fetchImpl,
+          saveCredentials: (updated, expiresAt) => context.store.persistCredentials(context.upstream.id, updated, expiresAt)
+        });
+        if (refreshed) {
+          context.store.settleUpstreamAttempt(context.upstream.id, admission, { class: 'neutral', retryable: false });
+          admission = context.store.beginUpstreamAttempt(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+          if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
+        }
+      } catch (error) {
+        context.store.settleUpstreamAttempt(context.upstream.id, admission, { class: 'neutral', retryable: false });
+        error.upstreamOutcomeSettled = true;
+        throw error;
+      }
+      await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+      response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
       persistCookies(response, context);
     }
   } catch (error) {
-    context.store.recordCircuitFailure(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+    if (!error?.upstreamOutcomeSettled) {
+      try {
+        context.store.settleUpstreamAttempt(
+          context.upstream.id,
+          admission,
+          error instanceof PacingError || error?.codexHostPreconnect || error?.codexHostCircuitOpen
+            ? { class: 'neutral', retryable: false }
+            : classifyTransportError(error)
+        );
+      } catch {}
+    }
     throw error;
+  } finally {
+    abort.cleanup();
   }
-  if (response.ok) completeCompatibilityCircuit(context, true);
-  else if (response.status >= 500 || response.status === 429) context.store.recordCircuitFailure(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
-  else context.store.releaseCircuit(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+  Object.defineProperty(response, 'relaydeckAdmission', { value: admission });
+  if (!deferSettlement) {
+    Object.defineProperty(response, 'relaydeckSettleAfterBody', { value: true });
+  }
   return response;
+}
+
+function settleCodexFetch(context, response, outcome) {
+  const admission = response?.relaydeckAdmission;
+  if (!admission) return;
+  context.store.settleUpstreamAttempt(context.upstream.id, admission, outcome);
 }
 
 function withCodexHeaders(context, options) {
@@ -358,9 +396,7 @@ function withCodexHeaders(context, options) {
     headers: {
       authorization: `Bearer ${context.credentials.accessToken}`,
       accept: 'application/json',
-      'user-agent': `codex_cli_rs/${CODEX_VERSION}`,
-      originator: 'codex_cli_rs',
-      version: CODEX_VERSION,
+      ...codexProtocolHeaders(),
       ...codexCookieHeaders(context.credentials),
       ...(context.upstream.accountId ? { 'chatgpt-account-id': context.upstream.accountId } : {}),
       ...(options.headers || {})
@@ -374,15 +410,37 @@ function persistCookies(response, context) {
   }
 }
 
-async function timedFetch(url, options, fetchImpl, upstreamDeadlines = {}) {
+async function timedFetch(url, options, fetchImpl, upstreamDeadlines = {}, codexHostHealth = null) {
   try {
-    return await fetchWithHeaderDeadline(fetchImpl, url, options, upstreamDeadlines);
+    return await withCodexHostHealth(codexHostHealth, url, () => fetchWithHeaderDeadline(fetchImpl, url, options, upstreamDeadlines));
   } catch (error) {
+    if (error?.codexHostCircuitOpen) throw error;
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
-    const wrapped = new Error(timedOut ? 'Upstream request timed out' : `Upstream request failed: ${error.message}`);
+    const wrapped = new Error(timedOut ? 'Upstream request timed out' : `Upstream request failed: ${error.message}`, { cause: error });
     wrapped.statusCode = 502;
+    wrapped.upstreamFailureKind = timedOut ? 'timeout' : 'transport';
+    if (error?.codexHostPreconnect) {
+      wrapped.codexHostPreconnect = true;
+      wrapped.codexHostPreconnectCode = error.codexHostPreconnectCode;
+    }
     throw wrapped;
   }
+}
+
+function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new DOMException('Upstream request timed out', 'TimeoutError')), timeoutMs);
+  const abort = () => controller.abort(new DOMException('Downstream request closed', 'AbortError'));
+  req?.once('aborted', abort);
+  res?.once('close', abort);
+  return {
+    signal: controller.signal,
+    cleanup() {
+      clearTimeout(timeout);
+      req?.removeListener('aborted', abort);
+      res?.removeListener('close', abort);
+    }
+  };
 }
 
 async function multipart(req, body) {
@@ -438,8 +496,22 @@ function settleCost(store, upstream, body, req) {
   }
 }
 
-async function responseJson(response, upstreamDeadlines = {}) {
-  try { return JSON.parse((await responseBytes(response, 16 * 1024 * 1024, upstreamDeadlines)).toString('utf8')); } catch { return null; }
+async function responseJson(response, upstreamDeadlines = {}, context = null) {
+  let bytes;
+  try {
+    bytes = await responseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+  } catch (error) {
+    if (context && response?.relaydeckSettleAfterBody) settleCodexFetch(context, response, classifyTransportError(error));
+    throw error;
+  }
+  let body = null;
+  try { body = JSON.parse(bytes.toString('utf8')); } catch {}
+  if (context && response?.relaydeckSettleAfterBody) {
+    settleCodexFetch(context, response, response.ok
+      ? body === null ? { class: 'transient', retryable: true } : { class: 'success', retryable: false }
+      : classifyHttpResponse(response, body));
+  }
+  return body;
 }
 
 async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}) {
@@ -465,16 +537,23 @@ async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDead
 
 function responseHeaders(response) {
   const headers = {};
-  for (const name of ['x-request-id', 'cache-control']) {
+  for (const name of ['x-request-id', 'cache-control', 'retry-after']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
   }
   return headers;
 }
 
-function sendFailure(res) {
+function retryAfterHeader(response) {
+  const value = response?.headers?.get?.('retry-after');
+  return typeof value === 'string' && value.length <= 1_024 && !/[\x00-\x1f\x7f]/.test(value)
+    ? { 'retry-after': value }
+    : {};
+}
+
+function sendFailure(res, headers = {}) {
   const failure = upstreamFailure();
-  return sendJson(res, failure.status, failure.body);
+  return sendJson(res, failure.status, failure.body, headers);
 }
 
 function invalid(res, message, param = null) {
