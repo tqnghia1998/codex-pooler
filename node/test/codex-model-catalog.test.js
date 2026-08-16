@@ -153,6 +153,22 @@ test('accepts authoritative empty catalogs and ignores malformed rows and sensit
   }
 });
 
+test('requires exact discovered ultrafast service-tier advertisements', async () => {
+  const { dir, store, upstreams } = fixture(2);
+  const catalog = new CodexModelCatalog(store);
+  const fetchImpl = async (_url, options) => options.headers['chatgpt-account-id'] === 'acct-0'
+    ? modelsResponse([{ slug: 'gpt-fast', service_tiers: [{ id: 'ultrafast' }] }])
+    : modelsResponse([{ slug: 'gpt-fast', additional_speed_tiers: ['priority'] }]);
+  try {
+    await catalog.resolve('default', { fetchImpl });
+    assert.equal(catalog.supportsServiceTier(upstreams[0].id, 'gpt-fast', 'ultrafast'), true);
+    assert.equal(catalog.supportsServiceTier(upstreams[1].id, 'gpt-fast', 'ultrafast'), false);
+    assert.equal(catalog.supportsServiceTier(upstreams[0].id, 'gpt-fast', 'priority'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fences stale discovery after token replacement and prunes deleted accounts', async () => {
   const { dir, store, upstreams } = fixture();
   const upstreamId = upstreams[0].id;
