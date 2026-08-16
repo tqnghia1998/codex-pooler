@@ -107,17 +107,29 @@ test('preserves standard detail field on Responses input_image parts', () => {
 });
 
 test('accepts pi replay shapes when switching models mid-session', () => {
+  const citations = [{ type: 'url_citation', start_index: 0, end_index: 5.5, url: 'https://example.com', title: 'Example' }];
   const adapted = adaptResponsesRequest({
     model: 'gpt-5.6-luna',
     input: [
       { type: 'message', role: 'assistant', status: 'completed', id: 'msg_pi_0', phase: undefined,
-        content: [{ type: 'output_text', text: 'prior answer', annotations: [] }] },
+        content: [{ type: 'output_text', text: 'prior answer', annotations: citations }] },
       { role: 'user', content: [{ type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' }] }
     ]
   });
-  assert.deepEqual(adapted.input[0].content[0], { type: 'output_text', text: 'prior answer' });
+  assert.deepEqual(adapted.input[0].content[0], { type: 'output_text', text: 'prior answer', annotations: citations });
   assert.equal('phase' in adapted.input[0], false);
   assert.deepEqual(adapted.input[1].content[0], { type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' });
+});
+
+test('translates official Chat custom tools and named choices', () => {
+  const adapted = adaptChatRequest({
+    model: 'gpt-5.6-sol',
+    messages: [{ role: 'user', content: 'run code' }],
+    tools: [{ type: 'custom', custom: { name: 'code_exec', description: 'Runs code', format: { type: 'text' } } }],
+    tool_choice: { type: 'custom', custom: { name: 'code_exec' } }
+  });
+  assert.deepEqual(adapted.tools, [{ type: 'custom', name: 'code_exec', description: 'Runs code', format: { type: 'text' } }]);
+  assert.deepEqual(adapted.tool_choice, { type: 'custom', name: 'code_exec' });
 });
 
 test('validates and preserves Responses tools and strict local schemas', () => {
@@ -191,6 +203,28 @@ test('forwards unrecognized native item/tool types by default but still rejects 
   assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'x', tools: [{ type: 'mcp', server_url: 'https://example.com' }] }), { param: 'tools' });
 });
 
+test('forwards future Responses fields and enum variants while preserving local semantic boundaries', () => {
+  const adapted = adaptResponsesRequest({
+    model: 'gpt',
+    input: 'x',
+    future_option: { mode: 'new' },
+    reasoning: { effort: 'future_effort', summary: 'brief', future_mode: true },
+    service_tier: 'burst',
+    stream_options: { include_obfuscation: true, future_option: 1 },
+    text: { format: { type: 'future_format', option: true } },
+    tools: [{ type: 'future_tool', option: true }],
+    tool_choice: { type: 'future_tool', option: true },
+    store: false
+  });
+  assert.deepEqual(adapted.future_option, { mode: 'new' });
+  assert.deepEqual(adapted.reasoning, { effort: 'future_effort', summary: 'brief', future_mode: true });
+  assert.equal(adapted.service_tier, 'burst');
+  assert.equal(adapted.stream_options.future_option, 1);
+  assert.deepEqual(adapted.text.format, { type: 'future_format', option: true });
+  assert.deepEqual(adapted.tool_choice, { type: 'future_tool', option: true });
+  assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'x', store: true }), { code: 'unsupported_parameter', param: 'store' });
+});
+
 test('maps unique namespace custom tool names but skips ambiguous ones', () => {
   const tools = [
     { type: 'namespace', name: 'ops', description: 'Operations', tools: [{ type: 'custom', name: 'shell' }] },
@@ -205,7 +239,7 @@ test('maps unique namespace custom tool names but skips ambiguous ones', () => {
 test('rejects malformed adapter shapes deterministically', () => {
   const responseCases = [
     [{ model: 'gpt', input: [] }, { param: 'input' }],
-    [{ model: 'gpt', input: 'x', unknown: true }, { code: 'unsupported_parameter', param: 'unknown' }],
+    [{ model: 'gpt', input: 'x', store: true }, { code: 'unsupported_parameter', param: 'store' }],
     [{ model: 'gpt', input: [{ role: 'user', content: [{ type: 'input_image', image_url: 'http://example.com/a.png' }] }] }, { code: 'unsupported_input_image_format', param: 'input' }],
     [{ model: 'gpt', input: [{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: '%%%%', format: 'wav' } }] }] }, { param: 'input' }],
     [{ model: 'gpt', input: 'x', tools: [{ type: 'mcp', server_url: 'https://example.com' }] }, { param: 'tools' }],
@@ -213,6 +247,7 @@ test('rejects malformed adapter shapes deterministically', () => {
     [{ model: 'gpt', input: 'x', previous_response_id: 'resp-1' }, { param: 'previous_response_id' }],
     [{ model: 'gpt', input: 'x', tools: [{ type: 'function', name: 'strict', parameters: { type: 'object' }, strict: true }] }, { code: 'invalid_function_parameters', param: 'tools.0.parameters' }],
     [{ model: 'gpt', input: [{ role: 'user', content: 'x', unsupported: true }] }, { param: 'input' }]
+    ,[{ model: 'gpt', input: [{ role: 'assistant', content: [{ type: 'output_text', text: 'x', annotations: [{ type: 'file_citation' }] }] }] }, { param: 'input' }]
   ];
   for (const [payload, expected] of responseCases) assertAdapterError(() => adaptResponsesRequest(payload), expected);
 
@@ -223,6 +258,7 @@ test('rejects malformed adapter shapes deterministically', () => {
     [{ model: 'gpt', messages: [{ role: 'user', content: 'x' }], functions: [] }, { param: 'functions' }],
     [{ model: 'gpt', messages: [{ role: 'user', content: 'x' }], max_tokens: 0 }, { param: 'max_tokens' }],
     [{ model: 'gpt', messages: [{ role: 'user', content: 'x' }], response_format: { type: 'json_schema' } }, { param: 'response_format' }]
+    ,[{ model: 'gpt', messages: [{ role: 'user', content: 'x' }], tools: [{ type: 'custom', name: 'flat' }] }, { param: 'tools' }]
   ];
   for (const [payload, expected] of chatCases) assertAdapterError(() => adaptChatRequest(payload), expected);
 });

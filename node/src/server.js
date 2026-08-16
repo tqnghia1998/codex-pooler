@@ -9,6 +9,10 @@ import { handleCompatibilityRequest, isCompatibilityRoute } from './compatibilit
 import { HttpError, readRequestBody } from './http-ingress.js';
 import { errorEnvelope } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed, localHost, originAllowed } from './admission.js';
+import { modelCatalogForStore } from './codex-model-catalog.js';
+import { CodexHostHealth, codexHostHealthForStore, codexHostHealthOptionsFromEnv } from './codex-host-health.js';
+import { upstreamPacerForStore } from './upstream-pacer.js';
+import { Readiness, readyReadiness } from './readiness.js';
 import {
   PROXY_ENDPOINTS,
   WEBSOCKET_ENDPOINTS,
@@ -33,9 +37,11 @@ const TOKEN_REFRESH_STALE_MS = 50_000;
 const TOKEN_REFRESH_MAX_ATTEMPTS = 8;
 const TOKEN_REFRESH_BATCH_SIZE = 100;
 
-export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console } = {}) {
+export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness() } = {}) {
   store.configureApiKey(apiKey);
   const admission = admissionPolicy(ingress);
+  const modelCatalog = modelCatalogForStore(store);
+  const upstreamPacer = upstreamPacerForStore(store);
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -47,8 +53,13 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         sendJson(res, 403, { error: 'Invalid Origin header' });
         return;
       }
-      if (url.pathname === '/healthz' || url.pathname === '/readyz') {
+      if (url.pathname === '/healthz') {
         sendJson(res, 200, { status: 'ok' });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/readyz') {
+        const state = readiness.status();
+        sendJson(res, state.status === 'ready' ? 200 : 503, state, state.status === 'ready' ? {} : { 'retry-after': '1' });
         return;
       }
       const usageRoute = url.pathname === '/v1/usage' && req.method === 'GET';
@@ -88,19 +99,19 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         return;
       }
       if (jsonProxyRoute) {
-        await proxyRequest({ req, res, path: url.pathname, payload: await jsonRuntimeBody(req, ingress, ['/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(url.pathname)), store, apiKey, fetchImpl, upstreamDeadlines, logger });
+        await proxyRequest({ req, res, path: url.pathname, payload: await jsonRuntimeBody(req, ingress, ['/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(url.pathname)), store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth });
         return;
       }
       if (modelRoute) {
-        await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey, fetchImpl });
+        await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey, fetchImpl, upstreamDeadlines, codexHostHealth });
         return;
       }
       if (compatibilityRoute) {
-        await handleCompatibilityRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, fetchImpl, upstreamDeadlines });
+        await handleCompatibilityRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
         return;
       }
       if (rawProxyRoute) {
-        await proxyRawRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, apiKey, fetchImpl, upstreamDeadlines, logger });
+        await proxyRawRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth });
         return;
       }
       if (url.pathname.startsWith('/api/')) {
@@ -108,7 +119,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
-        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure });
+        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness });
         return;
       }
       await staticFile(res, url.pathname, req, admission);
@@ -123,7 +134,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         return;
       }
       const failure = errorEnvelope(error);
-      sendJson(res, failure.status, failure.body);
+      sendJson(res, failure.status, failure.body, failure.headers);
     }
   };
 }
@@ -140,25 +151,37 @@ export function start(port = Number(process.env.PORT) || 3000, {
 } = {}) {
   if (!apiKey) throw new Error('CODEX_POOLER_API_KEY is required');
   let scheduleTokenRetry = () => {};
-  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress }));
-  attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress });
+  const readiness = new Readiness({ storage: 'ready', apiKey: 'ready' });
+  const codexHostHealth = new CodexHostHealth(codexHostHealthOptionsFromEnv());
+  const upstreamPacer = upstreamPacerForStore(store);
+  const modelCatalog = modelCatalogForStore(store);
+  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress, codexHostHealth, readiness }));
+  attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress, codexHostHealth });
   let polling = false;
   const poll = async () => {
     if (polling) return;
     polling = true;
     try {
-      await refreshAllQuotas(store, { fetchImpl, compassGatewayToken });
+      return await refreshAllQuotas(store, { fetchImpl, compassGatewayToken });
     } finally {
       polling = false;
     }
   };
-  void poll();
+  const initialQuotaRefresh = poll()
+    .then((results) => readiness.set('quotaRefresh', results?.some(({ status }) => status === 'rejected') ? 'degraded' : 'ready'))
+    .catch(() => readiness.set('quotaRefresh', 'degraded'));
   const timer = setInterval(poll, pollIntervalMs);
   timer.unref?.();
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl, compassGatewayToken });
   scheduleTokenRetry = tokenScheduler.schedule;
   store.setTokenRefreshFailureHandler?.(tokenScheduler.schedule);
-  void tokenScheduler.run();
+  const initialTokenRecovery = tokenScheduler.run()
+    .then((results) => readiness.set('tokenRecovery', results?.some(({ status }) => status === 'rejected') ? 'degraded' : 'ready'))
+    .catch(() => readiness.set('tokenRecovery', 'degraded'));
+  const initialModelDiscovery = modelCatalog.resolve('default', { fetchImpl, codexHostHealth })
+    .then(({ status }) => readiness.set('modelCatalog', status.source === 'live' ? 'ready' : 'degraded'))
+    .catch(() => readiness.set('modelCatalog', 'degraded'));
+  void Promise.allSettled([initialQuotaRefresh, initialTokenRecovery, initialModelDiscovery]);
   const tokenTimer = setInterval(tokenScheduler.run, tokenRefreshIntervalMs);
   tokenTimer.unref?.();
   server.once('close', () => {
@@ -166,6 +189,7 @@ export function start(port = Number(process.env.PORT) || 3000, {
     clearInterval(tokenTimer);
     store.setTokenRefreshFailureHandler?.(null);
     tokenScheduler.close();
+    upstreamPacer.close();
   });
   server.listen(port, host, () => console.log(`codex-pooler-node listening on http://${host}:${server.address().port}`));
   return server;
@@ -287,6 +311,7 @@ function createTokenRefreshScheduler(store, options) {
         const value = result.status === 'fulfilled' && result.value;
         if (value?.errorCode === 'failed') schedule(value.upstream.id, value.upstream.tokenRefresh.trigger, value.upstream.tokenRefresh.retryAttempt || 1);
       }
+      return results;
     } finally {
       running = false;
     }
@@ -303,7 +328,7 @@ async function api(req, res, url, store, options) {
   }
 }
 
-async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure }) {
+async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness }) {
   if (req.method === 'GET' && url.pathname === '/api/upstreams/events') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
     res.write('event: ready\ndata: {"type":"upstreams"}\n\n');
@@ -347,6 +372,40 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   }
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'upstreams') {
     sendJson(res, 200, { upstreams: store.list() });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'model-catalog') {
+    sendJson(res, 200, { catalog: modelCatalog.status(url.searchParams.get('scopeId') || 'default') });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'codex-host-health') {
+    sendJson(res, 200, { hostHealth: codexHostHealth.status() });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'pacing') {
+    sendJson(res, 200, { pacing: upstreamPacer.status() });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'diagnostics') {
+    sendJson(res, 200, { readiness: readiness.status(), gateway: store.gatewayDiagnostics() });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'routing') {
+    sendJson(res, 200, { policy: store.routingPolicy() });
+    return;
+  }
+  if (req.method === 'PUT' && parts.length === 2 && parts[1] === 'routing') {
+    sendJson(res, 200, { policy: store.setRoutingPolicy(await body(req)) });
+    return;
+  }
+  if (req.method === 'POST' && parts.length === 3 && parts[1] === 'routing' && parts[2] === 'dry-run') {
+    const input = routingDryRunInput(await body(req));
+    sendJson(res, 200, {
+      routing: store.routingDryRun({
+        ...input,
+        modelSupport: (upstreamId, model, generation) => modelCatalog.supports(upstreamId, model, generation)
+      })
+    });
     return;
   }
   if (req.method === 'POST' && parts.length === 2 && parts[1] === 'upstreams') {
@@ -394,6 +453,10 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
       throw new HttpError(status, `token_refresh_${result.errorCode}`, message);
     }
     sendJson(res, 200, result);
+    return;
+  }
+  if (req.method === 'POST' && action === 'clear-cooldown' && parts.length === 4) {
+    sendJson(res, 200, { upstream: store.clearUpstreamCooldown(id) });
     return;
   }
   if (req.method === 'POST' && action === 'refresh-quota' && parts.length === 4) {
@@ -459,6 +522,54 @@ async function body(req) {
   } catch {
     throw new HttpError(400, 'invalid_request', 'request body must be JSON');
   }
+}
+
+function routingDryRunInput(input = {}) {
+  const string = (name, max = 200) => {
+    if (input[name] === undefined || input[name] === null) return '';
+    if (typeof input[name] !== 'string' || input[name].length > max) throw new Error(`${name} must be a string of at most ${max} characters`);
+    return input[name];
+  };
+  const requirements = input.requirements === undefined ? {} : input.requirements;
+  if (!requirements || typeof requirements !== 'object' || Array.isArray(requirements)) throw new Error('requirements must be an object');
+  const allowedRequirements = new Set(['responses', 'streaming', 'tools', 'imageInput', 'reasoning', 'serviceTier']);
+  const unsupported = Object.keys(requirements).find((key) => !allowedRequirements.has(key));
+  if (unsupported) throw new Error(`unsupported routing requirement ${unsupported}`);
+  const normalizedRequirements = {};
+  for (const name of ['responses', 'streaming', 'tools', 'imageInput', 'reasoning']) {
+    if (requirements[name] !== undefined) {
+      if (typeof requirements[name] !== 'boolean') throw new Error(`${name} must be a boolean`);
+      normalizedRequirements[name] = requirements[name];
+    }
+  }
+  if (requirements.serviceTier !== undefined) {
+    if (typeof requirements.serviceTier !== 'string' || requirements.serviceTier.length > 80) throw new Error('serviceTier must be a string of at most 80 characters');
+    normalizedRequirements.serviceTier = requirements.serviceTier;
+  }
+  const strategy = input.strategy === undefined ? null : string('strategy', 80);
+  const requestedType = string('requestedType', 20);
+  const preferredType = string('preferredType', 20);
+  const requiredType = string('requiredType', 20);
+  for (const [name, value] of Object.entries({ requestedType, preferredType, requiredType })) {
+    if (value && !['codex', 'compass'].includes(value)) throw new Error(`${name} must be codex or compass`);
+  }
+  const now = input.now === undefined ? Date.now() : Number(input.now);
+  if (!Number.isFinite(now) || now < 0) throw new Error('now must be a non-negative timestamp');
+  return {
+    strategy,
+    affinityId: string('affinityId'),
+    pinnedId: string('pinnedId'),
+    requestedId: string('requestedId'),
+    requestedType,
+    preferredType,
+    requiredType,
+    rotateFromId: string('rotateFromId'),
+    model: string('model'),
+    routeClass: string('routeClass', 80) || 'proxy_http',
+    scopeId: string('scopeId') || null,
+    requirements: normalizedRequirements,
+    now
+  };
 }
 
 async function mapConcurrent(items, limit, mapper) {

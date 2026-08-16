@@ -4,7 +4,7 @@ const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const RETRY_CODES = new Set(['upstream_request_timeout', 'stream_incomplete', 'server_error', 'overloaded_error', 'server_is_overloaded', 'websocket_connection_limit_reached']);
 const FAILURE_REASONS = new Set([...RETRY_CODES, 'invalid_api_key', 'invalid_authentication', 'context_length_exceeded', 'insufficient_quota', 'invalid_previous_response_id', 'invalid_request', 'invalid_request_error', 'previous_response_not_found', 'rate_limit_exceeded', 'unauthorized', 'usage_limit_exceeded', 'usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_owner_usage_limit_reached']);
 
-export function splitSseBlocks(value) { return value.replace(/\r+\n/g, '\n').split('\n\n'); }
+export function splitSseBlocks(value) { return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n\n'); }
 
 export function decodeSseBlock(block) {
   const lines = block.split(/\r?\n/);
@@ -54,7 +54,7 @@ export function normalizePublicResponsesEvent(source, state) {
 }
 
 export function createChatStreamState(payload) {
-  return { id: `chatcmpl-${randomUUID()}`, created: Math.floor(Date.now() / 1000), model: typeof payload?.model === 'string' ? payload.model : 'unknown', serviceTier: null, roleSent: false, visible: false, terminal: false, includeUsage: payload?.stream_options?.include_usage === true };
+  return { id: `chatcmpl-${randomUUID()}`, created: Math.floor(Date.now() / 1000), model: typeof payload?.model === 'string' ? payload.model : 'unknown', serviceTier: null, roleSent: false, visible: false, terminal: false, toolCalls: false, includeUsage: payload?.stream_options?.include_usage === true };
 }
 
 export function normalizeChatEvent(event, state) {
@@ -72,14 +72,28 @@ export function normalizeChatEvent(event, state) {
   else if (event.type === 'response.output_text.delta' && typeof event.delta === 'string' && event.delta) { role(); state.visible = true; chunks.push(chatChunk(state, { content: event.delta }, null)); }
   else if (event.type === 'response.output_item.added' && event.item?.type === 'function_call') {
     state.visible = true;
+    state.toolCalls = true;
     const index = integer(event.item.output_index) ?? integer(event.output_index) ?? 0;
     chunks.push(chatChunk(state, { tool_calls: [{ index, id: string(event.item.call_id) || string(event.item.id) || string(event.item_id) || `call_${index}`, type: 'function', function: { name: string(event.item.name) || 'tool', arguments: typeof event.item.arguments === 'string' ? event.item.arguments : '' } }] }, null));
+  } else if (event.type === 'response.output_item.added' && event.item?.type === 'custom_tool_call') {
+    state.visible = true;
+    state.toolCalls = true;
+    const index = integer(event.item.output_index) ?? integer(event.output_index) ?? 0;
+    chunks.push(chatChunk(state, { tool_calls: [{ index, id: string(event.item.call_id) || string(event.item.id) || string(event.item_id) || `call_${index}`, type: 'custom', custom: { name: string(event.item.name) || 'tool', input: typeof event.item.input === 'string' ? event.item.input : '' } }] }, null));
   } else if (event.type === 'response.function_call_arguments.delta') {
     state.visible = true;
+    state.toolCalls = true;
     chunks.push(chatChunk(state, { tool_calls: [{ index: integer(event.output_index) ?? 0, function: { arguments: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
+  } else if (event.type === 'response.custom_tool_call_input.delta') {
+    state.visible = true;
+    state.toolCalls = true;
+    chunks.push(chatChunk(state, { tool_calls: [{ index: integer(event.output_index) ?? 0, custom: { input: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
   } else if (terminal === 'completed' || terminal === 'incomplete') {
     role();
-    const finish = terminal === 'incomplete' ? ['content_filter', 'content-filter'].includes(incompleteReason(event)) ? 'content_filter' : 'length' : 'stop';
+    state.toolCalls ||= Array.isArray(event.response?.output) && event.response.output.some((item) => ['function_call', 'custom_tool_call'].includes(item?.type));
+    const finish = terminal === 'incomplete'
+      ? ['content_filter', 'content-filter'].includes(incompleteReason(event)) ? 'content_filter' : 'length'
+      : state.toolCalls ? 'tool_calls' : 'stop';
     chunks.push(chatChunk(state, {}, finish));
     const usage = state.includeUsage && chatUsage(event.response?.usage || event.usage);
     if (usage) chunks.push({ ...chatChunk(state, null, null), choices: [], usage });

@@ -46,6 +46,25 @@ test('allows Codex accounts that share an organization account ID', () => {
   }
 });
 
+test('changes the model catalog generation only when Codex access identity changes', () => {
+  const { dir, store } = tempStore();
+  try {
+    const token = (value) => `header.${Buffer.from(JSON.stringify({ email: `${value}@example.com` })).toString('base64url')}.signature`;
+    const upstream = store.create({ type: 'codex', authJson: JSON.stringify({ tokens: { access_token: token('first'), id_token: token('first') } }) });
+    const initial = store.get(upstream.id);
+    const initialCatalogEpoch = initial.modelCatalogEpoch;
+    const credentials = store.credentials(upstream.id);
+    store.persistCredentials(upstream.id, { ...credentials, cookie: 'session=one' }, initial.accessTokenExpiresAt);
+    assert.equal(store.get(upstream.id).modelCatalogEpoch, initialCatalogEpoch);
+    const changed = store.credentials(upstream.id);
+    changed.accessToken = token('second');
+    store.persistCredentials(upstream.id, changed, initial.accessTokenExpiresAt);
+    assert.equal(store.get(upstream.id).modelCatalogEpoch, initialCatalogEpoch + 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps routing within one loaded database snapshot', () => {
   const { dir, store } = tempStore();
   try {
@@ -56,6 +75,77 @@ test('keeps routing within one loaded database snapshot', () => {
     store.load = () => { reads += 1; return load(); };
     assert.deepEqual(store.candidatePlan({ scopeId: 'default', preferredType: 'compass' }).map(({ id }) => id), [upstream.id]);
     assert.equal(reads, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists routing policy and exposes dry-run diagnostics from the live planner', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-16T08:00:00Z');
+  try {
+    const first = store.create({ type: 'compass', projectId: 'first', projectKey: 'secret-one' });
+    const second = store.create({ type: 'compass', projectId: 'second', projectKey: 'secret-two' });
+    store.setCap(first.id, { capDollars: 10 });
+    store.setCap(second.id, { capDollars: 10 });
+    store.setQuota(first.id, { remainingPercent: 25, observedAt: new Date(now).toISOString() });
+    store.setQuota(second.id, { remainingPercent: 75, observedAt: new Date(now).toISOString() });
+    store.setRoutingPolicy({ strategy: 'most-remaining-quota' });
+
+    const reopened = new Store(dir);
+    assert.equal(reopened.routingPolicy().strategy, 'most-remaining-quota');
+    const options = { preferredType: 'compass', requiredType: 'compass', now };
+    const dryRun = reopened.routingDryRun(options);
+    assert.deepEqual(dryRun.candidates.map(({ id }) => id), reopened.candidatePlan(options).map(({ id }) => id));
+    assert.deepEqual(dryRun.candidates.map(({ quota }) => quota.status), ['known', 'known']);
+    assert.equal(JSON.stringify(dryRun).includes('secret-one'), false);
+    assert.throws(() => reopened.setRoutingPolicy({ strategy: 'fill-first' }), /strategy must be one of/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists normalized per-upstream pacing policies without runtime state', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'compass',
+      projectId: 'paced-store',
+      projectKey: 'secret',
+      pacing: {
+        enabled: true,
+        minStartIntervalMs: 250,
+        modelIntervals: [{ model: 'GPT-PACED', minStartIntervalMs: 500 }],
+        maxQueueDepth: 4,
+        maxQueueAgeMs: 2_000
+      }
+    });
+    const reopened = new Store(dir);
+    assert.deepEqual(reopened.getPublic(upstream.id).pacing, {
+      enabled: true,
+      minStartIntervalMs: 250,
+      modelIntervals: [{ model: 'gpt-paced', minStartIntervalMs: 500 }],
+      maxQueueDepth: 4,
+      maxQueueAgeMs: 2_000
+    });
+    assert.equal(JSON.stringify(reopened.get(upstream.id)).includes('queueDepth'), false);
+    assert.throws(() => reopened.update(upstream.id, { pacing: { maxQueueAgeMs: 99 } }), /maxQueueAgeMs/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds and expires learned upstream compatibility facts', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'compatibility', projectKey: 'secret' });
+    store.rememberCompatibilityFact(upstream.id, 'messages:model', { adaptiveThinking: true }, 1_000);
+    assert.deepEqual(store.compatibilityFact(upstream.id, 'messages:model', { now: 1_500, maxAgeMs: 1_000 }), { adaptiveThinking: true });
+    assert.equal(store.compatibilityFact(upstream.id, 'messages:model', { now: 2_000, maxAgeMs: 1_000 }), null);
+    for (let index = 0; index < 105; index += 1) store.rememberCompatibilityFact(upstream.id, `fact:${index}`, index, 3_000 + index);
+    assert.equal(Object.keys(store.get(upstream.id).compatibility.facts).length, 100);
+    assert.equal(store.compatibilityFact(upstream.id, 'fact:0', { now: 3_200, maxAgeMs: 1_000 }), null);
+    assert.equal(store.compatibilityFact(upstream.id, 'fact:104', { now: 3_200, maxAgeMs: 1_000 }), 104);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -77,6 +167,51 @@ test('keeps only bounded terminal failure diagnostics on disk', () => {
     assert.equal(reopened.load().gatewayAttempts.length, 100);
     assert.deepEqual(reopened.load().gatewayUsage, [{ scopeId: 'default', apiKeyId: 'key', day, requestCount: 1, totalTokens: 3, cachedInputTokens: 0, totalCostMicros: 400, priced: true, attemptIds: ['attempt-legacy'] }]);
     assert.equal(reopened.gatewayRequest('active'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('scrubs legacy terminal failure identities and unsafe diagnostics on reopen', () => {
+  const { dir, store } = tempStore();
+  try {
+    const db = store.load();
+    db.gatewayRequests = [{
+      id: 'legacy-failure',
+      scopeId: 'private-scope',
+      apiKeyId: 'private-key',
+      model: 'private-model',
+      endpoint: '/v1/responses',
+      transport: 'http_json',
+      status: 'failed',
+      responseStatusCode: 999,
+      lastErrorCode: 'unsafe error',
+      exclusionReasons: ['quota_exhausted', 'unsafe reason'],
+      retryCount: 0,
+      completedAt: '2026-01-01T00:00:00.000Z'
+    }];
+    db.gatewayAttempts = [{
+      id: 'legacy-attempt',
+      requestId: 'legacy-failure',
+      upstreamId: 'private-upstream',
+      attemptNumber: 1,
+      status: 'failed',
+      responseStatusCode: 999,
+      errorCode: 'unsafe error',
+      timings: { queueWaitMs: 3, hostname: 'private.example' }
+    }];
+    store.save(db);
+
+    const reopened = new Store(dir);
+    const diagnostic = reopened.gatewayDiagnostics().failures[0];
+    assert.equal(diagnostic.responseStatusCode, null);
+    assert.equal(diagnostic.errorCode, null);
+    assert.deepEqual(diagnostic.exclusionReasons, ['quota_exhausted']);
+    assert.deepEqual(diagnostic.attempts[0].timings, { queueWaitMs: 3 });
+    const persisted = reopened.sqlite.prepare('SELECT group_concat(value) AS result FROM records').get().result || '';
+    for (const secret of ['private-scope', 'private-key', 'private-model', 'private-upstream', 'private.example', 'unsafe error', 'unsafe reason']) {
+      assert.equal(persisted.includes(secret), false);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -124,6 +259,132 @@ test('persists file metadata and upstream session pins', () => {
     assert.equal(reopened.listFiles().length, 1);
     reopened.remove(upstream.id);
     assert.equal(reopened.sessionUpstream('session-1'), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('persists account cooldowns, clears session affinity, and fences stale success', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-15T00:00:00Z');
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'cooldown', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    store.pinSession('cooldown-session', upstream.id);
+    store.pinResponse('resp_cooldown', upstream.id, 'default', 'key-cooldown');
+    const scope = { routeClass: 'proxy_http', model: 'test' };
+    const stale = store.beginUpstreamAttempt(upstream.id, scope, now);
+    const quota = store.beginUpstreamAttempt(upstream.id, scope, now + 1);
+    store.settleUpstreamAttempt(upstream.id, quota, { class: 'quota', retryable: true, retryAfter: '60' }, now + 2);
+    assert.equal(store.sessionUpstream('cooldown-session'), null);
+    assert.equal(store.responseUpstream('resp_cooldown', 'default', 'key-cooldown'), upstream.id);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    store.settleUpstreamAttempt(upstream.id, stale, { class: 'success', retryable: false }, now + 3);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+
+    const reopened = new Store(dir);
+    assert.equal(reopened.candidatePlan({ preferredType: 'compass', routeClass: 'proxy_http', now: now + 30_000 }).length, 0);
+    assert.equal(reopened.clearUpstreamCooldown(upstream.id).health, null);
+    assert.equal(reopened.candidatePlan({ preferredType: 'compass', routeClass: 'proxy_http', now: now + 30_000 }).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ordinary concurrent success does not fence a later valid quota outcome', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-15T00:00:00Z');
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'concurrent-health', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const scope = { routeClass: 'proxy_http', model: '' };
+    const success = store.beginUpstreamAttempt(upstream.id, scope, now);
+    const quota = store.beginUpstreamAttempt(upstream.id, scope, now + 1);
+    store.settleUpstreamAttempt(upstream.id, success, { class: 'success', retryable: false }, now + 2);
+    store.settleUpstreamAttempt(upstream.id, quota, { class: 'quota', retryable: true }, now + 3);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('credential replacement fences stale account-wide failures', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'credential-fence', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const admission = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: '' });
+    store.persistCredentials(upstream.id, { projectKey: 'rotated' });
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'credential', retryable: true });
+    assert.equal(store.get(upstream.id).health, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('allows one early reset-derived cooldown probe and never probes Retry-After early', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-15T00:00:00Z');
+  try {
+    const reset = store.create({ type: 'compass', projectId: 'reset-probe', projectKey: 'secret' });
+    const explicit = store.create({ type: 'compass', projectId: 'explicit-probe', projectKey: 'secret' });
+    store.setCap(reset.id, { capDollars: 100 });
+    store.setCap(explicit.id, { capDollars: 100 });
+    const scope = { routeClass: 'proxy_http', model: '' };
+
+    const resetAttempt = store.beginUpstreamAttempt(reset.id, scope, now);
+    store.settleUpstreamAttempt(reset.id, resetAttempt, { class: 'quota', retryable: true, resetAt: String(now + 15 * 60_000) }, now);
+    assert.equal(store.beginUpstreamAttempt(reset.id, scope, now + 5 * 60_000 - 1), null);
+    const probe = store.beginUpstreamAttempt(reset.id, scope, now + 5 * 60_000);
+    assert.ok(probe);
+    assert.equal(probe.accountProbe, true);
+    assert.equal(store.beginUpstreamAttempt(reset.id, scope, now + 5 * 60_000 + 1), null);
+    store.settleUpstreamAttempt(reset.id, probe, { class: 'success', retryable: false }, now + 5 * 60_000 + 2);
+    assert.equal(store.get(reset.id).health, undefined);
+
+    const explicitAttempt = store.beginUpstreamAttempt(explicit.id, scope, now);
+    store.settleUpstreamAttempt(explicit.id, explicitAttempt, { class: 'quota', retryable: true, retryAfter: '600' }, now);
+    assert.equal(store.beginUpstreamAttempt(explicit.id, scope, now + 5 * 60_000), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('failed reset-derived probes retain cooldown and stale probes cannot clear replacement state', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-15T00:00:00Z');
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'failed-probe', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const scope = { routeClass: 'proxy_http', model: '' };
+    const initial = store.beginUpstreamAttempt(upstream.id, scope, now);
+    store.settleUpstreamAttempt(upstream.id, initial, { class: 'quota', retryable: true, resetAt: String(now + 15 * 60_000) }, now);
+
+    const failedProbe = store.beginUpstreamAttempt(upstream.id, scope, now + 5 * 60_000);
+    store.settleUpstreamAttempt(upstream.id, failedProbe, { class: 'transient', retryable: true }, now + 5 * 60_000 + 1);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.get(upstream.id).health.probeInFlight, false);
+    assert.equal(store.beginUpstreamAttempt(upstream.id, scope, now + 10 * 60_000 - 1), null);
+
+    const staleProbe = store.beginUpstreamAttempt(upstream.id, scope, now + 10 * 60_000);
+    store.persistCredentials(upstream.id, { projectKey: 'replacement' });
+    const replacement = store.beginUpstreamAttempt(upstream.id, scope, now + 10 * 60_000 + 1);
+    store.settleUpstreamAttempt(upstream.id, replacement, { class: 'quota', retryable: true }, now + 10 * 60_000 + 2);
+    store.settleUpstreamAttempt(upstream.id, staleProbe, { class: 'success', retryable: false }, now + 10 * 60_000 + 3);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('clear cooldown leaves reauthentication-required state intact', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'reauth', projectKey: 'secret' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const admission = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: '' });
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'credential', retryable: true });
+    assert.equal(store.clearUpstreamCooldown(upstream.id).health.status, 'reauth_required');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -143,6 +143,7 @@ export function createUpstream(input) {
     email: '',
     accessTokenExpiresAt: null,
     credentialEpoch: 1,
+    modelCatalogEpoch: 1,
     projectId: '',
     quota: null,
     quotaSource,
@@ -505,6 +506,7 @@ function normalizeQuotaSource(value) {
 
 export function publicUpstream(upstream) {
   const spending = spendingSummary(upstream.spending);
+  const health = upstream.health && typeof upstream.health === 'object' ? upstream.health : null;
   return {
     id: upstream.id,
     priority: Number.isInteger(upstream.priority) ? upstream.priority : null,
@@ -519,9 +521,17 @@ export function publicUpstream(upstream) {
     metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
     quotaSource: isAiswitchUpstream(upstream) ? 'aiswitch' : upstream.quotaSource || null,
+    pacing: upstream.pacing,
     spending,
     updatedAt: upstream.updatedAt || null,
     lastSuccessfulAt: upstream.lastSuccessfulAt || null,
+    health: health ? {
+      status: health.status || 'available',
+      failureClass: health.failureClass || null,
+      cooldownSource: health.cooldownSource || null,
+      cooldownStartedAt: health.cooldownStartedAt || null,
+      nextEligibleAt: health.nextEligibleAt || null
+    } : null,
     eligibility: spendingEligibility(upstream).status
   };
 }
