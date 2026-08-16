@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-compact-http-0.146.1",
+  "client": {
+    "family": "codex",
+    "version": "0.146.1"
+  },
+  "profile": "codex-compact-http",
+  "negotiation": {
+    "headers": {
+      "version": "0.146.1",
+      "originator": "codex_cli_rs"
+    }
+  },
+  "request": {
+    "sourcePath": "/v1/responses/compact",
+    "originalPath": "/backend-api/codex/responses/compact",
+    "body": {
+      "model": "fixture-model",
+      "input": "fixture-text",
+      "reasoning": {
+        "effort": "ultra"
+      },
+      "max_output_tokens": 128,
+      "temperature": 0.1
+    },
+    "compatibility": {
+      "unsupportedFields": [
+        "temperature"
+      ]
+    }
+  },
+  "expected": {
+    "targetPath": "/backend-api/codex/responses/compact",
+    "fingerprint": {
+      "version": 1,
+      "hash": "be2458fe64be87ea96c97b38bb907e57",
+      "values": {
+        "user-agent": "codex_cli_rs/0.146.1",
+        "originator": "codex_cli_rs",
+        "version": "0.146.1"
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.input",
+          "type": "string"
+        },
+        {
+          "path": "$.max_output_tokens",
+          "type": "number"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.reasoning",
+          "type": "object"
+        },
+        {
+          "path": "$.reasoning.effort",
+          "type": "string"
+        }
+      ],
+      "typeValues": []
+    }
+  }
+}
