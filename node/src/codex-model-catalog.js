@@ -104,30 +104,6 @@ export class CodexModelCatalog {
     };
   }
 
-  scopedAccountCatalog(upstreamId, scopeId = DEFAULT_SCOPE_ID) {
-    return this.scopedAccountsCatalog([upstreamId], scopeId);
-  }
-
-  scopedAccountsCatalog(upstreamIds, scopeId = DEFAULT_SCOPE_ID) {
-    this.reconcile();
-    const upstreams = [...new Set(upstreamIds)]
-      .map((upstreamId) => this.store.get(upstreamId, scopeId))
-      .filter(Boolean);
-    if (!upstreams.length) return null;
-    const entries = upstreams.map(({ id }) => this.currentEntry(id));
-    const accountModels = entries.flatMap((entry) => entry?.hasCatalog ? [entry.models] : []);
-    const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
-      && !upstreams.some((upstream) => upstream.type === 'codex' && STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by === 'compass');
-    const aggregated = aggregateCatalog(accountModels, providerAllowed);
-    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, this.now(), this.freshTtlMs);
-    return {
-      ...aggregated,
-      etag: modelCatalogEtag({ models: aggregated.nativeModels }),
-      publicEtag: modelCatalogEtag({ object: 'list', data: aggregated.publicModels }),
-      status
-    };
-  }
-
   async discoverAccount(upstreamId, options = {}) {
     this.reconcile();
     const upstream = this.store.get(upstreamId);
@@ -162,17 +138,6 @@ export class CodexModelCatalog {
     if (entry.negativeModels.has(normalized)) return false;
     if (!entry.hasCatalog) return null;
     return entry.modelIds.has(normalized);
-  }
-
-  supportsServiceTier(upstreamId, model, tier, expectedGeneration = null) {
-    const normalized = normalizeModelId(model);
-    if (!normalized || tier !== 'ultrafast') return null;
-    const entry = expectedGeneration !== null
-      ? this.entryMatchingGeneration(upstreamId, expectedGeneration)
-      : this.currentEntry(upstreamId);
-    if (!entry?.hasCatalog) return false;
-    const row = entry.models.find(({ id }) => id === normalized)?.native;
-    return advertisedServiceTiers(row).includes(tier);
   }
 
   markUnsupported(upstreamId, model) {
@@ -492,17 +457,6 @@ function normalizeModelId(value) {
   if (typeof value !== 'string') return '';
   const id = value.trim();
   return MODEL_ID_PATTERN.test(id) ? id.toLowerCase() : '';
-}
-
-function advertisedServiceTiers(row) {
-  if (!plainObject(row)) return [];
-  return ['service_tiers', 'additional_speed_tiers'].flatMap((key) => {
-    const values = Array.isArray(row[key]) ? row[key] : [];
-    return values.flatMap((value) => {
-      const tier = typeof value === 'string' ? value : plainObject(value) ? value.id : null;
-      return typeof tier === 'string' && tier === tier.trim().toLowerCase() ? [tier] : [];
-    });
-  });
 }
 
 function aggregateCatalog(accountModels, modelAllowed) {
