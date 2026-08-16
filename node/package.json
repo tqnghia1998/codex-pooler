@@ -9,6 +9,7 @@
     "dev": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env --watch src/server.js",
     "compatibility:check": "node scripts/check-compatibility-fixtures.js",
     "compatibility:intake": "node scripts/intake-compatibility-capture.js",
+    "compatibility:release-check": "node scripts/check-client-releases.js",
     "compatibility:update": "node scripts/check-compatibility-fixtures.js --update",
     "pricing:refresh": "node scripts/refresh-openai-pricing.js",
     "test": "node --test"
