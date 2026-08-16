@@ -284,3 +284,9 @@ Reference audit:
 - [x] Add per-account capability-aware routing after catalog serving is stable.
 - [x] Follow with immediate `Retry-After`/quota-reset account cooldowns.
 - [x] Add the shared host circuit last, once account-level outcome settlement is centralized.
+
+## Next Phase
+
+Phase 7 is planned in `COMPATIBILITY_CANARY_PLAN.md`. Start with passive drift observation only;
+synthetic probes remain disabled by default and active request-shape probes require a separate
+explicit opt-in.
