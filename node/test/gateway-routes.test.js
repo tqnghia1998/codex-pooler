@@ -388,7 +388,13 @@ test('bridges public compaction triggers across JSON and SSE through ordinary ba
     calls.push({ url, body: JSON.parse(options.body) });
     return new Response(JSON.stringify({
       id: 'resp-public-compact',
-      output: [{ type: 'compaction', encrypted_content: 'encrypted-public' }],
+      output: [{
+        type: 'compaction',
+        id: null,
+        encrypted_content: 'encrypted-public',
+        internal_chat_message_metadata_passthrough: { turn_id: 'must-not-leak' },
+        summary: 'must-not-leak'
+      }],
       usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 }
     }), { headers: { 'content-type': 'application/json' } });
   };
@@ -406,7 +412,7 @@ test('bridges public compaction triggers across JSON and SSE through ordinary ba
       id: 'resp-public-compact',
       object: 'response',
       status: 'completed',
-      output: [{ type: 'compaction', encrypted_content: 'encrypted-public' }],
+      output: [{ type: 'compaction', id: null, encrypted_content: 'encrypted-public' }],
       usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 }
     });
 
@@ -423,6 +429,116 @@ test('bridges public compaction triggers across JSON and SSE through ordinary ba
       { lastInput: { type: 'compaction_trigger' }, stream: 'omitted' },
       { lastInput: { type: 'compaction_trigger' }, stream: 'omitted' }
     ]);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects blank public compaction output without leaking a later candidate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-public-compact-blank-'));
+  const { store } = configuredStore(dir);
+  const { server, base } = await start(store, async () => new Response(JSON.stringify({
+    output: [
+      { type: 'compaction', encrypted_content: '   ' },
+      { type: 'compaction_summary', encrypted_content: 'must-not-leak' }
+    ]
+  }), { headers: { 'content-type': 'application/json' } }));
+  try {
+    const response = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible' }] },
+          { type: 'compaction_trigger' }
+        ]
+      })
+    });
+    const body = await response.text();
+    assert.equal(response.status, 502);
+    assert.match(body, /invalid_compaction_response/);
+    assert.doesNotMatch(body, /must-not-leak/);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('routes ultrafast Responses only to exact advertised Codex models', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ultrafast-routing-'));
+  const { store, codexUpstream } = configuredStore(dir, { compass: true });
+  const dispatched = [];
+  const { server, base } = await start(store, async (url, options) => {
+    const path = new URL(url).pathname;
+    if (path === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({
+        models: [{
+          slug: 'gpt-5.6-sol',
+          service_tiers: [{ id: 'ultrafast' }]
+        }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    dispatched.push({ path, body: JSON.parse(options.body), authorization: options.headers.authorization });
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-ultrafast","status":"completed","service_tier":"ultrafast","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}\n\n', {
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  });
+  try {
+    assert.equal((await gatewayFetch(base, '/v1/models')).status, 200);
+    let response = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'fast', service_tier: 'ultrafast' })
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).service_tier, 'ultrafast');
+    assert.equal(dispatched.length, 1);
+    assert.equal(dispatched[0].body.service_tier, 'ultrafast');
+    assert.match(dispatched[0].authorization, /^Bearer header\./);
+    assert.equal(store.getPublic(codexUpstream.id).spending.spentDollars, 0);
+
+    response = await gatewayFetch(base, '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol',
+        messages: [{ role: 'user', content: 'fast' }],
+        service_tier: 'ultrafast'
+      })
+    });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).error.param, 'service_tier');
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not route ultrafast Responses to unadvertised Codex or Compass accounts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ultrafast-unadvertised-'));
+  const { store } = configuredStore(dir, { compass: true });
+  let dispatches = 0;
+  const { server, base } = await start(store, async (url) => {
+    if (new URL(url).pathname === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({
+        models: [{ slug: 'gpt-5.6-sol', additional_speed_tiers: ['priority'] }]
+      }), { headers: { 'content-type': 'application/json' } });
+    }
+    dispatches += 1;
+    return new Response('{}');
+  });
+  try {
+    assert.equal((await gatewayFetch(base, '/v1/models')).status, 200);
+    const response = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'fast', service_tier: 'ultrafast' })
+    });
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).error.code, 'no_compatible_backend');
+    assert.equal(dispatches, 0);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
@@ -1172,6 +1288,62 @@ test('bridges public WebSocket compaction turns over HTTP and echoes stream IDs'
   }
 });
 
+test('projects public WebSocket compaction policy failures without refreshing or penalizing the account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-public-compact-policy-'));
+  const store = new Store(dir);
+  const upstream = store.create(codex({ refreshToken: 'must-not-refresh' }));
+  store.setCap(upstream.id, { capDollars: 100 });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({
+      error: {
+        type: 'provider_policy',
+        code: 'misalignment_policy_violation',
+        message: 'Compaction blocked.',
+        param: 'must-not-leak'
+      }
+    }), { status: 403, headers: { 'content-type': 'application/json' } });
+  };
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const message = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'response.create',
+        model: 'gpt-5.6-sol',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible' }] },
+          { type: 'compaction_trigger' }
+        ]
+      })));
+      client.once('message', (data) => {
+        resolve(JSON.parse(data));
+        client.close();
+      });
+      client.once('error', reject);
+    });
+    assert.deepEqual(message.error, {
+      type: 'invalid_request_error',
+      code: 'misalignment_policy_violation',
+      message: 'Compaction blocked.',
+      param: null
+    });
+    assert.equal(message.status, 403);
+    assert.equal(calls, 1);
+    assert.equal(store.get(upstream.id).health, undefined);
+    assert.equal(store.get(upstream.id).tokenRefresh?.status, undefined);
+  } finally {
+    relay.close();
+    await close(gateway);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rejects invalid WebSocket stream IDs and recovers on the next turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-stream-id-'));
   const { store } = configuredStore(dir);
@@ -1344,6 +1516,74 @@ test('finalizes a public WebSocket request when a retryable failure has no fallb
     assert.deepEqual(store.gatewayAttempts(requests[0].id).map(({ status, errorCode }) => ({ status, errorCode })), [
       { status: 'failed', errorCode: 'upstream_response_failed' }
     ]);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects public WebSocket policy failures without retrying or penalizing the account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-policy-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  let turns = 0;
+  target.on('connection', (socket) => socket.once('message', () => {
+    turns += 1;
+    socket.send(JSON.stringify({
+      type: 'response.failed',
+      sequence_number: 8,
+      response: {
+        id: 'resp-ws-policy',
+        status: 'failed',
+        error: {
+          type: 'provider_policy',
+          code: 'misalignment_policy_violation',
+          message: 'WebSocket blocked.',
+          param: 'drop',
+          sibling: 'drop'
+        }
+      },
+      provider_sibling: 'drop'
+    }));
+  }));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const message = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'response.create',
+        model: 'gpt-5.6-sol',
+        input: 'blocked'
+      })));
+      client.once('message', (data) => {
+        resolve(JSON.parse(data));
+        client.close();
+      });
+      client.once('error', reject);
+    });
+    assert.deepEqual(message.response.error, {
+      type: 'invalid_request_error',
+      code: 'misalignment_policy_violation',
+      message: 'WebSocket blocked.'
+    });
+    assert.equal(JSON.stringify(message).includes('provider_policy'), false);
+    assert.equal(turns, 1);
+    assert.equal(store.get(codexUpstream.id).health, undefined);
+    const [requestRecord] = store.load().gatewayRequests;
+    assert.equal(requestRecord.lastErrorCode, 'misalignment_policy_violation');
+    assert.equal(store.gatewayAttempts(requestRecord.id).length, 1);
   } finally {
     relay.close();
     await close(gateway);

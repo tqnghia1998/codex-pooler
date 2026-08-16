@@ -174,6 +174,85 @@ test('validates and preserves Responses tools and strict local schemas', () => {
     }]
   });
   assert.equal(inferred.tools[0].parameters.properties.value.type, 'object');
+
+  const recursive = {
+    type: 'object',
+    properties: { node: { $ref: '#/$defs/node' } },
+    required: ['node'],
+    additionalProperties: false,
+    $defs: {
+      node: {
+        type: 'object',
+        properties: { children: { type: 'array', items: { $ref: '#/$defs/node' } } },
+        required: ['children'],
+        additionalProperties: false
+      }
+    }
+  };
+  assert.deepEqual(adaptResponsesRequest({
+    model: 'gpt',
+    input: 'recursive',
+    text: { format: { type: 'json_schema', strict: true, schema: recursive } }
+  }).text.format.schema, recursive);
+
+  for (const schema of [
+    { type: 'string' },
+    { type: ['object', 'null'], properties: {}, required: [], additionalProperties: false },
+    { $ref: '#/$defs/root', $defs: { root: { type: 'object', properties: {}, required: [], additionalProperties: false } } },
+    { type: 'object', properties: {}, required: [], additionalProperties: false, anyOf: [{ type: 'object' }] }
+  ]) {
+    assertAdapterError(() => adaptResponsesRequest({
+      model: 'gpt',
+      input: 'invalid root',
+      text: { format: { type: 'json_schema', strict: true, schema } }
+    }), { code: 'invalid_json_schema', param: 'text.format.schema' });
+  }
+});
+
+test('accepts only closed hosted-shell history replay shapes', () => {
+  const history = [
+    {
+      type: 'shell_call',
+      call_id: 'call-shell',
+      action: { commands: ['pwd', 'ls'], timeout_ms: null, max_output_length: 4096 },
+      id: null,
+      caller: { type: 'program', caller_id: 'program-1' },
+      status: 'completed',
+      environment: { type: 'local', skills: [{ name: '', description: '', path: '' }] }
+    },
+    {
+      type: 'shell_call_output',
+      call_id: 'call-shell',
+      output: [
+        { stdout: 'ok', stderr: '', outcome: { type: 'exit', exit_code: 0 } },
+        { stdout: '', stderr: '', outcome: { type: 'timeout' } }
+      ],
+      max_output_length: null
+    }
+  ];
+  assert.deepEqual(adaptResponsesRequest({ model: 'gpt', input: history }).input, history);
+  assertAdapterError(() => adaptResponsesRequest({
+    model: 'gpt',
+    input: [{ ...history[0], unknown: true }]
+  }), { param: 'input' });
+  assertAdapterError(() => adaptResponsesRequest({
+    model: 'gpt',
+    input: [{ ...history[1], output: [{ stdout: '', stderr: '' }] }]
+  }), { param: 'input' });
+  assertAdapterError(() => adaptResponsesRequest({
+    model: 'gpt',
+    input: 'run',
+    tools: [{ type: 'shell' }]
+  }), { param: 'tools' });
+});
+
+test('keeps ultrafast Responses-only', () => {
+  assert.equal(adaptResponsesRequest({ model: 'gpt', input: 'fast', service_tier: ' ULTRAFAST ' }).service_tier, 'ultrafast');
+  assertAdapterError(() => adaptChatRequest({
+    model: 'gpt',
+    messages: [{ role: 'user', content: 'fast' }],
+    service_tier: 'ultrafast'
+  }), { param: 'service_tier' });
 });
 
 test('passes through native Codex replay items untranslated', () => {

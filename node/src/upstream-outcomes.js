@@ -1,3 +1,5 @@
+import { misalignmentPolicyFailure } from './policy-failures.js';
+
 const DEFAULT_QUOTA_COOLDOWN_MS = 60_000;
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
 const MAX_RESET_COOLDOWN_MS = 15 * 60 * 1_000;
@@ -14,7 +16,7 @@ const TRANSIENT_TRANSPORT_CODES = new Set([
   'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET'
 ]);
 
-export function classifyHttpResponse(response, structuredBody = null) {
+export function classifyHttpResponse(response, structuredBody = null, { allowMisalignmentPolicy = false } = {}) {
   const status = Number(response?.status ?? response?.statusCode);
   const structured = structuredError(structuredBody);
   return outcomeForStatus(status, {
@@ -23,13 +25,15 @@ export function classifyHttpResponse(response, structuredBody = null) {
     errorCode: structured.code,
     errorType: structured.type,
     errorParam: structured.param
-  });
+  }, allowMisalignmentPolicy);
 }
 
-export function classifySseEvent(event) {
+export function classifySseEvent(event, { allowMisalignmentPolicy = false } = {}) {
   const error = structuredError(event);
+  const policyFailure = allowMisalignmentPolicy && misalignmentPolicyFailure(event);
+  if (policyFailure) return { class: 'neutral', retryable: false, errorCode: policyFailure.code };
   const status = finiteStatus(event?.status ?? event?.status_code ?? error.status);
-  if (status) return outcomeForStatus(status, error);
+  if (status) return outcomeForStatus(status, error, allowMisalignmentPolicy);
   if (!['error', 'response.failed'].includes(event?.type)) {
     return ['response.completed', 'response.incomplete'].includes(event?.type)
       ? { class: 'success', retryable: false }
@@ -104,7 +108,7 @@ export function parseResetCooldownMs(value, now = Date.now()) {
   return best;
 }
 
-function outcomeForStatus(status, metadata = {}) {
+function outcomeForStatus(status, metadata = {}, allowMisalignmentPolicy = false) {
   const normalized = {
     ...metadata,
     code: metadata.code ?? metadata.errorCode ?? null,
@@ -114,6 +118,9 @@ function outcomeForStatus(status, metadata = {}) {
   if (!Number.isFinite(status)) return { class: 'unknown', retryable: false };
   if (status >= 200 && status < 300) return { class: 'success', retryable: false, status };
   if (status >= 300 && status < 400) return { class: 'neutral', retryable: false, status };
+  if (allowMisalignmentPolicy && [400, 403].includes(status) && misalignmentPolicyFailure({ error: normalized })) {
+    return { class: 'neutral', retryable: false, status, errorCode: normalized.code };
+  }
   if (status === 401 || status === 403) return { class: 'credential', retryable: true, status, ...metadata };
   if (status === 402 || status === 429) return quotaOutcome({ status, ...metadata });
   if (status >= 400 && status < 500) {

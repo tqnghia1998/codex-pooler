@@ -419,6 +419,56 @@ test('fails over after a successful same-account refresh is still rejected', asy
   }
 });
 
+test('projects a policy failure returned after credential refresh without failing over', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-auth-policy-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'refresh-policy', email: 'first-policy@example.com', accountId: 'first-policy' }));
+  const second = store.create(codexInput({ email: 'second-policy@example.com', accountId: 'second-policy' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://auth.openai.com/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'rotated-policy-token', expires_in: 3600 }), { status: 200 });
+    }
+    providerCalls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (options.headers.authorization === 'Bearer rotated-policy-token') {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'misalignment_policy_violation',
+          message: 'Blocked after refresh.',
+          param: 'must-not-leak'
+        }
+      }), { status: 403, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 'should-not-run', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'policy after refresh' });
+    assert.equal(result.response.status, 403);
+    assert.deepEqual(result.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Blocked after refresh.'
+      }
+    });
+    assert.deepEqual(providerCalls, [`Bearer ${firstToken}`, 'Bearer rotated-policy-token']);
+    assert.equal(store.get(first.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('does not fail over when the selected Codex credential refresh fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-auth-no-failover-'));
   const store = new Store(dir);
@@ -620,6 +670,79 @@ test('redacts provider 5xx bodies, passes valid Anthropic 4xx, and rejects faile
     assert.match(streamText, /upstream_response_failed/);
     assert.equal(streamText.includes('sensitive upstream details'), false);
     assert.equal(streamText.includes('[DONE]'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects misalignment policy failures without refreshing or poisoning the account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-policy-failure-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput({ refreshToken: 'must-not-refresh' }));
+  store.setCap(created.id, { capDollars: 100 });
+  let calls = 0;
+  const { server, base } = await runningServer(store, async (url) => {
+    calls += 1;
+    assert.equal(new URL(url).pathname, '/backend-api/codex/responses');
+    return new Response(JSON.stringify({
+      error: {
+        type: 'provider_policy_type',
+        code: 'misalignment_policy_violation',
+        message: 'Request blocked by policy.',
+        param: 'must-not-leak',
+        sibling: 'must-not-leak'
+      },
+      provider_body: 'must-not-leak'
+    }), { status: 403, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol',
+      input: 'blocked'
+    });
+    assert.equal(result.response.status, 403);
+    assert.deepEqual(result.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Request blocked by policy.'
+      }
+    });
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+    assert.equal(store.get(created.id).tokenRefresh?.status, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects streamed misalignment policy failures and settles them once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-policy-stream-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(
+    'event: response.failed\ndata: {"type":"response.failed","sequence_number":7,"response":{"id":"resp-policy","status":"failed","error":{"type":"provider_policy","code":"misalignment_policy_violation","message":"Stream blocked.","param":"drop","sibling":"drop"}},"provider_sibling":"drop"}\n\n',
+    { headers: { 'content-type': 'text/event-stream' } }
+  ), 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer local-client-key' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'blocked', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /misalignment_policy_violation/);
+    assert.match(text, /Stream blocked\./);
+    assert.doesNotMatch(text, /provider_policy|provider_sibling|"param"/);
+    assert.equal(store.get(created.id).health, undefined);
+    const [requestRecord] = store.load().gatewayRequests;
+    assert.equal(requestRecord.status, 'failed');
+    assert.equal(requestRecord.lastErrorCode, 'misalignment_policy_violation');
+    assert.equal(store.gatewayAttempts(requestRecord.id).length, 1);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
