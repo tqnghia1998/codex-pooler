@@ -39,6 +39,7 @@ const COMPATIBILITY_FACT_SCHEMA_VERSION = 3;
 const COMPATIBILITY_FACT_ID_PATTERN = /^cf_[A-Za-z0-9_-]{20,64}$/;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
 const GATEWAY_ERROR_HISTORY_LIMIT = 100;
+const GATEWAY_DIAGNOSTIC_ATTEMPT_LIMIT = 8;
 const GATEWAY_USAGE_DAYS = 90;
 const GATEWAY_USAGE_ATTEMPT_LIMIT = 100;
 const ROUTING_STRATEGIES = new Set(['least-recent-success', 'most-remaining-quota']);
@@ -508,20 +509,24 @@ export class Store {
       .reverse()
       .map((request) => {
         const attempts = db.gatewayAttempts.filter((attempt) => attempt.requestId === request.id);
+        const retryCount = attempts.filter((attempt) => attempt.status === 'retryable_failed').length;
+        const visibleAttempts = attempts.slice(-GATEWAY_DIAGNOSTIC_ATTEMPT_LIMIT);
         return {
           endpoint: safeEndpoint(request.endpoint),
           transport: safeTransport(request.transport),
           responseStatusCode: safeStatusCode(request.responseStatusCode),
           errorCode: safeDiagnosticCode(request.lastErrorCode),
           exclusionReasons: sanitizeExclusionReasons(request.exclusionReasons),
-          retryCount: Math.max(0, Math.min(100, Number(request.retryCount) || 0)),
+          retryCount,
+          attemptCount: attempts.length,
+          omittedAttemptCount: attempts.length - visibleAttempts.length,
           completedAt: safeTimestamp(request.completedAt),
-          attempts: attempts.map((attempt) => ({
+          attempts: visibleAttempts.map((attempt) => ({
             attemptNumber: Math.max(1, Math.min(100, Number(attempt.attemptNumber) || 1)),
             status: ['retryable_failed', 'failed'].includes(attempt.status) ? attempt.status : 'failed',
             responseStatusCode: safeStatusCode(attempt.responseStatusCode),
             errorCode: safeDiagnosticCode(attempt.errorCode),
-            timings: sanitizeAttemptTimings(attempt.timings)
+            timings: diagnosticAttemptTimings(attempt)
           }))
         };
       });
@@ -1180,6 +1185,16 @@ function safeTimestamp(value) {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
+function diagnosticAttemptTimings(attempt) {
+  const timings = sanitizeAttemptTimings(attempt?.timings);
+  if (Object.keys(timings).length) return timings;
+  const startedAt = Date.parse(attempt?.startedAt);
+  const completedAt = Date.parse(attempt?.completedAt);
+  return Number.isFinite(startedAt) && Number.isFinite(completedAt) && completedAt >= startedAt
+    ? { terminalCompletionMs: Math.min(86_400_000, Math.round(completedAt - startedAt)) }
+    : {};
+}
+
 function dbUpstreamLimits(upstreams, scopeId) {
   return scoped(upstreams, scopeId).flatMap(({ quota }) => {
     if (!quota || typeof quota !== 'object') return [];
@@ -1487,7 +1502,7 @@ function normalizeCompatibilityFactRecord(record, key) {
   if (!/^[a-f0-9]{32}$/.test(record.protocolFingerprintHash || '')) return null;
   if (!Number.isInteger(record.protocolFingerprintVersion) || record.protocolFingerprintVersion < 1) return null;
   if (record.status !== 'active') return null;
-  if (!validCompatibilityFeature(record.providerType, record.feature, record.value)) return null;
+  if (!validCompatibilityFeature(record.providerType, record.feature, record.value, record.routeClass)) return null;
   const createdAt = Date.parse(record.createdAt);
   const lastValidatedAt = Date.parse(record.lastValidatedAt);
   const expiresAt = Date.parse(record.expiresAt);
