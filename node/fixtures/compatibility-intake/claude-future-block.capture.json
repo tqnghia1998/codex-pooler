@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "profile": "compass-anthropic-messages",
+  "client": {
+    "family": "claude-code",
+    "version": "2.0.0"
+  },
+  "request": {
+    "path": "/v1/messages",
+    "headers": {
+      "x-api-key": "fixture-api-key",
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "future-blocks-2026-08-16"
+    },
+    "body": {
+      "model": "claude-private-preview",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "synthetic customer request"
+            },
+            {
+              "type": "future_content_block",
+              "data": "synthetic-private-data"
+            }
+          ]
+        }
+      ],
+      "max_tokens": 2048,
+      "stream": true
+    }
+  },
+  "response": {
+    "status": 400,
+    "body": {
+      "error": {
+        "type": "invalid_request_error",
+        "code": "unsupported_content_block",
+        "param": "messages",
+        "message": "provider-private rejection detail"
+      },
+      "request_id": "provider-private-request-id"
+    }
+  }
+}
