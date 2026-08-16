@@ -13,6 +13,7 @@ import { modelCatalogForStore } from './codex-model-catalog.js';
 import { CodexHostHealth, codexHostHealthForStore, codexHostHealthOptionsFromEnv } from './codex-host-health.js';
 import { upstreamPacerForStore } from './upstream-pacer.js';
 import { Readiness, readyReadiness } from './readiness.js';
+import { compatibilityLearningForStore } from './compatibility-learning.js';
 import {
   PROXY_ENDPOINTS,
   WEBSOCKET_ENDPOINTS,
@@ -42,6 +43,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const upstreamPacer = upstreamPacerForStore(store);
+  const compatibilityLearning = compatibilityLearningForStore(store);
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -119,7 +121,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
-        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness });
+        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning });
         return;
       }
       await staticFile(res, url.pathname, req, admission);
@@ -328,7 +330,7 @@ async function api(req, res, url, store, options) {
   }
 }
 
-async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness }) {
+async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning }) {
   if (req.method === 'GET' && url.pathname === '/api/upstreams/events') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
     res.write('event: ready\ndata: {"type":"upstreams"}\n\n');
@@ -388,6 +390,19 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   }
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'diagnostics') {
     sendJson(res, 200, { readiness: readiness.status(), gateway: store.gatewayDiagnostics() });
+    return;
+  }
+  if (req.method === 'GET' && parts.length === 2 && parts[1] === 'compatibility') {
+    sendJson(res, 200, { compatibility: compatibilityLearning.status() });
+    return;
+  }
+  if (req.method === 'DELETE' && parts.length === 3 && parts[1] === 'compatibility' && parts[2] === 'facts') {
+    sendJson(res, 200, { removed: compatibilityLearning.reset() });
+    return;
+  }
+  if (req.method === 'DELETE' && parts.length === 4 && parts[1] === 'compatibility' && parts[2] === 'facts') {
+    if (!compatibilityLearning.resetFact(parts[3])) throw notFound();
+    sendJson(res, 204, null);
     return;
   }
   if (req.method === 'GET' && parts.length === 2 && parts[1] === 'routing') {
