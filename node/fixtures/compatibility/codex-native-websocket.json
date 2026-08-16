@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-native-websocket-0.146.1",
+  "client": {
+    "family": "codex",
+    "version": "0.146.1"
+  },
+  "profile": "codex-native-websocket",
+  "negotiation": {
+    "headers": {
+      "version": "0.146.1",
+      "originator": "codex_cli_rs",
+      "openai-beta": "responses_websockets=2026-02-06"
+    }
+  },
+  "request": {
+    "sourcePath": "/v1/responses",
+    "originalPath": "/backend-api/codex/responses",
+    "body": {
+      "type": "response.create",
+      "model": "fixture-model",
+      "input": "fixture-text",
+      "generate": true
+    }
+  },
+  "expected": {
+    "targetPath": "/backend-api/codex/responses",
+    "fingerprint": {
+      "version": 1,
+      "hash": "6287666d4ed2b7dbc7bf29c93e27f328",
+      "values": {
+        "user-agent": "codex_cli_rs/0.146.1",
+        "originator": "codex_cli_rs",
+        "version": "0.146.1",
+        "openai-beta": "responses_websockets=2026-02-06"
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.generate",
+          "type": "boolean"
+        },
+        {
+          "path": "$.input",
+          "type": "string"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.type",
+          "type": "string"
+        }
+      ],
+      "typeValues": [
+        {
+          "path": "$.type",
+          "value": "response.create"
+        }
+      ]
+    }
+  }
+}
