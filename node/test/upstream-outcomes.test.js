@@ -39,6 +39,36 @@ test('classifies structured SSE and WebSocket terminal frames', () => {
   assert.equal(classifySseEvent({ type: 'response.output_text.delta' }).class, 'neutral');
 });
 
+test('keeps eligible misalignment policy failures non-retryable and health-neutral', () => {
+  assert.deepEqual(classifyHttpResponse(new Response(null, { status: 403 }), {
+    error: { code: 'misalignment_policy_violation', message: 'blocked' }
+  }, {
+    allowMisalignmentPolicy: true
+  }), {
+    class: 'neutral',
+    retryable: false,
+    status: 403,
+    errorCode: 'misalignment_policy_violation'
+  });
+  assert.deepEqual(classifySseEvent({
+    type: 'response.failed',
+    response: { error: { code: 'misalignment_policy_violation' } }
+  }, {
+    allowMisalignmentPolicy: true
+  }), {
+    class: 'neutral',
+    retryable: false,
+    errorCode: 'misalignment_policy_violation'
+  });
+  assert.equal(classifyHttpResponse(new Response(null, { status: 403 }), {
+    error: { code: 'misalignment_policy_violation' }
+  }).class, 'credential');
+  assert.equal(classifySseEvent({
+    type: 'response.failed',
+    response: { error: { code: 'misalignment_policy_violation' } }
+  }).class, 'transient');
+});
+
 test('classifies bounded transport failures and cancellation', () => {
   assert.deepEqual(classifyTransportError(Object.assign(new Error('cancelled'), { upstreamFailureKind: 'cancelled' })), {
     class: 'neutral', retryable: false, transport: 'cancelled'
