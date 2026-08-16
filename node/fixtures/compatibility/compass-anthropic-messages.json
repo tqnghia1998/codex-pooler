@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 1,
+  "id": "compass-anthropic-messages-1.0.0",
+  "client": {
+    "family": "claude-code",
+    "version": "1.0.0"
+  },
+  "profile": "compass-anthropic-messages",
+  "negotiation": {
+    "headers": {
+      "anthropic-version": "2023-06-01",
+      "anthropic-beta": "output-128k-2025-02-19"
+    }
+  },
+  "request": {
+    "sourcePath": "/v1/messages",
+    "originalPath": "/v1/messages",
+    "body": {
+      "model": "fixture-model",
+      "messages": [
+        {
+          "role": "user",
+          "content": "fixture-text"
+        }
+      ],
+      "max_tokens": 512,
+      "stream": true,
+      "thinking": {
+        "type": "enabled",
+        "budget_tokens": 256
+      },
+      "temperature": 0.2,
+      "top_k": 40
+    },
+    "compatibility": {
+      "unsupportedFields": [
+        "top_k"
+      ],
+      "adaptiveThinking": true
+    }
+  },
+  "rejection": {
+    "status": 400,
+    "fields": {
+      "error.type": "invalid_request_error",
+      "error.code": "unsupported_parameter",
+      "error.param": "top_k"
+    }
+  },
+  "expected": {
+    "targetPath": "/messages",
+    "fingerprint": {
+      "version": 1,
+      "hash": "8aa4d01a3b35c3f5d59a137d91c5e868",
+      "values": {
+        "version": "2023-06-01",
+        "beta": [
+          "output-128k-2025-02-19"
+        ]
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.max_tokens",
+          "type": "number"
+        },
+        {
+          "path": "$.messages",
+          "type": "array"
+        },
+        {
+          "path": "$.messages[]",
+          "type": "object"
+        },
+        {
+          "path": "$.messages[].content",
+          "type": "string"
+        },
+        {
+          "path": "$.messages[].role",
+          "type": "string"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.stream",
+          "type": "boolean"
+        },
+        {
+          "path": "$.temperature",
+          "type": "number"
+        },
+        {
+          "path": "$.thinking",
+          "type": "object"
+        },
+        {
+          "path": "$.thinking.type",
+          "type": "string"
+        }
+      ],
+      "typeValues": [
+        {
+          "path": "$.thinking.type",
+          "value": "adaptive"
+        }
+      ]
+    },
+    "rejection": {
+      "status": 400,
+      "fields": {
+        "error.code": "unsupported_parameter",
+        "error.param": "top_k",
+        "error.type": "invalid_request_error"
+      }
+    }
+  }
+}

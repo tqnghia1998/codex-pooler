@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-public-sse-0.146.1",
+  "client": {
+    "family": "codex",
+    "version": "0.146.1"
+  },
+  "profile": "codex-public-sse",
+  "negotiation": {
+    "headers": {}
+  },
+  "request": {
+    "sourcePath": "/v1/responses",
+    "originalPath": "/v1/responses",
+    "body": {
+      "model": "fixture-model",
+      "input": [
+        {
+          "type": "message",
+          "role": "user",
+          "content": [
+            {
+              "type": "input_text",
+              "text": "fixture-text"
+            }
+          ]
+        }
+      ],
+      "stream": true,
+      "service_tier": "fast",
+      "prompt_cache_key": "fixture-cache"
+    }
+  },
+  "expected": {
+    "targetPath": "/backend-api/codex/responses",
+    "fingerprint": {
+      "version": 1,
+      "hash": "be2458fe64be87ea96c97b38bb907e57",
+      "values": {
+        "user-agent": "codex_cli_rs/0.146.1",
+        "originator": "codex_cli_rs",
+        "version": "0.146.1"
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.include",
+          "type": "array"
+        },
+        {
+          "path": "$.include[]",
+          "type": "string"
+        },
+        {
+          "path": "$.input",
+          "type": "array"
+        },
+        {
+          "path": "$.input[]",
+          "type": "object"
+        },
+        {
+          "path": "$.input[].content",
+          "type": "array"
+        },
+        {
+          "path": "$.input[].content[]",
+          "type": "object"
+        },
+        {
+          "path": "$.input[].content[].text",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].content[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].role",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.instructions",
+          "type": "string"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.prompt_cache_key",
+          "type": "string"
+        },
+        {
+          "path": "$.reasoning",
+          "type": "object"
+        },
+        {
+          "path": "$.service_tier",
+          "type": "string"
+        },
+        {
+          "path": "$.store",
+          "type": "boolean"
+        },
+        {
+          "path": "$.stream",
+          "type": "boolean"
+        }
+      ],
+      "typeValues": [
+        {
+          "path": "$.input[].content[].type",
+          "value": "input_text"
+        },
+        {
+          "path": "$.input[].type",
+          "value": "message"
+        }
+      ]
+    }
+  }
+}
