@@ -1933,12 +1933,12 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
                           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
                             <Text weight="bold">{failure.endpoint || 'Gateway request'}</Text>
                             <HStack gap={1} vAlign="center">
-                              {failure.responseStatusCode && <Badge label={String(failure.responseStatusCode)} variant="error" />}
+                              {failure.responseStatusCode && <Badge label={`Upstream ${failure.responseStatusCode}`} variant="error" />}
                               <Badge label={failure.errorCode || 'failed'} variant="error" />
                             </HStack>
                           </HStack>
                           <Text type="supporting" color="secondary">
-                            {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {failure.retryCount} retries
+                            {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {formatFailovers(failure)}
                           </Text>
                           {failure.exclusionReasons?.length > 0 && (
                             <Text type="supporting">Reasons: {failure.exclusionReasons.join(', ')}</Text>
@@ -1948,6 +1948,11 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
                               Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
                             </Text>
                           ))}
+                          {failure.omittedAttemptCount > 0 && (
+                            <Text type="supporting" color="secondary">
+                              Showing the latest {failure.attempts.length} of {failure.attemptCount} attempts
+                            </Text>
+                          )}
                         </VStack>
                       </Card>
                     ))}
@@ -2177,6 +2182,11 @@ function formatTimings(timings = {}) {
     Number.isFinite(timings[name]) ? [`${label} ${timings[name]}ms`] : []
   ));
   return values.length ? values.join(', ') : 'timing unavailable';
+}
+
+function formatFailovers(failure = {}) {
+  const count = Number(failure.retryCount) || 0;
+  return `${count} candidate failover${count === 1 ? '' : 's'}`;
 }
 
 function App() {
