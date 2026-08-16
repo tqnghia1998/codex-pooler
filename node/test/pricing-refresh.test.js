@@ -12,7 +12,8 @@ test('builds a deterministic OpenAI pricing snapshot for selected models and tie
         prices: {
           standard: { default: prices(2), long_context: prices(4) },
           flex: { default: prices(1), long_context: prices(2) },
-          fast: { default: prices(4), long_context: prices(8) }
+          fast: { default: prices(4), long_context: prices(8) },
+          ultrafast: { default: prices(6), long_context: prices(12) }
         }
       }
     }
@@ -27,6 +28,7 @@ test('builds a deterministic OpenAI pricing snapshot for selected models and tie
   assert.match(snapshot, /"tier":"flex","bucket":"default","input":1/);
   assert.match(snapshot, /"tier":"priority","bucket":"long_context","input":8/);
   assert.match(snapshot, /"tier":"standard","bucket":"default","input":2/);
+  assert.match(snapshot, /"tier":"ultrafast","bucket":"long_context","input":12/);
 });
 
 test('rejects incomplete selected-model pricing data', () => {

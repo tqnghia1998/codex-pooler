@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { publicMisalignmentError } from './policy-failures.js';
 
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 const RETRY_CODES = new Set(['upstream_request_timeout', 'stream_incomplete', 'server_error', 'overloaded_error', 'server_is_overloaded', 'websocket_connection_limit_reached']);
@@ -46,6 +47,7 @@ export function normalizePublicResponsesEvent(source, state) {
   state.sequence = sequence;
   result.push(encode(projected, sequence));
   if (projected.type === 'response.created') state.created = true;
+  if (projected.type.startsWith('response.shell_call_')) state.created = true;
   if (projected.type === 'response.output_text.delta' && projected.delta) state.text = true;
   if (!terminal && projected.type !== 'response.created') state.visible = true;
   state.responseId ||= responseId(projected);
@@ -63,6 +65,8 @@ export function normalizeChatEvent(event, state) {
   const terminal = terminalKind(event);
   if (terminal === 'failed') {
     state.terminal = true;
+    const policyError = publicMisalignmentError(event);
+    if (policyError) return [{ error: policyError }];
     return state.roleSent ? [chatChunk(state, {}, 'stop')] : [{ error: { ...safeError(event), code: 'upstream_response_failed', message: 'Upstream response failed' } }];
   }
   const chunks = [];
@@ -123,7 +127,7 @@ function nextSequence(incoming, state, terminal) { const value = Number.isSafeIn
 function synthetic(state) { state.sequence += 1; return state.sequence; }
 function project(event, terminal, namespaces) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index }, namespaces)); return value; }
 function failed(event, reason = '') { const response = plain(event.response) ? event.response : {}; const usage = safeUsage(response.usage || event.usage); return { type: 'response.failed', response: { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'failed', error: safeError(event), ...(reason || incompleteReason(event) ? { incomplete_details: { reason: reason || incompleteReason(event) } } : {}), model: 'unknown', output: [], output_text: '', instructions: null, metadata: null, ...(usage ? { usage } : {}), temperature: null, top_p: null, parallel_tool_calls: false, tool_choice: 'auto', tools: [] } }; }
-function safeError(_event) { return { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null }; }
+function safeError(event) { return publicMisalignmentError(event) || { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null }; }
 function safeUsage(usage) { if (!plain(usage)) return null; const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0; const input = number(usage.input_tokens ?? usage.prompt_tokens); const output = number(usage.output_tokens ?? usage.completion_tokens); return { input_tokens: input, output_tokens: output, total_tokens: Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens : input + output }; }
 function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; if (item.type === 'custom_tool_call' && (item.namespace === undefined || item.namespace === null) && namespaces[item.name]) item.namespace = namespaces[item.name]; if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
 

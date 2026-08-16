@@ -104,6 +104,11 @@ function resolvePrice(models, tier, timestamp, bucket) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
     const dated = PRICES.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
+    if (tier === 'ultrafast') {
+      const exact = dated.filter((snapshot) => snapshot.tier === tier && snapshot.bucket === bucket);
+      if (exact.length) return exact.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
+      continue;
+    }
     // A known model priced only at standard rates (no priority tier, no long-context bucket: all Anthropic entries)
     // bills at those rates instead of going unpriced, which would let the request escape the spending cap.
     const snapshots = preferred(preferred(dated, 'tier', tier, 'standard'), 'bucket', bucket, 'default');
@@ -171,5 +176,6 @@ function canonicalTier(value) {
   const tier = string(value)?.toLowerCase();
   if (tier === 'fast' || tier === 'priority') return 'priority';
   if (tier === 'flex') return 'flex';
+  if (tier === 'ultrafast') return 'ultrafast';
   return 'standard';
 }

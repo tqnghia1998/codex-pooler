@@ -20,7 +20,7 @@ const CHAT_LOCAL_FIELDS = new Set([
 const AUDIO_MIMES = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', ogg: 'audio/ogg' };
 const IMAGE_MIMES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
 const FILE_MIMES = new Set(['application/pdf', 'text/plain']);
-const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'tool_search_output']);
+const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'shell_call_output', 'tool_search_output']);
 
 export class AdapterError extends Error {
   constructor(message, param = null, code = 'invalid_request') {
@@ -80,6 +80,7 @@ export function adaptChatRequest(payload) {
   requireModel(normalized);
   validateReasoningEffort(normalized.reasoning_effort, 'reasoning_effort');
   normalizeServiceTier(normalized);
+  if (normalized.service_tier === 'ultrafast') invalid('service_tier is not supported', 'service_tier');
   validateStreamOptions(normalized.stream_options, 'include_usage');
   validatePositiveInteger(normalized, 'max_tokens');
   validatePositiveInteger(normalized, 'max_completion_tokens');
@@ -350,6 +351,10 @@ function normalizeInputItem(item) {
     if (![item.id, item.call_id, item.result].every((value) => typeof value === 'string') || !['completed', 'incomplete'].includes(item.status) || Object.keys(item).some((key) => !['type', 'id', 'call_id', 'result', 'status'].includes(key))) invalid('input item shape is not translatable', 'input');
     return [item];
   }
+  if (item.type === 'shell_call' || item.type === 'shell_call_output') {
+    validateHostedShellItem(item);
+    return [item];
+  }
   // Known native Codex replay items with no locally-owned semantics (see codex-rs
   // protocol::models::ResponseItem for the source of truth). Forwarded as-is.
   if (['tool_search_call', 'tool_search_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'context_compaction', 'agent_message', 'item_reference'].includes(item.type)) return [item];
@@ -550,6 +555,7 @@ function validateTool(tool) {
     return tool;
   }
   if (tool.type === 'mcp') invalid('remote MCP tools are not supported', 'tools');
+  if (tool.type === 'shell') invalid('hosted shell tools are not supported', 'tools');
   if (['programmatic_tool_calling', 'web_search_preview'].includes(tool.type)) {
     exactKeys(tool, ['type'], 'tools');
     return tool;
@@ -646,15 +652,21 @@ function validateStrictTool(tool, path) {
 
 function validateStrictSchema(schema, param, root = schema, refs = new Set()) {
   if (!plainObject(schema)) invalid('strict json_schema schema must be an object', param, 'invalid_json_schema');
+  if (schema === root) {
+    if (Object.hasOwn(schema, '$ref')) invalid('strict json_schema root schema must not contain $ref', param, 'invalid_json_schema');
+    if (schema.type !== 'object') invalid('strict json_schema root schema must have type object', param, 'invalid_json_schema');
+    if (Object.hasOwn(schema, 'anyOf')) invalid('strict json_schema root schema must not contain anyOf', param, 'invalid_json_schema');
+  }
   if (schema !== root && schema.type === undefined) {
     if (schema.properties !== undefined || schema.required !== undefined || schema.additionalProperties !== undefined) schema.type = 'object';
     else if (schema.items !== undefined) schema.type = 'array';
   }
   if (Object.hasOwn(schema, '$ref')) {
+    if (Object.keys(schema).some((key) => key !== '$ref')) invalid('strict json_schema $ref schema nodes must contain only $ref', param, 'invalid_json_schema');
     if (typeof schema.$ref !== 'string' || !schema.$ref.startsWith('#/')) invalid('strict json_schema $ref must be a local JSON Pointer fragment', `${param}.$ref`, 'invalid_json_schema');
     const tokens = schema.$ref.slice(2).split('/').map((token) => token.replace(/~1/g, '/').replace(/~0/g, '~'));
     if (!['$defs', 'definitions'].includes(tokens[0]) || !tokens[1]) invalid('strict json_schema $ref must point into $defs or definitions', `${param}.$ref`, 'invalid_json_schema');
-    if (refs.has(schema.$ref)) invalid('strict json_schema circular local $ref is not supported', `${param}.$ref`, 'invalid_json_schema');
+    if (refs.has(schema.$ref)) return;
     let target = root;
     for (const token of tokens) target = plainObject(target) && Object.hasOwn(target, token) ? target[token] : undefined;
     if (!plainObject(target)) invalid('strict json_schema $ref target could not be resolved', `${param}.$ref`, 'invalid_json_schema');
@@ -689,6 +701,93 @@ function validateStrictSchema(schema, param, root = schema, refs = new Set()) {
       schema[key].forEach((child, index) => validateStrictSchema(child, `${param}.${key}.${index}`, root, refs));
     }
   }
+}
+
+function validateHostedShellItem(item) {
+  const invalidItem = () => invalid('input item shape is not translatable', 'input');
+  if (item.type === 'shell_call') {
+    if (!exactObjectKeys(item, ['type', 'call_id', 'action', 'id', 'caller', 'status', 'environment'])
+      || !boundedIdentifier(item.call_id)
+      || !validShellAction(item.action)
+      || !optionalNullable(item, 'id', (value) => typeof value === 'string')
+      || !validShellCaller(item.caller)
+      || !validShellStatus(item.status)
+      || !validShellEnvironment(item.environment)) invalidItem();
+    return;
+  }
+  if (!exactObjectKeys(item, ['type', 'call_id', 'output', 'id', 'caller', 'status', 'max_output_length'])
+    || !boundedIdentifier(item.call_id)
+    || !Array.isArray(item.output)
+    || item.output.some((chunk) => !validShellOutputChunk(chunk))
+    || !optionalNullable(item, 'id', (value) => typeof value === 'string')
+    || !validShellCaller(item.caller)
+    || !validShellStatus(item.status)
+    || !optionalNullable(item, 'max_output_length', Number.isInteger)) invalidItem();
+}
+
+function validShellAction(action) {
+  return exactObjectKeys(action, ['commands', 'timeout_ms', 'max_output_length'])
+    && Array.isArray(action.commands)
+    && action.commands.every((command) => typeof command === 'string')
+    && optionalNullable(action, 'timeout_ms', Number.isInteger)
+    && optionalNullable(action, 'max_output_length', Number.isInteger);
+}
+
+function validShellCaller(caller) {
+  if (caller === undefined || caller === null) return true;
+  if (caller?.type === 'direct') return exactObjectKeys(caller, ['type']);
+  return caller?.type === 'program'
+    && exactObjectKeys(caller, ['type', 'caller_id'])
+    && boundedIdentifier(caller.caller_id);
+}
+
+function validShellStatus(status) {
+  return status === undefined || status === null || ['in_progress', 'completed', 'incomplete'].includes(status);
+}
+
+function validShellEnvironment(environment) {
+  if (environment === undefined || environment === null) return true;
+  if (environment?.type === 'container_reference') {
+    return exactObjectKeys(environment, ['type', 'container_id']) && typeof environment.container_id === 'string';
+  }
+  if (environment?.type !== 'local' || !exactObjectKeys(environment, ['type', 'skills'])) return false;
+  if (environment.skills === undefined) return true;
+  return Array.isArray(environment.skills)
+    && environment.skills.length <= 200
+    && environment.skills.every((skill) => exactObjectKeys(skill, ['name', 'description', 'path'])
+      && [skill.name, skill.description, skill.path].every((value) => typeof value === 'string'));
+}
+
+function validShellOutputChunk(chunk) {
+  return exactObjectKeys(chunk, ['stdout', 'stderr', 'outcome'])
+    && typeof chunk.stdout === 'string'
+    && typeof chunk.stderr === 'string'
+    && codepointLength(chunk.stdout) <= 10_485_760
+    && codepointLength(chunk.stderr) <= 10_485_760
+    && (chunk.outcome?.type === 'timeout' && exactObjectKeys(chunk.outcome, ['type'])
+      || chunk.outcome?.type === 'exit' && exactObjectKeys(chunk.outcome, ['type', 'exit_code']) && Number.isInteger(chunk.outcome.exit_code));
+}
+
+function exactObjectKeys(value, allowed) {
+  return plainObject(value) && Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function optionalNullable(object, key, predicate) {
+  return !Object.hasOwn(object, key) || object[key] === null || predicate(object[key]);
+}
+
+function boundedIdentifier(value) {
+  const length = typeof value === 'string' ? codepointLength(value, 64) : 0;
+  return length >= 1 && length <= 64;
+}
+
+function codepointLength(value, maximum = Infinity) {
+  let count = 0;
+  for (const _codepoint of value) {
+    count += 1;
+    if (count > maximum) break;
+  }
+  return count;
 }
 
 function validateMedia(value) {

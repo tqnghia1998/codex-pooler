@@ -23,6 +23,31 @@ test('projects failed terminals without provider fields and latches', () => {
   assert.equal(normalizePublicResponsesEvent({ type: 'response.output_text.delta', delta: 'late' }, state).length, 0);
 });
 
+test('projects policy failures with only the stable public contract', () => {
+  const result = decode(normalizePublicResponsesEvent({
+    type: 'response.failed',
+    sequence_number: 4,
+    provider_sibling: 'drop',
+    response: {
+      id: 'resp_policy',
+      error: {
+        type: 'provider_policy',
+        code: 'misalignment_policy_violation',
+        message: 'Request blocked by policy.',
+        param: 'drop',
+        sibling: 'drop'
+      }
+    }
+  }, createPublicResponsesState())[0]);
+  assert.deepEqual(result.response.error, {
+    type: 'invalid_request_error',
+    code: 'misalignment_policy_violation',
+    message: 'Request blocked by policy.'
+  });
+  assert.equal(JSON.stringify(result).includes('provider_policy'), false);
+  assert.equal(JSON.stringify(result).includes('"param"'), false);
+});
+
 test('synthesizes public lifecycle events and normalizes done/typeless success', () => {
   const state = createPublicResponsesState();
   normalizePublicResponsesEvent({ type: 'response.output_item.added', item: { type: 'function_call', call_id: 'call_1' }, output_index: 2 }, state);
@@ -57,6 +82,12 @@ test('translates Chat tool arguments, moderation, incomplete usage, and early fa
   assert.equal(terminal.at(-2).usage.total_tokens, 5);
   assert.equal(terminal.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'content_filter');
   assert.deepEqual(normalizeChatEvent({ type: 'response.failed', response: { error: { message: 'secret' } } }, createChatStreamState({ model: 'gpt' })), [{ error: { type: 'server_error', code: 'upstream_response_failed', message: 'Upstream response failed', param: null } }]);
+  assert.deepEqual(normalizeChatEvent({
+    type: 'response.failed',
+    response: { error: { code: 'misalignment_policy_violation', message: 'Policy blocked.' } }
+  }, createChatStreamState({ model: 'gpt' })), [{
+    error: { type: 'invalid_request_error', code: 'misalignment_policy_violation', message: 'Policy blocked.' }
+  }]);
 
   const completedToolState = createChatStreamState({ model: 'gpt' });
   normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call_done', name: 'lookup', arguments: '{}' } }, completedToolState);

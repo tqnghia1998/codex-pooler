@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_SOURCE_URL = 'https://icoretech.github.io/openai-json-pricing/pricing.json';
 const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
 const DEFAULT_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
-const TIER_MAP = Object.freeze({ standard: 'standard', flex: 'flex', fast: 'priority' });
+const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', flex: 'flex', fast: 'priority' });
+const OPTIONAL_TIER_MAP = Object.freeze({ ultrafast: 'ultrafast' });
 const BUCKETS = ['default', 'long_context'];
 const TARGET = fileURLToPath(new URL('../src/openai-pricing-snapshot.js', import.meta.url));
 
@@ -25,11 +26,15 @@ export function buildOpenAiPricingSnapshot(payload, {
     if (!plainObject(model) || model.model !== modelId || model.pricing_type !== 'per_1m_tokens' || !plainObject(model.prices)) {
       throw new Error(`Pricing feed is missing a compatible ${modelId} entry`);
     }
-    for (const [sourceTier, tier] of Object.entries(TIER_MAP)) {
+    for (const [sourceTier, tier] of Object.entries(REQUIRED_TIER_MAP)) {
       for (const bucket of BUCKETS) {
         const values = model.prices[sourceTier]?.[bucket];
         rows.push(priceRow(modelId, tier, bucket, values));
       }
+    }
+    for (const [sourceTier, tier] of Object.entries(OPTIONAL_TIER_MAP)) {
+      if (model.prices[sourceTier] === undefined) continue;
+      for (const bucket of BUCKETS) rows.push(priceRow(modelId, tier, bucket, model.prices[sourceTier]?.[bucket]));
     }
   }
   const generatedAt = new Date(payload.generated_at).toISOString();
