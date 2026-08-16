@@ -1,6 +1,6 @@
 # Codex Proxy Reliability and Compatibility TODO
 
-Status: Phases 1, 2, 3, and 4 complete; later phases proposed
+Status: Phases 1 through 10 complete; active provider request-shape probes remain intentionally deferred
 
 Last reviewed: 2026-08-16
 
@@ -256,6 +256,67 @@ Reference audit:
 - [x] Continue retaining at most 100 terminal failure records.
 - [x] Sanitize hostnames, tokens, account IDs, request bodies, and upstream response bodies.
 
+## Phase 7: Passive Compatibility Learning
+
+- [x] Add bounded passive structured-evidence observation and repeated-evidence promotion.
+- [x] Version and hash normalized Codex HTTP/WebSocket and Anthropic protocol fingerprints.
+- [x] Persist bounded generation-fenced facts.
+- [x] Add sanitized compatibility status, reset APIs, and dashboard controls.
+- [x] Add focused compatibility, fingerprint, sanitization, and transport regression tests.
+- [x] Remove metadata-only synthetic probes that duplicated model and quota refresh without testing
+  request compatibility.
+- [ ] Implement active request-shape probes only after a non-billable provider validation boundary is
+  proven.
+
+## Phase 8: Compatibility Fixture Automation
+
+- [x] Add a strict content-free fixture schema for Codex and Claude client protocol captures.
+- [x] Replay fixtures through the live HTTP and public WebSocket request projection.
+- [x] Cover public HTTP/SSE, native HTTP, compact, public/native WebSocket, and Compass Messages.
+- [x] Record only normalized negotiation fingerprints, JSON paths/types, `type` discriminators, and
+  structured rejection status/code/param fields.
+- [x] Reject credentials, hosts, account/project/model identifiers, real request content, provider
+  messages, unknown schema fields, oversized files, and secret-like values.
+- [x] Produce sorted deterministic Markdown or JSON drift reports without network access.
+- [x] Keep fixture expectation updates explicit and never mutate runtime compatibility allowlists.
+- [x] Add `compatibility:check` and `compatibility:update` package commands plus focused tests.
+- [x] Complete the full validation checklist and second review.
+
+## Phase 9: Automated Compatibility Intake
+
+- [x] Add a bounded local capture envelope for every Phase 8 transport profile.
+- [x] Sanitize request headers, bodies, WebSocket envelopes, and structured rejections without
+  retaining credentials, hosts, model/account/project IDs, content, URLs, binary data, arbitrary
+  object keys, provider messages, or response bodies.
+- [x] Preserve only protocol-significant field names, JSON types, booleans, negotiation tokens,
+  `type` discriminators, and stable rejection status/type/code/param values.
+- [x] Preserve strict JSON-schema relationships using deterministic synthetic property,
+  definition, and local-reference names.
+- [x] Match the closest same-profile committed fixture with deterministic shape similarity.
+- [x] Classify client-version, protocol-fingerprint, request/projected shape, discriminator,
+  structured-rejection, unsupported-field, and adapter-projection changes.
+- [x] Emit fixed review suggestions without modifying compatibility facts or fallback allowlists.
+- [x] Add `compatibility:intake`, optional sanitized draft output, JSON reports, and
+  `--fail-on-review` for CI.
+- [x] Add a synthetic corpus for future Codex fields/tools, Claude content blocks, structured
+  rejection changes, and adapter-incompatible MCP requests.
+- [x] Add focused sanitization, determinism, matching, media, schema, WebSocket, CLI, and bounds
+  tests plus a second review.
+
+## Phase 10: Client Release Compatibility Gate
+
+- [x] Add a reviewed manifest for Codex CLI and Claude Code root/platform packages.
+- [x] Discover latest versions without executing unreviewed releases.
+- [x] Verify exact registry package identity, version, tarball origin, and SHA-512 integrity.
+- [x] Extract only the reviewed executable archive member into a bounded local cache.
+- [x] Execute clients with synthetic credentials and temporary state against a loopback-only
+  synthetic endpoint.
+- [x] Require fail-closed external-network isolation plus process, timeout, request, and output
+  limits.
+- [x] Feed captures through Phase 9 sanitization and emit deterministic review reports.
+- [x] Never update fixtures, adapters, defaults, compatibility facts, or fallback allowlists.
+- [x] Add `compatibility:release-check`, focused tests, documentation, and a second review.
+
 ## Rollout Order
 
 - [x] Release Phase 1 independently.
@@ -287,6 +348,7 @@ Reference audit:
 
 ## Next Phase
 
-Phase 7 is planned in `COMPATIBILITY_CANARY_PLAN.md`. Start with passive drift observation only;
-synthetic probes remain disabled by default and active request-shape probes require a separate
-explicit opt-in.
+Phase 10 is specified in `COMPATIBILITY_RELEASE_GATE_PLAN.md`. Use the reviewed release gate to
+discover new client versions and run pinned clients only inside a local synthetic boundary, then
+explicitly review every manifest, fixture, adapter, or fallback change. Active provider
+request-shape probes remain deferred until a proven non-billable validation boundary exists.
