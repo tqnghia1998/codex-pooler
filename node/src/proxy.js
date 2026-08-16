@@ -11,7 +11,7 @@ import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamesp
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
@@ -71,9 +71,9 @@ const COMPACT_PAYLOAD_FIELDS = new Set([
   'prompt_cache_key',
   'text'
 ]);
-const MAX_STREAM_BUFFER_BYTES = 8 * 1024 * 1024;
 const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
+const MAX_GATEWAY_CANDIDATE_ATTEMPTS = 8;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
 const SESSION_HEADERS = ['x-codex-window-id', 'x-codex-session-id', 'session-id', 'x-session-id', 'x-session-affinity', 'session_id', 'x-codex-conversation-id'];
 const TERMINAL_EVENT_TYPE = Symbol('terminalEventType');
@@ -163,7 +163,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
-  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError } = dispatched;
+  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode } = dispatched;
   if (pacingError) {
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
     const failure = pacingUnavailable(pacingError);
@@ -186,7 +186,13 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   if (!response.ok) {
     const errorBytes = await readBoundedResponse(response);
     const policyError = publicPolicyError(errorBytes, path, sourcePath);
-    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: policyError?.code || 'upstream_response_failed', responseStatusCode: response.status });
+    const outcome = classifyHttpResponse(response, parseJson(errorBytes), {
+      allowMisalignmentPolicy: policyRoute(path, sourcePath)
+    });
+    finalizeGatewayFailure(store, lifecycle, attemptId, {
+      errorCode: policyError?.code || failureCode || gatewayOutcomeCode(outcome),
+      responseStatusCode: response.status
+    });
     const validAnthropic = response.status >= 400 && response.status < 500 && upstream.type === 'compass' && sourcePath === '/v1/messages' && validAnthropicError(errorBytes);
     if (policyError) sendJson(res, response.status, { error: policyError });
     else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
@@ -222,7 +228,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   if (isEventStream(response) || upstream.type === 'codex' && payload.stream === true) {
     await streamResponse({
-      response, res,
+      response, res, sourcePath,
       transformChat: upstream.type === 'codex' && sourcePath === '/v1/chat/completions',
       sanitizePublicResponses: upstream.type === 'codex' && path === '/v1/responses',
       publicResponsesNamespaces: path === '/v1/responses' ? customToolNamespaces(codexPayload.tools) : undefined,
@@ -388,11 +394,16 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
   let codexHostBlocked = false;
+  let candidatesAttempted = 0;
   for (const [candidateIndex, candidate] of candidates.entries()) {
+    if (candidatesAttempted >= MAX_GATEWAY_CANDIDATE_ATTEMPTS) break;
     const upstream = store.get(candidate.id, scopeId);
     if (codexHostBlocked && upstream?.type === 'codex') continue;
     let admission = upstream && store.beginUpstreamAttempt(upstream.id, scope);
     if (!upstream || !admission) continue;
+    candidatesAttempted += 1;
+    const queuePacing = candidateIndex === candidates.length - 1
+      || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
     const credentials = store.credentials(upstream.id);
     const startedAt = new Date().toISOString();
     const attempt = lifecycle ? store.beginGatewayAttempt(lifecycle.id, upstream.id, startedAt) : { id: randomUUID(), startedAt };
@@ -402,7 +413,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     let collected;
     const compatibilityService = compatibilityLearningForStore(store);
     let compatibilityScope = compatibilityFactContext(upstream, sourcePath, payload, req, path);
-    let compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
+    let compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
     diagnostics.credentialStarted(attemptId);
     try {
       const refreshed = await ensureProviderCredentials(upstream, credentials, {
@@ -414,7 +425,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         admission = store.beginUpstreamAttempt(upstream.id, scope);
         if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
         compatibilityScope = compatibilityFactContext(store.get(upstream.id) || upstream, sourcePath, payload, req, path);
-        compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
+        compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
       }
     } catch (error) {
       logProxyFailure(logger, 'credentials', upstream.id, error);
@@ -429,7 +440,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         store,
         upstreamId: upstream.id,
         model: payload?.model,
-        queue: candidateIndex === candidates.length - 1,
+        queue: queuePacing,
         attemptId
       });
       persistResponseCookies(response, upstream, credentials, store);
@@ -448,14 +459,14 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             admission = store.beginUpstreamAttempt(upstream.id, scope);
             if (!admission) return { upstream, attemptId, startedAt, response: new Response(null, { status: 503 }) };
             compatibilityScope = compatibilityFactContext(store.get(upstream.id) || upstream, sourcePath, payload, req, path);
-            compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope));
+            compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
           }
           request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
           response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
             store,
             upstreamId: upstream.id,
             model: payload?.model,
-            queue: candidateIndex === candidates.length - 1,
+            queue: queuePacing,
             attemptId
           });
           persistResponseCookies(response, upstream, credentials, store);
@@ -491,7 +502,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           store,
           upstreamId: upstream.id,
           model: payload?.model,
-          queue: candidateIndex === candidates.length - 1,
+          queue: queuePacing,
           attemptId
         });
         persistResponseCookies(response, upstream, credentials, store);
@@ -509,6 +520,14 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             allowMisalignmentPolicy: policyRoute(path, sourcePath)
           }));
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_first_event_failed', responseStatusCode: response.status });
+          terminalFailure = {
+            upstream,
+            attemptId: null,
+            startedAt,
+            response: new Response(null, { status: 502 }),
+            admission: null,
+            failureCode: 'upstream_first_event_failed'
+          };
           continue;
         }
       }
@@ -524,6 +543,14 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         await readBoundedResponse(response);
         store.settleUpstreamAttempt(upstream.id, admission, outcome);
         retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
+        terminalFailure = {
+          upstream,
+          attemptId: null,
+          startedAt,
+          response: new Response(null, { status: 502 }),
+          admission: null,
+          failureCode: 'upstream_authentication_failed'
+        };
         continue;
       }
       const publicCodexCollection = response.ok
@@ -558,7 +585,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         if (['queue_full', 'queue_expired', 'would_wait'].includes(error.code)) {
           terminalFailure = {
             upstream,
-            attemptId,
+            attemptId: null,
             startedAt,
             response: localPacingResponse(error),
             admission: null,
@@ -575,7 +602,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           codexHostBlocked = true;
           terminalFailure = {
             upstream,
-            attemptId,
+            attemptId: null,
             startedAt,
             response: localHostFailureResponse(error.retryAfterSeconds),
             admission: null,
@@ -587,6 +614,14 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       }
       store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_transport_failed' });
+      terminalFailure = {
+        upstream,
+        attemptId: null,
+        startedAt,
+        response: new Response(null, { status: 502 }),
+        admission: null,
+        failureCode: 'upstream_transport_failed'
+      };
       continue;
     }
     if (response.ok) {
@@ -603,13 +638,15 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
       await readBoundedResponse(response);
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
-      retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_retryable_response', responseStatusCode: response.status });
+      const failureCode = gatewayOutcomeCode(outcome);
+      retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: failureCode, responseStatusCode: response.status });
       terminalFailure = {
         upstream,
-        attemptId,
+        attemptId: null,
         startedAt,
         response: new Response(null, { status: response.status, headers: retryAfterHeader(response) }),
-        admission: null
+        admission: null,
+        failureCode
       };
       continue;
     }
@@ -636,7 +673,7 @@ async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstE
   const [probe, downstream] = response.body.tee();
   const reader = probe.getReader();
   const decoder = new TextDecoder();
-  let buffer = '';
+  let parserState = createSseParserState();
   const finish = (result) => {
     void reader.cancel('Initial SSE event classified').catch(() => {});
     return result;
@@ -644,15 +681,17 @@ async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstE
   try {
     while (true) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
-      if (done) return finish({ response: streamResponseClone(response, downstream), retryable: !hasSseData(buffer) });
-      buffer += decoder.decode(value, { stream: true });
-      const events = splitSseBlocks(buffer);
-      buffer = events.pop() || '';
-      if (Buffer.byteLength(buffer) > MAX_STREAM_BUFFER_BYTES) {
+      const result = consumeSseChunk(parserState, done ? decoder.decode() : decoder.decode(value, { stream: true }));
+      parserState = result.state;
+      if (result.overflow) {
         void reader.cancel('Initial SSE event exceeded buffer limit').catch(() => {});
         void downstream.cancel('Initial SSE event exceeded buffer limit').catch(() => {});
         return { response: localSseFailure(response), retryable: false };
       }
+      const pending = done ? pendingSseBlock(parserState) : '';
+      const events = pending.trim()
+        ? [...result.blocks, pending]
+        : result.blocks;
       for (const event of events) {
         if (!hasSseData(event)) continue;
         onFirstEvent?.();
@@ -661,6 +700,7 @@ async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstE
         if (event.includes('data: [DONE]')) return finish({ response: streamResponseClone(response, downstream), retryable: false });
         return finish({ response: streamResponseClone(response, downstream), retryable: false });
       }
+      if (done) return finish({ response: streamResponseClone(response, downstream), retryable: true });
     }
   } finally {
     reader.releaseLock();
@@ -756,7 +796,7 @@ export function projectProxyRequest({
     body: omitCompatibilityFields(
       normalizedBody,
       compatibility.unsupportedFields,
-      direct ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS
+      new Set(compatibilityOptionalFields(upstreamType, sourcePath))
     )
   };
 }
@@ -864,10 +904,11 @@ async function compatibilityFallback(response, upstream, sourcePath, payload, re
     && adaptiveThinkingRequired(body, text)) {
     return { ...current, adaptiveThinking: true };
   }
-  if (upstream.type === 'compass' && sourcePath === '/v1/messages') {
+  if (upstream.type === 'compass') {
     const field = rejectedParameter(body, text);
     const requestBody = parseJson(Buffer.from(request.body));
-    if (!COMPASS_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(requestBody || {}, field) || current.unsupportedFields?.includes(field)) return null;
+    const allowed = new Set(compatibilityOptionalFields('compass', sourcePath));
+    if (!allowed.has(field) || !Object.hasOwn(requestBody || {}, field) || current.unsupportedFields?.includes(field)) return null;
     return { ...current, unsupportedFields: [...new Set([...(current.unsupportedFields || []), field])] };
   }
   return null;
@@ -904,14 +945,14 @@ function compatibilityFactContext(upstream, sourcePath, payload, req, originalPa
   });
 }
 
-function compatibilityState(upstream, value) {
-  const allowed = upstream?.type === 'compass' ? COMPASS_OPTIONAL_FALLBACK_FIELDS : CODEX_OPTIONAL_FALLBACK_FIELDS;
+function compatibilityState(upstream, value, sourcePath = '') {
+  const allowed = new Set(compatibilityOptionalFields(upstream?.type, sourcePath));
   const unsupportedFields = Array.isArray(value?.unsupportedFields)
     ? [...new Set(value.unsupportedFields.filter((field) => allowed.has(field)))]
     : [];
   return {
     ...(unsupportedFields.length ? { unsupportedFields } : {}),
-    ...(upstream?.type === 'compass' && value?.adaptiveThinking === true ? { adaptiveThinking: true } : {})
+    ...(upstream?.type === 'compass' && sourcePath === '/v1/messages' && value?.adaptiveThinking === true ? { adaptiveThinking: true } : {})
   };
 }
 
@@ -1227,7 +1268,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -1244,7 +1285,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
   let completed = false;
   let usage;
   let healthOutcome = null;
-  let buffer = '';
+  let parserState = createSseParserState();
   const decoder = new TextDecoder();
   const publicState = sanitizePublicResponses ? createPublicResponsesState(publicResponsesNamespaces) : null;
   // Synthetic terminals continue the stream's own sequence so a client never sees it restart.
@@ -1277,7 +1318,7 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
       return;
     }
     usage = mergeUsage(usage, extractUsage(parsed));
-    const successfulTerminal = (parsed.type === 'response.completed' || parsed.type === 'response.incomplete') && parsed.response?.status !== 'failed' && !parsed.error && !parsed.response?.error;
+    const successfulTerminal = successfulSseTerminal(parsed, upstream.type, sourcePath);
     if (['response.failed', 'error'].includes(parsed.type) || parsed.type === 'response.incomplete' && !successfulTerminal) {
       healthOutcome = classifySseEvent(parsed, {
         allowMisalignmentPolicy: transformChat || sanitizePublicResponses
@@ -1311,26 +1352,29 @@ async function streamResponse({ response, res, transformChat, sanitizePublicResp
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
     }
-    if (type === 'response.completed' || type === 'response.incomplete') {
+    if (successfulTerminal) {
       terminal = true;
       completed = true;
-      void reader.cancel('Upstream terminal event').catch(() => {});
     }
     if (parsed) visible = true;
     await writeChunk(res, `${event}\n\n`);
+    if (successfulTerminal) void reader.cancel('Upstream terminal event').catch(() => {});
   };
   try {
     while (!downstreamClosed && !terminal) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      if (Buffer.byteLength(buffer) > MAX_STREAM_BUFFER_BYTES) throw new Error('SSE event exceeded buffer limit');
-      const events = splitSseBlocks(buffer);
-      buffer = events.pop() || '';
-      for (const event of events) await relayEvent(event);
+      const result = consumeSseChunk(parserState, decoder.decode(value, { stream: true }));
+      parserState = result.state;
+      if (result.overflow) throw new Error('SSE event exceeded buffer limit');
+      for (const event of result.blocks) await relayEvent(event);
     }
-    buffer += decoder.decode();
-    if (buffer.trim() && !terminal) await relayEvent(buffer);
+    const final = consumeSseChunk(parserState, decoder.decode());
+    parserState = final.state;
+    if (final.overflow) throw new Error('SSE event exceeded buffer limit');
+    for (const event of final.blocks) await relayEvent(event);
+    const pending = pendingSseBlock(parserState);
+    if (pending.trim() && !terminal) await relayEvent(pending);
     if (!downstreamClosed && visible && !terminal) {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure());
@@ -1375,6 +1419,22 @@ function hasSseData(event) {
 function eventData(event) {
   const decoded = decodeSseBlock(event);
   return decoded.kind === 'event' ? decoded.event : null;
+}
+
+function successfulSseTerminal(event, upstreamType, sourcePath) {
+  if (upstreamType === 'compass' && sourcePath === '/v1/messages' && event?.type === 'message_stop') return true;
+  return ['response.completed', 'response.incomplete'].includes(event?.type)
+    && event.response?.status !== 'failed'
+    && !event.error
+    && !event.response?.error;
+}
+
+function gatewayOutcomeCode(outcome) {
+  if (outcome?.class === 'caller') return outcome.modelNotFound ? 'upstream_model_unavailable' : 'upstream_request_rejected';
+  if (outcome?.class === 'credential') return 'upstream_authentication_failed';
+  if (outcome?.class === 'quota') return 'upstream_quota_exhausted';
+  if (outcome?.class === 'transient') return 'upstream_response_failed';
+  return 'upstream_response_failed';
 }
 
 function logProxyFailure(logger, stage, upstreamId, error) {
@@ -1785,18 +1845,18 @@ async function streamPassthrough(response, res, onEvent = null, upstreamDeadline
     res.end();
     return { cancelled: false };
   }
-  let buffer = '';
+  let parserState = createSseParserState();
   let downstreamClosed = false;
   const decoder = new TextDecoder();
-  const observe = (chunk) => {
+  const observe = (chunk, final = false) => {
     if (!onEvent) return;
-    buffer += decoder.decode(chunk, { stream: true });
-    if (Buffer.byteLength(buffer) > MAX_STREAM_BUFFER_BYTES) {
-      buffer = '';
-      return;
-    }
-    const blocks = splitSseBlocks(buffer);
-    buffer = blocks.pop() || '';
+    const result = consumeSseChunk(parserState, decoder.decode(chunk, { stream: !final }));
+    parserState = result.state;
+    if (result.overflow) return;
+    const pending = final ? pendingSseBlock(parserState) : '';
+    const blocks = pending.trim()
+      ? [...result.blocks, pending]
+      : result.blocks;
     for (const block of blocks) {
       const decoded = decodeSseBlock(block);
       if (decoded.kind === 'event') onEvent(decoded.event);
@@ -1813,7 +1873,7 @@ async function streamPassthrough(response, res, onEvent = null, upstreamDeadline
       observe(value);
       await writeChunk(res, Buffer.from(value));
     }
-    observe(new Uint8Array());
+    observe(new Uint8Array(), true);
     return { cancelled: downstreamClosed };
   } catch (error) {
     if (downstreamClosed) {

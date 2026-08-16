@@ -61,6 +61,46 @@ test('persists terminal failures with their retry diagnostics', () => {
   }
 });
 
+test('bounds retained attempt details and derives legacy terminal duration', () => {
+  const { dir, store } = tempStore();
+  try {
+    const key = store.configureApiKey('accounting-key');
+    const upstream = store.create(codexInput());
+    const request = store.reserveGatewayRequest({
+      scopeId: key.scopeId,
+      apiKeyId: key.id,
+      endpoint: '/v1/responses'
+    });
+    const startedAt = '2026-08-13T06:53:00.000Z';
+    for (let index = 0; index < 10; index += 1) {
+      const attempt = store.beginGatewayAttempt(request.id, upstream.id, startedAt);
+      const details = {
+        responseStatusCode: 503,
+        errorCode: 'upstream_transport_failed',
+        timings: {},
+        completedAt: '2026-08-13T06:53:00.025Z'
+      };
+      if (index < 9) store.retryGatewayAttempt(request.id, attempt.id, details);
+      else store.finalizeGatewayRequest({
+        requestId: request.id,
+        attemptId: attempt.id,
+        status: 'failed',
+        ...details
+      });
+    }
+
+    const failure = store.gatewayDiagnostics().failures[0];
+    assert.equal(failure.retryCount, 9);
+    assert.equal(failure.attemptCount, 10);
+    assert.equal(failure.omittedAttemptCount, 2);
+    assert.equal(failure.attempts.length, 8);
+    assert.equal(failure.attempts[0].attemptNumber, 3);
+    assert.deepEqual(failure.attempts[0].timings, { terminalCompletionMs: 25 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('reserves authenticated public Responses and Chat requests before dispatch', async () => {
   const { dir, store } = tempStore();
   const key = store.configureApiKey('accounting-key');
@@ -120,7 +160,7 @@ test('records real failed proxy phase timings without retaining account identity
     });
     assert.equal(response.status, 502);
     const failure = store.gatewayDiagnostics().failures[0];
-    assert.equal(failure.errorCode, 'upstream_request_failed');
+    assert.equal(failure.errorCode, 'upstream_transport_failed');
     assert.equal(failure.attempts[0].errorCode, 'upstream_transport_failed');
     assert.ok(Number.isInteger(failure.attempts[0].timings.credentialPreparationMs));
     assert.ok(Number.isInteger(failure.attempts[0].timings.connectionMs));
