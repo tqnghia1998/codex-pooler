@@ -607,6 +607,58 @@ test('passes Compass-only OpenAI options through without Codex adapter rejection
   }
 });
 
+test('learns Compass OpenAI sampling rejections independently per route', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-openai-learning-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = JSON.parse(options.body);
+    calls.push({ path, body });
+    if (Object.hasOwn(body, 'temperature')) {
+      return new Response(JSON.stringify({
+        error: { type: 'invalid_request_error', param: 'temperature', message: 'Unsupported parameter: temperature' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 'compass-learning', choices: [], output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'learning-project', projectKey: 'learning-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const result = await request(base, '/v1/chat/completions', {
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+        temperature: 0.4
+      }, { 'x-upstream-type': 'compass' });
+      assert.equal(result.response.status, 200);
+    }
+    assert.deepEqual(calls.slice(0, 5).map(({ body }) => Object.hasOwn(body, 'temperature')), [
+      true, false, true, false, false
+    ]);
+
+    calls.length = 0;
+    for (let index = 0; index < 3; index += 1) {
+      const result = await request(base, '/v1/responses', {
+        model: 'claude-sonnet-4-6',
+        input: 'hello',
+        temperature: 0.4
+      }, { 'x-upstream-type': 'compass' });
+      assert.equal(result.response.status, 200);
+    }
+    assert.deepEqual(calls.map(({ body }) => Object.hasOwn(body, 'temperature')), [
+      true, false, true, false, false
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fails over Compass after an invalid project key', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-auth-failover-'));
   const store = new Store(dir);
@@ -1089,6 +1141,48 @@ test('settles the latest reported Compass streaming cost', async () => {
   }
 });
 
+test('treats chunk-split Compass message_stop as a successful priced terminal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-message-stop-'));
+  const chunks = [
+    'event: message_start\r',
+    '\ndata: {"type":"message_start","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"price_cost_usd":1}}}\r\n\r',
+    '\nevent: message_delta\r\ndata: {"type":"message_delta","usage":{"output_tokens":20}}\r\n\r\n',
+    'event: message_stop\rdata: {"type":"message_stop"}\r\r'
+  ];
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'message-stop-project', projectKey: 'message-stop-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: true
+      })
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /"type":"message_start"/);
+    assert.match(text, /"type":"message_delta"/);
+    assert.match(text, /"type":"message_stop"/);
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 1);
+    assert.equal(Object.keys(store.get(created.id).circuits || {}).length, 0);
+    assert.ok(store.get(created.id).lastSuccessfulAt);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('settles priced Codex and streamed Anthropic usage, preferring reported costs', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-priced-settlement-'));
   const store = new Store(dir);
@@ -1202,6 +1296,70 @@ test('fails over pre-output transport, rate-limit, and model-unavailable failure
       await new Promise((resolve) => server.close(resolve));
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test('caps candidate failover and finalizes exhausted gateway diagnostics', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-failover-budget-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 12; index += 1) {
+    const upstream = store.create({
+      type: 'compass',
+      projectId: `failover-budget-${index}`,
+      projectKey: `secret-${index}`
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+  }, 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello'
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 502);
+    assert.equal(calls, 8);
+    const diagnostics = store.gatewayDiagnostics();
+    assert.equal(diagnostics.runtime.activeAttemptCount, 0);
+    assert.equal(diagnostics.failures.length, 1);
+    assert.equal(diagnostics.failures[0].retryCount, 8);
+    assert.equal(diagnostics.failures[0].attemptCount, 8);
+    assert.equal(diagnostics.failures[0].errorCode, 'upstream_transport_failed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('classifies upstream 400 diagnostics as request rejections', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-upstream-rejection-diagnostic-'));
+  const store = new Store(dir);
+  const upstream = store.create({
+    type: 'compass',
+    projectId: 'rejection-project',
+    projectKey: 'rejection-secret'
+  });
+  store.setCap(upstream.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'invalid_request', message: 'private provider detail' }
+  }), { status: 400, headers: { 'content-type': 'application/json' } }), 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello'
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 502);
+    const failure = store.gatewayDiagnostics().failures[0];
+    assert.equal(failure.responseStatusCode, 400);
+    assert.equal(failure.errorCode, 'upstream_request_rejected');
+    assert.equal(failure.retryCount, 0);
+    assert.equal(JSON.stringify(failure).includes('private provider detail'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 
@@ -1473,6 +1631,32 @@ test('bounds oversized incomplete public SSE events without exposing their conte
     const text = await response.text();
     assert.match(text, /"code":"server_error"/);
     assert.doesNotMatch(text, /oversized-provider-content/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds oversized completed public SSE events without exposing their content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-complete-sse-size-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const secret = 'completed-oversized-provider-content';
+  const fetchImpl = async () => new Response(
+    `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"${secret.repeat(300_000)}"}\r\n\r\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } }
+  );
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'large', stream: true })
+    });
+    const text = await response.text();
+    assert.match(text, /"code":"server_error"/);
+    assert.doesNotMatch(text, /completed-oversized-provider-content/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

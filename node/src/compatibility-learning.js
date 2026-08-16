@@ -215,9 +215,9 @@ function validEvidence(upstream, context, value, feature, responseClass) {
   if (context.protocolFingerprintVersion !== PROTOCOL_FINGERPRINT_VERSION || !/^[a-f0-9]{32}$/.test(context.protocolFingerprintHash || '')) return false;
   if (feature?.startsWith('unsupported_field:')) {
     const field = feature.slice('unsupported_field:'.length);
-    if (!isCompatibilityOptionalField(upstream.type, field)) return false;
+    if (!isCompatibilityOptionalField(upstream.type, field, context.routeClass)) return false;
   }
-  return validCompatibilityFeature(upstream.type, feature, value);
+  return validCompatibilityFeature(upstream.type, feature, value, context.routeClass);
 }
 
 function generationFor(upstream) {

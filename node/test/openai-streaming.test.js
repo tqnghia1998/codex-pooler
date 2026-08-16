@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createChatStreamState, createPublicResponsesState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
+import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, MAX_SSE_EVENT_BYTES, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
 
 const decode = (chunk) => JSON.parse(chunk.match(/^data: (.+)$/m)[1]);
 
@@ -10,6 +10,48 @@ test('strictly decodes SSE labels and retries only legacy retry codes', () => {
   assert.equal(retryableFirstSseEvent({ error: { code: 'server_error' } }), true);
   assert.equal(retryableFirstSseEvent({ error: { code: 'rate_limit_exceeded' } }), false);
   assert.deepEqual(splitSseBlocks('data: one\r\rdata: two\r\r'), ['data: one', 'data: two', '']);
+});
+
+test('parses CRLF and standalone CR incrementally without phantom blocks', () => {
+  let state = createSseParserState();
+  let result = consumeSseChunk(state, 'event: message_start\r');
+  assert.deepEqual(result.blocks, []);
+  state = result.state;
+
+  result = consumeSseChunk(state, '\ndata: {"message":{"usage":{"input_tokens":1}}}\r\n\r');
+  assert.deepEqual(result.blocks.map(decodeSseBlock), [{
+    kind: 'event',
+    event: { type: 'message_start', message: { usage: { input_tokens: 1 } } }
+  }]);
+  state = result.state;
+
+  result = consumeSseChunk(state, '\nevent: message_stop\rdata: {"type":"message_stop"}\r\r');
+  assert.deepEqual(result.blocks.map(decodeSseBlock), [
+    { kind: 'event', event: { type: 'message_stop' } }
+  ]);
+});
+
+test('rejects oversized complete and incomplete SSE events', () => {
+  const oversized = `data: ${'x'.repeat(MAX_SSE_EVENT_BYTES)}`;
+  for (const delimiter of ['', '\n\n', '\r\n\r\n', '\r\r']) {
+    const result = consumeSseChunk(createSseParserState(), oversized + delimiter);
+    assert.equal(result.overflow, true, JSON.stringify(delimiter));
+    assert.deepEqual(result.blocks, []);
+    assert.deepEqual(result.state, createSseParserState());
+  }
+});
+
+test('retains fragmented events without rebuilding the pending block', () => {
+  let state = createSseParserState();
+  let completed = [];
+  for (const chunk of ['data: {"type":', '"response.output_text.delta",', '"delta":"hello"}', '\n', '\n']) {
+    const result = consumeSseChunk(state, chunk);
+    state = result.state;
+    completed = completed.concat(result.blocks);
+  }
+  assert.equal(completed.length, 1);
+  assert.equal(decodeSseBlock(completed[0]).event.delta, 'hello');
+  assert.equal(pendingSseBlock(state), '');
 });
 
 test('projects failed terminals without provider fields and latches', () => {
