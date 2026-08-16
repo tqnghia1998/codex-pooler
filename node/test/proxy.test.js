@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
+import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -1596,7 +1597,12 @@ test('returns local pacing 429s, cancels queued requests, and preserves account 
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'queued' })
     });
-    await new Promise((resolve) => setImmediate(resolve));
+    const pacer = upstreamPacerForStore(store);
+    const queueDeadline = Date.now() + 2_000;
+    while (pacer.status()[0]?.queueDepth !== 1 && Date.now() < queueDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(pacer.status()[0]?.queueDepth, 1);
     const overflow = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'overflow' });
     assert.equal(overflow.response.status, 429);
     assert.equal(overflow.body.error.code, 'local_pacing_queue_full');
