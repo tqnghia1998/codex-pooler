@@ -221,6 +221,28 @@ test('accepts fixed allowlisted facts and rejects unrelated failure classes', ()
   }
 });
 
+test('scopes Compass optional fields to their protocol routes', () => {
+  const { dir, store } = tempStore();
+  try {
+    const created = store.create({ type: 'compass', projectId: 'route-project', projectKey: 'secret' });
+    const service = new CompatibilityLearning(store, { observationGapMs: 0 });
+    const upstream = store.get(created.id);
+    const chat = compatibilityContext(upstream, { sourcePath: '/v1/chat/completions', model: 'route-model' });
+    const messages = compatibilityContext(upstream, { sourcePath: '/v1/messages', model: 'route-model' });
+
+    assert.equal(evidence(service, upstream, chat, 'temperature', 'chat-one', 1).status, 'observed');
+    assert.equal(evidence(service, upstream, chat, 'temperature', 'chat-two', 2).status, 'active');
+    assert.deepEqual(service.activeFact(created.id, chat, { now: 3 }), { unsupportedFields: ['temperature'] });
+    assert.equal(service.activeFact(created.id, messages, { now: 3 }), null);
+
+    assert.equal(evidence(service, upstream, chat, 'top_k', 'chat-top-k', 4).status, 'ignored');
+    assert.equal(evidence(service, upstream, messages, 'top_k', 'messages-one', 5).status, 'observed');
+    assert.equal(evidence(service, upstream, messages, 'top_k', 'messages-two', 6).status, 'active');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bounds observations and reports fingerprint-stale facts', () => {
   const { dir, store } = tempStore();
   try {
