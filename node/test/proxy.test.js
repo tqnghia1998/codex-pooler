@@ -962,7 +962,7 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
   }
 });
 
-test('learns explicit Compass adaptive-thinking requirements without model-name guesses', async () => {
+test('defaults legacy Compass Messages thinking to adaptive thinking', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-adaptive-thinking-'));
   const calls = [];
   const fetchImpl = async (_url, options) => {
@@ -1006,37 +1006,25 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
       });
       assert.equal(result.response.status, 200);
     }
-    assert.deepEqual(calls.slice(0, 11).map(({ body }) => body.thinking), [
-      { type: 'enabled', budget_tokens: 2048, extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'enabled', budget_tokens: 2048, extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true },
-      { type: 'adaptive', extra: true }
-    ]);
-    assert.deepEqual(calls.slice(0, 11).map(({ body }) => [
+    assert.equal(calls.length, 9);
+    assert.deepEqual(calls.map(({ body }) => body.thinking), Array(9).fill({ type: 'adaptive', extra: true }));
+    assert.deepEqual(calls.map(({ body }) => body.output_config), Array(9).fill({ effort: 'medium' }));
+    assert.deepEqual(calls.map(({ body }) => [
       Object.hasOwn(body, 'temperature'),
       Object.hasOwn(body, 'top_p'),
       Object.hasOwn(body, 'top_k')
     ]), [
       [true, true, true],
-      [true, true, true],
       [false, true, true],
       [false, false, true],
       [false, false, false],
-      [true, true, true],
       [true, true, true],
       [false, true, true],
       [false, false, true],
       [false, false, false],
       [false, false, false]
     ]);
-    assert.deepEqual(calls.slice(0, 11).map(({ headers }) => headers['anthropic-version']), Array(11).fill('2023-06-01'));
+    assert.deepEqual(calls.map(({ headers }) => headers['anthropic-version']), Array(9).fill('2023-06-01'));
 
     const unsupportedAdaptive = await request(base, '/v1/messages', {
       model: 'claude-legacy-99',
@@ -1044,7 +1032,8 @@ test('learns explicit Compass adaptive-thinking requirements without model-name 
       thinking: { type: 'enabled', budget_tokens: 2048 }
     });
     assert.equal(unsupportedAdaptive.response.status, 400);
-    assert.equal(calls.at(-1).body.thinking.type, 'enabled');
+    assert.deepEqual(calls.at(-1).body.thinking, { type: 'adaptive' });
+    assert.deepEqual(calls.at(-1).body.output_config, { effort: 'medium' });
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
