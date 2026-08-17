@@ -90,6 +90,14 @@
           "type": "string"
         },
         {
+          "path": "$.output_config",
+          "type": "object"
+        },
+        {
+          "path": "$.output_config.effort",
+          "type": "string"
+        },
+        {
           "path": "$.stream",
           "type": "boolean"
         },
