@@ -781,7 +781,7 @@ export function projectProxyRequest({
     ? COMPASS_PATHS[sourcePath]
     : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
   const normalizedBody = direct
-    ? directUpstreamPayload(payload, sourcePath, compatibility)
+    ? directUpstreamPayload(payload, sourcePath)
     : sourcePath === '/v1/chat/completions'
       ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
       : publicCompaction
@@ -961,11 +961,13 @@ function omitCompatibilityFields(payload, fields, allowed) {
   return Object.fromEntries(Object.entries(payload).filter(([key]) => !blocked.has(key)));
 }
 
-function directUpstreamPayload(payload, sourcePath, compatibility = {}) {
-  if (sourcePath !== '/v1/messages' || payload?.thinking?.type !== 'enabled' || compatibility.adaptiveThinking !== true) return payload;
+function directUpstreamPayload(payload, sourcePath) {
+  if (sourcePath !== '/v1/messages' || payload?.thinking?.type !== 'enabled') return payload;
   const thinking = { ...payload.thinking, type: 'adaptive' };
   delete thinking.budget_tokens;
-  return { ...payload, thinking };
+  const outputConfig = plainObject(payload.output_config) ? { ...payload.output_config } : {};
+  if (!cleanString(outputConfig.effort)) outputConfig.effort = cleanString(payload.thinking.effort) || 'medium';
+  return { ...payload, thinking, output_config: outputConfig };
 }
 
 function normalizeCodexInput(payload, { compact = false, native = false } = {}) {
