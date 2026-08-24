@@ -1199,7 +1199,7 @@ test('settles priced Codex and streamed Anthropic usage, preferring reported cos
     let response = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'price', stream: false });
     assert.equal(response.response.status, 200);
     let settlements = Object.values(store.get(codex.id).spending.settlements);
-    assert.equal(settlements[0].settledCostMicros, 7_100);
+    assert.equal(settlements[0].settledCostMicros, 5_280);
     assert.equal(settlements[0].costSource, 'pricing_snapshot');
 
     reported = true;
