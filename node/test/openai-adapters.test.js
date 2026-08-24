@@ -145,7 +145,7 @@ test('validates and preserves Responses tools and strict local schemas', () => {
     tools: [
       { type: 'function', name: 'weather', parameters: schema, strict: true },
       { type: 'namespace', name: 'ops', description: 'Operations', tools: [{ type: 'custom', name: 'shell', format: { type: 'text' } }] },
-      { type: 'function', name: 'flexible', parameters: { type: 'object', properties: { labels: { type: 'object', additionalProperties: { type: 'string' } }, pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] } } } },
+      { type: 'function', name: 'flexible', parameters: { type: 'object', properties: { labels: { type: 'object', additionalProperties: { type: 'string' } }, pair: { type: 'array', items: [{ type: 'string' }, { type: 'number' }] } } }, strict: null },
       { type: 'tool_search', execution: 'client', description: 'Searches deferred tools', parameters: { type: 'object', properties: { query: { type: 'string' } } } }
     ],
     tool_choice: { type: 'function', name: 'weather' },
@@ -155,8 +155,73 @@ test('validates and preserves Responses tools and strict local schemas', () => {
   assert.deepEqual(adapted.tool_choice, { type: 'function', name: 'weather' });
   assert.deepEqual(adapted.tools[2].parameters.properties.labels.additionalProperties, { type: 'string' });
   assert.deepEqual(adapted.tools[2].parameters.properties.pair.items, [{ type: 'string' }, { type: 'number' }]);
+  assert.equal('strict' in adapted.tools[2], false);
   assert.deepEqual(adapted.tools[3], { type: 'tool_search', execution: 'client', description: 'Searches deferred tools', parameters: { type: 'object', properties: { query: { type: 'string' } } } });
   assert.equal(adapted.text.format.strict, true);
+
+  const allowedToolsAdapted = adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: 'search weather',
+    tools: [
+      { type: 'function', name: 'weather', parameters: schema },
+      { type: 'custom', name: 'exec', description: 'Run code', format: { type: 'text' } },
+      { type: 'web_search' }
+    ],
+    tool_choice: {
+      type: 'allowed_tools',
+      mode: 'required',
+      tools: [
+        { type: 'function', name: 'weather' },
+        { type: 'custom', name: 'exec' },
+        { type: 'web_search' }
+      ]
+    }
+  });
+  assert.deepEqual(allowedToolsAdapted.tool_choice, {
+    type: 'allowed_tools',
+    mode: 'required',
+    tools: [
+      { type: 'function', name: 'weather' },
+      { type: 'custom', name: 'exec' },
+      { type: 'web_search' }
+    ]
+  });
+
+  assertAdapterError(() => adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: 'search',
+    tools: [{ type: 'function', name: 'weather', parameters: schema }],
+    tool_choice: {
+      type: 'allowed_tools',
+      mode: 'required',
+      tools: [{ type: 'function', name: 'unknown' }]
+    }
+  }), { code: 'invalid_request', param: 'tool_choice' });
+
+  assertAdapterError(() => adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: 'search',
+    tools: [
+      { type: 'tool_search', execution: 'client', description: 'Searches deferred tools', parameters: { type: 'object', properties: { query: { type: 'string' } } } },
+      { type: 'function', name: 'weather', parameters: schema, defer_loading: true }
+    ],
+    tool_choice: {
+      type: 'allowed_tools',
+      mode: 'required',
+      tools: [{ type: 'function', name: 'weather' }]
+    }
+  }), { code: 'invalid_request', param: 'tool_choice' });
+
+  assertAdapterError(() => adaptChatRequest({
+    model: 'gpt-5.6-sol',
+    messages: [{ role: 'user', content: 'search' }],
+    tools: [{ type: 'function', function: { name: 'weather', parameters: schema } }],
+    tool_choice: {
+      type: 'allowed_tools',
+      mode: 'required',
+      tools: [{ type: 'function', name: 'weather' }]
+    }
+  }), { code: 'invalid_request', param: 'tool_choice' });
 
   const inferred = adaptResponsesRequest({
     model: 'gpt-5.6-sol',
