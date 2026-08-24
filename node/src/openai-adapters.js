@@ -252,6 +252,7 @@ function translateChatTools(tools) {
 }
 
 function translateChatToolChoice(choice) {
+  if (plainObject(choice) && choice.type === 'allowed_tools') invalid('tool_choice shape is not translatable', 'tool_choice');
   if (plainObject(choice) && choice.type === 'function' && cleanString(choice.function?.name)) return { type: 'function', name: choice.function.name };
   if (plainObject(choice) && choice.type === 'custom' && plainObject(choice.custom)) {
     exactKeys(choice, ['type', 'custom'], 'tool_choice');
@@ -532,7 +533,11 @@ function validateTool(tool) {
   if (tool.type === 'function') {
     exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema'], 'tools');
     if (!cleanString(tool.name) || !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
-    optionalBoolean(tool, 'strict', 'tools');
+    if (tool.strict === null) {
+      delete tool.strict;
+    } else {
+      optionalBoolean(tool, 'strict', 'tools');
+    }
     optionalBoolean(tool, 'defer_loading', 'tools');
     validateAllowedCallers(tool.allowed_callers);
     if (tool.output_schema !== undefined && !plainObject(tool.output_schema)) invalid('tool shape is not translatable', 'tools');
@@ -574,10 +579,34 @@ function validateTool(tool) {
   invalid('tool shape is not translatable', 'tools');
 }
 
+const ALLOWED_TOOLS_BUILTIN_TYPES = ['programmatic_tool_calling', 'web_search_preview', 'web_search', 'image_generation'];
+
+function isAllowedToolDeclared(allowedTool, tools) {
+  if (!plainObject(allowedTool) || !Array.isArray(tools)) return false;
+  if (['function', 'custom'].includes(allowedTool.type)) {
+    if (Object.keys(allowedTool).length !== 2 || !cleanString(allowedTool.name)) return false;
+    return tools.some((t) => t?.type === allowedTool.type && t?.name === allowedTool.name && t?.defer_loading !== true);
+  }
+  if (ALLOWED_TOOLS_BUILTIN_TYPES.includes(allowedTool.type)) {
+    if (Object.keys(allowedTool).length !== 1) return false;
+    return tools.some((t) => t?.type === allowedTool.type);
+  }
+  return false;
+}
+
 function validateToolChoice(payload) {
   const choice = payload.tool_choice;
   if (choice === undefined || ['auto', 'none', 'required'].includes(choice)) return;
   if (!plainObject(choice)) invalid('tool_choice shape is not translatable', 'tool_choice');
+  if (choice.type === 'allowed_tools') {
+    exactKeys(choice, ['type', 'mode', 'tools'], 'tool_choice');
+    if (!['auto', 'required'].includes(choice.mode)) invalid('tool_choice shape is not translatable', 'tool_choice');
+    if (!Array.isArray(choice.tools) || choice.tools.length === 0) invalid('tool_choice shape is not translatable', 'tool_choice');
+    if (!choice.tools.every((tool) => isAllowedToolDeclared(tool, payload.tools))) {
+      invalid('tool_choice shape is not translatable', 'tool_choice');
+    }
+    return;
+  }
   if (['image_generation', 'programmatic_tool_calling'].includes(choice.type)) {
     exactKeys(choice, ['type'], 'tool_choice');
     return;
