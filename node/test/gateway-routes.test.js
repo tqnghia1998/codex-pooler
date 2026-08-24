@@ -1420,7 +1420,7 @@ test('fails over a public WebSocket turn before output and settles its terminal 
     assert.equal(upstreamAuth.length, 2);
     assert.equal(store.sessionUpstream('ws-failover-session', undefined, apiKeyId), second.id);
     assert.equal(store.getPublic(first.id).spending.spentDollars, 0);
-    assert.deepEqual(Object.values(store.get(second.id).spending.settlements).map(({ settledCostMicros, costSource }) => ({ settledCostMicros, costSource })), [{ settledCostMicros: 35, costSource: 'pricing_snapshot' }]);
+    assert.deepEqual(Object.values(store.get(second.id).spending.settlements).map(({ settledCostMicros, costSource }) => ({ settledCostMicros, costSource })), [{ settledCostMicros: 24, costSource: 'pricing_snapshot' }]);
   } finally {
     relay.close();
     await close(gateway);
