@@ -426,6 +426,19 @@ test('clear cooldown leaves reauthentication-required state intact', () => {
   }
 });
 
+test('successful quota refresh clears reauthentication-required state', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'reauth', projectKey: 'secret' });
+    const admission = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: '' });
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'credential', retryable: true });
+    store.setQuota(upstream.id, { source: 'compass', remainingPercent: 90 });
+    assert.equal(store.get(upstream.id).health, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('prevents creating duplicate upstreams within the same scope', () => {
   const { dir, store } = tempStore();
   try {

@@ -313,6 +313,10 @@ export class Store {
     ensureSpending(upstream);
     upstream.quota = quota;
     upstream.quotaSource = quota?.source || null;
+    if (upstream.health?.status === 'reauth_required') {
+      upstream.healthGeneration = Math.max(0, Number(upstream.health.generation ?? upstream.healthGeneration) || 0) + 1;
+      delete upstream.health;
+    }
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     if (notify) this.notifyUpstreamsChange();
