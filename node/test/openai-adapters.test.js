@@ -65,6 +65,16 @@ test('adapts Chat fallback and rich multimodal tool requests', () => {
   assert.deepEqual(adapted.text, { format: { type: 'json_object' }, verbosity: 'high' });
 });
 
+test('drops unbound turn metadata from id-less compaction replay', () => {
+  assert.deepEqual(adaptResponsesRequest({
+    model: 'gpt-5.6-sol',
+    input: [
+      { type: 'compaction', encrypted_content: 'encrypted', internal_chat_message_metadata_passthrough: { turn_id: 'turn-1' } },
+      { role: 'user', content: 'continue' }
+    ]
+  }).input[0], { type: 'compaction', encrypted_content: 'encrypted' });
+});
+
 test('normalizes Responses instructions, replay, continuation, and cache controls', () => {
   const stateless = adaptResponsesRequest({
     model: 'gpt-5.6-sol',
