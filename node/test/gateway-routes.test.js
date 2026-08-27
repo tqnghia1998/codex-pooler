@@ -380,6 +380,54 @@ test('bridges terminal backend compaction triggers through compact JSON and retu
   }
 });
 
+test('bridges V2 backend compaction SSE including an unframed terminal event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-v2-compact-'));
+  const { store } = configuredStore(dir);
+  const compact = { type: 'compaction', id: 'cmp-v2', encrypted_content: 'encrypted-v2' };
+  const completed = { type: 'response.completed', response: { id: 'resp-v2', status: 'completed', output: [compact], usage: { input_tokens: 4, output_tokens: 1, total_tokens: 5 } } };
+  const { server, base } = await start(store, async (_url, options) => {
+    assert.equal(JSON.parse(options.body).stream, true);
+    return new Response(`event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', item: compact })}\n\nevent: response.completed\ndata: ${JSON.stringify(completed)}`, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  try {
+    const response = await gatewayFetch(base, '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-codex-turn-metadata': JSON.stringify({ compaction: { implementation: 'responses_compaction_v2' } }) },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible' }] }, { type: 'compaction_trigger' }], stream: true })
+    });
+    const body = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(body, /"encrypted_content":"encrypted-v2"/);
+    assert.match(body, /data: \[DONE\]/);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects V2 compaction data after its terminal event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-v2-compact-terminal-'));
+  const { store } = configuredStore(dir);
+  const compact = { type: 'compaction', encrypted_content: 'encrypted-v2' };
+  const { server, base } = await start(store, async () => new Response([
+    `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', item: compact })}\n\n`,
+    `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp-v2', status: 'completed' } })}\n\n`,
+    `event: response.output_text.delta\ndata: ${JSON.stringify({ type: 'response.output_text.delta', delta: 'must-not-accept' })}`
+  ].join(''), { headers: { 'content-type': 'text/event-stream' } }));
+  try {
+    const response = await gatewayFetch(base, '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-codex-turn-metadata': JSON.stringify({ compaction: { implementation: 'responses_compaction_v2' } }) },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'visible' }] }, { type: 'compaction_trigger' }], stream: true })
+    });
+    assert.equal(response.status, 502);
+    assert.match(await response.text(), /invalid_compaction_response/);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bridges public compaction triggers across JSON and SSE through ordinary backend Responses', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-public-compact-trigger-'));
   const { store } = configuredStore(dir);
