@@ -317,8 +317,9 @@ function normalizeInputItem(item) {
     return [item];
   }
   if (item.type === 'compaction') {
-    if (!cleanString(item.encrypted_content) || Object.keys(item).some((key) => !['type', 'encrypted_content', 'id'].includes(key)) || item.id !== undefined && !cleanString(item.id)) invalid('input item shape is not translatable', 'input');
-    return [item];
+    const turn = item.internal_chat_message_metadata_passthrough;
+    if (!cleanString(item.encrypted_content) || Object.keys(item).some((key) => !['type', 'encrypted_content', 'id', 'internal_chat_message_metadata_passthrough'].includes(key)) || item.id !== undefined && !cleanString(item.id) || turn !== undefined && (!plainObject(turn) || !cleanString(turn.turn_id) || Object.keys(turn).some((key) => key !== 'turn_id'))) invalid('input item shape is not translatable', 'input');
+    return [item.id === undefined && turn !== undefined ? stripKey(item, 'internal_chat_message_metadata_passthrough') : item];
   }
   if (item.type === 'function_call') {
     const callId = cleanString(item.call_id) || cleanString(item.id);
