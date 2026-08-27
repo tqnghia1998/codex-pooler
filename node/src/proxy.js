@@ -111,7 +111,10 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     return;
   }
   const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
-  const dispatchPayload = compactionBridge?.payload || payload;
+  const v2Compaction = compactionBridge && v2CompactionRequest(req);
+  const dispatchPayload = v2Compaction
+    ? { ...compactionBridge.payload, stream: true }
+    : compactionBridge?.payload || payload;
   if (sourcePath === '/v1/chat/completions' && normalizedServiceTier(payload?.service_tier) === 'ultrafast') {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_request', message: 'service_tier is not supported', param: 'service_tier' } });
     return;
@@ -200,14 +203,17 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     return;
   }
   if (compactionBridge) {
-    const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
-    const compactResult = parseJson(bytes);
+    const compactResult = v2Compaction && isEventStream(response)
+      ? await collectV2CompactionResponse(response, upstreamDeadlines)
+      : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines));
     const compact = compactionBridgeResult(compactResult, path === '/v1/responses');
     if (!compact) {
+      if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'transient', retryable: true });
       finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'invalid_compaction_response', responseStatusCode: 502 });
       sendJson(res, 502, { error: { type: 'server_error', code: 'invalid_compaction_response', message: 'Upstream compact response did not include encrypted compaction content', param: null } });
       return;
     }
+    if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
     settleUsage(store, upstream, attemptId, startedAt, compactResult, dispatchPayload, accounting, lifecycle, response.status);
     if (path === '/v1/responses' && payload.stream !== true) {
       sendJson(res, 200, compact.response);
@@ -312,6 +318,50 @@ function visibleCompactionContent(content) {
     if (part.type === 'input_file') return cleanString(part.file_id) !== null;
     return false;
   });
+}
+
+function v2CompactionRequest(req) {
+  try {
+    return JSON.parse(header(req, 'x-codex-turn-metadata'))?.compaction?.implementation === 'responses_compaction_v2';
+  } catch {
+    return false;
+  }
+}
+
+async function collectV2CompactionResponse(response, upstreamDeadlines) {
+  const reader = response.body?.getReader();
+  if (!reader) return null;
+  const decoder = new TextDecoder();
+  let parser = createSseParserState();
+  let item = null;
+  let terminal = null;
+  let invalid = false;
+  const collect = (block) => {
+    const { kind, event } = decodeSseBlock(block);
+    if (kind !== 'event') return;
+    if (terminal) { invalid = true; return; }
+    if (event.type === 'response.output_item.done' && plainObject(event.item) && ['compaction', 'compaction_summary'].includes(event.item.type) && !item) item = event.item;
+    if (event.type === 'response.completed' && plainObject(event.response)) terminal = event.response;
+    else if (['response.failed', 'response.incomplete', 'error'].includes(event.type)) invalid = true;
+  };
+  try {
+    while (true) {
+      const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
+      const result = consumeSseChunk(parser, done ? decoder.decode() : decoder.decode(value, { stream: true }));
+      parser = result.state;
+      if (result.overflow) return null;
+      for (const block of result.blocks) collect(block);
+      if (done) break;
+    }
+    const pending = pendingSseBlock(parser);
+    if (pending.trim()) collect(pending);
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  if (invalid || !terminal) return null;
+  return { ...terminal, output: item ? [item] : terminal.output };
 }
 
 function compactionBridgeResult(decoded, publicResponses = false) {
