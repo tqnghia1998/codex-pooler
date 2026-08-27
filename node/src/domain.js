@@ -6,7 +6,7 @@ export const DEFAULT_COMPASS_BASE_URL = 'https://compass.llm.shopee.io/compass-a
 export const STATIC_MODEL_CATALOG = Object.freeze([
   ...OPENAI_MODEL_IDS,
   'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5',
-  'glm-5.2', 'kimi-k3'
+  'glm-5.3-flash', 'kimi-k3'
 ].map((id) => Object.freeze({ id, object: 'model', owned_by: id.startsWith('claude-') ? 'compass' : 'codex' })));
 export const SUPPORTED_TYPES = new Set(['codex', 'compass']);
 export const CREDITS_PER_DOLLAR = 25;
