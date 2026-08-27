@@ -71,27 +71,55 @@ test('automatically refreshes Codex quotas for all stored upstreams', async () =
   }
 });
 
-test('refreshes quotas with bounded concurrency', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-bounded-poll-'));
+test('refreshes all quotas in sequential batches of ten', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-batched-poll-'));
   try {
     const store = new Store(dir);
-    for (let index = 0; index < 4; index += 1) store.create({ type: 'codex', accessToken: `token-${index}`, accountId: `acc-${index}` });
+    for (let index = 0; index < 21; index += 1) store.create({ type: 'codex', accessToken: `token-${index}`, accountId: `acc-${index}` });
     let active = 0;
     let peak = 0;
+    let completed = 0;
     let changes = 0;
     store.onUpstreamsChange(() => { changes += 1; });
     await refreshAllQuotas(store, {
       fetchImpl: async () => {
+        assert.equal(completed, Math.floor(completed / 10) * 10, 'the next batch starts only after the previous batch completes');
         active += 1;
         peak = Math.max(peak, active);
         await new Promise((resolve) => setTimeout(resolve, 10));
         active -= 1;
+        completed += 1;
         return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 2_592_000 } } }), { status: 200 });
       }
     });
-    assert.equal(peak, 3);
+    assert.equal(peak, 10);
+    assert.equal(completed, 21);
     assert.equal(changes, 1);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('continues bulk quota refresh after an upstream failure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-bulk-quota-api-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 11; index += 1) store.create({ type: 'codex', accessToken: `token-${index}` });
+  let calls = 0;
+  const { server, base } = await runningServer(store, {
+    fetchImpl: async (_url, { headers }) => {
+      calls += 1;
+      if (headers.authorization === 'Bearer token-0') throw new Error('unavailable');
+      return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 2_592_000 } } }), { status: 200 });
+    }
+  });
+  try {
+    const refreshed = await request(base, '/api/upstreams/refresh-quota', { method: 'POST', body: '{}' });
+    assert.equal(refreshed.response.status, 200);
+    assert.deepEqual(refreshed.data.results.map(({ status }) => status), ['failed', ...Array(10).fill('refreshed')]);
+    assert.equal(calls, 11);
+    assert.equal(store.list().slice(1).every(({ quota }) => quota.remainingPercent === 90), true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
   }
 });
