@@ -513,9 +513,9 @@ function Dashboard({ themeMode, setThemeMode }) {
     if (!refreshTarget) return;
     setIsRefreshing(true);
     try {
-      await api(`/api/upstreams/${refreshTarget.id}/refresh-quota`, { method: 'POST' });
+      await api(refreshTarget.all ? '/api/upstreams/refresh-quota' : `/api/upstreams/${refreshTarget.id}/refresh-quota`, { method: 'POST' });
       await load();
-      show('Quota refreshed');
+      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota refreshed');
       setRefreshTarget(null);
     } catch (error) {
       show(error.message, true);
@@ -782,6 +782,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                     { label: 'Compatibility', onClick: () => void openCompatibility() },
                     { label: 'Diagnostics', onClick: () => void openDiagnostics() },
                     { type: 'divider' },
+                    { label: 'Refresh all quotas', onClick: () => setRefreshTarget({ all: true }) },
                     { label: 'Set priority', onClick: () => setPriorityOpen(true) },
                     { label: 'Bulk set caps', onClick: openBulkCaps }
                   ]}
@@ -914,8 +915,8 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(refreshTarget)}
             onOpenChange={(isOpen) => { if (!isOpen) setRefreshTarget(null); }}
-            title="Refresh upstream quota?"
-            description={refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
+            title={refreshTarget?.all ? 'Refresh all upstream quotas?' : 'Refresh upstream quota?'}
+            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
             actionLabel="Refresh"
             actionVariant="primary"
             isActionLoading={isRefreshing}

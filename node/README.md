@@ -148,6 +148,7 @@ GET    /api/routing                       # persisted routing strategy
 PUT    /api/routing                       { "strategy": "least-recent-success|most-remaining-quota" }
 POST   /api/routing/dry-run               # sanitized live-planner candidate/exclusion diagnostics
 POST   /api/upstreams
+POST   /api/upstreams/refresh-quota         # all upstreams, concurrent batches of 10
 PATCH  /api/upstreams/:id
 DELETE /api/upstreams/:id
 POST   /api/upstreams/:id/refresh-quota

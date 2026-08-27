@@ -30,7 +30,7 @@ const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 export const AUTO_REFRESH_INTERVAL_MS = 60_000;
 export const TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
-const QUOTA_REFRESH_CONCURRENCY = 3;
+const QUOTA_REFRESH_BATCH_SIZE = 10;
 const TOKEN_REFRESH_CONCURRENCY = 3;
 const TOKEN_REFRESH_WINDOW_MS = 12 * 60 * 60 * 1_000;
 const TOKEN_REFRESH_FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
@@ -201,18 +201,22 @@ export function start(port = Number(process.env.PORT) || 3000, {
 }
 
 export async function refreshAllQuotas(store, options = {}) {
-  const results = await mapConcurrent(store.list(), QUOTA_REFRESH_CONCURRENCY, async ({ id }) => {
-    const upstream = store.get(id);
-    if (!upstream) return;
-    const credentials = store.credentials(id);
-    if (isAiswitchUpstream(upstream)) return { status: 'skipped', id, source: 'aiswitch' };
-    const quota = await refreshQuota(upstream, credentials, {
-      ...options,
-      saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
-    });
-    store.setQuota(id, quota, { notify: false });
-    return { status: 'refreshed', id };
-  });
+  const upstreams = store.list();
+  const results = [];
+  for (let index = 0; index < upstreams.length; index += QUOTA_REFRESH_BATCH_SIZE) {
+    results.push(...await Promise.allSettled(upstreams.slice(index, index + QUOTA_REFRESH_BATCH_SIZE).map(async ({ id }) => {
+      const upstream = store.get(id);
+      if (!upstream) return;
+      const credentials = store.credentials(id);
+      if (isAiswitchUpstream(upstream)) return { status: 'skipped', id, source: 'aiswitch' };
+      const quota = await refreshQuota(upstream, credentials, {
+        ...options,
+        saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
+      });
+      store.setQuota(id, quota, { notify: false });
+      return { status: 'refreshed', id };
+    })));
+  }
   if (results.some((result) => result.value?.status === 'refreshed')) store.notifyUpstreamsChange();
   return results;
 }
@@ -429,6 +433,11 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   if (req.method === 'POST' && parts.length === 2 && parts[1] === 'upstreams') {
     const upstream = store.create(await body(req));
     sendJson(res, 201, { upstream });
+    return;
+  }
+  if (req.method === 'POST' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'refresh-quota') {
+    const results = await refreshAllQuotas(store, { fetchImpl, compassGatewayToken });
+    sendJson(res, 200, { results: results.map(({ status, value }) => status === 'fulfilled' ? value : { status: 'failed' }) });
     return;
   }
 
