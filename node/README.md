@@ -11,6 +11,10 @@ Relaydeck is a deliberately small local dashboard for:
 
 This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer. The Elixir application is retained unchanged from upstream as a reference, not as a second maintained implementation. Codex access tokens are refreshed lazily before quota and proxy requests, and proactively once per hour when they expire within 12 hours.
 
+Quota sharing is a separate product under `pool/`. It has its own server, UI,
+cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
+not initialize or expose Codex Pool accounts, routes, sessions, or storage.
+
 ## Proxy compatibility status
 
 The Node proxy covers the client-visible local compatibility path:
