@@ -29,7 +29,7 @@ The Node proxy covers the client-visible local compatibility path:
 | Client release gate | Reviewed npm manifest, latest-version discovery, integrity-pinned platform packages, loopback-only synthetic client execution, and sanitized intake reports | `test/compatibility-release-gate.test.js` |
 | Readiness and diagnostics | Immediate liveness, startup-settled readiness with documented degradation, bounded sanitized terminal failure reasons, and phase timing summaries | `test/readiness.test.js`, `test/gateway-diagnostics.test.js`, `test/server.test.js`, `test/accounting-lifecycle.test.js` |
 | SSE | Incremental UTF-8/SSE parsing across LF, CRLF, standalone CR, and transport boundaries; bounded complete and incomplete events; OpenAI and Anthropic terminal recognition; first-event failover; public Responses sequencing; Chat translation; cancellation and usage settlement | `test/openai-streaming.test.js`, `test/proxy.test.js` |
-| Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, bounded frames/pending output, pre-output reconnect, sanitized terminals and terminal usage settlement | `test/gateway-routes.test.js` |
+| Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, bounded frames/pending output, pre-output reconnect, sanitized terminals and terminal usage settlement; native Codex frames remain opaque on one upstream connection, including compaction continuations | `test/gateway-routes.test.js` |
 
 ### Intentional limitations
 
