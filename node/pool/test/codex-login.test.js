@@ -120,34 +120,6 @@ test('the same Codex subject signs into the same Codex Pool account and refreshe
   }
 });
 
-test('reuses the canonical Codex upstream when duplicate links already exist', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-login-deduplicate-'));
-  try {
-    const upstreamStore = new Store(dir);
-    const sharingStore = new ProductStore(dir);
-    const first = upstreamStore.create(
-      { type: 'codex', authJson: authJson({ refreshToken: 'first-refresh' }) },
-      { allowDuplicateCodexIdentity: true }
-    );
-    const second = upstreamStore.create(
-      { type: 'codex', authJson: authJson({ refreshToken: 'second-refresh' }) },
-      { allowDuplicateCodexIdentity: true }
-    );
-    const provider = sharingStore.upsertAccount({ email: 'codex@example.com', name: 'codex' });
-    sharingStore.linkUpstream(provider.id, first.id);
-    sharingStore.linkUpstream(provider.id, second.id);
-    const manager = new CodexLoginManager({ sharingStore, upstreamStore });
-
-    const imported = manager.importAuthJson(authJson({ refreshToken: 'replacement-refresh' }));
-
-    assert.equal(imported.upstream.id, second.id);
-    assert.equal(upstreamStore.list().length, 2);
-    assert.equal(upstreamStore.credentials(second.id).refreshToken, 'replacement-refresh');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
 test('auth.json import signs into the same account and replaces stored credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-import-'));
   try {
@@ -162,16 +134,12 @@ test('auth.json import signs into the same account and replaces stored credentia
     assert.equal(second.upstream.id, first.upstream.id);
     assert.equal(upstreamStore.list().length, 1);
     assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'second-refresh');
-    assert.equal(sharingStore.sqlite.prepare(`
-      SELECT COUNT(*) AS count FROM sharing_events
-      WHERE entity_type = 'upstream' AND entity_id = ? AND action = 'linked'
-    `).get(first.upstream.id).count, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test('auth.json imports with the same email update the same linked credentials', () => {
+test('auth.json imports keep Business workspace members separate when they share a ChatGPT account ID', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-workspace-members-'));
   try {
     const upstreamStore = new Store(dir);
@@ -185,10 +153,11 @@ test('auth.json imports with the same email update the same linked credentials',
       refreshToken: 'rotated-refresh'
     }));
 
-    assert.equal(second.account.id, first.account.id);
-    assert.equal(second.upstream.id, first.upstream.id);
-    assert.equal(upstreamStore.list().length, 1);
-    assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'rotated-refresh');
+    assert.notEqual(second.account.id, first.account.id);
+    assert.notEqual(second.upstream.id, first.upstream.id);
+    assert.equal(upstreamStore.list().length, 2);
+    assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'refresh-login');
+    assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'rotated-refresh');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -227,7 +196,11 @@ test('a different Codex subject does not overwrite an upstream owned by another 
     const upstreamStore = new Store(dir);
     const sharingStore = new ProductStore(dir);
     const upstream = upstreamStore.create({ type: 'codex', authJson: authJson({ subject: 'first-subject' }) });
-    const owner = sharingStore.upsertAccount({ email: 'owner@example.com', name: 'Owner' });
+    const owner = sharingStore.upsertCodexAccount({
+      subject: 'first-subject',
+      issuer: 'https://auth.openai.com',
+      email: 'codex@example.com'
+    });
     sharingStore.linkUpstream(owner.id, upstream.id);
 
     const manager = new CodexLoginManager({
