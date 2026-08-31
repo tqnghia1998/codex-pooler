@@ -10,11 +10,13 @@ test('imports the useful fields from Codex auth.json', () => {
   const auth = parseCodexAuthJson(JSON.stringify({ tokens: {
     access_token: jwt({ 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-1' } }),
     refresh_token: 'refresh',
-    id_token: jwt({ email: 'person@example.com' })
+    id_token: jwt({ sub: 'person-1', iss: 'https://auth.openai.com', email: 'person@example.com' })
   }}));
   assert.equal(auth.accessToken.startsWith('header.'), true);
   assert.equal(auth.accountId, 'acct-1');
   assert.equal(auth.email, 'person@example.com');
+  assert.equal(auth.subject, 'person-1');
+  assert.equal(auth.issuer, 'https://auth.openai.com');
   assert.equal(auth.name, 'p5dymc');
 });
 
