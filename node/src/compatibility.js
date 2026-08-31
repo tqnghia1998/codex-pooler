@@ -302,11 +302,14 @@ const COMPATIBILITY_CIRCUIT_SCOPE = { routeClass: 'compatibility_native', model:
 
 async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, { modelCatalog = modelCatalogForStore(store), requireImageModel = false, codexHostHealth = codexHostHealthForStore(store) } = {}) {
   const scopeId = requestScopeId(req);
-  const apiKeyId = req.proxyAuth?.id || null;
+  const sharedUpstreamId = req.proxyAuth?.kind === 'share_session' ? req.proxyAuth.upstreamId : '';
+  const apiKeyId = sharedUpstreamId ? null : req.proxyAuth?.id || null;
   const sessionId = sessionAffinity(req);
-  const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const pinnedId = sharedUpstreamId || store.sessionUpstream(sessionId, scopeId, apiKeyId);
   const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
-  const requestedId = text(req.headers['x-upstream-id']);
+  const headerRequestedId = text(req.headers['x-upstream-id']);
+  if (sharedUpstreamId && headerRequestedId && headerRequestedId !== sharedUpstreamId) return null;
+  const requestedId = sharedUpstreamId || headerRequestedId;
   const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
   for (const candidate of candidates) {
     const upstream = store.get(candidate.id, scopeId);
@@ -485,11 +488,13 @@ function settleCost(store, upstream, body, req) {
   const startedAt = new Date().toISOString();
   try {
     const scopeId = requestScopeId(req);
-    const apiKeyId = req.proxyAuth?.id || null;
-    store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
+    const shared = req.proxyAuth?.kind === 'share_session';
+    const apiKeyId = shared ? null : req.proxyAuth?.id || null;
+    if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
     if (settledCostMicros !== undefined) {
       store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
       store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
+      if (shared) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros);
     }
   } catch {
     // Accounting must not replace a successful provider response.

@@ -407,15 +407,22 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   const scopeId = requestScopeId(req);
   const sessionId = sessionAffinity(req);
   const apiKeyId = requestAccounting(req).apiKeyId;
-  const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const sharedUpstreamId = req.proxyAuth?.kind === 'share_session' ? req.proxyAuth.upstreamId : '';
+  const pinnedId = sharedUpstreamId || store.sessionUpstream(sessionId, scopeId, apiKeyId);
   const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
-  const requestedId = header(req, 'x-upstream-id');
+  const headerRequestedId = header(req, 'x-upstream-id');
+  const requestedId = sharedUpstreamId || headerRequestedId;
   const requestedType = header(req, 'x-upstream-type');
   const responsePinnedId = originalPath === '/v1/responses' ? store.responseUpstream(payload?.previous_response_id, scopeId, apiKeyId) : null;
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
   const ultrafast = normalizedServiceTier(payload?.service_tier) === 'ultrafast';
   const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
+  if (sharedUpstreamId && (headerRequestedId && headerRequestedId !== sharedUpstreamId
+    || requestedType && store.get(sharedUpstreamId, scopeId)?.type !== requestedType
+    || responsePinnedId && responsePinnedId !== sharedUpstreamId)) {
+    return { candidates: [], diagnostics: { exclusions: [{ code: 'share_session_upstream_conflict' }] } };
+  }
   if (responsePinnedId && (requestedId && requestedId !== responsePinnedId || requestedType && store.get(responsePinnedId, scopeId)?.type !== requestedType)) {
     return { candidates: [], diagnostics: { exclusions: [{ code: 'response_pin_conflict' }] } };
   }
@@ -1501,10 +1508,13 @@ function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, 
   try {
     if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: 'succeeded', responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
     else {
-      store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
+      if (!accounting.shareSessionId) store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
       if (settlement) store.addUsage(upstream.id, { attemptId, startedAt, ...settlement });
     }
     if (settlement) store.addSessionUsage(accounting.sessionId, upstream.id, settlement.settledCostMicros, accounting.scopeId, accounting.apiKeyId);
+    if (settlement && accounting.shareSessionId) {
+      accounting.sharingStore?.settleSession(accounting.shareSessionId, attemptId, settlement.settledCostMicros);
+    }
   } catch {
     // Accounting must not replace a successful provider response.
   }
@@ -1662,7 +1672,14 @@ function requestScopeId(req) {
 }
 
 function requestAccounting(req) {
-  return { scopeId: requestScopeId(req), apiKeyId: req.proxyAuth?.id || null, sessionId: sessionAffinity(req) };
+  const shared = req.proxyAuth?.kind === 'share_session';
+  return {
+    scopeId: requestScopeId(req),
+    apiKeyId: shared ? null : req.proxyAuth?.id || null,
+    shareSessionId: shared ? req.proxyAuth.shareSessionId : null,
+    sharingStore: req.sharingStore || null,
+    sessionId: sessionAffinity(req)
+  };
 }
 
 function header(req, name) {
@@ -1815,7 +1832,18 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
   }
-  const catalog = await modelCatalogForStore(store).resolve(requestScopeId(req), { fetchImpl, upstreamDeadlines, codexHostHealth });
+  const modelCatalog = modelCatalogForStore(store);
+  let catalog;
+  if (req.proxyAuth?.kind === 'share_session') {
+    await modelCatalog.discoverAccount(req.proxyAuth.upstreamId, { fetchImpl, upstreamDeadlines, codexHostHealth });
+    catalog = modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, requestScopeId(req));
+  } else {
+    catalog = await modelCatalog.resolve(requestScopeId(req), { fetchImpl, upstreamDeadlines, codexHostHealth });
+  }
+  if (!catalog) {
+    sendJson(res, 503, { error: { type: 'server_error', code: 'share_session_upstream_unavailable', message: 'The share session upstream is unavailable' } });
+    return;
+  }
   if (path === '/v1/models') {
     sendJson(res, 200, { object: 'list', data: catalog.publicModels }, { etag: catalog.publicEtag });
   } else {
@@ -1827,9 +1855,12 @@ function chooseRawUpstream(store, req) {
   const scopeId = requestScopeId(req);
   const sessionId = sessionAffinity(req);
   const apiKeyId = requestAccounting(req).apiKeyId;
-  const pinnedId = store.sessionUpstream(sessionId, scopeId, apiKeyId);
+  const sharedUpstreamId = req.proxyAuth?.kind === 'share_session' ? req.proxyAuth.upstreamId : '';
+  const pinnedId = sharedUpstreamId || store.sessionUpstream(sessionId, scopeId, apiKeyId);
   const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
-  const requestedId = header(req, 'x-upstream-id');
+  const headerRequestedId = header(req, 'x-upstream-id');
+  if (sharedUpstreamId && headerRequestedId && headerRequestedId !== sharedUpstreamId) return null;
+  const requestedId = sharedUpstreamId || headerRequestedId;
   const candidates = store.candidatePlan({
     affinityId: pinnedId,
     requestedId,
@@ -1943,21 +1974,21 @@ async function writeChunk(res, chunk) {
   await Promise.race([once(res, 'drain'), once(res, 'close')]);
 }
 
-export function authenticateProxyRequest(req, store, expected, { allowXApiKey = false } = {}) {
-  if (!expected) return { scopeId: DEFAULT_SCOPE_ID };
-  store.configureApiKey(expected);
+export function authenticateProxyRequest(req, store, expected, { allowXApiKey = false, sharingStore = null, shareKeysOnly = false } = {}) {
+  if (!expected && !shareKeysOnly) return { scopeId: DEFAULT_SCOPE_ID };
+  if (expected && !shareKeysOnly) store.configureApiKey(expected);
   const authorization = req.headers.authorization;
   const key = typeof authorization === 'string'
     ? authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : ''
     : allowXApiKey && typeof req.headers['x-api-key'] === 'string' ? req.headers['x-api-key'].trim() : '';
-  return store.authenticateApiKey(key);
+  return (shareKeysOnly ? null : store.authenticateApiKey(key)) || sharingStore?.authenticateShareKey(key) || null;
 }
 
 export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store) } = {}) {
+export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store) } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const websocketIdleMs = Number.isFinite(ingress.websocketIdleMs) && ingress.websocketIdleMs > 0 ? ingress.websocketIdleMs : 30 * 60 * 1000;
@@ -1976,13 +2007,20 @@ export function attachWebSocketProxy(server, { store, apiKey = process.env.CODEX
         socket.destroy();
         return;
       }
-      const auth = authenticateProxyRequest(req, store, apiKey);
+      const auth = authenticateProxyRequest(req, store, apiKey, { sharingStore, shareKeysOnly });
       if (!auth) {
         socket.write('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
         socket.destroy();
         return;
       }
       req.proxyAuth = auth;
+      req.sharingStore = sharingStore;
+      const denial = shareSessionDenial(auth);
+      if (denial) {
+        socket.write(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n${JSON.stringify({ error: { type: 'permission_error', ...denial } })}`);
+        socket.destroy();
+        return;
+      }
       if (sessionAffinity(req).length > MAX_SESSION_ID_LENGTH) {
         socket.write('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
         socket.destroy();
@@ -2024,6 +2062,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   let publicOutput = false;
   let publicStreamId = null;
   let publicGenerate = true;
+  let nativeAttempt;
+  let nativePayload;
+  let nativeUsage;
   let nativeResponseControls = {};
   let nativeMetadataSent = false;
   let retriedTurn = false;
@@ -2246,6 +2287,21 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   client.on('message', (data, isBinary) => {
     if (client.readyState !== WebSocket.OPEN) return;
     if (isBinary) return client.close(1003, 'Binary WebSocket frames are not supported');
+    const shareDenial = refreshShareSessionAuthorization(req);
+    if (shareDenial) {
+      if (!publicResponses) return client.close(1008, shareDenial.message);
+      return publicWebSocketFailure(client, shareDenial.code, shareDenial.message, 0, null, null, 403);
+    }
+    if (!publicResponses && req.proxyAuth?.kind === 'share_session' && !isBinary) {
+      let frame;
+      try { frame = JSON.parse(data.toString()); } catch {}
+      if (frame?.type === 'response.create') {
+        if (nativeAttempt) return client.close(1008, 'A share session allows one active WebSocket turn');
+        nativeAttempt = { id: randomUUID(), startedAt: new Date().toISOString() };
+        nativePayload = frame;
+        nativeUsage = null;
+      }
+    }
     if (publicResponses) {
       try {
         const frame = JSON.parse(data.toString());
@@ -2359,6 +2415,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     publicLifecycle = null;
     publicAttempt = null;
     publicStreamId = null;
+    nativeAttempt = null;
+    nativePayload = null;
+    nativeUsage = null;
     pending.length = 0;
     pendingBytes = 0;
     queuedTurns.length = 0;
@@ -2692,10 +2751,18 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (!isBinary) {
         try { nativeFrame = JSON.parse(data.toString()); } catch {}
       }
+      if (nativeAttempt && nativeFrame) nativeUsage = mergeUsage(nativeUsage, extractUsage(nativeFrame));
       if (nativeFrame && ['error', 'response.failed'].includes(nativeFrame.type)) {
         settleNativeAdmission(classifySseEvent(nativeFrame));
+        nativeAttempt = null;
+        nativePayload = null;
+        nativeUsage = null;
       } else if (nativeFrame && ['response.completed', 'response.incomplete'].includes(nativeFrame.type)) {
         settleNativeAdmission({ class: 'success', retryable: false });
+        if (nativeAttempt) settleUsage(store, connectionUpstream, nativeAttempt.id, nativeAttempt.startedAt, nativeUsage, nativePayload, accounting);
+        nativeAttempt = null;
+        nativePayload = null;
+        nativeUsage = null;
       }
       if (!nativeMetadataSent) {
         nativeMetadataSent = true;
@@ -2960,6 +3027,28 @@ function validApiKey(req, expected) {
   const left = Buffer.from(bearer);
   const right = Buffer.from(expected);
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function refreshShareSessionAuthorization(req) {
+  if (req.proxyAuth?.kind !== 'share_session') return null;
+  const access = req.sharingStore?.shareSessionAccess(req.proxyAuth.shareSessionId);
+  if (!access
+    || access.upstreamId !== req.proxyAuth.upstreamId
+    || access.scopeId !== req.proxyAuth.scopeId) {
+    return { code: 'share_session_revoked', message: 'The share session is no longer available' };
+  }
+  req.proxyAuth = { ...req.proxyAuth, ...access };
+  return shareSessionDenial(req.proxyAuth);
+}
+
+function shareSessionDenial(auth) {
+  if (auth?.kind !== 'share_session') return null;
+  if (auth.sessionStatus === 'paused') return { code: 'share_session_paused', message: 'The share session is paused' };
+  if (auth.sessionStatus === 'revoked') return { code: 'share_session_revoked', message: 'The share session is revoked' };
+  if (auth.sessionStatus !== 'active' || auth.remainingMicros <= 0) {
+    return { code: 'share_session_exhausted', message: 'The share session quota is exhausted' };
+  }
+  return null;
 }
 
 function sendJson(res, status, body, extraHeaders = {}) {

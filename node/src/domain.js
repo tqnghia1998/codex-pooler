@@ -118,6 +118,8 @@ export function parseCodexAuthJson(raw) {
   const profile = idClaims?.['https://api.openai.com/profile'] || accessClaims?.['https://api.openai.com/profile'];
   const accountId = text(tokens.account_id || authClaim(idClaims, 'chatgpt_account_id') || authClaim(accessClaims, 'chatgpt_account_id'));
   const email = text(idClaims?.email || accessClaims?.email || profile?.email);
+  const subject = text(idClaims?.sub || accessClaims?.sub);
+  const issuer = text(idClaims?.iss || accessClaims?.iss);
 
   return {
     accessToken,
@@ -126,6 +128,8 @@ export function parseCodexAuthJson(raw) {
     idToken,
     accountId,
     email,
+    subject,
+    issuer,
     name: deriveUpstreamName('codex', { email, accountId })
   };
 }
