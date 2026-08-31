@@ -175,7 +175,7 @@ export class Store {
     return upstream ? publicUpstream(upstream) : null;
   }
 
-  create(input, { scopeId = input?.scopeId || DEFAULT_SCOPE_ID } = {}) {
+  create(input, { scopeId = input?.scopeId || DEFAULT_SCOPE_ID, allowDuplicateCodexIdentity = false } = {}) {
     const upstream = createUpstream(input);
     const db = this.load();
     activeScope(db, scopeId);
@@ -183,7 +183,9 @@ export class Store {
     const isDuplicate = db.upstreams.some((item) => (item.scopeId || DEFAULT_SCOPE_ID) === scopeId && item.type === upstream.type && (upstream.type === 'codex'
       ? (upstream.email ? item.email === upstream.email : upstream.accountId && item.accountId === upstream.accountId)
       : item.projectId === upstream.projectId));
-    if (isDuplicate) throw new Error(`${upstream.type} upstream already exists`);
+    if (isDuplicate && !(allowDuplicateCodexIdentity && upstream.type === 'codex')) {
+      throw new Error(`${upstream.type} upstream already exists`);
+    }
 
     upstream.scopeId = scopeId;
     upstream.routing = normalizeRouting(input.routing);

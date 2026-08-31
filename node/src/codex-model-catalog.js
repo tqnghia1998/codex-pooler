@@ -104,6 +104,24 @@ export class CodexModelCatalog {
     };
   }
 
+  scopedAccountCatalog(upstreamId, scopeId = DEFAULT_SCOPE_ID) {
+    this.reconcile();
+    const upstream = this.store.get(upstreamId, scopeId);
+    if (!upstream) return null;
+    const entry = this.currentEntry(upstreamId);
+    const accountModels = entry?.hasCatalog ? [entry.models] : [];
+    const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
+      && (upstream.type !== 'codex' || STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by !== 'compass');
+    const aggregated = aggregateCatalog(accountModels, providerAllowed);
+    const status = catalogStatus(entry ? [entry] : [], entry?.hasCatalog ? 1 : 0, aggregated.publicModels.length, this.now(), this.freshTtlMs);
+    return {
+      ...aggregated,
+      etag: modelCatalogEtag({ models: aggregated.nativeModels }),
+      publicEtag: modelCatalogEtag({ object: 'list', data: aggregated.publicModels }),
+      status
+    };
+  }
+
   async discoverAccount(upstreamId, options = {}) {
     this.reconcile();
     const upstream = this.store.get(upstreamId);
