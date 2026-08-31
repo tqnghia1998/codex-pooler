@@ -3,32 +3,26 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../../src/store.js';
-import { exportUpstreamCredentials, parseClaudeAuthJson, claudeOAuthInputError, isSupportedClaudeOAuthUpstream } from '../../src/domain.js';
-import { ensureClaudeCredentialIdentity } from '../../src/claude-protocol.js';
-import { createTokenRefreshScheduler, TOKEN_REFRESH_INTERVAL_MS } from '../../src/codex-token-refresh.js';
-import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from '../../src/upstream-quota-refresh.js';
-import { shareSessionDenial } from '../../src/share-authorization.js';
-import { HttpError, readJsonObjectBody } from '../../src/http-ingress.js';
-import { dispatchGatewayRequest, gatewayRequestKind } from '../../src/gateway-dispatch.js';
+import { refreshQuota } from '../../src/providers.js';
+import { HttpError, readRequestBody } from '../../src/http-ingress.js';
 import { errorEnvelope, openaiError } from '../../src/public-errors.js';
-import { exportAllData, importAllData } from '../../src/data-portability.js';
 import { firewallAllowed, hostAllowed, originAllowed } from '../../src/admission.js';
 import { codexHostHealthForStore } from '../../src/codex-host-health.js';
-import { modelCatalogForStore } from '../../src/codex-model-catalog.js';
 import {
+  PROXY_ENDPOINTS,
+  WEBSOCKET_ENDPOINTS,
   attachWebSocketProxy,
   authenticateProxyRequest,
-  testUpstreamConnection
+  isAdditionalGatewayRoute,
+  proxyModelsRequest,
+  proxyRawRequest,
+  proxyRequest
 } from '../../src/proxy.js';
 import { ProductStore } from './product-store.js';
 import { CodexLoginManager } from './codex-login.js';
-import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
-import { createSnapshotBackup, SNAPSHOT_BACKUP_INTERVAL_MS, snapshotBackupPath } from './backup.js';
-import { providerIssue } from './provider-availability.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicDir = join(productRoot, 'public');
-const relaydeckDataDir = resolve(productRoot, '../.data');
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -41,9 +35,7 @@ const COOKIE_NAMES = {
   login: 'codex_pool_login'
 };
 export const QUOTA_REFRESH_INTERVAL_MS = 60_000;
-export const PRODUCT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
-const ACCOUNT_COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60;
-const ADMIN_EMAIL = 'quangnghia.trinh@shopee.com';
+const QUOTA_REFRESH_BATCH_SIZE = 10;
 
 export function createApp({
   store = new Store(resolve(productRoot, '.data')),
@@ -55,12 +47,8 @@ export function createApp({
   upstreamDeadlines = {},
   logger = console,
   codexHostHealth = codexHostHealthForStore(store),
-  onCodexCredentialsImported = () => {},
-  publicBasePath = process.env.POOL_PUBLIC_BASE_PATH
+  onCodexCredentialsImported = () => {}
 } = {}) {
-  store.clearAisSpendingCaps();
-  const modelCatalog = modelCatalogForStore(store);
-  const basePath = normalizePublicBasePath(publicBasePath);
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -73,36 +61,29 @@ export function createApp({
         return;
       }
       if (url.pathname === '/healthz') {
-        sendJson(res, 200, { status: 'ok', product: 'codex-share' });
+        sendJson(res, 200, { status: 'ok', product: 'codex-pool' });
         return;
       }
       if (url.pathname === '/readyz') {
-        sendJson(res, 200, { status: 'ready', product: 'codex-share' });
+        sendJson(res, 200, { status: 'ready', product: 'codex-pool' });
         return;
       }
       if (url.pathname.startsWith('/auth/')) {
-        await authRequest(req, res, url, {
-          store,
-          productStore,
-          codexLoginManager,
-          cookieSecure,
-          onCodexCredentialsImported,
-          logger
-        });
+        await authRequest(req, res, url, { productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported });
         return;
       }
       if (url.pathname.startsWith('/api/pool/')) {
         await productApi(req, res, url, { store, productStore, fetchImpl });
         return;
       }
-      if (url.pathname === '/admin') {
-        requireAdmin(accountSession(req, productStore, false).account);
-        await staticFile(req, res, '/', ingress, basePath);
-        return;
-      }
 
-      const gatewayKind = gatewayRequestKind(req.method, url.pathname);
-      if (gatewayKind) {
+      const usageRoute = req.method === 'GET' && url.pathname === '/v1/usage';
+      const modelRoute = req.method === 'GET'
+        && ['/v1/models', '/backend-api/codex/models', '/backend-api/codex/v1/models'].includes(url.pathname);
+      const jsonProxyRoute = req.method === 'POST' && PROXY_ENDPOINTS.has(url.pathname);
+      const websocketOnlyRoute = req.method === 'GET' && WEBSOCKET_ENDPOINTS.has(url.pathname);
+      const rawProxyRoute = isAdditionalGatewayRoute(req.method, url.pathname);
+      if (usageRoute || modelRoute || jsonProxyRoute || websocketOnlyRoute || rawProxyRoute) {
         if (!firewallAllowed(req, ingress)) {
           sendJson(res, 403, { error: { type: 'permission_error', code: 'access_denied', message: 'Client IP is not allowed' } });
           return;
@@ -113,58 +94,58 @@ export function createApp({
           shareKeysOnly: true
         });
         if (!auth) {
-          sendJson(res, 401, { error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid QuotaHub key' } }, { 'www-authenticate': 'Bearer' });
+          sendJson(res, 401, { error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid Codex Pool share key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
         req.proxyAuth = auth;
         req.sharingStore = productStore;
-        req.upstreamStore = store;
-        const denial = shareSessionDenial(req.proxyAuth);
+        const denial = shareSessionDenial(auth);
         if (denial) {
           sendJson(res, 403, { error: { type: 'permission_error', ...denial } });
           return;
         }
       }
-      if (gatewayKind) {
-        req.disablePacing = true;
-        req.ignoreQuotaCooldown = true;
-        req.allowUnknownQuota = true;
-        await dispatchGatewayRequest({
-          kind: gatewayKind,
+      if (usageRoute) {
+        if (url.searchParams.size) throw new HttpError(400, 'invalid_request', 'Usage query parameters are not supported');
+        sendJson(res, 200, productStore.shareSessionUsage(req.proxyAuth.shareSessionId));
+        return;
+      }
+      if (websocketOnlyRoute) {
+        sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'websocket_upgrade_required', message: 'WebSocket upgrade required' } });
+        return;
+      }
+      if (jsonProxyRoute) {
+        await proxyRequest({
           req,
           res,
-          url,
+          path: url.pathname,
+          payload: await jsonBody(req, ingress),
           store,
           apiKey: null,
           fetchImpl,
-          ingress,
           upstreamDeadlines,
           logger,
-          codexHostHealth,
-          modelCatalog,
-          sendJson,
-          handleUsage: () => {
-            if (url.searchParams.size) throw new HttpError(400, 'invalid_request', 'Usage query parameters are not supported');
-            sendJson(res, 200, req.proxyAuth.kind === 'personal_share'
-              ? productStore.personalKeyUsage(req.proxyAuth.accountId, store)
-              : productStore.shareSessionUsage(req.proxyAuth.shareSessionId));
-          }
+          codexHostHealth
         });
         return;
       }
-      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/') || url.pathname.startsWith('/backend-api/')) {
-        sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported QuotaHub endpoint' } });
+      if (modelRoute) {
+        await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey: null, fetchImpl, upstreamDeadlines, codexHostHealth });
         return;
       }
-      await staticFile(req, res, url.pathname, ingress, basePath);
+      if (rawProxyRoute) {
+        const requestBody = ['GET', 'DELETE'].includes(req.method) ? Buffer.alloc(0) : await readRequestBody(req, ingress);
+        await proxyRawRequest({ req, res, path: url.pathname, body: requestBody, store, apiKey: null, fetchImpl, upstreamDeadlines, logger, codexHostHealth });
+        return;
+      }
+      if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/') || url.pathname.startsWith('/backend-api/')) {
+        sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported Codex Pool endpoint' } });
+        return;
+      }
+      await staticFile(req, res, url.pathname, ingress);
     } catch (error) {
       if (res.headersSent) {
         res.destroy();
-        return;
-      }
-      if (error.plainBadRequest) {
-        res.writeHead(error.statusCode, { 'content-type': 'text/plain; charset=utf-8' });
-        res.end('Bad Request');
         return;
       }
       const failure = poolErrorEnvelope(error);
@@ -175,55 +156,28 @@ export function createApp({
 
 export function start(port = Number(process.env.POOL_PORT) || 3010, {
   dataDir = process.env.POOL_DATA_DIR || resolve(productRoot, '.data'),
-  store = null,
-  productStore = null,
+  store = new Store(dataDir),
+  productStore = new ProductStore(dataDir),
   fetchImpl = globalThis.fetch,
   host = process.env.POOL_BIND_HOST || '127.0.0.1',
   ingress = poolIngress(),
   cookieSecure = envBoolean(process.env.POOL_COOKIE_SECURE, false),
-  quotaRefreshIntervalMs = Number(process.env.POOL_QUOTA_REFRESH_INTERVAL_MS) || QUOTA_REFRESH_INTERVAL_MS,
-  tokenRefreshIntervalMs = Number(process.env.POOL_TOKEN_REFRESH_INTERVAL_MS) || TOKEN_REFRESH_INTERVAL_MS,
-  emailDeliveryIntervalMs = Number(process.env.POOL_EMAIL_DELIVERY_INTERVAL_MS) || EMAIL_DELIVERY_INTERVAL_MS,
-  productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS,
-  backupIntervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS
+  quotaRefreshIntervalMs = Number(process.env.POOL_QUOTA_REFRESH_INTERVAL_MS) || QUOTA_REFRESH_INTERVAL_MS
 } = {}) {
-  const poolDataDir = requirePoolDataDir(dataDir);
-  store ||= new Store(poolDataDir);
-  productStore ||= new ProductStore(poolDataDir);
   const codexLoginManager = new CodexLoginManager({
     sharingStore: productStore,
     upstreamStore: store,
     command: process.env.POOL_CODEX_CLI || 'codex'
   });
   const codexHostHealth = codexHostHealthForStore(store);
-  const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl });
-  const emailScheduler = createEmailScheduler(productStore, { intervalMs: emailDeliveryIntervalMs });
-  const snapshotBackup = createSnapshotBackup({
-    store,
-    productStore,
-    filePath: snapshotBackupPath(poolDataDir),
-    intervalMs: backupIntervalMs
-  });
-  store.setTokenRefreshFailureHandler?.(tokenScheduler.schedule);
   let refreshing = false;
   const refresh = async () => {
     if (refreshing) return [];
     refreshing = true;
     try {
-      const results = await refreshAllQuotas(store, { fetchImpl });
-      productStore.expireDue();
-      productStore.observeProviders(store);
-      await emailScheduler.run();
-      return results;
+      return await refreshAllQuotas(store, { fetchImpl });
     } finally {
       refreshing = false;
-    }
-  };
-  const refreshImportedUpstream = async (upstreamId) => {
-    try {
-      await refreshUpstreamQuota(store, upstreamId, { fetchImpl });
-    } finally {
-      productStore.observeProviders(store);
     }
   };
   const server = createHttpServer(createApp({
@@ -234,86 +188,64 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     ingress,
     cookieSecure,
     codexHostHealth,
-    onCodexCredentialsImported: refreshImportedUpstream
+    onCodexCredentialsImported: refresh
   }));
   const websocketServer = attachWebSocketProxy(server, {
     store,
     sharingStore: productStore,
     shareKeysOnly: true,
-    disablePacing: true,
-    ignoreQuotaCooldown: true,
     apiKey: null,
     fetchImpl,
     ingress,
     codexHostHealth
   });
-  productStore.cleanup();
-  snapshotBackup.run();
   void refresh();
   const timer = setInterval(refresh, quotaRefreshIntervalMs);
   timer.unref?.();
-  const cleanupTimer = setInterval(() => productStore.cleanup(), productCleanupIntervalMs);
-  cleanupTimer.unref?.();
-  void tokenScheduler.run();
-  void emailScheduler.run();
-  const tokenTimer = setInterval(tokenScheduler.run, tokenRefreshIntervalMs);
-  tokenTimer.unref?.();
   server.once('close', () => {
     clearInterval(timer);
-    clearInterval(cleanupTimer);
-    clearInterval(tokenTimer);
-    store.setTokenRefreshFailureHandler?.(null);
-    tokenScheduler.close();
-    emailScheduler.close();
-    snapshotBackup.close();
     websocketServer.close();
     codexLoginManager.close();
   });
   server.listen(port, host, () => {
-    console.log(`codex-share listening on http://${host}:${server.address().port}`);
+    console.log(`codex-pool listening on http://${host}:${server.address().port}`);
   });
   return server;
 }
 
-export async function startConfigured() {
-  return start();
-}
-
-function requirePoolDataDir(dataDir) {
-  const resolved = resolve(dataDir);
-  if (resolved === relaydeckDataDir) {
-    throw new Error('POOL_DATA_DIR must not point to Relaydeck node/.data');
-  }
-  return resolved;
-}
-
 export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } = {}) {
-  return refreshAllUpstreamQuotas(store, {
-    fetchImpl,
-    shouldRefresh: (upstream) => upstream.type === 'codex'
-  });
+  const upstreams = store.list();
+  const results = [];
+  for (let index = 0; index < upstreams.length; index += QUOTA_REFRESH_BATCH_SIZE) {
+    const batch = upstreams.slice(index, index + QUOTA_REFRESH_BATCH_SIZE);
+    results.push(...await Promise.allSettled(batch.map(async ({ id }) => {
+      const upstream = store.get(id);
+      if (!upstream || upstream.type !== 'codex') return null;
+      return refreshPoolUpstreamQuota(store, upstream, fetchImpl);
+    })));
+  }
+  return results;
 }
 
-async function authRequest(req, res, url, { store, productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
+async function authRequest(req, res, url, { productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported }) {
   if (req.method === 'POST' && url.pathname === '/auth/codex/import') {
     const input = await body(req);
     if (typeof input.authJson !== 'string' || !input.authJson.trim()) {
       throw new HttpError(400, 'invalid_request', 'authJson is required');
     }
     let account;
-    let upstream;
     try {
-      ({ account, upstream } = codexLoginManager.importAuthJson(input.authJson));
+      ({ account } = codexLoginManager.importAuthJson(input.authJson));
     } catch (error) {
       if (error?.statusCode) throw error;
       throw new HttpError(400, 'invalid_request', String(error.message || 'Codex auth JSON could not be imported').slice(0, 300));
     }
     const session = productStore.createAccountSession(account.id);
-    await refreshImportedCredentials(onCodexCredentialsImported, upstream.id, logger);
+    void onCodexCredentialsImported();
     setCookies(res, [
       cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
-      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
-      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
+      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: 30 * 24 * 60 * 60 }),
+      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: 30 * 24 * 60 * 60 })
     ]);
     sendJson(res, 200, { account });
     return;
@@ -331,16 +263,13 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     const login = codexLoginManager.status(token);
     if (!login) throw new HttpError(401, 'authentication_error', 'Codex login attempt is unavailable');
     if (login.status === 'completed') {
-      const accountId = productStore.accountIdForCompletedCodexLogin(token);
-      if (!accountId) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
-      await Promise.all(productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-        .map(({ upstreamId }) => refreshImportedCredentials(onCodexCredentialsImported, upstreamId, logger)));
       const completed = productStore.consumeCompletedCodexLogin(token);
       if (!completed) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
+      void onCodexCredentialsImported();
       setCookies(res, [
         cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
-        cookie(COOKIE_NAMES.session, completed.session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
-        cookie(COOKIE_NAMES.csrf, completed.session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
+        cookie(COOKIE_NAMES.session, completed.session.token, { httpOnly: true, secure: cookieSecure, maxAge: 30 * 24 * 60 * 60 }),
+        cookie(COOKIE_NAMES.csrf, completed.session.csrfToken, { secure: cookieSecure, maxAge: 30 * 24 * 60 * 60 })
       ]);
       sendJson(res, 200, { login: completed.login });
       return;
@@ -353,67 +282,6 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     if (!token || !codexLoginManager.cancel(token)) throw new HttpError(404, 'not_found', 'Codex login attempt was not found');
     setCookies(res, [cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 })]);
     sendJson(res, 204, null);
-    return;
-  }
-  if (req.method === 'POST' && url.pathname === '/auth/session') {
-    const input = await body(req);
-    let sessionData = input?.session;
-    if (typeof sessionData === 'string') {
-      try {
-        sessionData = JSON.parse(sessionData);
-      } catch {
-        sessionData = { sub: sessionData };
-      }
-    }
-    if (!sessionData || typeof sessionData !== 'object') {
-      throw new HttpError(400, 'invalid_request', 'session data is required');
-    }
-    const userObj = (sessionData.user && typeof sessionData.user === 'object') ? sessionData.user : {};
-    const email = String(
-      sessionData.email ||
-      sessionData.login_email ||
-      userObj.email ||
-      userObj.login_email ||
-      sessionData.mail ||
-      ''
-    ).trim();
-    const username = String(
-      userObj.username ||
-      (typeof sessionData.username === 'string' ? sessionData.username : '') ||
-      (typeof sessionData.user === 'string' ? sessionData.user : '') ||
-      email.split('@')[0] ||
-      ''
-    ).trim();
-    const name = String(
-      userObj.full_name ||
-      userObj.family_name ||
-      userObj.given_name ||
-      sessionData.displayName ||
-      (typeof sessionData.name === 'string' ? sessionData.name : '') ||
-      username ||
-      email ||
-      'Smart User'
-    ).trim();
-    const sub = String(
-      sessionData.identity_uuid ||
-      userObj.sub ||
-      sessionData.sub ||
-      sessionData.id ||
-      sessionData.userId ||
-      username ||
-      email
-    ).trim();
-    if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
-    const finalEmail = email || (username ? `${username}@shopee.com` : '');
-    if (!finalEmail) throw new HttpError(400, 'invalid_request', 'Smart session email is required');
-    const account = productStore.upsertAccount({ email: finalEmail, name });
-    const session = productStore.createAccountSession(account.id);
-    setCookies(res, [
-      cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
-      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
-      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
-    ]);
-    sendJson(res, 200, { account, csrfToken: session.csrfToken });
     return;
   }
   if (req.method === 'POST' && url.pathname === '/auth/logout') {
@@ -430,14 +298,6 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
   throw new HttpError(404, 'not_found', 'Not found');
 }
 
-async function refreshImportedCredentials(refresh, upstreamId, logger) {
-  try {
-    await refresh(upstreamId);
-  } catch (error) {
-    logger?.warn?.(`QuotaHub quota refresh failed for upstream ${upstreamId}: ${error?.code || error?.name || 'Error'}`);
-  }
-}
-
 async function productRequest(req, res, url, { store, productStore, fetchImpl }) {
   const auth = accountSession(req, productStore, isMutation(req.method));
   const accountId = auth.account.id;
@@ -450,295 +310,25 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 200, { account: auth.account });
     return;
   }
-  if (req.method === 'GET' && resource === 'personal-key' && parts.length === 3) {
-    sendJson(res, 200, { personalKey: productStore.personalKey(accountId, store) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-key' && id === 'reveal' && parts.length === 4) {
-    sendJson(res, 200, productStore.revealPersonalKey(accountId));
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-key' && id === 'rotate' && parts.length === 4) {
-    sendJson(res, 200, productStore.rotatePersonalKey(accountId));
-    return;
-  }
-  if (req.method === 'GET' && resource === 'personal-keys' && parts.length === 3) {
-    sendJson(res, 200, { personalKeys: productStore.listPersonalKeys(accountId, store) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-keys' && parts.length === 3) {
-    sendJson(res, 201, productStore.createNamedPersonalKey(accountId, await body(req), store));
-    return;
-  }
-  if (req.method === 'POST' && resource === 'upstreams' && id === 'claude' && parts.length === 4) {
-    const input = await body(req);
-    const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
-    if (!rawToken) throw new HttpError(400, 'invalid_request', 'Claude setup token is required');
-
-    let authJson = '';
-    if (rawToken.startsWith('{')) {
-      authJson = rawToken;
-    } else {
-      authJson = JSON.stringify({
-        claudeAiOauth: {
-          accessToken: rawToken,
-          refreshToken: '',
-          expiresAt: 0
-        }
-      });
-    }
-
-    const policyError = claudeOAuthInputError({ authJson }, { creating: true });
-    if (policyError) throw new HttpError(400, 'invalid_request', policyError);
-    let parsedAuth;
-    try {
-      parsedAuth = parseClaudeAuthJson(authJson);
-    } catch (error) {
-      throw new HttpError(400, 'invalid_request', String(error?.message || 'Invalid Claude OAuth token'));
-    }
-    const upstream = store.create({
-      type: 'claude',
-      authJson,
-      name: input.name || parsedAuth.account?.displayName || parsedAuth.account?.emailAddress || 'Claude OAuth'
-    });
-    try {
-      const credentials = store.credentials(upstream.id);
-      if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
-        try {
-          await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile: true });
-        } catch (error) {
-          if (error?.statusCode === 401 || error?.statusCode === 403) {
-            throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
-          }
-          // Profile lookup is advisory; log warning for transient upstream connectivity issues
-          console.warn(`[pool] Advisory Claude identity lookup failed for ${upstream.id}:`, error?.message || error);
-        }
-      }
-      productStore.linkUpstream(accountId, upstream.id);
-      const provider = productStore.providerSummary(accountId, upstream.id, store);
-      const latest = store.get(upstream.id) || upstream;
-      sendJson(res, 201, {
-        upstream: {
-          ...latest,
-          providerIssue: providerIssue(latest),
-          sharing: provider.sharing,
-          commitment: provider.commitment
-        }
-      });
-    } catch (error) {
-      productStore.cleanupUpstream(upstream.id);
-      store.remove(upstream.id);
-      throw error;
-    }
-    return;
-  }
-  if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
-    const input = await body(req);
-    const upstream = store.create({
-      type: 'compass',
-      quotaSource: 'ais',
-      projectId: input.projectId,
-      projectKey: input.projectKey
-    });
-    try {
-      productStore.linkUpstream(accountId, upstream.id);
-      const provider = productStore.providerSummary(accountId, upstream.id, store);
-      sendJson(res, 201, {
-        upstream: {
-          ...upstream,
-          providerIssue: providerIssue(upstream),
-          sharing: provider.sharing,
-          commitment: provider.commitment
-        }
-      });
-    } catch (error) {
-      productStore.cleanupUpstream(upstream.id);
-      store.remove(upstream.id);
-      throw error;
-    }
-    return;
-  }
-  if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {
-    const input = await body(req);
-    const upstream = store.get(id);
-    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
-      throw new HttpError(404, 'not_found', 'Not found');
-    }
-    const isAis = upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch';
-    const isClaude = upstream.type === 'claude';
-    if (!isAis && !isClaude) {
-      throw new HttpError(400, 'invalid_request', 'Only AIS or Claude upstreams can be updated');
-    }
-
-    let updateFields = {};
-    if (isAis) {
-      updateFields = {
-        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-        ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
-      };
-    } else if (isClaude) {
-      const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
-      if (rawToken) {
-        let authJson = '';
-        if (rawToken.startsWith('{')) {
-          authJson = rawToken;
-        } else {
-          authJson = JSON.stringify({
-            claudeAiOauth: {
-              accessToken: rawToken,
-              refreshToken: '',
-              expiresAt: 0
-            }
-          });
-        }
-        const policyError = claudeOAuthInputError({ authJson });
-        if (policyError) throw new HttpError(400, 'invalid_request', policyError);
-        updateFields = { authJson };
-      }
-    }
-
-    const updated = store.update(id, updateFields);
-    if (isClaude && updateFields.authJson) {
-      try {
-        const credentials = store.credentials(id);
-        if (isSupportedClaudeOAuthUpstream({ ...updated, credentials })) {
-          await ensureClaudeCredentialIdentity({ upstream: updated, credentials, store, fetchImpl, refreshProfile: true });
-        }
-      } catch (error) {
-        if (error?.statusCode === 401 || error?.statusCode === 403) {
-          throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
-        }
-        console.warn(`[pool] Advisory Claude identity lookup failed on update for ${id}:`, error?.message || error);
-      }
-    }
-    const provider = productStore.providerSummary(accountId, id, store);
-    sendJson(res, 200, {
-      upstream: {
-        ...updated,
-        providerIssue: providerIssue(updated),
-        sharing: provider.sharing,
-        commitment: provider.commitment
-      }
-    });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'reveal') {
-    sendJson(res, 200, productStore.revealNamedPersonalKey(accountId, id));
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'rotate') {
-    sendJson(res, 200, productStore.rotateNamedPersonalKey(accountId, id));
-    return;
-  }
-  if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'revoke') {
-    sendJson(res, 200, { personalKey: productStore.revokeNamedPersonalKey(accountId, id, store) });
-    return;
-  }
   if (req.method === 'GET' && resource === 'upstreams' && parts.length === 3) {
-    const upstreams = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
+    const upstreams = productStore.listAccountUpstreamLinks(accountId)
       .flatMap(({ upstreamId }) => {
         const upstream = store.getPublic(upstreamId);
-        if (!upstream) return [];
-        const provider = productStore.providerSummary(accountId, upstreamId, store);
-        return [{
-          ...upstream,
-          name: upstream.email || upstream.name,
-          providerIssue: providerIssue(upstream),
-          sharing: provider.sharing,
-          commitment: provider.commitment
-        }];
+        return upstream ? [upstream] : [];
       });
     sendJson(res, 200, { upstreams });
     return;
   }
-  if (req.method === 'GET' && resource === 'sharing-counts' && parts.length === 3) {
-    sendJson(res, 200, { counts: productStore.sharingCounts(accountId) });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
-    requireAdmin(auth.account);
-    sendJson(res, 200, { analytics: productStore.adminAnalytics({ eventCursor: adminEventCursor(url) }) });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'admin' && id === 'export' && parts.length === 4) {
-    requireAdmin(auth.account);
-    sendJson(res, 200, exportAllData({ store, productStore }), {
-      'content-disposition': `attachment; filename="quotahub-export-${new Date().toISOString().slice(0, 10)}.json"`
-    });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'admin' && id === 'import' && parts.length === 4) {
-    requireAdmin(auth.account);
-    const data = await importBody(req);
-    let imported;
-    try {
-      imported = importAllData({ store, productStore, data });
-    } catch (error) {
-      throw new HttpError(400, 'invalid_request', `Import failed: ${error.message}`);
-    }
-    sendJson(res, 200, { imported });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
-    const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-      .flatMap(({ upstreamId }) => {
-        const upstream = store.get(upstreamId);
-        return upstream ? [{
-          id: upstream.id,
-          name: upstream.email || upstream.name,
-          credentials: exportUpstreamCredentials(upstream, store.credentials(upstream.id))
-        }] : [];
-      });
-    sendJson(res, 200, { credentials });
-    return;
-  }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'refresh-quota') {
     const upstream = store.get(id);
-    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
-      throw new HttpError(404, 'not_found', 'Not found');
-    }
-    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch') {
-      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
-      return;
-    }
-    if (upstream.type !== 'codex' && upstream.type !== 'claude') throw new HttpError(400, 'invalid_request', 'Only Codex and Claude accounts can refresh quota');
-    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'upstreams' && id && action === 'test-connection') {
-    if (!productStore.accountOwnsUpstream(accountId, id)) {
-      throw new HttpError(404, 'not_found', 'Not found');
-    }
-    req.disablePacing = true;
-    sendJson(res, 200, {
-      connection: await testUpstreamConnection({
-        store,
-        upstreamId: id,
-        req,
-        res,
-        fetchImpl
-      })
-    });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'providers' && id && parts.length === 4) {
-    sendJson(res, 200, { provider: productStore.providerSummary(accountId, id, store) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'providers' && id && action === 'pause') {
-    sendJson(res, 200, { provider: productStore.setProviderSharing(accountId, id, 'paused', store) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'providers' && id && action === 'resume') {
-    sendJson(res, 200, { provider: productStore.setProviderSharing(accountId, id, 'active', store) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'providers' && id && action === 'revoke-all') {
-    sendJson(res, 200, { provider: productStore.revokeProviderSharing(accountId, id, store) });
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) throw notFound();
+    if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
+    const quota = await refreshPoolUpstreamQuota(store, upstream, fetchImpl);
+    sendJson(res, 200, { upstream: quota });
     return;
   }
   if (req.method === 'GET' && resource === 'offers' && parts.length === 3) {
-    sendJson(res, 200, productStore.listOffersPage(accountId, store, sharingListQuery(url)));
+    sendJson(res, 200, { offers: productStore.listOffers(accountId, store) });
     return;
   }
   if (req.method === 'POST' && resource === 'offers' && parts.length === 3) {
@@ -750,7 +340,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'tickets' && parts.length === 3) {
-    sendJson(res, 200, productStore.listTicketsPage(accountId, store, sharingListQuery(url)));
+    sendJson(res, 200, { tickets: productStore.listTickets(accountId, store) });
     return;
   }
   if (req.method === 'POST' && resource === 'tickets' && parts.length === 3) {
@@ -770,7 +360,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'sessions' && parts.length === 3) {
-    sendJson(res, 200, productStore.listSessionsPage(accountId, store, sharingListQuery(url)));
+    sendJson(res, 200, { sessions: productStore.listSessions(accountId, store) });
     return;
   }
   if (req.method === 'PATCH' && resource === 'sessions' && id && parts.length === 4) {
@@ -789,42 +379,6 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 200, productStore.rotateSessionKey(accountId, id));
     return;
   }
-  if (req.method === 'POST' && resource === 'sessions' && action === 'test-connection') {
-    const session = productStore.session(id, accountId, store);
-    if (session.role !== 'consumer') throw new HttpError(404, 'not_found', 'Not found');
-    const proxyAuth = productStore.shareSessionAccess(id);
-    const denial = shareSessionDenial(proxyAuth);
-    if (denial) throw new HttpError(409, denial.code, denial.message);
-    if (session.providerIssue) {
-      throw new HttpError(409, session.providerIssue.code, session.providerIssue.message);
-    }
-    req.disablePacing = true;
-    sendJson(res, 200, {
-      connection: await testUpstreamConnection({
-        store,
-        upstreamId: proxyAuth.upstreamId,
-        req,
-        res,
-        fetchImpl,
-        proxyAuth,
-        sharingStore: productStore,
-        allowUnavailableCandidate: false
-      })
-    });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'quota-requests' && parts.length === 3) {
-    sendJson(res, 200, productStore.listQuotaRequestsPage(accountId, sharingListQuery(url)));
-    return;
-  }
-  if (req.method === 'POST' && resource === 'quota-requests' && parts.length === 3) {
-    sendJson(res, 201, { quotaRequest: productStore.createQuotaRequest(accountId, await body(req)) });
-    return;
-  }
-  if (req.method === 'POST' && resource === 'quota-requests' && id && action === 'cancel') {
-    sendJson(res, 200, { quotaRequest: productStore.cancelQuotaRequest(accountId, id) });
-    return;
-  }
   throw new HttpError(404, 'not_found', 'Not found');
 }
 
@@ -835,6 +389,14 @@ async function productApi(req, res, url, context) {
     if (error instanceof HttpError || error?.statusCode) throw error;
     throw new HttpError(400, 'invalid_request', String(error.message || 'Invalid request').slice(0, 300));
   }
+}
+
+async function refreshPoolUpstreamQuota(store, upstream, fetchImpl) {
+  const quota = await refreshQuota(upstream, store.credentials(upstream.id), {
+    fetchImpl,
+    saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(upstream.id, updated, accessTokenExpiresAt)
+  });
+  return store.setQuota(upstream.id, quota);
 }
 
 function accountSession(req, productStore, requireCsrf) {
@@ -848,21 +410,16 @@ function accountSession(req, productStore, requireCsrf) {
   return auth;
 }
 
-function requireAdmin(account) {
-  if (String(account.email || '').toLowerCase() !== ADMIN_EMAIL) {
-    throw new HttpError(403, 'permission_error', 'Administrator access is required');
-  }
-}
-
 async function jsonBody(req, ingress) {
-  return readJsonObjectBody(req, ingress, { message: 'Request body must be a JSON object' });
-}
-
-async function importBody(req) {
-  return jsonBody(req, {
-    maxCompressedBodyBytes: 32 * 1024 * 1024,
-    maxDecompressedBodyBytes: 32 * 1024 * 1024
-  });
+  const bytes = await readRequestBody(req, ingress);
+  if (!bytes.length) return {};
+  try {
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    return value;
+  } catch {
+    throw new HttpError(400, 'invalid_request', 'Request body must be a JSON object');
+  }
 }
 
 async function body(req) {
@@ -872,9 +429,9 @@ async function body(req) {
   });
 }
 
-async function staticFile(req, res, pathname, ingress, publicBasePath) {
+async function staticFile(req, res, pathname, ingress) {
   const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
-  if (!['index.html', 'app.js', 'styles.css', 'assets/codex-share.svg'].includes(filename)) {
+  if (!['index.html', 'app.js', 'styles.css'].includes(filename)) {
     if (!firewallAllowed(req, ingress)) {
       sendJson(res, 403, { error: { type: 'permission_error', code: 'access_denied', message: 'Client IP is not allowed' } });
       return;
@@ -884,18 +441,8 @@ async function staticFile(req, res, pathname, ingress, publicBasePath) {
   }
   const content = await readFile(join(publicDir, filename));
   const extension = filename.slice(filename.lastIndexOf('.'));
-  const isUiBundle = filename === 'index.html' || filename === 'app.js' || filename === 'styles.css';
-  res.writeHead(200, { 'content-type': MIME_TYPES[extension], 'cache-control': isUiBundle ? 'no-store' : 'public, max-age=300' });
-  res.end(filename === 'index.html' ? content.toString().replace('__CODEX_SHARE_BASE_PATH__', publicBasePath) : content);
-}
-
-function normalizePublicBasePath(value) {
-  const path = String(value || '').trim();
-  if (!path || path === '/') return '/';
-  if (!path.startsWith('/') || path.startsWith('//') || path.includes('?') || path.includes('#')) {
-    throw new Error('POOL_PUBLIC_BASE_PATH must be an absolute path without a query or fragment');
-  }
-  return `${path.replace(/\/+$/, '')}/`;
+  res.writeHead(200, { 'content-type': MIME_TYPES[extension], 'cache-control': filename === 'index.html' ? 'no-store' : 'public, max-age=300' });
+  res.end(content);
 }
 
 function poolIngress(input = {}) {
@@ -960,26 +507,13 @@ function envBoolean(value, fallback) {
   return String(value).toLowerCase() === 'true';
 }
 
-function adminEventCursor(url) {
-  const value = url.searchParams.get('eventCursor');
-  if (!value || value.length > 512) return null;
-  try {
-    const cursor = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
-    return typeof cursor?.createdAt === 'string' && typeof cursor?.id === 'string' ? cursor : null;
-  } catch {
-    return null;
+function shareSessionDenial(auth) {
+  if (auth?.sessionStatus === 'paused') return { code: 'share_session_paused', message: 'The share session is paused' };
+  if (auth?.sessionStatus === 'revoked') return { code: 'share_session_revoked', message: 'The share session is revoked' };
+  if (auth?.sessionStatus !== 'active' || auth?.remainingMicros <= 0) {
+    return { code: 'share_session_exhausted', message: 'The share session quota is exhausted' };
   }
-}
-
-function sharingListQuery(url) {
-  const rawLimit = Number(url.searchParams.get('limit') || 10);
-  const limit = Number.isInteger(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 10;
-  const rawOffset = Number(url.searchParams.get('offset') || 0);
-  const offset = Number.isInteger(rawOffset) ? Math.max(0, rawOffset) : 0;
-  const query = String(url.searchParams.get('q') || '').trim().toLowerCase().slice(0, 320);
-  const includePast = !url.searchParams.has('includePast') || url.searchParams.get('includePast') === 'true';
-  const role = String(url.searchParams.get('role') || '').trim();
-  return { limit, offset, query, includePast, role };
+  return null;
 }
 
 function poolErrorEnvelope(error) {
@@ -1004,9 +538,4 @@ function sendJson(res, status, value, extraHeaders = {}) {
   res.end(JSON.stringify(value));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-  void startConfigured().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-}
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) start();

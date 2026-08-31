@@ -4,11 +4,10 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { createApp as createRelaydeckApp } from '../../src/server.js';
 import { Store } from '../../src/store.js';
-import { createApp as createPoolApp, start as startPool } from '../src/server.js';
+import { createApp as createPoolApp } from '../src/server.js';
 import { ProductStore } from '../src/product-store.js';
 
 function digest(path) {
@@ -30,15 +29,18 @@ test('Codex Pool routes, cookies, and data stay isolated from Relaydeck', async 
   try {
     const relaydeckStore = new Store(relaydeckDir);
     relaydeckStore.create({ type: 'compass', projectId: 'relaydeck-only', projectKey: 'secret' });
-    const relaydeckDefaultDataDir = resolve(fileURLToPath(new URL('../../.data', import.meta.url)));
-    assert.throws(() => startPool(0, { dataDir: relaydeckDefaultDataDir }), /must not point to Relaydeck/);
     const relaydeckApp = createRelaydeckApp({ store: relaydeckStore, apiKey: 'relaydeck-key' });
     const relaydeckDigest = digest(relaydeckStore.dbPath);
     const relaydeck = await listen(relaydeckApp);
 
     const poolStore = new Store(poolDir);
     const productStore = new ProductStore(poolDir);
-    const account = productStore.upsertAccount({ email: 'pool@example.com', name: 'Pool User' });
+    const account = productStore.upsertCodexAccount({
+      subject: 'pool-user',
+      issuer: 'https://auth.openai.com',
+      email: 'pool@example.com',
+      name: 'Pool User'
+    });
     const manager = {
       start() {
         const attempt = productStore.createCodexLoginAttempt();
