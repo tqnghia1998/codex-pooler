@@ -1946,6 +1946,66 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
   }
 });
 
+test('preserves native WebSocket compaction continuations on the upstream connection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-compact-continuation-'));
+  const { store } = configuredStore(dir);
+  const frames = [];
+  let connections = 0;
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => {
+    connections += 1;
+    socket.on('message', (data) => {
+      const frame = JSON.parse(data);
+      frames.push(frame);
+      socket.send(JSON.stringify({
+        type: 'response.completed',
+        response: { id: `native-${frames.length}`, status: 'completed', output: [] }
+      }));
+    });
+  });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      let completed = 0;
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'response.create', model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: 'anchor' }],
+        client_metadata: { turn_id: 'native-compact-turn' }
+      })));
+      client.on('message', (data) => {
+        const frame = JSON.parse(data);
+        if (frame.type !== 'response.completed') return;
+        completed += 1;
+        if (completed === 1) client.send(JSON.stringify({
+          type: 'response.create', model: 'gpt-5.6-sol', input: [{ type: 'compaction', encrypted_content: 'encrypted' }, { type: 'message', role: 'user', content: 'continued' }],
+          client_metadata: { turn_id: 'native-compact-turn', 'x-codex-turn-metadata': { compaction: { implementation: 'responses_compaction_v2' } } }
+        }));
+        else { client.close(); resolve(); }
+      });
+      client.once('error', reject);
+    });
+    assert.equal(connections, 1);
+    assert.equal(frames.length, 2);
+    assert.equal(frames[1].client_metadata.turn_id, 'native-compact-turn');
+    assert.equal(frames[1].input[0].type, 'compaction');
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('counts a native WebSocket handshake failure once when a turn is already queued', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-handshake-health-'));
   const { store, codexUpstream } = configuredStore(dir);
