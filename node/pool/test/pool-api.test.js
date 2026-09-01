@@ -420,6 +420,19 @@ test('serves the Codex Share favicon', async () => {
   }
 });
 
+test('renders the configured public base path into the dashboard', async () => {
+  const server = createServer(createApp({ publicBasePath: '/codex-share' }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/`);
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /<base href="\/codex-share\/">/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('sharing API requires account sessions and CSRF while offers stay public to signed-in accounts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-api-'));
   try {
