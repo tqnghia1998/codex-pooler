@@ -293,10 +293,12 @@ function installRedisShutdown(server, persistence) {
   };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  process.once('SIGHUP', stop);
   server.once('close', () => {
     if (!stopping) void persistence.close();
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);
+    process.off('SIGHUP', stop);
   });
 }
 
