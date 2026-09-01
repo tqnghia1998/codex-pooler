@@ -291,6 +291,37 @@ test('creates one personal key that selects active consumer sessions and preserv
   }
 });
 
+test('a provider can extend a session expiry without exceeding the provider quota reset', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-session-expiry-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'session-expiry', projectKey: 'secret' });
+    const resetAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1_000).toISOString();
+    upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, resetAt, observedAt: new Date().toISOString() });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'expiry-provider', 'expiry-provider@example.com');
+    const consumer = account(sharingStore, 'expiry-consumer', 'expiry-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, upstreamStore);
+
+    const extended = sharingStore.updateSession(provider.id, session.id, {
+      expiresAt: new Date(Date.now() + 20 * 24 * 60 * 60 * 1_000).toISOString()
+    }, upstreamStore);
+    assert.ok(Date.parse(extended.expiresAt) > Date.parse(session.expiresAt));
+    assert.equal(extended.expiresAt, resetAt);
+    assert.throws(
+      () => sharingStore.updateSession(provider.id, session.id, {
+        expiresAt: new Date(Date.now() + 5 * 24 * 60 * 60 * 1_000).toISOString()
+      }, upstreamStore),
+      /can only be extended/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('does not publish or approve sharing offers when the provider quota is known to be exhausted', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-exhausted-provider-'));
   try {
