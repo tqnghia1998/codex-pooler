@@ -70,6 +70,18 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
 
       response = await fetch(`${app.base}/v1/responses`, {
         method: 'POST',
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+          'x-upstream-id': second.id
+        },
+        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'escape' })
+      });
+      assert.equal(response.status, 503);
+      assert.equal(calls.length, 0);
+
+      response = await fetch(`${app.base}/v1/responses`, {
+        method: 'POST',
         headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello' })
       });
@@ -85,17 +97,58 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
       assert.equal(response.status, 403);
       assert.equal((await response.json()).error.code, 'share_session_exhausted');
 
-      response = await fetch(`${app.base}/v1/responses`, {
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a manually budgeted AISwitch project serves a pinned Compass Messages share session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-aiswitch-share-proxy-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'aiswitch',
+      projectId: 'shared-aiswitch-project',
+      projectKey: 'shared-aiswitch-key'
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'aiswitch-share-provider');
+    const consumer = account(sharingStore, 'aiswitch-share-consumer');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    sharingStore.setManualShareBudget(provider.id, upstream.id, { quotaDollars: 3 }, store);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 3 }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const { apiKey } = sharingStore.revealSessionKey(consumer.id, session.id);
+    const calls = [];
+    const app = await running(store, sharingStore, async (url, options) => {
+      calls.push({ path: new URL(url).pathname, authorization: options.headers.authorization });
+      return new Response(JSON.stringify({
+        id: 'aiswitch-share-message',
+        model: 'claude-sonnet-5',
+        content: [{ type: 'text', text: 'shared' }],
+        usage: { price_cost_usd: 1 }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    });
+    try {
+      const response = await fetch(`${app.base}/v1/messages`, {
         method: 'POST',
         headers: {
           authorization: `Bearer ${apiKey}`,
           'content-type': 'application/json',
-          'x-upstream-id': second.id
+          'anthropic-version': '2023-06-01'
         },
-        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'escape' })
+        body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
       });
-      assert.equal(response.status, 403);
-      assert.equal(calls.length, 1);
+      assert.equal(response.status, 200);
+      assert.deepEqual(calls, [{ path: '/compass-api/v1/messages', authorization: 'Bearer shared-aiswitch-key' }]);
+      assert.equal(sharingStore.session(session.id, consumer.id, store).remainingQuotaDollars, 2);
+      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, 2);
     } finally {
       await app.close();
     }
