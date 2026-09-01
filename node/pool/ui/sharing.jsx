@@ -7,6 +7,7 @@ import { Card } from '@astryxdesign/core/Card';
 import { DateInput } from '@astryxdesign/core/DateInput';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
 import { EmptyState } from '@astryxdesign/core/EmptyState';
+import { FieldLabel } from '@astryxdesign/core/Field';
 import { Grid } from '@astryxdesign/core/Grid';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { IconButton } from '@astryxdesign/core/IconButton';
@@ -1579,6 +1580,40 @@ function SessionDialog({ value, onClose, onSave, onChange }) {
 
 function KeyDialog({ value, onClose, onNotice }) {
   const personal = value?.personal;
+  const [modelState, setModelState] = useState({ status: 'idle', ids: [] });
+  useEffect(() => {
+    if (!value?.apiKey) {
+      setModelState({ status: 'idle', ids: [] });
+      return undefined;
+    }
+    const controller = new AbortController();
+    let active = true;
+    setModelState({ status: 'loading', ids: [] });
+    void fetch('/v1/models', {
+      headers: { authorization: `Bearer ${value.apiKey}` },
+      signal: controller.signal
+    })
+      .then(async (response) => {
+        const body = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error('Unable to load models');
+        return [...new Set((body.data || []).map((model) => model.id).filter(Boolean))];
+      })
+      .then((ids) => {
+        if (active) setModelState({ status: 'loaded', ids });
+      })
+      .catch((error) => {
+        if (active && error.name !== 'AbortError') setModelState({ status: 'error', ids: [] });
+      });
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [value?.apiKey]);
+  const models = modelState.status === 'loading'
+    ? 'Loading available models…'
+    : modelState.status === 'error'
+      ? 'Unable to load models.'
+      : modelState.ids.join(', ') || 'No models available.';
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} width={600}>
       <Layout
@@ -1586,15 +1621,19 @@ function KeyDialog({ value, onClose, onNotice }) {
         content={(
           <LayoutContent>
             <VStack gap={3}>
-              <Banner
-                title="Keep this key private"
-                description={personal
-                  ? 'Anyone with this key can use quota from your active share sessions.'
-                  : 'Anyone with this key can use the session quota until the key is replaced or the session is revoked.'}
-                status="warning"
-              />
+              {!personal && (
+                <Banner
+                  title="Use your Personal API key for uninterrupted access"
+                  description="This key works only for this session. Use a Personal API key to route requests across all your active share sessions and avoid interruptions when this session ends."
+                  status="info"
+                />
+              )}
               <TextInput label="API key" value={value?.apiKey || ''} isReadOnly />
               <TextInput label="API base URL" value={apiBaseUrl()} isReadOnly />
+              <VStack gap={1}>
+                <FieldLabel label="Available models" inputID="available-models" isGroupLabel />
+                <Text type="supporting">{models}</Text>
+              </VStack>
             </VStack>
           </LayoutContent>
         )}
