@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp, start } from '../src/server.js';
+import { createApp, refreshAllQuotas, start } from '../src/server.js';
 import { Store } from '../../src/store.js';
 import { ProductStore } from '../src/product-store.js';
 import { CodexLoginManager } from '../src/codex-login.js';
@@ -82,7 +82,35 @@ test('Codex device sign-in creates an opaque browser session and enforces origin
         return login ? sharingStore.updateCodexLoginAttempt(login.id, { status: 'cancelled' }) : null;
       }
     };
-    const server = createServer(createApp({ store, productStore: sharingStore, codexLoginManager: manager }));
+    let refreshedUpstreamId = null;
+    const upstream = store.create({ type: 'codex', authJson: authJson({
+      subject: 'browser-user',
+      email: 'browser@example.com',
+      accountId: 'browser-account'
+    }) });
+    sharingStore.linkUpstream(account.id, upstream.id);
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      codexLoginManager: manager,
+      onCodexCredentialsImported: async (upstreamId) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        refreshedUpstreamId = upstreamId;
+        store.setQuota(upstreamId, {
+          label: 'Provider quota window',
+          usedPercent: 20,
+          remainingPercent: 80,
+          remainingUnits: null,
+          limitUnits: null,
+          remainingDollars: null,
+          limitDollars: null,
+          windowSeconds: 3600,
+          resetAt: null,
+          observedAt: new Date().toISOString(),
+          source: 'codex_usage_api'
+        });
+      }
+    }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
@@ -110,11 +138,14 @@ test('Codex device sign-in creates an opaque browser session and enforces origin
       response = await fetch(`${base}/auth/codex/status`, { headers: { cookie: `codex_pool_login=${encodeURIComponent(loginToken)}` } });
       assert.equal(response.status, 200);
       assert.equal((await response.json()).login.status, 'completed');
+      assert.equal(refreshedUpstreamId, upstream.id);
+      assert.equal(store.getPublic(upstream.id).quota.remainingPercent, 80);
       const sessionCookies = setCookies(response);
       const sessionToken = decodeURIComponent(cookieValue(sessionCookies, 'codex_pool_session'));
       const csrfToken = decodeURIComponent(cookieValue(sessionCookies, 'codex_pool_csrf'));
       assert.ok(sessionToken);
       assert.ok(csrfToken);
+      assert.match(sessionCookies.find((value) => value.startsWith('codex_pool_session=')), /Max-Age=315360000/);
 
       response = await fetch(`${base}/auth/codex/status`, { headers: { cookie: `codex_pool_login=${encodeURIComponent(loginToken)}` } });
       assert.equal(response.status, 401);
@@ -155,7 +186,29 @@ test('auth.json sign-in imports credentials and returns only public account data
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
     const manager = new CodexLoginManager({ sharingStore, upstreamStore: store });
-    const server = createServer(createApp({ store, productStore: sharingStore, codexLoginManager: manager }));
+    let refreshedUpstreamId = null;
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      codexLoginManager: manager,
+      onCodexCredentialsImported: async (upstreamId) => {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        refreshedUpstreamId = upstreamId;
+        store.setQuota(upstreamId, {
+          label: 'Provider quota window',
+          usedPercent: 30,
+          remainingPercent: 70,
+          remainingUnits: null,
+          limitUnits: null,
+          remainingDollars: null,
+          limitDollars: null,
+          windowSeconds: 3600,
+          resetAt: null,
+          observedAt: new Date().toISOString(),
+          source: 'codex_usage_api'
+        });
+      }
+    }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
@@ -185,6 +238,8 @@ test('auth.json sign-in imports credentials and returns only public account data
       assert.equal(responseText.includes('refresh-import'), false);
       assert.equal(responseText.includes('access_token'), false);
       assert.equal(store.list().length, 1);
+      assert.equal(refreshedUpstreamId, store.list()[0].id);
+      assert.equal(store.list()[0].quota.remainingPercent, 70);
       assert.equal(store.credentials(store.list()[0].id).refreshToken, 'refresh-import');
 
       response = await fetch(`${base}/api/pool/me`, {
@@ -202,6 +257,56 @@ test('auth.json sign-in imports credentials and returns only public account data
       assert.equal((await response.json()).account.id, result.account.id);
       assert.equal(store.list().length, 1);
       assert.equal(store.credentials(store.list()[0].id).refreshToken, 'rotated-refresh');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an account can reveal credentials only for its linked Codex upstreams', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-share-credentials-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const first = account(sharingStore, 'credentials-first');
+    const second = account(sharingStore, 'credentials-second');
+    const firstUpstream = store.create({ type: 'codex', authJson: authJson({
+      subject: 'credentials-first',
+      email: 'first@example.com',
+      accountId: 'first-account',
+      refreshToken: 'first-refresh'
+    }) });
+    const secondUpstream = store.create({ type: 'codex', authJson: authJson({
+      subject: 'credentials-second',
+      email: 'second@example.com',
+      accountId: 'second-account',
+      refreshToken: 'second-refresh'
+    }) });
+    sharingStore.linkUpstream(first.id, firstUpstream.id);
+    sharingStore.linkUpstream(second.id, secondUpstream.id);
+    const firstSession = sharingStore.createAccountSession(first.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const revealed = await request(base, '/api/pool/upstreams/credentials', firstSession, { csrf: false });
+      assert.equal(revealed.response.status, 200);
+      assert.deepEqual(revealed.body.credentials, [{
+        id: firstUpstream.id,
+        name: 'first@example.com',
+        credentials: {
+          auth_mode: 'chatgpt',
+          OPENAI_API_KEY: null,
+          tokens: {
+            id_token: store.credentials(firstUpstream.id).idToken,
+            access_token: store.credentials(firstUpstream.id).accessToken,
+            refresh_token: 'first-refresh',
+            account_id: 'first-account'
+          }
+        }
+      }]);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -254,6 +359,64 @@ test('separate browser sessions keep different Codex Pool identities after anoth
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('multiple browser sessions for one Codex Share account remain valid after another sign-in', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-same-account-sessions-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const manager = new CodexLoginManager({ sharingStore, upstreamStore: store });
+    const server = createServer(createApp({ store, productStore: sharingStore, codexLoginManager: manager }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const firstLogin = await fetch(`${base}/auth/codex/import`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authJson: authJson({ subject: 'same-browser-account', email: 'same@example.com', accountId: 'same-account' }) })
+      });
+      assert.equal(firstLogin.status, 200);
+      const account = (await firstLogin.json()).account;
+      const firstSession = decodeURIComponent(cookieValue(setCookies(firstLogin), 'codex_pool_session'));
+
+      const secondLogin = await fetch(`${base}/auth/codex/import`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authJson: authJson({ subject: 'same-browser-account', email: 'same@example.com', accountId: 'same-account', refreshToken: 'rotated-refresh' }) })
+      });
+      assert.equal(secondLogin.status, 200);
+      assert.equal((await secondLogin.json()).account.id, account.id);
+      const secondSession = decodeURIComponent(cookieValue(setCookies(secondLogin), 'codex_pool_session'));
+
+      assert.notEqual(firstSession, secondSession);
+      for (const token of [firstSession, secondSession]) {
+        const response = await fetch(`${base}/api/pool/me`, {
+          headers: { cookie: `codex_pool_session=${encodeURIComponent(token)}` }
+        });
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).account.id, account.id);
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serves the Codex Share favicon', async () => {
+  const server = createServer(createApp());
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/assets/codex-share.svg`);
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /image\/svg\+xml/);
+    assert.match(await response.text(), /<svg/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 
@@ -318,7 +481,9 @@ test('sharing API requires account sessions and CSRF while offers stay public to
 
       result = await request(base, '/api/pool/offers', consumerSession);
       assert.equal(result.response.status, 200);
-      assert.equal(result.body.offers.length, 0);
+      assert.equal(result.body.offers.length, 1);
+      assert.equal(result.body.offers[0].status, 'closed');
+      assert.equal(result.body.offers[0].isUsable, false);
 
       result = await request(base, `/api/pool/sessions/${sessionId}/reveal-key`, providerSession, {
         method: 'POST',
@@ -392,6 +557,362 @@ test('a signed-in provider can read and refresh its own Codex quota', async () =
   }
 });
 
+test('a provider can test only its own linked Codex connection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-share-connection-test-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'codex',
+      authJson: authJson({
+        subject: 'connection-provider',
+        accountId: 'connection-provider-account'
+      })
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'connection-provider');
+    const other = account(sharingStore, 'connection-other');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const providerSession = sharingStore.createAccountSession(provider.id);
+    const otherSession = sharingStore.createAccountSession(other.id);
+    const calls = [];
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async (url, options = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ path, options });
+        if (path === '/backend-api/codex/models') {
+          return new Response(JSON.stringify({
+            models: [{ slug: 'gpt-5.6-terra' }, { slug: 'gpt-5.6-luna' }]
+          }), { headers: { 'content-type': 'application/json' } });
+        }
+        if (path === '/backend-api/codex/responses') {
+          return new Response(
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"pool-response-test","status":"completed","model":"gpt-5.6-luna","output":[]}}\n\n',
+            { headers: { 'content-type': 'text/event-stream' } }
+          );
+        }
+        throw new Error(`Unexpected provider request: ${path}`);
+      }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let result = await request(base, `/api/pool/upstreams/${upstream.id}/test-connection`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.connection.endpoint, '/v1/responses');
+      assert.equal(result.body.connection.model, 'gpt-5.6-luna');
+
+      const providerRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
+      const body = JSON.parse(providerRequest.options.body);
+      assert.equal(body.max_output_tokens, 64);
+      assert.equal(body.input[0].content[0].text, 'What is the current time?');
+
+      const callCount = calls.length;
+      result = await request(base, `/api/pool/upstreams/${upstream.id}/test-connection`, otherSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 404);
+      assert.equal(calls.length, callCount);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a consumer can test a My Access session through its shared quota', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-share-session-connection-test-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'codex',
+      authJson: authJson({
+        subject: 'session-connection-provider',
+        accountId: 'session-connection-provider-account'
+      })
+    });
+    store.setQuota(upstream.id, {
+      remainingDollars: 20,
+      remainingPercent: 100,
+      observedAt: new Date().toISOString()
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'session-connection-provider');
+    const consumer = account(sharingStore, 'session-connection-consumer');
+    const other = account(sharingStore, 'session-connection-other');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, {
+      upstreamId: upstream.id,
+      quotaDollars: 5
+    }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
+    const sharedSession = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const providerSession = sharingStore.createAccountSession(provider.id);
+    const consumerSession = sharingStore.createAccountSession(consumer.id);
+    const otherSession = sharingStore.createAccountSession(other.id);
+    const calls = [];
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async (url, options = {}) => {
+        const path = new URL(url).pathname;
+        calls.push({ path, options });
+        if (path === '/backend-api/codex/models') {
+          return new Response(JSON.stringify({
+            models: [{ slug: 'gpt-5.6-sol' }, { slug: 'gpt-5.6-luna' }]
+          }), { headers: { 'content-type': 'application/json' } });
+        }
+        if (path === '/backend-api/codex/responses') {
+          return new Response(
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"shared-session-test","status":"completed","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":5,"output_tokens":1,"price_cost_usd":"0.25"}}}\n\n',
+            { headers: { 'content-type': 'text/event-stream' } }
+          );
+        }
+        throw new Error(`Unexpected provider request: ${path}`);
+      }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let result = await request(base, `/api/pool/sessions/${sharedSession.id}/test-connection`, consumerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.connection.endpoint, '/v1/responses');
+      assert.equal(result.body.connection.model, 'gpt-5.6-luna');
+
+      const providerRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
+      const body = JSON.parse(providerRequest.options.body);
+      assert.equal(body.max_output_tokens, 64);
+      assert.equal(body.input[0].content[0].text, 'What is the current time?');
+      assert.equal(providerRequest.options.headers['chatgpt-account-id'], 'session-connection-provider-account');
+      assert.equal(sharingStore.session(sharedSession.id, consumer.id, store).consumedQuotaDollars, 0.25);
+
+      const callCount = calls.length;
+      for (const session of [providerSession, otherSession]) {
+        result = await request(base, `/api/pool/sessions/${sharedSession.id}/test-connection`, session, {
+          method: 'POST',
+          body: '{}'
+        });
+        assert.equal(result.response.status, 404);
+      }
+      assert.equal(calls.length, callCount);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Pool upstreams expose server-authoritative provider availability', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-upstream-availability-api-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'codex', authJson: authJson({ subject: 'availability-provider', accountId: 'availability-account' }) });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'availability-provider');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    store.setTokenRefresh(upstream.id, {
+      status: 'reauth_required',
+      trigger: 'runtime',
+      errorCode: 'reauth_required',
+      finishedAt: new Date().toISOString()
+    });
+    const session = sharingStore.createAccountSession(provider.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const result = await request(base, '/api/pool/upstreams', session);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.upstreams[0].providerIssue.code, 'provider_reauth_required');
+      assert.equal(result.body.upstreams[0].name, 'import@example.com');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Pool quota refresh batches provider-change notifications', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-quota-batches-'));
+  try {
+    const store = new Store(dir);
+    for (let index = 0; index < 11; index += 1) {
+      store.create({ type: 'codex', accessToken: `quota-token-${index}`, accountId: `quota-account-${index}` });
+    }
+    let changes = 0;
+    store.onUpstreamsChange(() => { changes += 1; });
+    const results = await refreshAllQuotas(store, {
+      fetchImpl: async () => new Response(JSON.stringify({
+        rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 2_592_000 } }
+      }), { status: 200 })
+    });
+    assert.equal(results.filter((result) => result.value?.status === 'refreshed').length, 11);
+    assert.equal(changes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a consumer can reveal and rotate one personal key for active share sessions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-personal-key-api-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'codex', authJson: authJson({ subject: 'personal-provider', accountId: 'personal-provider-account' }) });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'personal-provider');
+    const consumer = account(sharingStore, 'personal-consumer');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 2 }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
+    sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const consumerSession = sharingStore.createAccountSession(consumer.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let result = await request(base, '/api/pool/personal-key', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.personalKey.hasKey, false);
+      assert.equal(result.body.personalKey.activeSessionCount, 1);
+
+      result = await request(base, '/api/pool/personal-key/reveal', consumerSession, { method: 'POST', body: '{}' });
+      assert.equal(result.response.status, 200);
+      const firstKey = result.body.apiKey;
+      assert.match(firstKey, /^cp_personal_/);
+
+      result = await request(base, '/api/pool/personal-key/rotate', consumerSession, { method: 'POST', body: '{}' });
+      assert.equal(result.response.status, 200);
+      assert.match(result.body.apiKey, /^cp_personal_/);
+      assert.notEqual(result.body.apiKey, firstKey);
+      assert.equal(sharingStore.authenticateShareKey(firstKey), null);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('provider controls, named keys, and friend quota requests are available through the product API', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-share-reliability-api-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'codex', authJson: authJson({
+      subject: 'reliability-provider',
+      accountId: 'reliability-provider-account'
+    }) });
+    store.setQuota(upstream.id, {
+      remainingDollars: 20,
+      remainingPercent: 100,
+      observedAt: new Date().toISOString()
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'reliability-provider');
+    const consumer = account(sharingStore, 'reliability-consumer');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const providerSession = sharingStore.createAccountSession(provider.id);
+    const consumerSession = sharingStore.createAccountSession(consumer.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let result = await request(base, '/api/pool/offers', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 5 })
+      });
+      assert.equal(result.response.status, 201);
+
+      result = await request(base, '/api/pool/upstreams', providerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.upstreams[0].commitment.offerReservationDollars, 5);
+      assert.equal(result.body.upstreams[0].commitment.offerableQuotaDollars, 15);
+      assert.equal(result.body.upstreams[0].sharing.status, 'active');
+
+      result = await request(base, `/api/pool/providers/${upstream.id}/pause`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.provider.sharing.status, 'paused');
+
+      result = await request(base, `/api/pool/providers/${upstream.id}/resume`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.provider.sharing.status, 'active');
+
+      result = await request(base, '/api/pool/personal-keys', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({ name: 'Laptop' })
+      });
+      assert.equal(result.response.status, 201);
+      assert.match(result.body.apiKey, /^cp_personal_/);
+      const keyId = result.body.personalKey.id;
+
+      result = await request(base, '/api/pool/personal-keys', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.personalKeys[0].name, 'Laptop');
+
+      result = await request(base, `/api/pool/personal-keys/${keyId}/reveal`, consumerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.match(result.body.apiKey, /^cp_personal_/);
+
+      result = await request(base, `/api/pool/personal-keys/${keyId}/revoke`, consumerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.personalKey.status, 'revoked');
+
+      result = await request(base, '/api/pool/quota-requests', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({ quotaDollars: 3 })
+      });
+      assert.equal(result.response.status, 201);
+      assert.equal(result.body.quotaRequest.quotaDollars, 3);
+      const quotaRequestId = result.body.quotaRequest.id;
+
+      result = await request(base, '/api/pool/quota-requests', providerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.quotaRequests[0].requester.email, 'reliability-consumer@example.com');
+
+      result = await request(base, `/api/pool/quota-requests/${quotaRequestId}/cancel`, consumerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.quotaRequest.status, 'cancelled');
+
+      result = await request(base, `/api/pool/providers/${upstream.id}/revoke-all`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.provider.sharing.status, 'paused');
+      assert.equal((await request(base, '/api/pool/offers', providerSession)).body.offers[0].status, 'closed');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Pool refreshes Codex quotas at startup and on its scheduled interval', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-quota-scheduler-'));
   try {
@@ -418,6 +939,53 @@ test('Pool refreshes Codex quotas at startup and on its scheduled interval', asy
       assert.ok(calls >= 2);
       assert.equal(store.list()[0].quota.remainingPercent, 75);
       assert.ok(store.list()[0].quota.observedAt);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Pool refreshes Codex tokens that expire within the 12-hour proactive window', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-token-scheduler-'));
+  try {
+    const store = new Store(dir);
+    const productStore = new ProductStore(dir);
+    const expiringToken = jwt({ exp: Math.floor(Date.now() / 1000) + 60 * 60 });
+    const upstream = store.create({ type: 'codex', authJson: JSON.stringify({ tokens: {
+      access_token: expiringToken,
+      id_token: jwt({ email: 'scheduler@example.com' }),
+      refresh_token: 'scheduled-refresh-token'
+    }}) });
+    let refreshCalls = 0;
+    const fetchImpl = async (url) => {
+      if (String(url) === 'https://auth.openai.com/oauth/token') {
+        refreshCalls += 1;
+        return new Response(JSON.stringify({
+          access_token: 'refreshed-access-token',
+          refresh_token: 'refreshed-refresh-token',
+          expires_in: 3600
+        }), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({
+        rate_limit: {
+          primary_window: {
+            used_percent: 25,
+            limit_window_seconds: 3600
+          }
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const server = start(0, { store, productStore, fetchImpl, tokenRefreshIntervalMs: 60_000 });
+    try {
+      await new Promise((resolve) => server.once('listening', resolve));
+      const deadline = Date.now() + 1_000;
+      while (!refreshCalls && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.equal(refreshCalls, 1);
+      assert.equal(store.credentials(upstream.id).accessToken, 'refreshed-access-token');
+      assert.equal(store.credentials(upstream.id).refreshToken, 'refreshed-refresh-token');
+      assert.equal(store.get(upstream.id).tokenRefresh.status, 'succeeded');
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
