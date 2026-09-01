@@ -78,6 +78,7 @@ export function createApp({
       }
       if (url.pathname.startsWith('/auth/')) {
         await authRequest(req, res, url, {
+          store,
           productStore,
           codexLoginManager,
           cookieSecure,
@@ -263,7 +264,8 @@ export async function startConfigured() {
     const store = new Store(runtimeDir);
     const productStore = new ProductStore(runtimeDir);
     await persistence.hydrate(store.sqlite, productStore.sqlite);
-    store.db = store.load();
+    store.db = null;
+    store.load();
     store.sqlite = persistence.attach('gateway', store.sqlite);
     productStore.sqlite = persistence.attach('product', productStore.sqlite);
     const server = start(undefined, { dataDir: runtimeDir, store, productStore });
@@ -310,7 +312,7 @@ export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } =
   });
 }
 
-async function authRequest(req, res, url, { productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
+async function authRequest(req, res, url, { store, productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
   if (req.method === 'POST' && url.pathname === '/auth/codex/import') {
     const input = await body(req);
     if (typeof input.authJson !== 'string' || !input.authJson.trim()) {
@@ -349,7 +351,7 @@ async function authRequest(req, res, url, { productStore, codexLoginManager, coo
     if (login.status === 'completed') {
       const accountId = productStore.accountIdForCompletedCodexLogin(token);
       if (!accountId) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
-      await Promise.all(productStore.listAccountUpstreamLinks(accountId)
+      await Promise.all(productStore.listCanonicalAccountUpstreamLinks(accountId, store)
         .map(({ upstreamId }) => refreshImportedCredentials(onCodexCredentialsImported, upstreamId, logger)));
       const completed = productStore.consumeCompletedCodexLogin(token);
       if (!completed) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
@@ -452,6 +454,27 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     }
     return;
   }
+  if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {
+    const input = await body(req);
+    const upstream = store.get(id);
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id) || upstream.quotaSource !== 'aiswitch') {
+      throw new HttpError(404, 'not_found', 'Not found');
+    }
+    const updated = store.update(id, {
+      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+      ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
+    });
+    const provider = productStore.providerSummary(accountId, id, store);
+    sendJson(res, 200, {
+      upstream: {
+        ...updated,
+        providerIssue: providerIssue(updated),
+        sharing: provider.sharing,
+        commitment: provider.commitment
+      }
+    });
+    return;
+  }
   if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'reveal') {
     sendJson(res, 200, productStore.revealNamedPersonalKey(accountId, id));
     return;
@@ -465,7 +488,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'upstreams' && parts.length === 3) {
-    const upstreams = productStore.listAccountUpstreamLinks(accountId)
+    const upstreams = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
       .flatMap(({ upstreamId, manualShareBudgetMicros }) => {
         const upstream = store.getPublic(upstreamId);
         if (!upstream) return [];
@@ -482,7 +505,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
-    const credentials = productStore.listAccountUpstreamLinks(accountId)
+    const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
       .flatMap(({ upstreamId }) => {
         const upstream = store.get(upstreamId);
         return upstream ? [{
@@ -675,7 +698,8 @@ async function staticFile(req, res, pathname, ingress, publicBasePath) {
   }
   const content = await readFile(join(publicDir, filename));
   const extension = filename.slice(filename.lastIndexOf('.'));
-  res.writeHead(200, { 'content-type': MIME_TYPES[extension], 'cache-control': filename === 'index.html' ? 'no-store' : 'public, max-age=300' });
+  const isUiBundle = filename === 'index.html' || filename === 'app.js' || filename === 'styles.css';
+  res.writeHead(200, { 'content-type': MIME_TYPES[extension], 'cache-control': isUiBundle ? 'no-store' : 'public, max-age=300' });
   res.end(filename === 'index.html' ? content.toString().replace('__CODEX_SHARE_BASE_PATH__', publicBasePath) : content);
 }
 

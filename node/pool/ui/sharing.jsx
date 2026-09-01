@@ -20,7 +20,6 @@ import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
 import { Switch } from '@astryxdesign/core/Switch';
-import { Tab, TabList } from '@astryxdesign/core/TabList';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
@@ -37,6 +36,8 @@ const SHARING_VIEWS = new Set([
   'shared-by-me'
 ]);
 const SHARING_VIEW_STORAGE_KEY = 'codex_pool_sharing_view';
+const SHARING_CARD_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
+const PROVIDER_CARD_GRID_COLUMNS = { minWidth: 220, max: 2, repeat: 'fill' };
 
 function initialSharingView() {
   try {
@@ -327,47 +328,57 @@ export function SharingWorkspace({ onNotice }) {
     }
   };
 
-  if (loading && !account && !login) {
-    return <Card variant="muted"><Text color="secondary" maxLines={1}>Loading sharing workspace...</Text></Card>;
+  if (loading) {
+    return (
+      <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
+        <Card variant="muted" padding={3}>
+          <Text color="secondary" maxLines={1}>Loading sharing workspace...</Text>
+        </Card>
+      </Grid>
+    );
   }
 
   if (!account) {
-    return <VStack gap={3}>
-      <Card>
-        <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
-          <VStack gap={1}>
-            <Heading level={2} maxLines={1}>Quota sharing</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Sign in with Codex to publish quota, request access, and manage share sessions.</Text>
-          </VStack>
-          {!login && (
-            <HStack gap={2} wrap="wrap">
-              <Button label="Login with Codex" variant="primary" isLoading={loginLoading} onClick={() => void startCodexLogin()} />
-              <Button
-                label="Login with auth.json"
-                variant="secondary"
-                onClick={openAuthJsonDialog}
-              />
+    return (
+      <VStack gap={2}>
+        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
+          <Card padding={3}>
+            <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+              <VStack gap={1}>
+                <Heading level={2} maxLines={1}>Quota sharing</Heading>
+                <Text type="supporting" color="secondary" maxLines={1}>Sign in with Codex to publish quota, request access, and manage share sessions.</Text>
+              </VStack>
+              {!login && (
+                <HStack gap={1} wrap="wrap">
+                  <Button label="Login with Codex" variant="primary" isLoading={loginLoading} onClick={() => void startCodexLogin()} />
+                  <Button
+                    label="Login with auth.json"
+                    variant="secondary"
+                    onClick={openAuthJsonDialog}
+                  />
+                </HStack>
+              )}
             </HStack>
-          )}
-        </HStack>
-      </Card>
-      {login && <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />}
-      <AuthJsonLoginDialog
-        isOpen={authJsonDialog}
-        value={authJson}
-        isLoading={authJsonLoading}
-        onChange={setAuthJson}
-        onClose={() => {
-          if (authJsonLoading) return;
-          setAuthJsonDialog(false);
-          setAuthJson('');
-        }}
-        onSubmit={(event) => {
-          event.preventDefault();
-          void importAuthJson();
-        }}
-      />
-    </VStack>;
+          </Card>
+          {login && <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />}
+        </Grid>
+        <AuthJsonLoginDialog
+          isOpen={authJsonDialog}
+          value={authJson}
+          isLoading={authJsonLoading}
+          onChange={setAuthJson}
+          onClose={() => {
+            if (authJsonLoading) return;
+            setAuthJsonDialog(false);
+            setAuthJson('');
+          }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            void importAuthJson();
+          }}
+        />
+      </VStack>
+    );
   }
 
   const offerableUpstreams = upstreams.filter((upstream) => (
@@ -408,20 +419,20 @@ export function SharingWorkspace({ onNotice }) {
   const activeOwnQuotaRequest = activeQuotaRequests.find((request) => request.isMine);
 
   return (
-    <VStack gap={3}>
-      <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
+    <VStack gap={2}>
+      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
         <VStack gap={1}>
           <HStack gap={2} vAlign="center" wrap="wrap">
             <Heading level={2}>Quota sharing</Heading>
             <Badge label={accountLabel(account)} variant="neutral" />
           </HStack>
         </VStack>
-        <HStack gap={2} wrap="wrap">
+        <HStack gap={1} wrap="wrap">
           <Button label="Sign out" variant="secondary" onClick={() => void logout()} />
         </HStack>
       </HStack>
 
-      <Grid columns={{ minWidth: 320, max: 3, repeat: 'fit' }} gap={3}>
+      <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
         <GridSpan columns={2}>
           <QuotaOverview
             upstreams={upstreams}
@@ -430,6 +441,11 @@ export function SharingWorkspace({ onNotice }) {
             onLinkCodex={() => void startCodexLogin()}
             onImportAuthJson={openAuthJsonDialog}
             onAddAiswitch={() => setAiswitchDialog({ projectId: '', projectKey: '', quotaDollars: 10 })}
+            onEditAiswitch={(upstream) => setAiswitchDialog({
+              upstream,
+              projectId: upstream.projectId || '',
+              projectKey: ''
+            })}
             onRevealCredentials={() => void revealCredentials()}
             onTestConnection={(upstream) => void testConnection(upstream)}
             testingUpstreamId={testingUpstreamId}
@@ -472,18 +488,22 @@ export function SharingWorkspace({ onNotice }) {
           onRevoke={setPersonalKeyRevokeTarget}
         />
       </Grid>
-      {login && <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />}
+      {login && (
+        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
+          <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />
+        </Grid>
+      )}
       <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-        <TabList value={view} onChange={setView} hasDivider aria-label="Sharing workspace">
-          <Tab value="community-offers" label={`Community offers (${activeCommunityOffers.length})`} />
-          <Tab value="my-offers" label={`My offers (${activeMyOffers.length})`} />
-          <Tab value="quota-requests" label={`Friends seeking quota (${activeQuotaRequests.length})`} />
-          <Tab value="sent-requests" label={`Sent requests (${pendingSentTickets.length})`} />
-          <Tab value="approvals" label={`Approvals (${pendingReceivedTickets.length})`} />
-          <Tab value="my-access" label={`My access (${ongoingRequestedSessions.length})`} />
-          <Tab value="shared-by-me" label={`Shared by me (${ongoingSharingSessions.length})`} />
-        </TabList>
-        <HStack gap={3} vAlign="center" wrap="wrap">
+        <SegmentedControl label="Sharing workspace" value={view} onChange={setView} size="md" layout="hug">
+          <SegmentedControlItem value="community-offers" label={`Community offers (${activeCommunityOffers.length})`} />
+          <SegmentedControlItem value="my-offers" label={`My offers (${activeMyOffers.length})`} />
+          <SegmentedControlItem value="quota-requests" label={`Friends seeking quota (${activeQuotaRequests.length})`} />
+          <SegmentedControlItem value="sent-requests" label={`Sent requests (${pendingSentTickets.length})`} />
+          <SegmentedControlItem value="approvals" label={`Approvals (${pendingReceivedTickets.length})`} />
+          <SegmentedControlItem value="my-access" label={`My access (${ongoingRequestedSessions.length})`} />
+          <SegmentedControlItem value="shared-by-me" label={`Shared by me (${ongoingSharingSessions.length})`} />
+        </SegmentedControl>
+        <HStack gap={2} vAlign="center" wrap="wrap">
           <Switch label="Show past data" value={showPastData} onChange={setShowPastData} />
           {offerableUpstreams.length > 0 && (
             <Button label="Publish offer" variant="primary" onClick={() => setOfferDialog({ upstreamId: offerableUpstreams[0].id, quotaDollars: 10, expiresOn: '' })} />
@@ -665,12 +685,18 @@ export function SharingWorkspace({ onNotice }) {
         onClose={() => setAiswitchDialog(null)}
         onChange={setAiswitchDialog}
         onSave={(value) => void mutate(async () => {
-          await api('/api/pool/upstreams/aiswitch', {
-            method: 'POST',
-            body: JSON.stringify(value)
+          const editing = Boolean(value.upstream);
+          await api(editing ? `/api/pool/upstreams/${value.upstream.id}` : '/api/pool/upstreams/aiswitch', {
+            method: editing ? 'PATCH' : 'POST',
+            body: JSON.stringify(editing
+              ? {
+                  projectId: value.projectId,
+                  ...(value.projectKey.trim() ? { projectKey: value.projectKey } : {})
+                }
+              : value)
           });
           setAiswitchDialog(null);
-        }, 'AISwitch project added with a manual share budget')}
+        }, aiswitchDialog?.upstream ? 'AISwitch project updated' : 'AISwitch project added with a manual share budget')}
       />
       <ManualBudgetDialog
         value={manualBudgetDialog}
@@ -822,6 +848,7 @@ function QuotaOverview({
   onLinkCodex,
   onImportAuthJson,
   onAddAiswitch,
+  onEditAiswitch,
   onRevealCredentials,
   onTestConnection,
   testingUpstreamId,
@@ -829,26 +856,30 @@ function QuotaOverview({
   onRevokeAll,
   onSetManualBudget
 }) {
+  const hasAiswitch = upstreams.some((upstream) => upstream.quotaSource === 'aiswitch');
+  const orderedUpstreams = [...upstreams].sort((left, right) =>
+    Number(left.quotaSource === 'aiswitch') - Number(right.quotaSource === 'aiswitch')
+  );
   if (!upstreams.length) {
     return (
-      <Card variant="muted">
-        <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
-          <VStack gap={1}>
+      <Card variant="muted" padding={3}>
+        <VStack gap={2} hAlign="center">
+          <VStack gap={1} hAlign="center">
             <Heading level={3} maxLines={1}>No share provider linked</Heading>
             <Text type="supporting" color="secondary" maxLines={1}>Link Codex quota or add an AISwitch project to publish an offer.</Text>
           </VStack>
-          <HStack gap={2} wrap="wrap">
+          <HStack justify="center" gap={1} wrap="wrap">
             <Button label="Login with Codex" size="sm" variant="primary" onClick={onLinkCodex} />
             <Button label="Login with auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
-            <Button label="Add AISwitch project" size="sm" variant="secondary" onClick={onAddAiswitch} />
+            <Button label="Add AISwitch project" size="sm" variant="dashed" onClick={onAddAiswitch} />
           </HStack>
-        </HStack>
+        </VStack>
       </Card>
     );
   }
   return (
-    <Card variant="muted" height="100%">
-      <VStack gap={3}>
+    <Card variant="muted" height="100%" padding={3}>
+      <VStack gap={2}>
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
             <Heading level={3} maxLines={1}>Your share providers</Heading>
@@ -857,11 +888,10 @@ function QuotaOverview({
           <HStack gap={2} wrap="wrap">
             <Button label="View credentials" size="sm" variant="secondary" onClick={onRevealCredentials} />
             <Button label="Refresh quota" size="sm" variant="secondary" isLoading={isRefreshing} onClick={onRefresh} />
-            <Button label="Add AISwitch project" size="sm" variant="secondary" onClick={onAddAiswitch} />
           </HStack>
         </HStack>
-        <Grid columns={{ minWidth: 220, max: 3, repeat: 'fit' }} gap={2}>
-          {upstreams.map((upstream) => (
+        <Grid columns={PROVIDER_CARD_GRID_COLUMNS} gap={2}>
+          {orderedUpstreams.map((upstream) => (
             <QuotaCard
               key={upstream.id}
               upstream={upstream}
@@ -872,8 +902,14 @@ function QuotaOverview({
               onToggleSharing={onToggleSharing}
               onRevokeAll={onRevokeAll}
               onSetManualBudget={onSetManualBudget}
+              onEditAiswitch={onEditAiswitch}
             />
           ))}
+          {!hasAiswitch && (
+            <VStack hAlign="center" vAlign="center" height="100%">
+              <Button label="Add AISwitch project" size="sm" variant="dashed" onClick={onAddAiswitch} />
+            </VStack>
+          )}
         </Grid>
       </VStack>
     </Card>
@@ -883,9 +919,9 @@ function QuotaOverview({
 function PersonalKeyCard({ personalKeys, sessions, onCreate, onReveal, onRotate, onRevoke }) {
   const remainingQuota = sessions.reduce((total, session) => total + session.remainingQuotaDollars, 0);
   return (
-    <Card variant="muted" height="100%">
-      <VStack gap={3}>
-        <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
+    <Card variant="muted" height="100%" padding={3}>
+      <VStack gap={2}>
+        <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
             <HStack gap={2} vAlign="center" wrap="wrap">
               <Heading level={3} maxLines={1}>My Pool Keys</Heading>
@@ -962,7 +998,7 @@ function PersonalKeyCard({ personalKeys, sessions, onCreate, onReveal, onRotate,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onSetManualBudget }) {
+function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onSetManualBudget, onEditAiswitch }) {
   const quota = upstream.quota;
   const isAiswitch = upstream.quotaSource === 'aiswitch';
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
@@ -970,15 +1006,18 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
   return (
-    <Card variant={issue ? 'red' : 'default'} height="100%">
-      <VStack gap={3} height="100%" vAlign="between">
+    <Card variant={issue ? 'red' : 'default'} height="100%" padding={3}>
+      <VStack gap={2} height="100%" vAlign="between">
         <VStack gap={2}>
           <HStack justify="between" vAlign="start" gap={2}>
             <VStack gap={1}>
               <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
               <Text type="supporting" color="secondary" maxLines={1}>{isAiswitch ? 'AISwitch · manual share budget' : quota?.label || 'Waiting for provider quota'}</Text>
             </VStack>
-            {issue && <ProviderIssueBadge issue={issue} />}
+            <HStack gap={1} vAlign="center">
+              {isAiswitch && <Button label="Edit" size="sm" variant="secondary" onClick={() => onEditAiswitch(upstream)} />}
+              {issue && <ProviderIssueBadge issue={issue} />}
+            </HStack>
           </HStack>
           <Text weight="bold" maxLines={1}>{isAiswitch ? `$${money(commitment?.actualQuotaDollars)} manual budget left` : quotaRemaining(quota)}</Text>
           {percentage !== null && (
@@ -1038,13 +1077,13 @@ function OffersView({ offers, requestedOfferIds, emptyTitle, emptyDescription, o
     return <EmptyState title={emptyTitle} description={emptyDescription} />;
   }
   return (
-    <Grid columns={{ minWidth: 280, max: 2, repeat: 'fill' }} gap={3}>
+    <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
       {offers.map((offer) => {
         const issue = offer.status === 'active' ? offer.upstream?.providerIssue : null;
         return (
-        <Card key={offer.id} variant={issue ? 'red' : 'default'} height="100%" minHeight={192}>
-          <VStack gap={3} height="100%" vAlign="between">
-            <VStack gap={3}>
+        <Card key={offer.id} variant={issue ? 'red' : 'default'} height="100%" minHeight={192} padding={3}>
+          <VStack gap={2} height="100%" vAlign="between">
+            <VStack gap={2}>
               <HStack justify="between" vAlign="start" gap={2}>
                 <VStack gap={1}>
                   <Heading level={3} maxLines={1}>{accountLabel(offer.provider)}</Heading>
@@ -1089,11 +1128,11 @@ function OffersView({ offers, requestedOfferIds, emptyTitle, emptyDescription, o
 function TicketsView({ tickets, emptyTitle, emptyDescription, onApprove, onReject, onCancel }) {
   if (!tickets.length) return <EmptyState title={emptyTitle} description={emptyDescription} />;
   return (
-    <VStack gap={2}>
+    <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
       {tickets.map((ticket) => {
         const issue = ticket.status === 'pending' ? ticket.upstream?.providerIssue : null;
         return (
-        <Card key={ticket.id} variant={issue ? 'red' : 'muted'}>
+        <Card key={ticket.id} variant={issue ? 'red' : 'muted'} padding={3}>
           <VStack gap={2}>
             <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
             <VStack gap={1}>
@@ -1128,7 +1167,7 @@ function TicketsView({ tickets, emptyTitle, emptyDescription, onApprove, onRejec
         </Card>
         );
       })}
-    </VStack>
+    </Grid>
   );
 }
 
@@ -1147,7 +1186,7 @@ function SessionsView({
 }) {
   if (!sessions.length) return <EmptyState title={emptyTitle} description={emptyDescription} />;
   return (
-    <Grid columns={{ minWidth: 280, max: 2, repeat: 'fill' }} gap={3}>
+    <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
       {sessions.map((session) => {
         const issue = session.status === 'active' ? session.providerIssue : null;
         const hasProviderIssue = Boolean(issue);
@@ -1160,8 +1199,8 @@ function SessionsView({
           ['active', 'paused', 'exhausted'].includes(session.status)
         );
         return (
-          <Card key={session.id} variant={hasProviderIssue ? 'red' : 'default'} height="100%" minHeight={192}>
-            <VStack gap={3} height="100%" vAlign="between">
+          <Card key={session.id} variant={hasProviderIssue ? 'red' : 'default'} height="100%" minHeight={192} padding={3}>
+            <VStack gap={2} height="100%" vAlign="between">
               <VStack gap={2}>
                 <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
                   <VStack gap={1}>
@@ -1293,10 +1332,10 @@ function QuotaRequestsView({ requests, canOffer, onCancel, onOffer }) {
     );
   }
   return (
-    <Grid columns={{ minWidth: 280, max: 4, repeat: 'fit' }} gap={3}>
+    <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
       {requests.map((request) => (
-        <Card key={request.id}>
-          <VStack gap={3}>
+        <Card key={request.id} padding={3}>
+          <VStack gap={2}>
             <HStack justify="between" vAlign="start" gap={2}>
               <VStack gap={1}>
                 <Heading level={3} maxLines={1}>{accountLabel(request.requester)}</Heading>
@@ -1343,8 +1382,8 @@ function CodexLoginCard({ login, onCancel, onRetry }) {
   const waiting = ['starting', 'waiting'].includes(login.status);
   const retryable = ['failed', 'cancelled'].includes(login.status);
   return (
-    <Card variant="muted">
-      <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
+    <Card variant="muted" padding={3}>
+      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
         <VStack gap={1}>
           <HStack gap={2} vAlign="center">
             <Text weight="bold" maxLines={1}>Codex sign-in</Text>
@@ -1355,7 +1394,7 @@ function CodexLoginCard({ login, onCancel, onRetry }) {
             : <Text type="supporting" color="secondary" maxLines={1}>Starting the OpenAI device sign-in flow...</Text>}
           {login.errorCode && <Text type="supporting" color="secondary" maxLines={1}>{login.errorCode}</Text>}
         </VStack>
-        <HStack gap={2}>
+        <HStack gap={1}>
           {login.verificationUrl && <Button label="Open OpenAI sign-in" variant="primary" onClick={() => window.open(login.verificationUrl, '_blank', 'noopener,noreferrer')} />}
           {retryable && <Button label="Try again" variant="primary" onClick={onRetry} />}
           {waiting && <Button label="Cancel" variant="secondary" onClick={onCancel} />}
@@ -1415,40 +1454,46 @@ function AuthJsonLoginDialog({ isOpen, value, isLoading, onChange, onClose, onSu
 
 function AiswitchProjectDialog({ value, onClose, onSave, onChange }) {
   const [guideOpen, setGuideOpen] = useState(false);
+  const editing = Boolean(value?.upstream);
   return (
     <>
       <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={520}>
         <Layout
-          header={<DialogHeader title="Add AISwitch project" subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
+          header={<DialogHeader title={editing ? 'Edit AISwitch project' : 'Add AISwitch project'} subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
           content={(
             <LayoutContent>
               {value && <VStack gap={3}>
                 <Banner
-                  title="Manual share budget"
-                  description="AISwitch quota cannot be queried here. Set the amount currently available for sharing; Codex Share will decrement it only as shared sessions spend."
+                  title={editing ? 'Update project details' : 'Manual share budget'}
+                  description={editing
+                    ? 'Update the project ID or replace the project key. Leave the key blank to keep the current key.'
+                    : 'AISwitch quota cannot be queried here. Set the amount currently available for sharing; Codex Share will decrement it only as shared sessions spend.'}
                   status="info"
                 />
                 <TextInput
                   label="AISwitch project ID"
-                  value={value.projectId}
+                  value={value.projectId || ''}
                   onChange={(projectId) => onChange({ ...value, projectId })}
                   hasAutoFocus
                   isRequired
                 />
                 <TextInput
-                  label="AISwitch project key"
-                  value={value.projectKey}
+                  label={editing ? 'New AISwitch project key (optional)' : 'AISwitch project key'}
+                  value={value.projectKey || ''}
                   onChange={(projectKey) => onChange({ ...value, projectKey })}
-                  isRequired
+                  placeholder={editing ? 'Leave blank to keep the current key' : undefined}
+                  isRequired={!editing}
                 />
-                <NumberInput
-                  label="Manual share budget (USD)"
-                  value={value.quotaDollars}
-                  onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
-                  min={0.01}
-                  step={0.01}
-                  isRequired
-                />
+                {!editing && (
+                  <NumberInput
+                    label="Manual share budget (USD)"
+                    value={value.quotaDollars}
+                    onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
+                    min={0.01}
+                    step={0.01}
+                    isRequired
+                  />
+                )}
               </VStack>}
             </LayoutContent>
           )}
@@ -1464,8 +1509,10 @@ function AiswitchProjectDialog({ value, onClose, onSave, onChange }) {
               )}
               onClose={onClose}
               onSave={() => onSave(value)}
-              saveLabel="Add project"
-              isSaveDisabled={!value?.projectId.trim() || !value?.projectKey.trim() || Number(value?.quotaDollars) <= 0}
+              saveLabel={editing ? 'Save changes' : 'Add project'}
+              isSaveDisabled={!String(value?.projectId || '').trim()
+                || (!editing && !String(value?.projectKey || '').trim())
+                || (!editing && Number(value?.quotaDollars) <= 0)}
             />
           )}
         />
