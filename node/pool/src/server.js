@@ -25,6 +25,7 @@ import { providerIssue } from './provider-availability.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicDir = join(productRoot, 'public');
+const relaydeckDataDir = resolve(productRoot, '../.data');
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -158,8 +159,8 @@ export function createApp({
 
 export function start(port = Number(process.env.POOL_PORT) || 3010, {
   dataDir = process.env.POOL_DATA_DIR || resolve(productRoot, '.data'),
-  store = new Store(dataDir),
-  productStore = new ProductStore(dataDir),
+  store = null,
+  productStore = null,
   fetchImpl = globalThis.fetch,
   host = process.env.POOL_BIND_HOST || '127.0.0.1',
   ingress = poolIngress(),
@@ -169,6 +170,9 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   emailDeliveryIntervalMs = Number(process.env.POOL_EMAIL_DELIVERY_INTERVAL_MS) || EMAIL_DELIVERY_INTERVAL_MS,
   productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS
 } = {}) {
+  const poolDataDir = requirePoolDataDir(dataDir);
+  store ||= new Store(poolDataDir);
+  productStore ||= new ProductStore(poolDataDir);
   const codexLoginManager = new CodexLoginManager({
     sharingStore: productStore,
     upstreamStore: store,
@@ -242,6 +246,14 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     console.log(`codex-share listening on http://${host}:${server.address().port}`);
   });
   return server;
+}
+
+function requirePoolDataDir(dataDir) {
+  const resolved = resolve(dataDir);
+  if (resolved === relaydeckDataDir) {
+    throw new Error('POOL_DATA_DIR must not point to Relaydeck node/.data');
+  }
+  return resolved;
 }
 
 export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } = {}) {
@@ -366,6 +378,33 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 201, productStore.createNamedPersonalKey(accountId, await body(req), store));
     return;
   }
+  if (req.method === 'POST' && resource === 'upstreams' && id === 'aiswitch' && parts.length === 4) {
+    const input = await body(req);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'aiswitch',
+      projectId: input.projectId,
+      projectKey: input.projectKey
+    });
+    try {
+      const cappedUpstream = store.setCap(upstream.id, { capDollars: 1_000_000 });
+      productStore.linkUpstream(accountId, upstream.id);
+      const provider = productStore.setManualShareBudget(accountId, upstream.id, input, store);
+      sendJson(res, 201, {
+        upstream: {
+          ...cappedUpstream,
+          providerIssue: providerIssue(cappedUpstream),
+          sharing: provider.sharing,
+          commitment: provider.commitment
+        }
+      });
+    } catch (error) {
+      productStore.cleanupUpstream(upstream.id);
+      store.remove(upstream.id);
+      throw error;
+    }
+    return;
+  }
   if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'reveal') {
     sendJson(res, 200, productStore.revealNamedPersonalKey(accountId, id));
     return;
@@ -380,10 +419,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
   }
   if (req.method === 'GET' && resource === 'upstreams' && parts.length === 3) {
     const upstreams = productStore.listAccountUpstreamLinks(accountId)
-      .flatMap(({ upstreamId }) => {
+      .flatMap(({ upstreamId, manualShareBudgetMicros }) => {
         const upstream = store.getPublic(upstreamId);
         if (!upstream) return [];
-        const provider = productStore.providerSummary(accountId, upstreamId, store);
+        const provider = productStore.providerSummary(accountId, upstreamId, store, { manualShareBudgetMicros });
         return [{
           ...upstream,
           name: upstream.email || upstream.name,
@@ -413,8 +452,16 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
+    if (upstream.quotaSource === 'aiswitch') {
+      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'manual_share_budget' });
+      return;
+    }
     if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
     sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
+    return;
+  }
+  if (req.method === 'PUT' && resource === 'upstreams' && id && action === 'manual-budget') {
+    sendJson(res, 200, { provider: productStore.setManualShareBudget(accountId, id, await body(req), store) });
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'test-connection') {
