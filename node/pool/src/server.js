@@ -22,6 +22,7 @@ import { ProductStore } from './product-store.js';
 import { CodexLoginManager } from './codex-login.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
 import { providerIssue } from './provider-availability.js';
+import { openRedisSqlitePersistence } from '../../src/redis-sqlite.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicDir = join(productRoot, 'public');
@@ -248,12 +249,55 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   return server;
 }
 
+export async function startConfigured() {
+  if (!process.env.POOL_REDIS_URL) return start();
+  const dataDir = process.env.POOL_DATA_DIR || resolve(productRoot, '.data');
+  requirePoolDataDir(dataDir);
+  const persistence = await openRedisSqlitePersistence({
+    url: process.env.POOL_REDIS_URL,
+    prefix: process.env.POOL_REDIS_PREFIX,
+    logger: console
+  });
+  try {
+    await persistence.restore(dataDir);
+    const store = new Store(dataDir);
+    const productStore = new ProductStore(dataDir);
+    store.sqlite = persistence.attach('db.sqlite', store.sqlite, store.keyPath);
+    productStore.sqlite = persistence.attach('pool.sqlite', productStore.sqlite, productStore.keyPath);
+    await persistence.flush();
+    const server = start(undefined, { dataDir, store, productStore });
+    installRedisShutdown(server, persistence);
+    return server;
+  } catch (error) {
+    await persistence.close().catch(() => {});
+    throw error;
+  }
+}
+
 function requirePoolDataDir(dataDir) {
   const resolved = resolve(dataDir);
   if (resolved === relaydeckDataDir) {
     throw new Error('POOL_DATA_DIR must not point to Relaydeck node/.data');
   }
   return resolved;
+}
+
+function installRedisShutdown(server, persistence) {
+  let stopping = false;
+  const stop = () => {
+    if (stopping) return;
+    stopping = true;
+    server.close(() => {
+      void persistence.close().finally(() => process.exit(0));
+    });
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+  server.once('close', () => {
+    if (!stopping) void persistence.close();
+    process.off('SIGINT', stop);
+    process.off('SIGTERM', stop);
+  });
 }
 
 export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } = {}) {
@@ -716,4 +760,9 @@ function sendJson(res, status, value, extraHeaders = {}) {
   res.end(JSON.stringify(value));
 }
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) start();
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
+  void startConfigured().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
