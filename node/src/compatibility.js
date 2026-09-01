@@ -12,6 +12,13 @@ import { modelCatalogForStore } from './codex-model-catalog.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
+import {
+  isShareCredential,
+  personalShareSessions,
+  releaseShareRequest,
+  reserveShareRequest,
+  selectPersonalShareSession
+} from './share-authorization.js';
 
 const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2']);
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
@@ -29,15 +36,27 @@ export function isCompatibilityRoute(method, path) {
   return method === 'POST' && ['/v1/files', '/v1/audio/transcriptions', '/v1/images/generations', '/v1/images/edits'].includes(path);
 }
 
+export function isUnsupportedV1Route(method, path) {
+  if (method === 'POST' && ['/v1/images/variations', '/v1/embeddings', '/v1/batches', '/v1/moderations', '/v1/fine_tuning/jobs'].includes(path)) return true;
+  if ((method === 'GET' || method === 'DELETE') && /^\/v1\/responses\/[^/]+$/.test(path)) return true;
+  return method === 'POST' && /^\/v1\/responses\/[^/]+\/cancel$/.test(path);
+}
+
 export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store) }) {
-  if (path === '/v1/files') {
-    if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: store.listFiles(requestScopeId(req)) });
-    return createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
+  try {
+    if (path === '/v1/files') {
+      if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: listFiles(store, req) });
+      return await createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
+    }
+    const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);
+    if (fileMatch) return fileOperation({ req, res, store, id: decodeURIComponent(fileMatch[1]), content: Boolean(fileMatch[2]) });
+    if (path === '/v1/audio/transcriptions') {
+      return await transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
+    }
+    return await image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
+  } finally {
+    releaseShareRequest(req, req.compatibilityShareAttemptId, 'compatibility_request_failed');
   }
-  const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);
-  if (fileMatch) return fileOperation({ req, res, store, id: decodeURIComponent(fileMatch[1]), content: Boolean(fileMatch[2]) });
-  if (path === '/v1/audio/transcriptions') return transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
-  return image({ req, res, path, body, store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
 }
 
 async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth }) {
@@ -79,7 +98,7 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
 
   const now = Math.floor(Date.now() / 1000);
   const record = store.saveFile({
-    scopeId: requestScopeId(req),
+    scopeId: fileScopeId(req),
     id: fileId,
     object: 'file',
     bytes: file.size,
@@ -89,11 +108,12 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
     status: 'uploaded',
     expires_at: integer(createdBody?.expires_at) || now + 86_400
   });
+  releaseShareRequest(req, provider.shareAttemptId, null);
   sendJson(res, 200, record);
 }
 
 function fileOperation({ req, res, store, id, content }) {
-  const file = store.getFile(id, requestScopeId(req));
+  const file = fileScopes(req).map((scopeId) => store.getFile(id, scopeId)).find(Boolean);
   if (!file) return sendError(res, 404, 'file_not_found', 'File not found', 'file_id');
   if (req.method === 'GET' && !content) return sendJson(res, 200, file);
   return sendError(res, 404, 'unsupported_endpoint', 'Unsupported OpenAI /v1 endpoint');
@@ -302,16 +322,24 @@ const COMPATIBILITY_CIRCUIT_SCOPE = { routeClass: 'compatibility_native', model:
 
 async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, { modelCatalog = modelCatalogForStore(store), requireImageModel = false, codexHostHealth = codexHostHealthForStore(store) } = {}) {
   const scopeId = requestScopeId(req);
+  const personalKey = req.proxyAuth?.kind === 'personal_share';
   const sharedUpstreamId = req.proxyAuth?.kind === 'share_session' ? req.proxyAuth.upstreamId : '';
-  const apiKeyId = sharedUpstreamId ? null : req.proxyAuth?.id || null;
+  const apiKeyId = isShareCredential(req.proxyAuth) ? null : req.proxyAuth?.id || null;
   const sessionId = sessionAffinity(req);
-  const pinnedId = sharedUpstreamId || store.sessionUpstream(sessionId, scopeId, apiKeyId);
-  const rotationUpstreamId = store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
+  const personalSessions = personalShareSessions(req, { sessionId });
+  if (personalKey) req.personalShareSessions = personalSessions;
+  const pinnedId = sharedUpstreamId || (personalKey ? '' : store.sessionUpstream(sessionId, scopeId, apiKeyId));
+  const rotationUpstreamId = personalKey ? null : store.sessionRotationUpstream(sessionId, scopeId, apiKeyId);
   const headerRequestedId = text(req.headers['x-upstream-id']);
+  if (personalKey && headerRequestedId) return null;
   if (sharedUpstreamId && headerRequestedId && headerRequestedId !== sharedUpstreamId) return null;
   const requestedId = sharedUpstreamId || headerRequestedId;
   const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
-  for (const candidate of candidates) {
+  const allowed = personalKey
+    ? candidates.filter((candidate) => personalSessions.some((session) => session.upstreamId === candidate.id))
+    : candidates;
+  for (const candidate of allowed) {
+    if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionId, allowReselect: true })) continue;
     const upstream = store.get(candidate.id, scopeId);
     const credentials = store.credentials(candidate.id);
     try {
@@ -323,7 +351,28 @@ async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, 
         ? await modelCatalog.imageModel(candidate.id, { fetchImpl, upstreamDeadlines, codexHostHealth })
         : null;
       if (requireImageModel && !hostModel) continue;
-      return { upstream, credentials, store, fetchImpl, req, res, scopeId, apiKeyId, sessionId, upstreamDeadlines, hostModel, codexHostHealth };
+      const shareAttemptId = compatibilityShareAttemptId(req);
+      if (!reserveShareRequest(req, shareAttemptId, {
+        model: hostModel || '',
+        route: new URL(req.url, 'http://localhost').pathname
+      })) {
+        continue;
+      }
+      return {
+        upstream,
+        credentials,
+        store,
+        fetchImpl,
+        req,
+        res,
+        scopeId,
+        apiKeyId,
+        sessionId,
+        upstreamDeadlines,
+        hostModel,
+        codexHostHealth,
+        shareAttemptId
+      };
     } catch (error) {
       if (error?.codexHostCircuitOpen) throw error;
     }
@@ -332,7 +381,9 @@ async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, 
 }
 
 function pinCompatibilitySession(context) {
-  if (context?.sessionId) context.store.pinSession(context.sessionId, context.upstream.id, context.scopeId, context.apiKeyId);
+  if (context?.sessionId && !isShareCredential(context.req.proxyAuth)) {
+    context.store.pinSession(context.sessionId, context.upstream.id, context.scopeId, context.apiKeyId);
+  }
 }
 
 async function codexFetch(context, path, options, { deferSettlement = false, pacingModel = '' } = {}) {
@@ -484,21 +535,29 @@ function extractCost(body) {
 
 function settleCost(store, upstream, body, req) {
   const settledCostMicros = extractCost(body);
-  const attemptId = randomUUID();
+  const attemptId = req.compatibilityShareAttemptId || randomUUID();
   const startedAt = new Date().toISOString();
   try {
     const scopeId = requestScopeId(req);
-    const shared = req.proxyAuth?.kind === 'share_session';
+    const shared = isShareCredential(req.proxyAuth);
     const apiKeyId = shared ? null : req.proxyAuth?.id || null;
     if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
     if (settledCostMicros !== undefined) {
       store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
-      store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
-      if (shared) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros);
+      if (!shared) store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
+      if (shared && req.proxyAuth.shareSessionId) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros);
+    } else if (shared) {
+      releaseShareRequest(req, attemptId, null);
     }
   } catch {
     // Accounting must not replace a successful provider response.
   }
+}
+
+function compatibilityShareAttemptId(req) {
+  if (!isShareCredential(req.proxyAuth)) return null;
+  req.compatibilityShareAttemptId ||= randomUUID();
+  return req.compatibilityShareAttemptId;
 }
 
 async function responseJson(response, upstreamDeadlines = {}, context = null) {
@@ -588,6 +647,29 @@ function sessionAffinity(req) {
 
 function requestScopeId(req) {
   return req.proxyAuth?.scopeId || 'default';
+}
+
+function fileScopes(req) {
+  if (req.proxyAuth?.kind === 'share_session' && req.proxyAuth.shareSessionId) {
+    return [`share-session:${req.proxyAuth.shareSessionId}`];
+  }
+  if (req.proxyAuth?.kind === 'personal_share') {
+    return personalShareSessions(req).map(({ shareSessionId }) => `share-session:${shareSessionId}`);
+  }
+  return [requestScopeId(req)];
+}
+
+function fileScopeId(req) {
+  if (isShareCredential(req.proxyAuth) && req.proxyAuth.shareSessionId) {
+    return `share-session:${req.proxyAuth.shareSessionId}`;
+  }
+  return requestScopeId(req);
+}
+
+function listFiles(store, req) {
+  const seen = new Set();
+  return fileScopes(req).flatMap((scopeId) => store.listFiles(scopeId))
+    .filter((file) => !seen.has(file.id) && seen.add(file.id));
 }
 
 function text(value) {

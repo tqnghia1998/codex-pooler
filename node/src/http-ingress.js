@@ -41,6 +41,20 @@ export async function readRequestBody(req, options = {}) {
   return encoding === 'zstd' ? decompressZstd(bytes, decodeLimits) : decompressZlib(bytes, encoding, decodeLimits);
 }
 
+export async function readJsonObjectBody(req, options = {}, { message = 'request body must be JSON', plainBadRequest = false } = {}) {
+  const bytes = await readRequestBody(req, options);
+  if (!bytes.length) return {};
+  try {
+    const value = JSON.parse(bytes.toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    return value;
+  } catch {
+    const error = new HttpError(400, 'invalid_request', message);
+    error.plainBadRequest = plainBadRequest;
+    throw error;
+  }
+}
+
 function contentEncoding(req) {
   const value = req.headers['content-encoding'];
   if (value === undefined) return '';
