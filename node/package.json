@@ -15,6 +15,7 @@
     "compatibility:release-check": "node scripts/check-client-releases.js",
     "compatibility:update": "node scripts/check-compatibility-fixtures.js --update",
     "pricing:refresh": "node scripts/refresh-openai-pricing.js",
+    "export:codex-share": "node ../scripts/export-codex-share.mjs",
     "test": "node --test"
   },
   "dependencies": {
