@@ -35,6 +35,12 @@ export function providerIssue(upstream) {
       message: 'The provider account is temporarily unavailable while Codex token refresh is retried.'
     };
   }
+  if (upstream.health?.status === 'cooldown') {
+    return {
+      code: 'provider_cooldown',
+      message: 'The provider account is temporarily unavailable. Try again after its cooldown.'
+    };
+  }
   if (providerQuotaExhausted(upstream)) {
     return {
       code: 'provider_quota_exhausted',
