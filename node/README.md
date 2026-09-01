@@ -13,7 +13,7 @@ This is the primary implementation for new development. It is a small single-pro
 
 Quota sharing is a separate product under `pool/`. It has its own server, UI,
 cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
-not initialize or expose Codex Pool accounts, routes, sessions, or storage.
+not initialize or expose Codex Share accounts, routes, sessions, or storage.
 Both products route their client-facing gateway surface through
 `src/gateway-dispatch.js`. Add proxy routes or compatibility behavior in the
 shared gateway modules, never as a Relaydeck-only or Codex Share-only route.
@@ -198,7 +198,9 @@ GET    /backend-api/codex/responses # WebSocket upgrade
 POST   /backend-api/codex/v1/responses
 POST   /backend-api/codex/v1/chat/completions
 POST   /backend-api/codex/responses/compact
+POST   /backend-api/codex/v1/responses/compact
 GET    /backend-api/codex/models
+GET    /backend-api/codex/v1/models
 POST   /backend-api/transcribe
 POST   /backend-api/files
 POST   /backend-api/files/:id/uploaded
