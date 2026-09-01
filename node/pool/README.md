@@ -46,7 +46,8 @@ hashes, and audit events. Back up all four files together.
 
 Relaydeck uses `node/.data`, port `3000`, and its own operator authentication.
 Starting either product does not start, configure, migrate, or mutate the
-other.
+other. `POOL_DATA_DIR` must not point to `node/.data`; Codex Share startup
+rejects that configuration.
 
 ## Authentication
 
@@ -64,8 +65,8 @@ workspaces can share those values across different people.
 
 Provider tokens are never included in ordinary browser account or upstream
 responses and are never placed in `localStorage`. The signed-in owner can
-explicitly reveal the current credential export from the linked Codex quota
-card. Browser sessions use opaque cookies and mutating management requests
+explicitly reveal the current credential export from a linked provider card.
+Browser sessions use opaque cookies and mutating management requests
 require a session-bound CSRF token.
 
 Codex Share account sessions are permanent until logout or revocation. The
@@ -77,7 +78,7 @@ refresh before completing the browser login, then
 refreshes every linked Codex account automatically every minute in batches of
 ten. The dashboard polls this stored quota state and can also refresh it
 manually. Some Codex plans expose only a percentage or provider units; Codex
-Codex Share shows that reported value rather than estimating a dollar balance.
+Share shows that reported value rather than estimating a dollar balance.
 At startup and once per hour, Codex Share also refreshes any refreshable Codex token
 that expires within 12 hours. Transient refresh failures retry with bounded
 exponential backoff; revoked or missing refresh tokens require the provider to
@@ -94,7 +95,8 @@ product, so its owner sets the current **manual share budget** in USD. Codex
 Share reserves offers against that amount and decrements it only for settled
 usage through share sessions. Updating the budget replaces the pool-side
 remaining amount; it does not query or change AISwitch, and outside use of the
-project is not visible here.
+project is not visible here. Use **Add AISwitch project** and its **How to get
+AISwitch project** guide to retrieve `project_id` and `api_key` from Compass.
 
 ## Sharing Flow
 
@@ -117,7 +119,7 @@ dashboard.
 Providers can pause, resume, resize, top up, revoke, or replace a session key.
 Providers and consumers can reveal the current key while the session remains
 until it is revoked. Replacing a key immediately invalidates the previous key.
-Session keys are pinned to the approved provider account. A personal key
+Session keys are pinned to the approved provider upstream. A personal key
 selects an active session with the most remaining quota, keeps normal
 conversation and Responses continuations on that selected session, and moves
 to another session only for a new request after the prior session becomes
@@ -225,6 +227,7 @@ GET    /v1/models
 POST   /v1/responses
 GET    /v1/responses                 # WebSocket upgrade
 POST   /v1/chat/completions
+POST   /v1/messages                  # AISwitch only
 GET    /v1/files
 POST   /v1/files
 GET    /v1/files/:id
@@ -250,7 +253,8 @@ POST   /backend-api/codex/images/generations
 POST   /backend-api/codex/images/edits
 ```
 
-Model routes require a valid `cp_share_...` or `cp_personal_...` key.
+Gateway routes require a valid `cp_share_...` or `cp_personal_...` key in a
+Bearer token; `POST /v1/messages` also accepts that key in `x-api-key`.
 Personal-key model lists are the union of active-session catalogs. Ordinary
 Relaydeck API keys are rejected.
 
