@@ -397,6 +397,7 @@ export class ProductStore {
           SET codex_subject = ?, email = ?, display_name = ?, updated_at = ?
           WHERE id = ?
         `).run(codexSubject, normalizedEmail, cleanName(name, normalizedEmail), now, existing.id);
+        this.ensureDefaultPersonalKey(existing.id);
         return existing.id;
       }
       const id = randomUUID();
@@ -404,6 +405,7 @@ export class ProductStore {
         INSERT INTO accounts (id, google_sub, codex_subject, email, display_name, avatar_url, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
       `).run(id, `codex:${hash(codexSubject)}`, codexSubject, normalizedEmail, cleanName(name, normalizedEmail), now, now);
+      this.ensureDefaultPersonalKey(id);
       return id;
     });
     return this.account(apply());
@@ -1717,6 +1719,16 @@ export class ProductStore {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, accountId, cleanKeyName(name), hash(apiKey), encrypt(apiKey, this.key), expiresAt, now, now);
     return this.personalKeyRow(id);
+  }
+
+  ensureDefaultPersonalKey(accountId) {
+    const existing = this.sqlite.prepare(`
+      SELECT id
+      FROM personal_api_keys
+      WHERE account_id = ? AND name = ?
+      LIMIT 1
+    `).get(accountId, 'Default');
+    return existing || this.createPersonalKey(accountId);
   }
 
   personalKeyRow(id) {
