@@ -120,6 +120,39 @@ test('the same Codex subject signs into the same Codex Pool account and refreshe
   }
 });
 
+test('reuses the canonical Codex upstream when duplicate links already exist', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-login-deduplicate-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const first = upstreamStore.create(
+      { type: 'codex', authJson: authJson({ refreshToken: 'first-refresh' }) },
+      { allowDuplicateCodexIdentity: true }
+    );
+    const second = upstreamStore.create(
+      { type: 'codex', authJson: authJson({ refreshToken: 'second-refresh' }) },
+      { allowDuplicateCodexIdentity: true }
+    );
+    const provider = sharingStore.upsertCodexAccount({
+      subject: 'codex-user',
+      issuer: 'https://auth.openai.com',
+      email: 'codex@example.com',
+      name: 'codex'
+    });
+    sharingStore.linkUpstream(provider.id, first.id);
+    sharingStore.linkUpstream(provider.id, second.id);
+    const manager = new CodexLoginManager({ sharingStore, upstreamStore });
+
+    const imported = manager.importAuthJson(authJson({ refreshToken: 'replacement-refresh' }));
+
+    assert.equal(imported.upstream.id, second.id);
+    assert.equal(upstreamStore.list().length, 2);
+    assert.equal(upstreamStore.credentials(second.id).refreshToken, 'replacement-refresh');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('auth.json import signs into the same account and replaces stored credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-import-'));
   try {

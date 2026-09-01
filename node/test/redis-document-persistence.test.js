@@ -44,8 +44,10 @@ test('hydrates and writes Redis records without using the configured data direct
   try {
     sourceStore = new Store(sourceDir);
     sourceStore.createScope({ id: 'seed-scope' });
+    const upstream = sourceStore.create({ type: 'compass', projectId: 'seed-project', projectKey: 'seed-key' });
     sourceProductStore = new ProductStore(sourceDir);
     const account = sourceProductStore.upsertCodexAccount({ subject: 'seed', email: 'seed@example.com', name: 'Seed' });
+    sourceProductStore.linkUpstream(account.id, upstream.id);
     await redis.set('test:manifest', JSON.stringify({ version: 1 }));
     await redis.set('test:encryption:gateway', readFileSync(sourceStore.keyPath).toString('base64'));
     await redis.set('test:encryption:product', readFileSync(sourceProductStore.keyPath).toString('base64'));
@@ -58,10 +60,14 @@ test('hydrates and writes Redis records without using the configured data direct
     const runtimeStore = new Store(runtimeDir);
     const runtimeProductStore = new ProductStore(runtimeDir);
     await persistence.hydrate(runtimeStore.sqlite, runtimeProductStore.sqlite);
-    runtimeStore.db = runtimeStore.load();
+    runtimeStore.db = null;
+    runtimeStore.load();
     runtimeStore.sqlite = persistence.attach('gateway', runtimeStore.sqlite);
     assert.equal(runtimeStore.listApiKeys().length, sourceStore.listApiKeys().length);
+    assert.equal(runtimeStore.db.scopes.some((scope) => scope.id === 'seed-scope'), true);
+    assert.equal(runtimeStore.get(upstream.id).projectId, 'seed-project');
     assert.equal(runtimeProductStore.account(account.id).email, 'seed@example.com');
+    assert.equal(runtimeProductStore.listAccountUpstreamLinks(account.id)[0].upstreamId, upstream.id);
 
     runtimeStore.createScope({ id: 'persisted-scope' });
     await persistence.flush();
