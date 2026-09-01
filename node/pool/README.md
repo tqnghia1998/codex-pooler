@@ -121,6 +121,9 @@ is known. Creating or resizing a grant is rejected atomically when it would
 overcommit the provider's current quota. If provider quota later falls below
 existing commitments, affected offers and sessions remain visible as
 underfunded but cannot accept or route new work beyond their backed amount.
+Providers can extend an active session's expiry from **Resize share session**;
+the new expiry cannot shorten the session or exceed the provider quota reset
+or the 30-day session limit.
 Providers can pause all sharing without deleting grants, or revoke all sharing
 to close offers, reject pending tickets, and revoke sessions for one Codex
 account.
