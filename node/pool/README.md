@@ -45,14 +45,12 @@ store for imported Codex credentials. `pool/.data/pool.sqlite` and
 hashes, and audit events. Back up all four files together.
 
 Set `POOL_REDIS_URL` when the deployment has no persistent volume. Codex Share
-restores those two SQLite stores and their encryption keys from Redis into its
-ephemeral data directory at startup, then queues a new Redis snapshot after
-each committed change and flushes it during graceful shutdown. Redis must be a
-durable, private service because it contains encrypted provider credentials and
-the keys needed to decrypt them. Redis mode permits one Codex Share replica;
-it uses a Redis lock and refuses to start a second replica with the same
-`POOL_REDIS_PREFIX`. SQLite remains the default when `POOL_REDIS_URL` is not
-set.
+uses Redis as the durable record store. It creates an isolated temporary
+working directory from the Redis records and encryption keys, then removes it
+on shutdown; it does not read, create, or update `POOL_DATA_DIR`. Redis must be
+a durable, private service because it contains encrypted provider credentials
+and the keys needed to decrypt them. SQLite remains the local-development
+default when `POOL_REDIS_URL` is not set.
 
 Relaydeck uses `node/.data`, port `3000`, and its own operator authentication.
 Starting either product does not start, configure, migrate, or mutate the
