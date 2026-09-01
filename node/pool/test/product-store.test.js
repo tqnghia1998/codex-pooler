@@ -105,6 +105,31 @@ test('keeps product data in pool.sqlite without changing the private gateway dat
   }
 });
 
+test('new Codex Share accounts receive one default personal key', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-default-personal-key-'));
+  try {
+    const sharingStore = new ProductStore(dir);
+    const user = account(sharingStore, 'default-key-user', 'default-key@example.com');
+
+    let keys = sharingStore.listPersonalKeys(user.id);
+    assert.equal(keys.length, 1);
+    assert.equal(keys[0].name, 'Default');
+    assert.equal(keys[0].status, 'active');
+
+    sharingStore.upsertCodexAccount({
+      subject: 'default-key-user',
+      issuer: 'https://auth.openai.com',
+      email: 'default-key@example.com',
+      name: 'default-key'
+    });
+    keys = sharingStore.listPersonalKeys(user.id);
+    assert.equal(keys.length, 1);
+    assert.match(sharingStore.revealPersonalKey(user.id).apiKey, /^cp_personal_/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('does not transfer a linked upstream between product accounts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ownership-'));
   try {
@@ -241,7 +266,7 @@ test('creates one personal key that selects active consumer sessions and preserv
     const firstSession = sharingStore.approveTicket(firstProvider.id, firstTicket.id, {}, upstreamStore);
     const secondSession = sharingStore.approveTicket(secondProvider.id, secondTicket.id, {}, upstreamStore);
 
-    assert.equal(sharingStore.personalKey(consumer.id).hasKey, false);
+    assert.equal(sharingStore.personalKey(consumer.id).hasKey, true);
     const { apiKey } = sharingStore.revealPersonalKey(consumer.id);
     assert.match(apiKey, /^cp_personal_/);
     assert.equal(sharingStore.revealPersonalKey(consumer.id).apiKey, apiKey);
