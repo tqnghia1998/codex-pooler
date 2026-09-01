@@ -22,7 +22,7 @@ import { ProductStore } from './product-store.js';
 import { CodexLoginManager } from './codex-login.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
 import { providerIssue } from './provider-availability.js';
-import { openRedisSqlitePersistence } from '../../src/redis-sqlite.js';
+import { openRedisDocumentPersistence } from '../../src/redis-document-persistence.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicDir = join(productRoot, 'public');
@@ -251,21 +251,20 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
 
 export async function startConfigured() {
   if (!process.env.POOL_REDIS_URL) return start();
-  const dataDir = process.env.POOL_DATA_DIR || resolve(productRoot, '.data');
-  requirePoolDataDir(dataDir);
-  const persistence = await openRedisSqlitePersistence({
+  const persistence = await openRedisDocumentPersistence({
     url: process.env.POOL_REDIS_URL,
     prefix: process.env.POOL_REDIS_PREFIX,
     logger: console
   });
   try {
-    await persistence.restore(dataDir);
-    const store = new Store(dataDir);
-    const productStore = new ProductStore(dataDir);
-    store.sqlite = persistence.attach('db.sqlite', store.sqlite, store.keyPath);
-    productStore.sqlite = persistence.attach('pool.sqlite', productStore.sqlite, productStore.keyPath);
-    await persistence.flush();
-    const server = start(undefined, { dataDir, store, productStore });
+    const runtimeDir = await persistence.restore();
+    const store = new Store(runtimeDir);
+    const productStore = new ProductStore(runtimeDir);
+    await persistence.hydrate(store.sqlite, productStore.sqlite);
+    store.db = store.load();
+    store.sqlite = persistence.attach('gateway', store.sqlite);
+    productStore.sqlite = persistence.attach('product', productStore.sqlite);
+    const server = start(undefined, { dataDir: runtimeDir, store, productStore });
     installRedisShutdown(server, persistence);
     return server;
   } catch (error) {
