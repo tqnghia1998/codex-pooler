@@ -35,7 +35,8 @@ those hooks.
 - Relaydeck uses `node/.env`; Codex Pool uses `node/pool/.env`.
 - Relaydeck uses `node/.data`; Codex Pool uses `node/pool/.data`.
 - Codex Pool cookies use the `codex_pool_*` namespace.
-- Codex Pool share keys use the `cp_share_...` prefix.
+- Codex Pool session keys use the `cp_share_...` prefix; consumer personal
+  routing keys use `cp_personal_...`.
 - Relaydeck has no `/auth/codex/*` or `/api/pool/*` product routes.
 - Codex Pool has no upstream administration routes or operator-key fallback.
 - Codex Pool proxy traffic accepts only an active share-session key.
@@ -83,6 +84,9 @@ device-login result.
 - Providers can pause, resume, resize, or revoke.
 - Providers and consumers can reveal the current key until the session is
   revoked; providers can rotate it or revoke the session.
+- Consumers can reveal one personal key that routes a new request to an active
+  session with the most remaining quota. Session and Responses continuations
+  stay pinned to their selected share session.
 
 The first version intentionally omits visibility controls, request
 minimums/maximums, model allowlists, concurrency limits, messages, automatic
@@ -92,13 +96,14 @@ approval, and provider reserves.
 
 For every `share_session` request:
 
-1. The key must map to an active session with positive remaining quota.
+1. A session key must map to an active session with positive remaining quota.
+   A personal key must map to at least one such consumer session.
 2. Routing is hard-pinned to the approved provider upstream.
 3. Headers and continuation pins cannot select another upstream.
 4. Existing credential, provider health, model capability, pacing, and
    compatibility behavior still applies.
 5. Successful priced usage settles idempotently against the provider upstream
-   and session grant.
+   and the selected session grant.
 6. Exhausted, paused, and revoked sessions are denied before new dispatches.
 
 Exact cost is known after completion, so the final request may exceed the
