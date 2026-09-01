@@ -34,6 +34,7 @@ import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, us
 import { restrictToParentElement, restrictToVerticalAxis } from '@dnd-kit/modifiers';
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
+import { PlugZap } from 'lucide-react';
 
 const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 1000, capDollars: 100 },
@@ -201,6 +202,8 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [pacing, setPacing] = useState([]);
   const [formDialog, setFormDialog] = useState({ isOpen: false, mode: 'add', upstream: null });
   const [formValues, setFormValues] = useState(FORM_DEFAULTS);
+  const [currentCredentials, setCurrentCredentials] = useState(null);
+  const [currentCredentialsLoading, setCurrentCredentialsLoading] = useState(false);
   const [credentialTarget, setCredentialTarget] = useState(null);
   const [credentialValue, setCredentialValue] = useState('');
   const [credentialSaving, setCredentialSaving] = useState(false);
@@ -234,6 +237,7 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshTokenTarget, setRefreshTokenTarget] = useState(null);
   const [isRefreshingToken, setIsRefreshingToken] = useState(false);
+  const [testingUpstreamId, setTestingUpstreamId] = useState(null);
   const [cooldownTarget, setCooldownTarget] = useState(null);
   const [isClearingCooldown, setIsClearingCooldown] = useState(false);
   const [filterQuery, setFilterQuery] = useStoredValue('codex_filter_filter-query');
@@ -430,6 +434,7 @@ function Dashboard({ themeMode, setThemeMode }) {
   }));
   const resetForm = useCallback(() => {
     setFormValues({ ...FORM_DEFAULTS, pacing: { ...DEFAULT_PACING, modelIntervals: [] } });
+    setCurrentCredentials(null);
     setFormDialog((s) => ({ ...s, isOpen: false }));
   }, []);
 
@@ -473,7 +478,22 @@ function Dashboard({ themeMode, setThemeMode }) {
       quotaSource: upstream.quotaSource || 'compass',
       pacing: { ...DEFAULT_PACING, ...(upstream.pacing || {}), modelIntervals: [...(upstream.pacing?.modelIntervals || [])] }
     });
+    setCurrentCredentials(null);
     setFormDialog({ isOpen: true, mode: 'edit', upstream });
+  };
+
+  const revealCurrentCredentials = async () => {
+    const upstream = formDialog.upstream;
+    if (!upstream) return;
+    setCurrentCredentialsLoading(true);
+    try {
+      const data = await api(`/api/upstreams/${upstream.id}/credentials`);
+      setCurrentCredentials(JSON.stringify(data.credentials, null, 2));
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setCurrentCredentialsLoading(false);
+    }
   };
 
   const replaceCredentials = (upstream) => {
@@ -546,6 +566,20 @@ function Dashboard({ themeMode, setThemeMode }) {
 
   const clearCooldown = (upstream) => {
     setCooldownTarget(upstream);
+  };
+
+  const testConnection = async (upstream) => {
+    setTestingUpstreamId(upstream.id);
+    try {
+      const data = await api(`/api/upstreams/${upstream.id}/test-connection`, { method: 'POST', body: '{}' });
+      const connection = data.connection;
+      show(`Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms`);
+      await load();
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setTestingUpstreamId(null);
+    }
   };
 
   const confirmClearCooldown = async () => {
@@ -804,6 +838,8 @@ function Dashboard({ themeMode, setThemeMode }) {
                     upstream={upstream}
                     pacing={pacingByUpstream.get(upstream.id)}
                     onRefresh={refresh}
+                    onTestConnection={testConnection}
+                    isTestingConnection={testingUpstreamId === upstream.id}
                     onRefreshToken={promptRefreshToken}
                     isRefreshingToken={isRefreshingToken && refreshTokenTarget?.id === upstream.id}
                     onClearCooldown={clearCooldown}
@@ -942,7 +978,10 @@ function Dashboard({ themeMode, setThemeMode }) {
             isActionLoading={isClearingCooldown}
             onAction={confirmClearCooldown}
           />
-          <Dialog isOpen={formDialog.isOpen} onOpenChange={() => setFormDialog((s) => ({ ...s, isOpen: false }))} width={640} purpose="form">
+          <Dialog isOpen={formDialog.isOpen} onOpenChange={() => {
+            setCurrentCredentials(null);
+            setFormDialog((s) => ({ ...s, isOpen: false }));
+          }} width={640} purpose="form">
             <Layout
               header={<DialogHeader title={formDialog.mode === 'edit' ? 'Edit upstream' : 'Add upstream'} hasDivider />}
               content={(
@@ -1071,6 +1110,29 @@ function Dashboard({ themeMode, setThemeMode }) {
                           </VStack>
                         </VStack>
                       )}
+                      {formDialog.mode === 'edit' && (
+                        <VStack gap={2}>
+                          <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+                            <Text type="label" weight="bold">Current credentials</Text>
+                            <Button
+                              label={currentCredentials ? 'Refresh credentials' : 'View credentials'}
+                              size="sm"
+                              variant="secondary"
+                              isLoading={currentCredentialsLoading}
+                              onClick={() => void revealCurrentCredentials()}
+                            />
+                          </HStack>
+                          {currentCredentials && (
+                            <TextArea
+                              label="Current credential data"
+                              value={currentCredentials}
+                              rows={16}
+                              isReadOnly
+                              hasSpellCheck={false}
+                            />
+                          )}
+                        </VStack>
+                      )}
                     </VStack>
                   </form>
                 </LayoutContent>
@@ -1078,7 +1140,10 @@ function Dashboard({ themeMode, setThemeMode }) {
               footer={(
                 <LayoutFooter hasDivider>
                   <HStack justify="end" gap={2}>
-                    <Button label="Cancel" variant="secondary" onClick={() => setFormDialog((s) => ({ ...s, isOpen: false }))} />
+                    <Button label="Cancel" variant="secondary" onClick={() => {
+                      setCurrentCredentials(null);
+                      setFormDialog((s) => ({ ...s, isOpen: false }));
+                    }} />
                     <Button label="Save" variant="primary" type="submit" form="upstream-form" />
                   </HStack>
                 </LayoutFooter>
@@ -1094,8 +1159,8 @@ function Metric({ label, value }) {
   return (
     <Card variant="muted" padding={2}>
       <VStack gap={1}>
-        <Text type="supporting" color="secondary">{label}</Text>
-        <Heading level={3} type="display-3">{value}</Heading>
+        <Text type="supporting" color="secondary" maxLines={1}>{label}</Text>
+        <Heading level={3} type="display-3" maxLines={1}>{value}</Heading>
       </VStack>
     </Card>
   );
@@ -1141,6 +1206,8 @@ function UpstreamCard({
   upstream,
   pacing,
   onRefresh,
+  onTestConnection,
+  isTestingConnection,
   onRefreshToken,
   isRefreshingToken,
   onClearCooldown,
@@ -1184,7 +1251,7 @@ function UpstreamCard({
             <VStack gap={1}>
               <Heading level={3} maxLines={1}>{upstream.name}</Heading>
               <HStack gap={1} vAlign="center" minHeight={28} wrap="wrap">
-                {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary">{tokenExpiry}</Text>}
+                {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary" maxLines={1}>{tokenExpiry}</Text>}
                 {coolingDown && <Badge label={`Cooling down until ${formatShortTime(upstream.health.nextEligibleAt)}`} variant="warning" />}
                 {pacingEnabled && <Badge label={queuedRequests ? `${queuedRequests} queued` : 'Pacing enabled'} variant={queuedRequests ? 'warning' : 'neutral'} />}
                 {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
@@ -1198,7 +1265,7 @@ function UpstreamCard({
           </HStack>
         </HStack>
         <VStack gap={1} height={56}>
-          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold">{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary">{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
           <ProgressBar
             label="Quota remaining"
             value={!quota ? 0 : quotaRemaining}
@@ -1207,10 +1274,10 @@ function UpstreamCard({
             variant={quotaVariant}
             style={progressStyleMap[quotaVariant]}
           />
-          <Text type="supporting" color="secondary" minHeight={20}>{quotaCount(quota)}</Text>
+          <Text type="supporting" color="secondary" minHeight={20} maxLines={1}>{quotaCount(quota)}</Text>
         </VStack>
         <VStack gap={1}>
-          <Text type="label" weight="bold">{capHeading}</Text>
+          <Text type="label" weight="bold" maxLines={1}>{capHeading}</Text>
           <ProgressBar
             label="Spending cap remaining"
             value={spending.capCredits <= 0 ? 0 : spendingRemaining}
@@ -1220,8 +1287,8 @@ function UpstreamCard({
             style={progressStyleMap[spendingVariant]}
           />
           <HStack justify="between" vAlign="center" gap={2}>
-            <Text type="supporting" color="secondary">{capUsage}</Text>
-            {recentActiveText && <Text type="supporting" color="secondary">{recentActiveText}</Text>}
+            <Text type="supporting" color="secondary" maxLines={1}>{capUsage}</Text>
+            {recentActiveText && <Text type="supporting" color="secondary" maxLines={1}>{recentActiveText}</Text>}
           </HStack>
         </VStack>
         <HStack gap={1} vAlign="center" wrap="wrap">
@@ -1233,6 +1300,17 @@ function UpstreamCard({
             size="sm"
             variant="secondary"
             onClick={() => onRefresh(upstream)}
+          />
+          <Button
+            label="Test connection"
+            tooltip="Test connection"
+            icon={<PlugZap size={16} />}
+            isIconOnly
+            size="sm"
+            variant="secondary"
+            isLoading={isTestingConnection}
+            isDisabled={isTestingConnection}
+            onClick={() => onTestConnection(upstream)}
           />
           {upstream.type === 'codex' && (
             <Button
@@ -1554,11 +1632,11 @@ function SortableRow({ upstream, index, onRemove }) {
       <Card>
         <HStack gap={2} vAlign="center" justify="between">
           <HStack gap={2} vAlign="center">
-            <Text type="label" color="secondary">⠿</Text>
+            <Text type="label" color="secondary" maxLines={1}>⠿</Text>
             <Badge label={ordinal(index + 1)} variant="purple" />
             <VStack>
-              <Text type="label" weight="bold">{upstream.name}</Text>
-              <Text type="supporting" color="secondary">{upstream.type} · {capSummary(upstream.spending) || 'no cap'}</Text>
+              <Text type="label" weight="bold" maxLines={1}>{upstream.name}</Text>
+              <Text type="supporting" color="secondary" maxLines={1}>{upstream.type} · {capSummary(upstream.spending) || 'no cap'}</Text>
             </VStack>
           </HStack>
           <Button label="Remove" size="sm" variant="ghost" onClick={() => onRemove(upstream.id)} />
@@ -1734,8 +1812,8 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
                         <Card key={candidate.id}>
                           <HStack justify="between" gap={2} vAlign="center">
                             <VStack gap={1}>
-                              <Text type="label" weight="bold">{candidate.order}. {candidate.name}</Text>
-                              <Text type="supporting" color="secondary">{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
+                              <Text type="label" weight="bold" maxLines={1}>{candidate.order}. {candidate.name}</Text>
+                              <Text type="supporting" color="secondary" maxLines={1}>{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
                             </VStack>
                             <Badge
                               label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : candidate.quota.status}
@@ -1834,19 +1912,19 @@ function SystemStatusDialog({
                     <Collapsible trigger="Operational details" defaultIsOpen={false}>
                       <Grid columns={{ minWidth: 190, max: 3, repeat: 'fit' }} gap={3}>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold">Gateway</Text>
-                          <Text type="supporting" color="secondary">{gateway?.runtime?.activeAttemptCount ?? 0} active attempts</Text>
-                          <Text type="supporting" color="secondary">{gateway?.retainedFailureCount ?? 0} retained failures</Text>
+                          <Text type="label" weight="bold" maxLines={1}>Gateway</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{gateway?.runtime?.activeAttemptCount ?? 0} active attempts</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{gateway?.retainedFailureCount ?? 0} retained failures</Text>
                         </VStack>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold">Model discovery</Text>
-                          <Text type="supporting" color="secondary">{catalog?.source || 'unknown'} source, {catalog?.freshness || 'unknown'} freshness</Text>
-                          <Text type="supporting" color="secondary">{catalog?.freshAccountCount ?? 0}/{catalog?.accountCount ?? 0} account catalogs fresh</Text>
+                          <Text type="label" weight="bold" maxLines={1}>Model discovery</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{catalog?.source || 'unknown'} source, {catalog?.freshness || 'unknown'} freshness</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{catalog?.freshAccountCount ?? 0}/{catalog?.accountCount ?? 0} account catalogs fresh</Text>
                         </VStack>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold">Compatibility</Text>
-                          <Text type="supporting" color="secondary">{compatibility?.counts?.active ?? 0} learned rules</Text>
-                          <Text type="supporting" color="secondary">{compatibility?.counts?.observations ?? 0} pending evidence records</Text>
+                          <Text type="label" weight="bold" maxLines={1}>Compatibility</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{compatibility?.counts?.active ?? 0} learned rules</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{compatibility?.counts?.observations ?? 0} pending evidence records</Text>
                         </VStack>
                       </Grid>
                     </Collapsible>
@@ -1879,9 +1957,9 @@ function StatusMetric({ label, value, variant }) {
   return (
     <Card variant="muted" padding={2}>
       <VStack gap={2}>
-        <Text type="supporting" color="secondary">{label}</Text>
+        <Text type="supporting" color="secondary" maxLines={1}>{label}</Text>
         <HStack justify="between" vAlign="center" gap={2}>
-          <Text type="label" weight="bold">{value}</Text>
+          <Text type="label" weight="bold" maxLines={1}>{value}</Text>
           <Badge label={variant === 'success' ? 'OK' : variant === 'warning' ? 'Check' : 'Unknown'} variant={variant} />
         </HStack>
       </VStack>
@@ -1932,25 +2010,25 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
                       <Card key={`${failure.completedAt}-${index}`} padding={3}>
                         <VStack gap={2}>
                           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                            <Text weight="bold">{failure.endpoint || 'Gateway request'}</Text>
+                            <Text weight="bold" maxLines={1}>{failure.endpoint || 'Gateway request'}</Text>
                             <HStack gap={1} vAlign="center">
                               {failure.responseStatusCode && <Badge label={`Upstream ${failure.responseStatusCode}`} variant="error" />}
                               <Badge label={failure.errorCode || 'failed'} variant="error" />
                             </HStack>
                           </HStack>
-                          <Text type="supporting" color="secondary">
+                          <Text type="supporting" color="secondary" maxLines={1}>
                             {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {formatFailovers(failure)}
                           </Text>
                           {failure.exclusionReasons?.length > 0 && (
-                            <Text type="supporting">Reasons: {failure.exclusionReasons.join(', ')}</Text>
+                            <Text type="supporting" maxLines={1}>Reasons: {failure.exclusionReasons.join(', ')}</Text>
                           )}
                           {failure.attempts?.map((attempt) => (
-                            <Text key={attempt.attemptNumber} type="supporting" color="secondary">
+                            <Text key={attempt.attemptNumber} type="supporting" color="secondary" maxLines={1}>
                               Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
                             </Text>
                           ))}
                           {failure.omittedAttemptCount > 0 && (
-                            <Text type="supporting" color="secondary">
+                            <Text type="supporting" color="secondary" maxLines={1}>
                               Showing the latest {failure.attempts.length} of {failure.attemptCount} attempts
                             </Text>
                           )}
@@ -2010,10 +2088,10 @@ function CompatibilityDialog({ isOpen, compatibility, isLoading, error, onResetF
                     {Object.entries(compatibility?.fingerprints || {}).map(([provider, fingerprint]) => (
                       <VStack key={provider} gap={1}>
                         <HStack justify="between" vAlign="center">
-                          <Text type="label" weight="bold">{provider}</Text>
+                          <Text type="label" weight="bold" maxLines={1}>{provider}</Text>
                           <Badge label={`v${fingerprint.version}`} variant="neutral" />
                         </HStack>
-                        <Text type="supporting" color="secondary">{fingerprint.hash}</Text>
+                        <Text type="supporting" color="secondary" maxLines={1}>{fingerprint.hash}</Text>
                       </VStack>
                     ))}
                   </Grid>
@@ -2054,11 +2132,11 @@ function CompatibilityFactList({ title, facts, onResetFact }) {
               <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
                 <VStack gap={1}>
                   <HStack gap={1} vAlign="center" wrap="wrap">
-                    <Text weight="bold">{fact.features.join(', ')}</Text>
+                    <Text weight="bold" maxLines={1}>{fact.features.join(', ')}</Text>
                     <Badge label={fact.provider} variant={fact.provider === 'codex' ? 'purple' : 'teal'} />
                     <Badge label={fact.route} variant="neutral" />
                   </HStack>
-                  <Text type="supporting" color="secondary">
+                  <Text type="supporting" color="secondary" maxLines={1}>
                     {fact.evidenceCount} observations · expires {formatDiagnosticTime(fact.expiresAt)}
                   </Text>
                 </VStack>
@@ -2086,10 +2164,10 @@ function ReadinessCheck({ name, status }) {
   return (
     <VStack gap={1}>
       <HStack justify="between" vAlign="center" gap={2}>
-        <Text type="supporting">{readinessLabel(name)}</Text>
+        <Text type="supporting" maxLines={1}>{readinessLabel(name)}</Text>
         <Badge label={readinessStatusLabel(status)} variant={diagnosticVariant(status)} />
       </HStack>
-      {description && <Text type="supporting" color="secondary">{description}</Text>}
+      {description && <Text type="supporting" color="secondary" maxLines={1}>{description}</Text>}
     </VStack>
   );
 }
