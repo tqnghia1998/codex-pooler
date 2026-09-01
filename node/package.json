@@ -30,6 +30,7 @@
     "nodemailer": "^7.0.13",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "redis": "^5.12.1",
     "ws": "^8.21.1"
   },
   "devDependencies": {
