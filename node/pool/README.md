@@ -290,6 +290,7 @@ POOL_ALLOWED_ORIGINS
 POOL_FIREWALL_ALLOWLIST
 POOL_TRUSTED_PROXIES
 POOL_COOKIE_SECURE
+POOL_PUBLIC_BASE_PATH
 POOL_CODEX_CLI
 POOL_DATA_DIR
 POOL_REDIS_URL
@@ -312,6 +313,12 @@ store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
 a 15-second outbox delivery interval are the defaults. `POOL_REDIS_PREFIX`
 defaults to `codex-share`; set it differently for each environment sharing a
 Redis service.
+
+Set `POOL_PUBLIC_BASE_PATH=/codex-share` when a reverse proxy or API Gateway
+publishes Codex Share below that path and strips the prefix before forwarding.
+The dashboard then loads its assets and management APIs from `/codex-share/`,
+and displays `https://host/codex-share/v1` as the API base URL. Leave it unset
+when the product is served from `/`.
 
 ## Validation
 

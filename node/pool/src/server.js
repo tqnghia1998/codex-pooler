@@ -52,9 +52,11 @@ export function createApp({
   upstreamDeadlines = {},
   logger = console,
   codexHostHealth = codexHostHealthForStore(store),
-  onCodexCredentialsImported = () => {}
+  onCodexCredentialsImported = () => {},
+  publicBasePath = process.env.POOL_PUBLIC_BASE_PATH
 } = {}) {
   const modelCatalog = modelCatalogForStore(store);
+  const basePath = normalizePublicBasePath(publicBasePath);
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -141,7 +143,7 @@ export function createApp({
         sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported Codex Share endpoint' } });
         return;
       }
-      await staticFile(req, res, url.pathname, ingress);
+      await staticFile(req, res, url.pathname, ingress, basePath);
     } catch (error) {
       if (res.headersSent) {
         res.destroy();
@@ -661,7 +663,7 @@ async function body(req) {
   });
 }
 
-async function staticFile(req, res, pathname, ingress) {
+async function staticFile(req, res, pathname, ingress, publicBasePath) {
   const filename = pathname === '/' ? 'index.html' : pathname.slice(1);
   if (!['index.html', 'app.js', 'styles.css', 'assets/codex-share.svg'].includes(filename)) {
     if (!firewallAllowed(req, ingress)) {
@@ -674,7 +676,16 @@ async function staticFile(req, res, pathname, ingress) {
   const content = await readFile(join(publicDir, filename));
   const extension = filename.slice(filename.lastIndexOf('.'));
   res.writeHead(200, { 'content-type': MIME_TYPES[extension], 'cache-control': filename === 'index.html' ? 'no-store' : 'public, max-age=300' });
-  res.end(content);
+  res.end(filename === 'index.html' ? content.toString().replace('__CODEX_SHARE_BASE_PATH__', publicBasePath) : content);
+}
+
+function normalizePublicBasePath(value) {
+  const path = String(value || '').trim();
+  if (!path || path === '/') return '/';
+  if (!path.startsWith('/') || path.startsWith('//') || path.includes('?') || path.includes('#')) {
+    throw new Error('POOL_PUBLIC_BASE_PATH must be an absolute path without a query or fragment');
+  }
+  return `${path.replace(/\/+$/, '')}/`;
 }
 
 function poolIngress(input = {}) {
