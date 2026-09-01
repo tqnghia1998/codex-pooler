@@ -540,3 +540,22 @@ export function publicUpstream(upstream) {
     eligibility: spendingEligibility(upstream).status
   };
 }
+
+export function exportUpstreamCredentials(upstream, credentials) {
+  if (upstream.type === 'codex') {
+    return {
+      auth_mode: 'chatgpt',
+      OPENAI_API_KEY: null,
+      tokens: {
+        id_token: credentials.idToken || null,
+        access_token: credentials.accessToken || null,
+        refresh_token: credentials.refreshToken || null,
+        account_id: upstream.accountId || null
+      }
+    };
+  }
+  return {
+    project_id: upstream.projectId || null,
+    project_key: credentials.projectKey || null
+  };
+}
