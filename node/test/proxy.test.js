@@ -770,6 +770,77 @@ test('projects misalignment policy failures without refreshing or poisoning the 
   }
 });
 
+test('relays bounded misalignment guidance only through direct native HTTP', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-policy-details-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: {
+      code: 'misalignment_policy_violation',
+      message: 'Continue with the requested correction.',
+      misalignment: {
+        error_type: 'policy',
+        detailed_explanation: 'Use the requested safe direction.',
+        steer: { message: 'Continue safely.' },
+        provider_field: 'drop'
+      },
+      provider_field: 'drop'
+    }
+  }), { status: 403, headers: { 'content-type': 'application/json' } }));
+  try {
+    const native = await request(base, '/backend-api/codex/responses', { model: 'gpt-5.6-sol', input: 'blocked' });
+    assert.equal(native.response.status, 403);
+    assert.deepEqual(native.body, {
+      error: {
+        code: 'misalignment_policy_violation',
+        message: 'Continue with the requested correction.',
+        misalignment: {
+          error_type: 'policy',
+          detailed_explanation: 'Use the requested safe direction.',
+          steer: { message: 'Continue safely.' }
+        }
+      }
+    });
+
+    const publicResult = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'blocked' });
+    assert.deepEqual(publicResult.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Continue with the requested correction.'
+      }
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays bounded misalignment guidance in direct native SSE terminals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-policy-stream-details-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(
+    'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"misalignment_policy_violation","message":"Continue safely.","misalignment":{"detailed_explanation":"Use the safe path.","provider_field":"drop"}}}}\n\n',
+    { headers: { 'content-type': 'text/event-stream' } }
+  ));
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'blocked', stream: true })
+    });
+    const text = await response.text();
+    assert.match(text, /Use the safe path\./);
+    assert.doesNotMatch(text, /provider_field/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('projects streamed misalignment policy failures and settles them once', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-policy-stream-'));
   const store = new Store(dir);
