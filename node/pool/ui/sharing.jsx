@@ -4,13 +4,17 @@ import { Badge } from '@astryxdesign/core/Badge';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
+import { Code } from '@astryxdesign/core/Code';
+import { CodeBlock } from '@astryxdesign/core/CodeBlock';
 import { DateInput } from '@astryxdesign/core/DateInput';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
 import { EmptyState } from '@astryxdesign/core/EmptyState';
 import { FieldLabel } from '@astryxdesign/core/Field';
-import { Grid } from '@astryxdesign/core/Grid';
+import { Grid, GridSpan } from '@astryxdesign/core/Grid';
+import { Icon } from '@astryxdesign/core/Icon';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { IconButton } from '@astryxdesign/core/IconButton';
+import { Link } from '@astryxdesign/core/Link';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
@@ -20,7 +24,8 @@ import { Tab, TabList } from '@astryxdesign/core/TabList';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
-import { Ban, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
+import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
+import { UserGuideDialog } from './UserGuideDialog.jsx';
 
 const SHARING_VIEWS = new Set([
   'community-offers',
@@ -99,6 +104,8 @@ export function SharingWorkspace({ onNotice }) {
   const [authJsonDialog, setAuthJsonDialog] = useState(false);
   const [authJson, setAuthJson] = useState('');
   const [authJsonLoading, setAuthJsonLoading] = useState(false);
+  const [aiswitchDialog, setAiswitchDialog] = useState(null);
+  const [manualBudgetDialog, setManualBudgetDialog] = useState(null);
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const [testingUpstreamId, setTestingUpstreamId] = useState(null);
   const [testingSessionId, setTestingSessionId] = useState(null);
@@ -250,10 +257,14 @@ export function SharingWorkspace({ onNotice }) {
   };
 
   const refreshQuota = async () => {
-    if (!upstreams.length) return;
+    const refreshable = upstreams.filter((upstream) => upstream.type === 'codex');
+    if (!refreshable.length) {
+      onNotice('AISwitch share budgets are set manually');
+      return;
+    }
     setQuotaRefreshing(true);
     try {
-      await Promise.all(upstreams.map((upstream) => api(`/api/pool/upstreams/${upstream.id}/refresh-quota`, {
+      await Promise.all(refreshable.map((upstream) => api(`/api/pool/upstreams/${upstream.id}/refresh-quota`, {
         method: 'POST',
         body: '{}'
       })));
@@ -270,7 +281,7 @@ export function SharingWorkspace({ onNotice }) {
     try {
       const data = await api('/api/pool/upstreams/credentials');
       if (!data.credentials?.length) {
-        onNotice('No linked Codex credentials found', true);
+        onNotice('No linked provider credentials found', true);
         return;
       }
       setCredentialsDialog({
@@ -410,25 +421,32 @@ export function SharingWorkspace({ onNotice }) {
         </HStack>
       </HStack>
 
-      <Grid columns={{ minWidth: 320, max: 2, repeat: 'fit' }} gap={3}>
-        <QuotaOverview
-          upstreams={upstreams}
-          isRefreshing={quotaRefreshing}
-          onRefresh={() => void refreshQuota()}
-          onLinkCodex={() => void startCodexLogin()}
-          onImportAuthJson={openAuthJsonDialog}
-          onRevealCredentials={() => void revealCredentials()}
-          onTestConnection={(upstream) => void testConnection(upstream)}
-          testingUpstreamId={testingUpstreamId}
-          onToggleSharing={(upstream) => void mutate(
-            () => api(`/api/pool/providers/${upstream.id}/${upstream.sharing?.status === 'paused' ? 'resume' : 'pause'}`, {
-              method: 'POST',
-              body: '{}'
-            }),
-            upstream.sharing?.status === 'paused' ? 'Sharing resumed' : 'Sharing paused'
-          )}
-          onRevokeAll={setProviderRevokeTarget}
-        />
+      <Grid columns={{ minWidth: 320, max: 3, repeat: 'fit' }} gap={3}>
+        <GridSpan columns={2}>
+          <QuotaOverview
+            upstreams={upstreams}
+            isRefreshing={quotaRefreshing}
+            onRefresh={() => void refreshQuota()}
+            onLinkCodex={() => void startCodexLogin()}
+            onImportAuthJson={openAuthJsonDialog}
+            onAddAiswitch={() => setAiswitchDialog({ projectId: '', projectKey: '', quotaDollars: 10 })}
+            onRevealCredentials={() => void revealCredentials()}
+            onTestConnection={(upstream) => void testConnection(upstream)}
+            testingUpstreamId={testingUpstreamId}
+            onToggleSharing={(upstream) => void mutate(
+              () => api(`/api/pool/providers/${upstream.id}/${upstream.sharing?.status === 'paused' ? 'resume' : 'pause'}`, {
+                method: 'POST',
+                body: '{}'
+              }),
+              upstream.sharing?.status === 'paused' ? 'Sharing resumed' : 'Sharing paused'
+            )}
+            onRevokeAll={setProviderRevokeTarget}
+            onSetManualBudget={(upstream) => setManualBudgetDialog({
+              upstream,
+              quotaDollars: upstream.commitment?.actualQuotaDollars ?? 0
+            })}
+          />
+        </GridSpan>
         <PersonalKeyCard
           personalKeys={showPastData ? personalKeys : personalKeys.filter((key) => key.status === 'active')}
           sessions={personalKeySessions}
@@ -624,6 +642,7 @@ export function SharingWorkspace({ onNotice }) {
       <OfferDialog
         value={offerDialog}
         upstreams={upstreams}
+        offerableUpstreams={offerableUpstreams}
         onClose={() => setOfferDialog(null)}
         onSave={(value) => void mutate(async () => {
           const path = value.offer ? `/api/pool/offers/${value.offer.id}` : '/api/pool/offers';
@@ -640,6 +659,30 @@ export function SharingWorkspace({ onNotice }) {
           setOfferDialog(null);
         }, value.offer ? 'Offer updated' : 'Offer published')}
         onChange={setOfferDialog}
+      />
+      <AiswitchProjectDialog
+        value={aiswitchDialog}
+        onClose={() => setAiswitchDialog(null)}
+        onChange={setAiswitchDialog}
+        onSave={(value) => void mutate(async () => {
+          await api('/api/pool/upstreams/aiswitch', {
+            method: 'POST',
+            body: JSON.stringify(value)
+          });
+          setAiswitchDialog(null);
+        }, 'AISwitch project added with a manual share budget')}
+      />
+      <ManualBudgetDialog
+        value={manualBudgetDialog}
+        onClose={() => setManualBudgetDialog(null)}
+        onChange={setManualBudgetDialog}
+        onSave={(value) => void mutate(async () => {
+          await api(`/api/pool/upstreams/${value.upstream.id}/manual-budget`, {
+            method: 'PUT',
+            body: JSON.stringify({ quotaDollars: value.quotaDollars })
+          });
+          setManualBudgetDialog(null);
+        }, 'AISwitch manual share budget updated')}
       />
       <PersonalKeyDialog
         value={personalKeyDialog}
@@ -778,23 +821,26 @@ function QuotaOverview({
   onRefresh,
   onLinkCodex,
   onImportAuthJson,
+  onAddAiswitch,
   onRevealCredentials,
   onTestConnection,
   testingUpstreamId,
   onToggleSharing,
-  onRevokeAll
+  onRevokeAll,
+  onSetManualBudget
 }) {
   if (!upstreams.length) {
     return (
       <Card variant="muted">
         <HStack justify="between" vAlign="center" gap={3} wrap="wrap">
           <VStack gap={1}>
-            <Heading level={3} maxLines={1}>No Codex account linked</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Link a Codex account to load its quota and publish an offer.</Text>
+            <Heading level={3} maxLines={1}>No share provider linked</Heading>
+            <Text type="supporting" color="secondary" maxLines={1}>Link Codex quota or add an AISwitch project to publish an offer.</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
             <Button label="Login with Codex" size="sm" variant="primary" onClick={onLinkCodex} />
             <Button label="Login with auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
+            <Button label="Add AISwitch project" size="sm" variant="secondary" onClick={onAddAiswitch} />
           </HStack>
         </HStack>
       </Card>
@@ -805,12 +851,13 @@ function QuotaOverview({
       <VStack gap={3}>
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
-            <Heading level={3} maxLines={1}>Your Codex quota</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Provider usage is refreshed automatically every minute.</Text>
+            <Heading level={3} maxLines={1}>Your share providers</Heading>
+            <Text type="supporting" color="secondary" maxLines={1}>Codex quota refreshes automatically; AISwitch share budgets are owner-managed.</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
             <Button label="View credentials" size="sm" variant="secondary" onClick={onRevealCredentials} />
             <Button label="Refresh quota" size="sm" variant="secondary" isLoading={isRefreshing} onClick={onRefresh} />
+            <Button label="Add AISwitch project" size="sm" variant="secondary" onClick={onAddAiswitch} />
           </HStack>
         </HStack>
         <Grid columns={{ minWidth: 220, max: 3, repeat: 'fit' }} gap={2}>
@@ -824,6 +871,7 @@ function QuotaOverview({
               isTestingConnection={testingUpstreamId === upstream.id}
               onToggleSharing={onToggleSharing}
               onRevokeAll={onRevokeAll}
+              onSetManualBudget={onSetManualBudget}
             />
           ))}
         </Grid>
@@ -914,43 +962,46 @@ function PersonalKeyCard({ personalKeys, sessions, onCreate, onReveal, onRotate,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll }) {
+function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onSetManualBudget }) {
   const quota = upstream.quota;
+  const isAiswitch = upstream.quotaSource === 'aiswitch';
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
   return (
-    <Card variant={issue ? 'red' : 'default'}>
-      <VStack gap={2}>
-        <HStack justify="between" vAlign="start" gap={2}>
-          <VStack gap={1}>
-            <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
-            <Text type="supporting" color="secondary" maxLines={1}>{quota?.label || 'Waiting for provider quota'}</Text>
-          </VStack>
-          {issue && <ProviderIssueBadge issue={issue} />}
-        </HStack>
-        <Text weight="bold" maxLines={1}>{quotaRemaining(quota)}</Text>
-        {percentage !== null && (
-          <ProgressBar
-            label="Provider quota remaining"
-            isLabelHidden
-            value={percentage}
-            max={100}
-            variant={quotaProgressVariant(percentage)}
-          />
-        )}
-        <Text type="supporting" color="secondary" maxLines={1}>{quotaTiming(quota)}</Text>
-        {commitment && (
-          <Text type="supporting" color="secondary" maxLines={1}>
-            ${money(commitment.totalCommitmentDollars)} committed · {Number.isFinite(commitment.offerableQuotaDollars)
-              ? `$${money(commitment.offerableQuotaDollars)} available to offer`
-              : 'offerable quota unavailable'}
-          </Text>
-        )}
-        {commitment?.underfundedQuotaDollars > 0 && (
-          <Badge label={`$${money(commitment.underfundedQuotaDollars)} underfunded`} variant="error" />
-        )}
+    <Card variant={issue ? 'red' : 'default'} height="100%">
+      <VStack gap={3} height="100%" vAlign="between">
+        <VStack gap={2}>
+          <HStack justify="between" vAlign="start" gap={2}>
+            <VStack gap={1}>
+              <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
+              <Text type="supporting" color="secondary" maxLines={1}>{isAiswitch ? 'AISwitch · manual share budget' : quota?.label || 'Waiting for provider quota'}</Text>
+            </VStack>
+            {issue && <ProviderIssueBadge issue={issue} />}
+          </HStack>
+          <Text weight="bold" maxLines={1}>{isAiswitch ? `$${money(commitment?.actualQuotaDollars)} manual budget left` : quotaRemaining(quota)}</Text>
+          {percentage !== null && (
+            <ProgressBar
+              label="Provider quota remaining"
+              isLabelHidden
+              value={percentage}
+              max={100}
+              variant={quotaProgressVariant(percentage)}
+            />
+          )}
+          <Text type="supporting" color="secondary" maxLines={1}>{isAiswitch ? 'Decreases only from Codex Share session usage.' : quotaTiming(quota)}</Text>
+          {commitment && (
+            <Text type="supporting" color="secondary" maxLines={1}>
+              ${money(commitment.totalCommitmentDollars)} committed · {Number.isFinite(commitment.offerableQuotaDollars)
+                ? `$${money(commitment.offerableQuotaDollars)} available to offer`
+                : 'offerable quota unavailable'}
+            </Text>
+          )}
+          {commitment?.underfundedQuotaDollars > 0 && (
+            <Badge label={`$${money(commitment.underfundedQuotaDollars)} underfunded`} variant="error" />
+          )}
+        </VStack>
         <HStack justify="end" gap={1} wrap="wrap">
           <IconButton
             label="Test connection"
@@ -962,6 +1013,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
             isDisabled={isTestingConnection}
             onClick={() => onTestConnection(upstream)}
           />
+          {isAiswitch && <Button label="Set budget" size="sm" variant="secondary" onClick={() => onSetManualBudget(upstream)} />}
           {issue?.code === 'provider_reauth_required' && (
             <>
               <Button label="Reconnect" size="sm" variant="primary" onClick={onLinkCodex} />
@@ -990,30 +1042,35 @@ function OffersView({ offers, requestedOfferIds, emptyTitle, emptyDescription, o
       {offers.map((offer) => {
         const issue = offer.status === 'active' ? offer.upstream?.providerIssue : null;
         return (
-        <Card key={offer.id} variant={issue ? 'red' : 'default'}>
-          <VStack gap={3}>
-            <HStack justify="between" vAlign="start" gap={2}>
-              <VStack gap={1}>
-                <Heading level={3} maxLines={1}>{accountLabel(offer.provider)}</Heading>
-                <Text type="supporting" color="secondary" maxLines={1}>
-                  {offer.expiresAt ? `Expires ${dateTime(offer.expiresAt)}` : 'Expiry unavailable'}
-                </Text>
-              </VStack>
-              <HStack gap={1} wrap="wrap">
-                {!offer.isUsable && <Badge label="unusable" variant="error" />}
-                {issue && <ProviderIssueBadge issue={issue} />}
-                <Badge label={offer.status} variant={offer.status === 'active' ? 'green' : 'neutral'} />
+        <Card key={offer.id} variant={issue ? 'red' : 'default'} height="100%" minHeight={192}>
+          <VStack gap={3} height="100%" vAlign="between">
+            <VStack gap={3}>
+              <HStack justify="between" vAlign="start" gap={2}>
+                <VStack gap={1}>
+                  <Heading level={3} maxLines={1}>{accountLabel(offer.provider)}</Heading>
+                  <Text type="supporting" color="secondary" maxLines={1}>
+                    {offer.expiresAt ? `Expires ${dateTime(offer.expiresAt)}` : 'Expiry unavailable'}
+                  </Text>
+                </VStack>
+                <HStack gap={1} wrap="wrap">
+                  {!offer.isUsable && <Badge label="unusable" variant="error" />}
+                  {issue && <ProviderIssueBadge issue={issue} />}
+                  <Badge label={offer.status} variant={offer.status === 'active' ? 'green' : 'neutral'} />
+                  <UpstreamSourceBadge upstream={offer.upstream} />
+                </HStack>
               </HStack>
-            </HStack>
-            <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-              <Text weight="bold" maxLines={1}>${money(offer.quotaDollars)} offered</Text>
-              <Text type="supporting" color="secondary" maxLines={1}>{providerQuota(offer.upstream?.quota)}</Text>
-            </HStack>
-            {offer.isUnderfunded && (
-              <Text type="supporting" color="secondary" maxLines={1}>
-                ${money(offer.backedQuotaDollars)} currently backed · ${money(offer.underfundedQuotaDollars)} unavailable
-              </Text>
-            )}
+              <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+                <Text weight="bold" maxLines={1}>${money(offer.quotaDollars)} offered</Text>
+                <Text type="supporting" color="secondary" maxLines={1}>
+                  {offer.upstream?.quotaSource === 'aiswitch' ? 'AISwitch · manual share budget' : providerQuota(offer.upstream?.quota)}
+                </Text>
+              </HStack>
+              {offer.isUnderfunded && (
+                <Text type="supporting" color="secondary" maxLines={1}>
+                  ${money(offer.backedQuotaDollars)} currently backed · ${money(offer.underfundedQuotaDollars)} unavailable
+                </Text>
+              )}
+            </VStack>
             <HStack justify="end" gap={2}>
               {offer.isProvider
                 ? <Button label="Edit" size="sm" variant="secondary" onClick={() => onEdit(offer)} />
@@ -1103,44 +1160,47 @@ function SessionsView({
           ['active', 'paused', 'exhausted'].includes(session.status)
         );
         return (
-          <Card key={session.id} variant={hasProviderIssue ? 'red' : 'default'}>
-            <VStack gap={2}>
-              <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                <VStack gap={1}>
-                  <Heading level={3} maxLines={1}>{accountLabel(session.role === 'provider' ? session.consumer : session.provider)}</Heading>
-                  <Text type="supporting" color="secondary" maxLines={1}>
-                    {session.expiresAt ? `Expires ${dateTime(session.expiresAt)}` : 'No expiry'}
-                  </Text>
-                </VStack>
-                <HStack gap={1} wrap="wrap">
-                  {hasProviderIssue && <ProviderIssueBadge issue={issue} />}
-                  {providerPaused && <Badge label="Provider paused" variant="warning" />}
-                  {(!hasProviderIssue && !providerPaused || session.status !== 'active') && (
-                    <Badge label={session.status} variant={session.status === 'active' ? 'green' : session.status === 'exhausted' ? 'warning' : 'neutral'} />
-                  )}
-                </HStack>
-              </HStack>
-              <VStack gap={1}>
+          <Card key={session.id} variant={hasProviderIssue ? 'red' : 'default'} height="100%" minHeight={192}>
+            <VStack gap={3} height="100%" vAlign="between">
+              <VStack gap={2}>
                 <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                  <Text weight="bold" maxLines={1}>${money(session.remainingQuotaDollars)} remaining</Text>
-                  <Text type="supporting" color="secondary" maxLines={1}>
-                    ${money(session.consumedQuotaDollars)} used of ${money(session.grantedQuotaDollars)}
-                  </Text>
+                  <VStack gap={1}>
+                    <Heading level={3} maxLines={1}>{accountLabel(session.role === 'provider' ? session.consumer : session.provider)}</Heading>
+                    <Text type="supporting" color="secondary" maxLines={1}>
+                      {session.expiresAt ? `Expires ${dateTime(session.expiresAt)}` : 'No expiry'}
+                    </Text>
+                  </VStack>
+                  <HStack gap={1} wrap="wrap">
+                    {hasProviderIssue && <ProviderIssueBadge issue={issue} />}
+                    {providerPaused && <Badge label="Provider paused" variant="warning" />}
+                    {(!hasProviderIssue && !providerPaused || session.status !== 'active') && (
+                      <Badge label={session.status} variant={session.status === 'active' ? 'green' : session.status === 'exhausted' ? 'warning' : 'neutral'} />
+                    )}
+                    <UpstreamSourceBadge upstream={session.upstream} />
+                  </HStack>
                 </HStack>
-                <ProgressBar
-                  label="Share quota remaining"
-                  isLabelHidden
-                  value={remainingPercent}
-                  max={100}
-                  variant={quotaVariant}
-                />
+                <VStack gap={1}>
+                  <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+                    <Text weight="bold" maxLines={1}>${money(session.remainingQuotaDollars)} remaining</Text>
+                    <Text type="supporting" color="secondary" maxLines={1}>
+                      ${money(session.consumedQuotaDollars)} used of ${money(session.grantedQuotaDollars)}
+                    </Text>
+                  </HStack>
+                  <ProgressBar
+                    label="Share quota remaining"
+                    isLabelHidden
+                    value={remainingPercent}
+                    max={100}
+                    variant={quotaVariant}
+                  />
+                </VStack>
+                {session.isUnderfunded && session.status === 'active' && (
+                  <Text type="supporting" color="secondary" maxLines={1}>
+                    ${money(session.backedRemainingQuotaDollars)} of ${money(session.remainingQuotaDollars)} remaining quota is currently backed
+                  </Text>
+                )}
+                <ActivitySummary activity={session.activity} />
               </VStack>
-              {session.isUnderfunded && session.status === 'active' && (
-                <Text type="supporting" color="secondary" maxLines={1}>
-                  ${money(session.backedRemainingQuotaDollars)} of ${money(session.remainingQuotaDollars)} remaining quota is currently backed
-                </Text>
-              )}
-              <ActivitySummary activity={session.activity} />
               <HStack justify="end" gap={1} wrap="wrap">
                 {session.role === 'consumer' && session.status === 'active' && (
                   <IconButton
@@ -1274,6 +1334,11 @@ function ProviderIssueBadge({ issue }) {
   return <Badge label={issue.code === 'provider_reauth_required' ? 'Sign-in required' : 'Unavailable'} variant="error" />;
 }
 
+function UpstreamSourceBadge({ upstream }) {
+  const isAiswitch = upstream?.quotaSource === 'aiswitch';
+  return <Badge label={isAiswitch ? 'aiswitch' : 'codex'} variant={isAiswitch ? 'teal' : 'purple'} />;
+}
+
 function CodexLoginCard({ login, onCancel, onRetry }) {
   const waiting = ['starting', 'waiting'].includes(login.status);
   const retryable = ['failed', 'cancelled'].includes(login.status);
@@ -1348,7 +1413,132 @@ function AuthJsonLoginDialog({ isOpen, value, isLoading, onChange, onClose, onSu
   );
 }
 
-function OfferDialog({ value, upstreams, onClose, onSave, onChange }) {
+function AiswitchProjectDialog({ value, onClose, onSave, onChange }) {
+  const [guideOpen, setGuideOpen] = useState(false);
+  return (
+    <>
+      <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={520}>
+        <Layout
+          header={<DialogHeader title="Add AISwitch project" subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
+          content={(
+            <LayoutContent>
+              {value && <VStack gap={3}>
+                <Banner
+                  title="Manual share budget"
+                  description="AISwitch quota cannot be queried here. Set the amount currently available for sharing; Codex Share will decrement it only as shared sessions spend."
+                  status="info"
+                />
+                <TextInput
+                  label="AISwitch project ID"
+                  value={value.projectId}
+                  onChange={(projectId) => onChange({ ...value, projectId })}
+                  hasAutoFocus
+                  isRequired
+                />
+                <TextInput
+                  label="AISwitch project key"
+                  value={value.projectKey}
+                  onChange={(projectKey) => onChange({ ...value, projectKey })}
+                  isRequired
+                />
+                <NumberInput
+                  label="Manual share budget (USD)"
+                  value={value.quotaDollars}
+                  onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
+                  min={0.01}
+                  step={0.01}
+                  isRequired
+                />
+              </VStack>}
+            </LayoutContent>
+          )}
+          footer={(
+            <DialogFooter
+              startContent={(
+                <Link label="How to get AISwitch project" onClick={() => setGuideOpen(true)}>
+                  <HStack gap={1} vAlign="center">
+                    <Icon icon={CircleHelp} size="sm" />
+                    <Text>How to get AISwitch project</Text>
+                  </HStack>
+                </Link>
+              )}
+              onClose={onClose}
+              onSave={() => onSave(value)}
+              saveLabel="Add project"
+              isSaveDisabled={!value?.projectId.trim() || !value?.projectKey.trim() || Number(value?.quotaDollars) <= 0}
+            />
+          )}
+        />
+      </Dialog>
+      <AiswitchProjectGuide isOpen={guideOpen} onClose={() => setGuideOpen(false)} />
+    </>
+  );
+}
+
+const AISWITCH_PROJECT_SCRIPT = "fetch('/api/v1/cqp/ccswitch/api_key/get_or_generate',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json()).then(r=>console.log(r.data))";
+
+function AiswitchProjectGuide({ isOpen, onClose }) {
+  return (
+    <UserGuideDialog
+      isOpen={isOpen}
+      onClose={onClose}
+      title="How to get an AISwitch project"
+      subtitle="Retrieve your project ID and API key from Compass"
+    >
+      <VStack gap={2}>
+        <Text weight="bold">1. Open Compass</Text>
+        <Text type="supporting" color="secondary">
+          Open <Link href="https://compass.llm.shopee.io/integration/my" isExternalLink>compass.llm.shopee.io/integration/my</Link> and sign in.
+        </Text>
+      </VStack>
+      <VStack gap={2}>
+        <Text weight="bold">2. Generate or retrieve the project key</Text>
+        <Text type="supporting" color="secondary">Open your browser DevTools console, paste this script, and run it.</Text>
+        <CodeBlock code={AISWITCH_PROJECT_SCRIPT} language="javascript" hasCopyButton isWrapped width="100%" />
+      </VStack>
+      <VStack gap={2}>
+        <Text weight="bold">3. Enter the returned values</Text>
+        <Text type="supporting" color="secondary">
+          Copy <Code>project_id</Code> into AISwitch project ID and <Code>api_key</Code> into AISwitch project key in the form.
+        </Text>
+      </VStack>
+    </UserGuideDialog>
+  );
+}
+
+function ManualBudgetDialog({ value, onClose, onSave, onChange }) {
+  return (
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
+      <Layout
+        header={<DialogHeader title="Set AISwitch share budget" subtitle={value?.upstream?.name} onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            {value && <VStack gap={3}>
+              <Banner
+                title="Enter the current available amount"
+                description="This replaces the pool-side remaining budget. It does not query or change AISwitch itself."
+                status="info"
+              />
+              <NumberInput
+                label="Manual share budget (USD)"
+                value={value.quotaDollars}
+                onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
+                min={0}
+                step={0.01}
+                isRequired
+                hasAutoFocus
+              />
+            </VStack>}
+          </LayoutContent>
+        )}
+        footer={<DialogFooter onClose={onClose} onSave={() => onSave(value)} saveLabel="Set budget" isSaveDisabled={!Number.isFinite(Number(value?.quotaDollars)) || Number(value?.quotaDollars) < 0} />}
+      />
+    </Dialog>
+  );
+}
+
+function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, onChange }) {
+  const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
       <Layout
@@ -1356,7 +1546,20 @@ function OfferDialog({ value, upstreams, onClose, onSave, onChange }) {
         content={(
           <LayoutContent>
             {value && <VStack gap={3}>
-              <TextInput label="Provider upstream" value={upstreams.find((item) => item.id === value.upstreamId)?.name || value.offer?.upstream.name || ''} isDisabled />
+              {value.offer ? (
+                <TextInput label="Share source" value={selectedUpstream?.name || ''} isDisabled />
+              ) : (
+                <Selector
+                  label="Share source"
+                  options={offerableUpstreams.map((upstream) => ({
+                    value: upstream.id,
+                    label: `${upstream.name} · ${upstream.quotaSource === 'aiswitch' ? 'AISwitch' : 'Codex'}`
+                  }))}
+                  value={value.upstreamId}
+                  onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
+                  width="100%"
+                />
+              )}
               <NumberInput
                 label="Shareable quota (USD)"
                 value={value.quotaDollars}
@@ -1662,10 +1865,10 @@ function CredentialsDialog({ value, onClose, onChange, onNotice }) {
         content={(
           <LayoutContent>
             <VStack gap={3}>
-              <Banner title="Keep this private" description="This is the current credential data for your linked Codex account." status="warning" />
+              <Banner title="Provider credentials" description="This is the current credential data for your linked provider." status="warning" />
               {value?.entries.length > 1 && (
                 <Selector
-                  label="Codex account"
+                  label="Provider"
                   options={value.entries.map((entry) => ({ value: entry.id, label: entry.name }))}
                   value={value.selectedId}
                   onChange={(selectedId) => onChange({ ...value, selectedId })}
@@ -1692,12 +1895,15 @@ function CredentialsDialog({ value, onClose, onChange, onNotice }) {
   );
 }
 
-function DialogFooter({ onClose, onSave, saveLabel, isSaveDisabled = false }) {
+function DialogFooter({ startContent = null, onClose, onSave, saveLabel, isSaveDisabled = false }) {
   return (
     <LayoutFooter hasDivider>
-      <HStack justify="end" gap={2}>
-        <Button label="Cancel" variant="secondary" onClick={onClose} />
-        <Button label={saveLabel} variant="primary" isDisabled={isSaveDisabled} onClick={onSave} />
+      <HStack justify={startContent ? 'between' : 'end'} vAlign="center" gap={2} wrap="wrap">
+        {startContent}
+        <HStack gap={2}>
+          <Button label="Cancel" variant="secondary" onClick={onClose} />
+          <Button label={saveLabel} variant="primary" isDisabled={isSaveDisabled} onClick={onSave} />
+        </HStack>
       </HStack>
     </LayoutFooter>
   );
