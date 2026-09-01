@@ -743,6 +743,80 @@ test('Pool upstreams expose server-authoritative provider availability', async (
   }
 });
 
+test('an owner can add an AISwitch project with a manual share budget that settlement decrements', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-aiswitch-manual-budget-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'aiswitch-provider');
+    const consumer = account(sharingStore, 'aiswitch-consumer');
+    const providerSession = sharingStore.createAccountSession(provider.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const added = await request(base, '/api/pool/upstreams/aiswitch', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'aiswitch-project', projectKey: 'aiswitch-key', quotaDollars: 10 })
+      });
+      assert.equal(added.response.status, 201);
+      assert.equal(added.body.upstream.type, 'compass');
+      assert.equal(added.body.upstream.quotaSource, 'aiswitch');
+      assert.equal(added.body.upstream.spending.capDollars, 1_000_000);
+      assert.equal(added.body.upstream.commitment.actualQuotaDollars, 10);
+      const upstream = store.get(added.body.upstream.id);
+      assert.equal(store.credentials(upstream.id).projectKey, 'aiswitch-key');
+
+      const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 6 }, store);
+      const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
+      const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+      assert.equal(session.upstream.quotaSource, 'aiswitch');
+      sharingStore.settleSession(session.id, 'aiswitch-settlement', 2_000_000);
+
+      const listed = await request(base, '/api/pool/upstreams', providerSession);
+      assert.equal(listed.response.status, 200);
+      assert.equal(listed.body.upstreams[0].commitment.actualQuotaDollars, 8);
+      assert.equal(listed.body.upstreams[0].commitment.offerableQuotaDollars, 4);
+      assert.throws(
+        () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store),
+        /truly offerable quota/
+      );
+
+      const updated = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
+        method: 'PUT',
+        body: JSON.stringify({ quotaDollars: 20 })
+      });
+      assert.equal(updated.response.status, 200);
+      assert.equal(updated.body.provider.commitment.actualQuotaDollars, 20);
+
+      const exhausted = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
+        method: 'PUT',
+        body: JSON.stringify({ quotaDollars: 0 })
+      });
+      assert.equal(exhausted.response.status, 200);
+      assert.equal(exhausted.body.provider.commitment.actualQuotaDollars, 0);
+
+      const invalidBudget = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
+        method: 'PUT',
+        body: JSON.stringify({ quotaDollars: null })
+      });
+      assert.equal(invalidBudget.response.status, 400);
+
+      const rejected = await request(base, '/api/pool/upstreams/aiswitch', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'invalid-aiswitch-project', projectKey: 'invalid-aiswitch-key', quotaDollars: -1 })
+      });
+      assert.equal(rejected.response.status, 400);
+      assert.deepEqual(sharingStore.listAccountUpstreamLinks(provider.id).map((link) => link.upstreamId), [upstream.id]);
+      assert.equal(store.list().length, 1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Pool quota refresh batches provider-change notifications', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-quota-batches-'));
   try {
