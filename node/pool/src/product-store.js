@@ -1242,21 +1242,32 @@ export class ProductStore {
           throw new Error('session quota exceeds the provider’s actual remaining quota');
         }
       }
+      const now = new Date();
+      let expiresAt = row.expires_at;
+      if (input.expiresAt !== undefined) {
+        const upstream = upstreamStore.get(row.upstream_id);
+        if (!upstream || !this.accountOwnsUpstream(accountId, row.upstream_id)) throw notFound();
+        const nextExpiry = sharingExpiry(input.expiresAt, upstream, now, SHARE_SESSION_TTL_MS);
+        if (expiresAt && Date.parse(nextExpiry) < Date.parse(expiresAt)) {
+          throw new Error('session expiration can only be extended');
+        }
+        expiresAt = nextExpiry;
+      }
       let status = input.status === undefined ? row.status : input.status;
       if (status === 'exhausted' && input.status === undefined && grantedMicros > row.consumed_micros) status = 'active';
       if (!['active', 'paused', 'exhausted'].includes(status) || input.status === 'exhausted') throw new Error('status must be active or paused');
       if (status === 'active') requireProviderSharing(this.providerSharingState(row.upstream_id));
       if (grantedMicros <= row.consumed_micros) status = 'exhausted';
-      const now = new Date().toISOString();
-      this.sqlite.prepare('UPDATE sharing_sessions SET granted_micros = ?, status = ?, updated_at = ? WHERE id = ?')
-        .run(grantedMicros, status, now, id);
-      this.event(accountId, 'session', id, 'updated', { grantedMicros, status });
+      const updatedAt = now.toISOString();
+      this.sqlite.prepare('UPDATE sharing_sessions SET granted_micros = ?, status = ?, expires_at = ?, updated_at = ? WHERE id = ?')
+        .run(grantedMicros, status, expiresAt, updatedAt, id);
+      this.event(accountId, 'session', id, 'updated', { grantedMicros, status, expiresAt });
     });
     update();
     this.notifySessionParticipants(
       id,
       'Codex Share session updated',
-      'A share session was paused, resumed, or resized. Open Codex Share for the current state.',
+      'A share session was paused, resumed, resized, or had its expiry extended. Open Codex Share for the current state.',
       `session:${id}:updated:${this.sessionRow(id).updated_at}`
     );
     return this.session(id, accountId, upstreamStore);
