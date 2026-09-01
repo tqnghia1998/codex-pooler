@@ -497,6 +497,50 @@ export class ProductStore {
       .all(accountId);
   }
 
+  listCanonicalAccountUpstreamLinks(accountId, upstreamStore) {
+    const grouped = new Map();
+    for (const link of this.listAccountUpstreamLinks(accountId)) {
+      const upstream = upstreamStore.get(link.upstreamId);
+      if (!upstream) continue;
+      const key = upstreamIdentityKey(upstream) || `upstream:${upstream.id}`;
+      const candidates = grouped.get(key) || [];
+      candidates.push({ link, upstream });
+      grouped.set(key, candidates);
+    }
+    return [...grouped.values()]
+      .map((candidates) => candidates
+        .sort((left, right) => compareCanonicalUpstreams(left, right, this))[0].link)
+      .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  }
+
+  upstreamActivity(upstreamId) {
+    const offers = this.sqlite.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status IN ('active', 'paused') THEN 1 ELSE 0 END) AS active
+      FROM sharing_offers
+      WHERE upstream_id = ?
+    `).get(upstreamId);
+    const sessions = this.sqlite.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status IN ('active', 'paused') THEN 1 ELSE 0 END) AS active
+      FROM sharing_sessions
+      WHERE upstream_id = ?
+    `).get(upstreamId);
+    const tickets = this.sqlite.prepare(`
+      SELECT COUNT(*) AS total
+      FROM sharing_tickets
+      JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
+      WHERE sharing_offers.upstream_id = ?
+    `).get(upstreamId);
+    return {
+      activeSessions: Number(sessions?.active) || 0,
+      activeOffers: Number(offers?.active) || 0,
+      activityCount: (Number(offers?.total) || 0) + (Number(sessions?.total) || 0) + (Number(tickets?.total) || 0)
+    };
+  }
+
   manualShareBudgetMicros(upstreamId) {
     const value = this.sqlite.prepare(`
       SELECT manual_share_budget_micros AS manualShareBudgetMicros
@@ -2742,6 +2786,31 @@ function cleanName(value, email) {
 function poolDisplayName(email, fallback = '') {
   const local = typeof email === 'string' ? email.trim().split('@')[0].slice(0, 120) : '';
   return local || cleanName(fallback, email);
+}
+
+function upstreamIdentityKey(upstream) {
+  if (upstream?.type === 'codex') {
+    const accountId = String(upstream.accountId || '').trim().toLowerCase();
+    const email = String(upstream.email || '').trim().toLowerCase();
+    const identity = accountId && email ? `${accountId}:${email}` : accountId || email;
+    return identity ? `codex:${identity}` : null;
+  }
+  if (upstream?.quotaSource === 'aiswitch') {
+    const projectId = String(upstream.projectId || '').trim();
+    return projectId ? `aiswitch:${projectId}` : null;
+  }
+  return null;
+}
+
+function compareCanonicalUpstreams(left, right, productStore) {
+  const leftActivity = productStore.upstreamActivity(left.upstream.id);
+  const rightActivity = productStore.upstreamActivity(right.upstream.id);
+  return rightActivity.activeSessions - leftActivity.activeSessions
+    || rightActivity.activeOffers - leftActivity.activeOffers
+    || rightActivity.activityCount - leftActivity.activityCount
+    || Number(right.link.sharingStatus === 'active') - Number(left.link.sharingStatus === 'active')
+    || String(right.link.createdAt).localeCompare(String(left.link.createdAt))
+    || String(right.upstream.id).localeCompare(String(left.upstream.id));
 }
 
 function cleanUrl(value) {

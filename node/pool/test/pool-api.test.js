@@ -780,6 +780,15 @@ test('an owner can add an AISwitch project with a manual share budget that settl
       const upstream = store.get(added.body.upstream.id);
       assert.equal(store.credentials(upstream.id).projectKey, 'aiswitch-key');
 
+      const projectUpdated = await request(base, `/api/pool/upstreams/${upstream.id}`, providerSession, {
+        method: 'PATCH',
+        body: JSON.stringify({ projectId: 'updated-aiswitch-project', projectKey: 'updated-aiswitch-key' })
+      });
+      assert.equal(projectUpdated.response.status, 200);
+      assert.equal(projectUpdated.body.upstream.projectId, 'updated-aiswitch-project');
+      assert.equal(store.get(upstream.id).projectId, 'updated-aiswitch-project');
+      assert.equal(store.credentials(upstream.id).projectKey, 'updated-aiswitch-key');
+
       const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 6 }, store);
       const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
       const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
