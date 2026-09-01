@@ -98,7 +98,14 @@ export class CodexLoginManager {
     if (candidates.length === 1) return candidates[0];
     if (!parsed.accountId) return null;
     const matches = candidates.filter((upstream) => upstream.accountId === parsed.accountId);
-    return matches.length === 1 ? matches[0] : null;
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+      const canonical = this.sharingStore.listCanonicalAccountUpstreamLinks(accountId, this.upstreamStore);
+      return canonical
+        .map(({ upstreamId }) => this.upstreamStore.get(upstreamId))
+        .find((upstream) => upstream?.type === 'codex' && upstream.accountId === parsed.accountId) || null;
+    }
+    return null;
   }
 
   capture(id, chunk) {

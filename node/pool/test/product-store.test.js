@@ -149,6 +149,33 @@ test('does not transfer a linked upstream between product accounts', () => {
   }
 });
 
+test('canonicalizes duplicate provider identities using current sharing activity', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-canonical-upstreams-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const older = upstreamStore.create({ type: 'compass', quotaSource: 'aiswitch', projectId: 'project-older', projectKey: 'older-key' });
+    const active = upstreamStore.create({ type: 'compass', quotaSource: 'aiswitch', projectId: 'project-active', projectKey: 'active-key' });
+    upstreamStore.update(active.id, { projectId: 'project-older' });
+
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'canonical-provider', 'canonical-provider@example.com');
+    const consumer = account(sharingStore, 'canonical-consumer', 'canonical-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, older.id);
+    sharingStore.linkUpstream(provider.id, active.id);
+    sharingStore.setManualShareBudget(provider.id, active.id, { quotaDollars: 10 }, upstreamStore);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: active.id, quotaDollars: 5 }, upstreamStore);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
+    sharingStore.approveTicket(provider.id, ticket.id, {}, upstreamStore);
+
+    assert.deepEqual(
+      sharingStore.listCanonicalAccountUpstreamLinks(provider.id, upstreamStore).map(({ upstreamId }) => upstreamId),
+      [active.id]
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('shows provider availability issues on offers, tickets, and share sessions', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-provider-issues-'));
   try {

@@ -24,6 +24,20 @@ const poolTheme = defineTheme({
         boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-border-red), transparent 50%)'
       }
     },
+    button: {
+      'variant:dashed': {
+        backgroundColor: 'transparent',
+        borderColor: 'var(--color-border-emphasized)',
+        borderStyle: 'dashed',
+        borderWidth: '1px',
+        color: 'var(--color-text-secondary)'
+      }
+    },
+    'segmented-control-item': {
+      'size:md+selected': {
+        fontWeight: 'var(--font-weight-medium)'
+      }
+    },
     banner: {
       'status:info': {
         '--color-accent-muted': 'var(--color-background-blue)'
@@ -72,9 +86,9 @@ function ProductShell({ themeMode, setThemeMode }) {
     toast({ body: text, type: error ? 'error' : 'info', isAutoHide: true });
   }, [toast]);
   return (
-    <AppShell variant="surface" height="auto" contentPadding={4} mobileNav={false}>
-      <VStack gap={6}>
-        <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
+    <AppShell variant="surface" height="auto" contentPadding={3} mobileNav={false}>
+      <VStack gap={4}>
+        <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
           <VStack gap={1}>
             <HStack gap={2} vAlign="center">
               <Icon icon={Share2} size="lg" color="accent" />

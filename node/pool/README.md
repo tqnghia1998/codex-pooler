@@ -204,6 +204,7 @@ POST   /api/pool/personal-keys/:id/rotate
 POST   /api/pool/personal-keys/:id/revoke
 GET    /api/pool/upstreams
 POST   /api/pool/upstreams/aiswitch                 { projectId, projectKey, quotaDollars }
+PATCH  /api/pool/upstreams/:id                      { projectId, projectKey? } (AISwitch only)
 GET    /api/pool/upstreams/credentials
 POST   /api/pool/upstreams/:id/refresh-quota
 PUT    /api/pool/upstreams/:id/manual-budget        { quotaDollars }
