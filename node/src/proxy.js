@@ -16,7 +16,7 @@ import { consumeSseChunk, createChatStreamState, createPublicResponsesState, cre
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
-import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, publicMisalignmentError } from './policy-failures.js';
+import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, nativeMisalignmentError, publicMisalignmentError } from './policy-failures.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 import {
@@ -199,7 +199,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
 
   if (!response.ok) {
     const errorBytes = await readBoundedResponse(response);
-    const policyError = publicPolicyError(errorBytes, path, sourcePath);
+    const policyError = policyErrorForRoute(errorBytes, path, sourcePath);
     const outcome = classifyHttpResponse(response, parseJson(errorBytes), {
       allowMisalignmentPolicy: policyRoute(path, sourcePath)
     });
@@ -255,6 +255,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       responseOptions: { ...responseOptions, modelsEtag },
       upstreamDeadlines,
       admission,
+      nativeMisalignmentDetails: isBackendResponsesRoute(path),
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId, req) : null,
       logger
     });
@@ -1536,7 +1537,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -1616,7 +1617,10 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       });
       if (transformChat) await writeChunk(res, chatStreamFailure('upstream_response_failed', 'Upstream response failed'));
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
-      else await writeChunk(res, `${event}\n\n`);
+      else {
+        const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
+        await writeChunk(res, nativeEvent === parsed ? `${event}\n\n` : encodeSseEvent(nativeEvent));
+      }
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
     }
@@ -1625,7 +1629,8 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       completed = true;
     }
     if (parsed) visible = true;
-    await writeChunk(res, `${event}\n\n`);
+    const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
+    await writeChunk(res, nativeEvent === parsed ? `${event}\n\n` : encodeSseEvent(nativeEvent));
     if (successfulTerminal) void reader.cancel('Upstream terminal event').catch(() => {});
   };
   try {
@@ -3274,7 +3279,19 @@ function sanitizeNativeResponseControlFrame(data, isBinary) {
     if (event.response.headers === undefined) delete event.response.headers;
     changed = true;
   }
+  changed ||= redactNativeMisalignmentDetails(event);
   return changed ? Buffer.from(JSON.stringify(event)) : data;
+}
+
+function redactNativeMisalignmentDetails(event) {
+  let changed = false;
+  for (const container of [event, event.response, event.status_details, event.response?.status_details]) {
+    const error = container?.error;
+    if (!plainObject(error) || error.code !== MISALIGNMENT_POLICY_CODE || !Object.hasOwn(error, 'misalignment')) continue;
+    delete error.misalignment;
+    changed = true;
+  }
+  return changed;
 }
 
 function nativeResponseControlMap(headers) {
@@ -3320,8 +3337,27 @@ function policyRoute(path, sourcePath) {
   return POLICY_ROUTES.has(path) || POLICY_ROUTES.has(sourcePath);
 }
 
+function policyErrorForRoute(bytes, path, sourcePath) {
+  if (isBackendResponsesRoute(path)) return nativeMisalignmentError(parseJson(bytes));
+  return publicPolicyError(bytes, path, sourcePath);
+}
+
 function publicPolicyError(bytes, path, sourcePath) {
   return policyRoute(path, sourcePath) ? publicMisalignmentError(parseJson(bytes)) : null;
+}
+
+function projectNativeMisalignmentEvent(event) {
+  if (event?.type !== 'response.failed') return event;
+  const replacement = nativeMisalignmentError(event);
+  if (!replacement) return event;
+  const projected = structuredClone(event);
+  if (plainObject(projected.response)) projected.response.error = replacement;
+  if (plainObject(projected.error)) projected.error = replacement;
+  return projected;
+}
+
+function encodeSseEvent(event) {
+  return `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
 }
 
 async function readWebSocketHandshakeBody(response, maxBytes = 1024 * 1024) {
