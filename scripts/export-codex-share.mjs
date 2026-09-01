@@ -141,6 +141,7 @@ function standaloneServerSource(source) {
   return source
     .replace("const relaydeckDataDir = resolve(productRoot, '../.data');\n", '')
     .replace('const poolDataDir = requirePoolDataDir(dataDir);', 'const poolDataDir = resolve(dataDir);')
+    .replace('  requirePoolDataDir(dataDir);\n', '')
     .replace(/\nfunction requirePoolDataDir\(dataDir\) \{\n  const resolved = resolve\(dataDir\);\n  if \(resolved === relaydeckDataDir\) \{\n    throw new Error\('POOL_DATA_DIR must not point to Relaydeck node\/\.data'\);\n  \}\n  return resolved;\n\}\n/, '\n');
 }
 
