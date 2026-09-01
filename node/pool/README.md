@@ -22,9 +22,10 @@ npm run pool:start
 # open http://localhost:3010
 ```
 
-Use `npm run pool:dev` for Node watch mode. The product loads `pool/.env` when
-that file exists. Its variables use the `POOL_*` prefix; Relaydeck's
-`CODEX_POOLER_*` variables are not product configuration.
+`npm run pool:start` runs the server in Node watch mode; `npm run pool:dev` is
+an alias. The product loads `pool/.env` when that file exists. Its variables
+use the `POOL_*` prefix; Relaydeck's `CODEX_POOLER_*` variables are not product
+configuration.
 
 ## Product Boundary
 
@@ -71,7 +72,7 @@ Codex Share account sessions are permanent until logout or revocation. The
 browser cookies are issued with a ten-year lifetime; clearing cookies still
 requires signing in again in that browser.
 
-After sign-in, Codex Share waits for an immediate best-effort provider quota
+After sign-in, Codex Share waits for an immediate best-effort Codex quota
 refresh before completing the browser login, then
 refreshes every linked Codex account automatically every minute in batches of
 ten. The dashboard polls this stored quota state and can also refresh it
@@ -87,9 +88,18 @@ Offers, pending tickets, and share sessions show a sanitized provider issue to
 both providers and consumers when the provider needs reauthentication, has a
 token-refresh failure, is in cooldown, or has exhausted its provider quota.
 
+After signing in, a user can also add an AISwitch project by entering its
+project ID and project key. AISwitch does not expose a quota query to this
+product, so its owner sets the current **manual share budget** in USD. Codex
+Share reserves offers against that amount and decrements it only for settled
+usage through share sessions. Updating the budget replaces the pool-side
+remaining amount; it does not query or change AISwitch, and outside use of the
+project is not visible here.
+
 ## Sharing Flow
 
-1. A provider publishes an offer for one imported Codex account and a dollar
+1. A provider publishes an offer for one imported Codex account or manually
+   added AISwitch project and a dollar
    quota. The offer reserves that amount from the provider's currently
    offerable quota.
 2. A consumer requests a dollar quota through a ticket.
@@ -183,8 +193,10 @@ POST   /api/pool/personal-keys/:id/reveal
 POST   /api/pool/personal-keys/:id/rotate
 POST   /api/pool/personal-keys/:id/revoke
 GET    /api/pool/upstreams
+POST   /api/pool/upstreams/aiswitch                 { projectId, projectKey, quotaDollars }
 GET    /api/pool/upstreams/credentials
 POST   /api/pool/upstreams/:id/refresh-quota
+PUT    /api/pool/upstreams/:id/manual-budget        { quotaDollars }
 POST   /api/pool/upstreams/:id/test-connection
 GET    /api/pool/providers/:id
 POST   /api/pool/providers/:id/pause
@@ -246,9 +258,9 @@ Codex Share dispatches the same Codex Responses, Chat Completions, streaming,
 tool-call, compaction, model-catalog, public file/audio/image, and native
 WebSocket implementations as Relaydeck. A share key limits candidate accounts
 and accounting; it does not create a second protocol adapter. Public file
-metadata is isolated per share session. Codex Share accepts `/v1/messages`,
-but it cannot serve Anthropic Messages because the product intentionally imports
-only Codex accounts, not Compass providers.
+metadata is isolated per share session. Codex Share accepts `/v1/messages`
+for manually added AISwitch projects. Codex-native backend API and
+WebSocket routes remain Codex-only.
 
 Client-facing gateway route classification and dispatch live in
 `../src/gateway-dispatch.js`, shared with Relaydeck. Future proxy or
