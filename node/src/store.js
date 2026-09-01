@@ -205,17 +205,26 @@ export class Store {
     upstream.credentials = previousCredentials;
     updateUpstream(upstream, input);
     if (upstream.type === 'codex' && (input.authJson || input.accessToken)) {
+      upstream.quota = null;
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
       upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
       upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
       delete upstream.tokenRefresh;
       clearHealthAfterCredentialReplacement(upstream);
       delete upstream.compatibility;
-    } else if (upstream.type === 'compass' && input.projectKey !== undefined) {
-      upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
-      upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
-      clearHealthAfterCredentialReplacement(upstream);
-      delete upstream.compatibility;
+    } else if (upstream.type === 'compass') {
+      const quotaIdentityChanged = input.projectId !== undefined
+        || input.projectKey !== undefined
+        || input.quotaSource !== undefined
+        || input.metadata?.quota_type !== undefined
+        || input.metadata?.quotaType !== undefined;
+      if (quotaIdentityChanged) upstream.quota = null;
+      if (input.projectKey !== undefined) {
+        upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+        upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
+        clearHealthAfterCredentialReplacement(upstream);
+        delete upstream.compatibility;
+      }
     }
     if (input.routing !== undefined) upstream.routing = normalizeRouting(input.routing);
     if (input.pacing !== undefined) upstream.pacing = normalizePacingPolicy(input.pacing);
@@ -914,7 +923,7 @@ export class Store {
 
   saveFile(file, scopeId = file.scopeId || DEFAULT_SCOPE_ID) {
     const db = this.load();
-    activeScope(db, scopeId);
+    if (!activeScope(db, scopeId, false) && !privateFileScope(scopeId)) throw new Error('scope not found');
     file = { ...file, scopeId };
     const index = db.files.findIndex((item) => item.id === file.id && item.scopeId === scopeId);
     if (index === -1) db.files.push(file);
@@ -1365,6 +1374,10 @@ function activeScope(db, scopeId, required = true) {
   const scope = db.scopes.find((item) => item.id === scopeId) || null;
   if (!scope && required) throw new Error('scope not found');
   return scope;
+}
+
+function privateFileScope(scopeId) {
+  return typeof scopeId === 'string' && /^share-session:[A-Za-z0-9-]{1,128}$/.test(scopeId);
 }
 
 function sessionKey(scopeId, apiKeyId, sessionId) {

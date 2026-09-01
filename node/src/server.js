@@ -3,10 +3,16 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
-import { dollarsToMicros, isAiswitchUpstream } from './domain.js';
-import { codexRefreshFailureCode, codexRefreshFailureDetail, refreshProviderCredentials, refreshQuota } from './providers.js';
-import { handleCompatibilityRequest, isCompatibilityRoute } from './compatibility.js';
-import { HttpError, readRequestBody } from './http-ingress.js';
+import { dollarsToMicros, exportUpstreamCredentials, isAiswitchUpstream } from './domain.js';
+import {
+  createTokenRefreshScheduler,
+  refreshCodexToken,
+  refreshDueCodexTokens,
+  TOKEN_REFRESH_INTERVAL_MS
+} from './codex-token-refresh.js';
+import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from './upstream-quota-refresh.js';
+import { HttpError } from './http-ingress.js';
+import { dispatchGatewayRequest, gatewayRequestKind } from './gateway-dispatch.js';
 import { errorEnvelope } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed, localHost, originAllowed } from './admission.js';
 import { modelCatalogForStore } from './codex-model-catalog.js';
@@ -15,28 +21,16 @@ import { upstreamPacerForStore } from './upstream-pacer.js';
 import { Readiness, readyReadiness } from './readiness.js';
 import { compatibilityLearningForStore } from './compatibility-learning.js';
 import {
-  PROXY_ENDPOINTS,
-  WEBSOCKET_ENDPOINTS,
   attachWebSocketProxy,
   authenticateProxyRequest,
-  isAdditionalGatewayRoute,
-  proxyModelsRequest,
-  proxyRawRequest,
-  proxyRequest,
+  testUpstreamConnection,
   validProxyApiKey
 } from './proxy.js';
 
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 export const AUTO_REFRESH_INTERVAL_MS = 60_000;
-export const TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
-const QUOTA_REFRESH_BATCH_SIZE = 10;
-const TOKEN_REFRESH_CONCURRENCY = 3;
-const TOKEN_REFRESH_WINDOW_MS = 12 * 60 * 60 * 1_000;
-const TOKEN_REFRESH_FAILURE_COOLDOWN_MS = 6 * 60 * 60 * 1_000;
-const TOKEN_REFRESH_STALE_MS = 50_000;
-const TOKEN_REFRESH_MAX_ATTEMPTS = 8;
-const TOKEN_REFRESH_BATCH_SIZE = 100;
+export { createTokenRefreshScheduler, refreshCodexToken, refreshDueCodexTokens, TOKEN_REFRESH_INTERVAL_MS };
 
 export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness() } = {}) {
   store.configureApiKey(apiKey);
@@ -64,14 +58,8 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         sendJson(res, state.status === 'ready' ? 200 : 503, state, state.status === 'ready' ? {} : { 'retry-after': '1' });
         return;
       }
-      const usageRoute = url.pathname === '/v1/usage' && req.method === 'GET';
-      const modelRoute = req.method === 'GET' && ['/v1/models', '/backend-api/codex/models', '/backend-api/codex/v1/models'].includes(url.pathname);
-      const jsonProxyRoute = PROXY_ENDPOINTS.has(url.pathname) && req.method === 'POST';
-      const websocketOnlyRoute = WEBSOCKET_ENDPOINTS.has(url.pathname) && req.method === 'GET';
-      const compatibilityRoute = isCompatibilityRoute(req.method, url.pathname);
-      const rawProxyRoute = isAdditionalGatewayRoute(req.method, url.pathname);
-      const unsupportedRoute = isUnsupportedV1Route(req.method, url.pathname);
-      if (usageRoute || modelRoute || jsonProxyRoute || websocketOnlyRoute || compatibilityRoute || rawProxyRoute || unsupportedRoute) {
+      const gatewayKind = gatewayRequestKind(req.method, url.pathname);
+      if (gatewayKind) {
         if (!firewallAllowed(req, admission)) {
           sendJson(res, 403, { error: { type: 'invalid_request_error', code: 'access_denied', message: 'client IP is not allowed', param: null } });
           return;
@@ -83,37 +71,30 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         }
         req.proxyAuth = auth;
       }
-      if (usageRoute) {
-        const parameter = url.searchParams.keys().next().value;
-        if (parameter) {
-          sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'unsupported_parameter', message: `${parameter} is not supported`, param: parameter } });
-          return;
-        }
-        sendJson(res, 200, store.gatewayUsage(requestScopeId(req), req.proxyAuth?.id || null));
-        return;
-      }
-      if (unsupportedRoute) {
-        sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported OpenAI /v1 endpoint', param: null } });
-        return;
-      }
-      if (websocketOnlyRoute) {
-        sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'websocket_upgrade_required', message: 'WebSocket upgrade required', param: null } });
-        return;
-      }
-      if (jsonProxyRoute) {
-        await proxyRequest({ req, res, path: url.pathname, payload: await jsonRuntimeBody(req, ingress, ['/v1/responses', '/v1/chat/completions', '/v1/messages'].includes(url.pathname)), store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth });
-        return;
-      }
-      if (modelRoute) {
-        await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey, fetchImpl, upstreamDeadlines, codexHostHealth });
-        return;
-      }
-      if (compatibilityRoute) {
-        await handleCompatibilityRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, fetchImpl, upstreamDeadlines, modelCatalog, codexHostHealth });
-        return;
-      }
-      if (rawProxyRoute) {
-        await proxyRawRequest({ req, res, path: url.pathname, body: req.method === 'GET' || req.method === 'DELETE' ? Buffer.alloc(0) : await readRequestBody(req, ingress), store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth });
+      if (gatewayKind) {
+        await dispatchGatewayRequest({
+          kind: gatewayKind,
+          req,
+          res,
+          url,
+          store,
+          apiKey,
+          fetchImpl,
+          ingress,
+          upstreamDeadlines,
+          logger,
+          codexHostHealth,
+          modelCatalog,
+          sendJson,
+          handleUsage: () => {
+            const parameter = url.searchParams.keys().next().value;
+            if (parameter) {
+              sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'unsupported_parameter', message: `${parameter} is not supported`, param: parameter } });
+              return;
+            }
+            sendJson(res, 200, store.gatewayUsage(requestScopeId(req), req.proxyAuth?.id || null));
+          }
+        });
         return;
       }
       if (url.pathname.startsWith('/api/')) {
@@ -201,131 +182,11 @@ export function start(port = Number(process.env.PORT) || 3000, {
 }
 
 export async function refreshAllQuotas(store, options = {}) {
-  const upstreams = store.list();
-  const results = [];
-  for (let index = 0; index < upstreams.length; index += QUOTA_REFRESH_BATCH_SIZE) {
-    results.push(...await Promise.allSettled(upstreams.slice(index, index + QUOTA_REFRESH_BATCH_SIZE).map(async ({ id }) => {
-      const upstream = store.get(id);
-      if (!upstream) return;
-      const credentials = store.credentials(id);
-      if (isAiswitchUpstream(upstream)) return { status: 'skipped', id, source: 'aiswitch' };
-      const quota = await refreshQuota(upstream, credentials, {
-        ...options,
-        saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
-      });
-      store.setQuota(id, quota, { notify: false });
-      return { status: 'refreshed', id };
-    })));
-  }
-  if (results.some((result) => result.value?.status === 'refreshed')) store.notifyUpstreamsChange();
-  return results;
-}
-
-export async function refreshDueCodexTokens(store, { now = Date.now(), ...options } = {}) {
-  const candidates = store.list()
-    .map(({ id }) => ({ id, eligibleAt: tokenRefreshEligibleAt(store.get(id), now) }))
-    .filter(({ eligibleAt }) => eligibleAt !== null)
-    .sort((left, right) => left.eligibleAt - right.eligibleAt || left.id.localeCompare(right.id))
-    .slice(0, TOKEN_REFRESH_BATCH_SIZE);
-  return mapConcurrent(candidates, TOKEN_REFRESH_CONCURRENCY, async ({ id }) => {
-    const upstream = store.get(id);
-    const credentials = store.credentials(id);
-    if (!credentials.refreshToken) return store.setTokenRefresh(id, tokenRefreshState('reauth_required', 'scheduled', now));
-    return refreshCodexToken(store, id, { trigger: 'scheduled', now, ...options });
+  return refreshAllUpstreamQuotas(store, {
+    ...options,
+    shouldRefresh: (upstream) => !isAiswitchUpstream(upstream),
+    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: 'aiswitch' })
   });
-}
-
-export async function refreshCodexToken(store, id, { trigger = 'manual', now = Date.now(), retryAttempt = null, ...options } = {}) {
-  const upstream = store.get(id);
-  if (!upstream) throw notFound();
-  if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Token refresh is only available for Codex upstreams');
-  const refreshing = upstream.tokenRefresh;
-  if (refreshing?.status === 'reauth_required') return { upstream: store.getPublic(id), errorCode: 'reauth_required' };
-  if (refreshing?.status === 'refreshing' && Date.parse(refreshing.startedAt) > now - TOKEN_REFRESH_STALE_MS) return { upstream: store.getPublic(id), errorCode: 'refresh_in_progress' };
-  const credentials = store.credentials(id);
-  if (!credentials.refreshToken) {
-    return { upstream: store.setTokenRefresh(id, tokenRefreshState('reauth_required', trigger, now)), errorCode: 'reauth_required' };
-  }
-  store.setTokenRefresh(id, tokenRefreshState('refreshing', trigger, now));
-  try {
-    const refreshed = await refreshProviderCredentials(upstream, credentials, {
-      ...options,
-      saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
-    });
-    return refreshed ? { upstream: store.setTokenRefresh(id, tokenRefreshState('succeeded', trigger, now)) } : { upstream: store.getPublic(id) };
-  } catch (error) {
-    if ((Number(store.get(id)?.credentialEpoch) || 0) !== (Number(upstream.credentialEpoch) || 0)) return { upstream: store.getPublic(id) };
-    const errorCode = codexRefreshFailureCode(error);
-    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt, codexRefreshFailureDetail(error))), errorCode };
-  }
-}
-
-function tokenRefreshEligibleAt(upstream, now) {
-  if (!upstream || upstream.type !== 'codex') return null;
-  const refresh = upstream.tokenRefresh;
-  if (refresh?.status === 'reauth_required') return null;
-  if (refresh?.status === 'refreshing') {
-    const startedAt = Date.parse(refresh.startedAt || upstream.updatedAt);
-    return !Number.isFinite(startedAt) || startedAt <= now - TOKEN_REFRESH_STALE_MS ? Number.isFinite(startedAt) ? startedAt : now : null;
-  }
-  if (refresh?.status === 'failed') {
-    const finishedAt = Date.parse(refresh.finishedAt || upstream.updatedAt);
-    const eligibleAt = Number.isFinite(finishedAt) ? finishedAt + TOKEN_REFRESH_FAILURE_COOLDOWN_MS : now;
-    return eligibleAt <= now ? eligibleAt : null;
-  }
-  const expiresAt = Date.parse(upstream.accessTokenExpiresAt);
-  const eligibleAt = expiresAt - TOKEN_REFRESH_WINDOW_MS;
-  return Number.isFinite(eligibleAt) && eligibleAt <= now ? eligibleAt : null;
-}
-
-function tokenRefreshState(status, trigger, now, retryAttempt = null, errorDetail = null) {
-  const timestamp = new Date(now).toISOString();
-  return status === 'refreshing'
-    ? { status, startedAt: timestamp, trigger }
-    : { status, finishedAt: timestamp, trigger, errorCode: status === 'succeeded' ? null : status, ...(errorDetail ? { errorDetail } : {}), ...(status === 'failed' && retryAttempt ? { retryAttempt } : {}) };
-}
-
-function createTokenRefreshScheduler(store, options) {
-  const timers = new Map();
-  const schedule = (id, trigger = 'scheduled', attempt = 1, retryAt = null) => {
-    if (attempt >= TOKEN_REFRESH_MAX_ATTEMPTS) return;
-    const upstream = store.get(id);
-    if (!upstream || upstream.tokenRefresh?.status !== 'failed') return;
-    const dueAt = retryAt || new Date(Date.now() + Math.min(2 ** attempt * 30_000, 3_600_000)).toISOString();
-    const delay = Math.max(0, Date.parse(dueAt) - Date.now());
-    clearTimeout(timers.get(id));
-    store.setTokenRefresh(id, { ...upstream.tokenRefresh, trigger, retryAttempt: attempt, retryAt: dueAt });
-    const timer = setTimeout(async () => {
-      timers.delete(id);
-      if (store.get(id)?.tokenRefresh?.status !== 'failed') return;
-      try {
-        const result = await refreshCodexToken(store, id, { ...options, trigger, retryAttempt: attempt + 1 });
-        if (result.errorCode === 'failed') schedule(id, trigger, attempt + 1);
-      } catch {}
-    }, delay);
-    timer.unref?.();
-    timers.set(id, timer);
-  };
-  let running = false;
-  const run = async () => {
-    if (running) return;
-    running = true;
-    try {
-      for (const upstream of store.list()) {
-        const refresh = store.get(upstream.id)?.tokenRefresh;
-        if (refresh?.status === 'failed' && refresh.retryAttempt && refresh.retryAt) schedule(upstream.id, refresh.trigger, refresh.retryAttempt, refresh.retryAt);
-      }
-      const results = await refreshDueCodexTokens(store, options);
-      for (const result of results) {
-        const value = result.status === 'fulfilled' && result.value;
-        if (value?.errorCode === 'failed') schedule(value.upstream.id, value.upstream.tokenRefresh.trigger, value.upstream.tokenRefresh.retryAttempt || 1);
-      }
-      return results;
-    } finally {
-      running = false;
-    }
-  };
-  return { run, schedule, close: () => timers.forEach(clearTimeout) };
 }
 
 async function api(req, res, url, store, options) {
@@ -432,7 +293,9 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   }
   if (req.method === 'POST' && parts.length === 2 && parts[1] === 'upstreams') {
     const upstream = store.create(await body(req));
-    sendJson(res, 201, { upstream });
+    sendJson(res, 201, {
+      upstream: await refreshSavedUpstreamQuota(store, upstream.id, { fetchImpl, compassGatewayToken })
+    });
     return;
   }
   if (req.method === 'POST' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'refresh-quota') {
@@ -458,12 +321,17 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   if (req.method === 'GET' && action === 'credentials' && parts.length === 4) {
     const upstream = store.get(id);
     if (!upstream) throw notFound();
-    const credentials = store.credentials(id);
-    sendJson(res, 200, { credentials });
+    sendJson(res, 200, { credentials: exportUpstreamCredentials(upstream, store.credentials(id)) });
     return;
   }
   if (req.method === 'PATCH' && parts.length === 3) {
-    sendJson(res, 200, { upstream: store.update(id, await body(req)) });
+    const input = await body(req);
+    const upstream = store.update(id, input);
+    sendJson(res, 200, {
+      upstream: quotaCredentialsChanged(upstream, input)
+        ? await refreshSavedUpstreamQuota(store, id, { fetchImpl, compassGatewayToken })
+        : upstream
+    });
     return;
   }
   if (req.method === 'DELETE' && parts.length === 3) {
@@ -493,13 +361,20 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
       sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'aiswitch' });
       return;
     }
-    const credentials = store.credentials(id);
-    const quota = await refreshQuota(upstream, credentials, {
-      fetchImpl,
-      compassGatewayToken,
-      saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
+    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl, compassGatewayToken }) });
+    return;
+  }
+  if (req.method === 'POST' && action === 'test-connection' && parts.length === 4) {
+    sendJson(res, 200, {
+      connection: await testUpstreamConnection({
+        store,
+        upstreamId: id,
+        req,
+        res,
+        fetchImpl,
+        codexHostHealth
+      })
     });
-    sendJson(res, 200, { upstream: store.setQuota(id, quota) });
     return;
   }
   if (req.method === 'PUT' && action === 'cap' && parts.length === 4) {
@@ -519,18 +394,23 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   throw notFound();
 }
 
-async function jsonRuntimeBody(req, ingress, plainBadRequest = false) {
-  const bytes = await readRequestBody(req, ingress);
-  if (!bytes.length) return {};
+async function refreshSavedUpstreamQuota(store, id, options) {
+  const upstream = store.get(id);
+  if (!upstream || isAiswitchUpstream(upstream)) return store.getPublic(id);
   try {
-    const parsed = JSON.parse(bytes.toString('utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
-    return parsed;
+    return await refreshUpstreamQuota(store, id, options);
   } catch {
-    const error = new HttpError(400, 'invalid_request', 'request body must be JSON');
-    error.plainBadRequest = plainBadRequest;
-    throw error;
+    return store.getPublic(id);
   }
+}
+
+function quotaCredentialsChanged(upstream, input) {
+  if (upstream.type === 'codex') return input.authJson !== undefined || input.accessToken !== undefined;
+  return input.projectId !== undefined
+    || input.projectKey !== undefined
+    || input.quotaSource !== undefined
+    || input.metadata?.quota_type !== undefined
+    || input.metadata?.quotaType !== undefined;
 }
 
 async function body(req) {
@@ -597,28 +477,6 @@ function routingDryRunInput(input = {}) {
     requirements: normalizedRequirements,
     now
   };
-}
-
-async function mapConcurrent(items, limit, mapper) {
-  const results = Array(items.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      try {
-        results[index] = { status: 'fulfilled', value: await mapper(items[index]) };
-      } catch (reason) {
-        results[index] = { status: 'rejected', reason };
-      }
-    }
-  }));
-  return results;
-}
-
-function isUnsupportedV1Route(method, path) {
-  if (method === 'POST' && ['/v1/images/variations', '/v1/embeddings', '/v1/batches', '/v1/moderations', '/v1/fine_tuning/jobs'].includes(path)) return true;
-  if ((method === 'GET' || method === 'DELETE') && /^\/v1\/responses\/[^/]+$/.test(path)) return true;
-  return method === 'POST' && /^\/v1\/responses\/[^/]+\/cancel$/.test(path);
 }
 
 async function staticFile(res, pathname, req, admission) {

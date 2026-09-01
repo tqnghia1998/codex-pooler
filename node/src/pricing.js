@@ -89,6 +89,22 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   return { settledCostMicros, costSource: 'pricing_snapshot', model: snapshot.model, priceVersion: snapshot.priceVersion };
 }
 
+export function cheapestPricedModel(models, startedAt = new Date().toISOString()) {
+  const timestamp = Date.parse(startedAt);
+  const candidates = [...new Set((Array.isArray(models) ? models : [models])
+    .map((model) => string(model)?.toLowerCase())
+    .filter(Boolean))];
+  if (!Number.isFinite(timestamp) || !candidates.length) return candidates[0] || null;
+  let selected = null;
+  for (const model of candidates) {
+    const snapshot = resolvePrice(model, 'standard', timestamp, 'default');
+    if (!snapshot) continue;
+    const score = snapshot.input + snapshot.output;
+    if (!selected || score < selected.score) selected = { model, score };
+  }
+  return selected?.model || candidates[0];
+}
+
 function usageObject(body) {
   const usage = body?.usage || body?.message?.usage || body?.response?.usage;
   return usage && typeof usage === 'object' && !Array.isArray(usage) ? usage : null;

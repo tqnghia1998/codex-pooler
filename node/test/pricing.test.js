@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractUsage, mergeUsage, priceUsage, upstreamCostMicros } from '../src/pricing.js';
+import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage, upstreamCostMicros } from '../src/pricing.js';
+
+test('selects the cheapest priced model and preserves provider order as fallback', () => {
+  assert.equal(cheapestPricedModel(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra']), 'gpt-5.6-luna');
+  assert.equal(cheapestPricedModel(['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5']), 'claude-sonnet-5');
+  assert.equal(cheapestPricedModel(['unknown-first', 'unknown-second']), 'unknown-first');
+  assert.equal(cheapestPricedModel([]), null);
+});
 
 test('extracts Codex and Anthropic token/cache usage shapes', () => {
   assert.deepEqual(extractUsage({ usage: {

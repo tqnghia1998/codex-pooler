@@ -105,15 +105,21 @@ export class CodexModelCatalog {
   }
 
   scopedAccountCatalog(upstreamId, scopeId = DEFAULT_SCOPE_ID) {
+    return this.scopedAccountsCatalog([upstreamId], scopeId);
+  }
+
+  scopedAccountsCatalog(upstreamIds, scopeId = DEFAULT_SCOPE_ID) {
     this.reconcile();
-    const upstream = this.store.get(upstreamId, scopeId);
-    if (!upstream) return null;
-    const entry = this.currentEntry(upstreamId);
-    const accountModels = entry?.hasCatalog ? [entry.models] : [];
+    const upstreams = [...new Set(upstreamIds)]
+      .map((upstreamId) => this.store.get(upstreamId, scopeId))
+      .filter(Boolean);
+    if (!upstreams.length) return null;
+    const entries = upstreams.map(({ id }) => this.currentEntry(id));
+    const accountModels = entries.flatMap((entry) => entry?.hasCatalog ? [entry.models] : []);
     const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
-      && (upstream.type !== 'codex' || STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by !== 'compass');
+      && !upstreams.some((upstream) => upstream.type === 'codex' && STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by === 'compass');
     const aggregated = aggregateCatalog(accountModels, providerAllowed);
-    const status = catalogStatus(entry ? [entry] : [], entry?.hasCatalog ? 1 : 0, aggregated.publicModels.length, this.now(), this.freshTtlMs);
+    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, this.now(), this.freshTtlMs);
     return {
       ...aggregated,
       etag: modelCatalogEtag({ models: aggregated.nativeModels }),
