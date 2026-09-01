@@ -5,12 +5,41 @@ import '@astryxdesign/core/astryx.css';
 import '@astryxdesign/theme-neutral/theme.css';
 import { AppShell } from '@astryxdesign/core/AppShell';
 import { Button } from '@astryxdesign/core/Button';
+import { Icon } from '@astryxdesign/core/Icon';
 import { Heading, Text } from '@astryxdesign/core/Text';
-import { Theme } from '@astryxdesign/core/theme';
+import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { HStack, VStack } from '@astryxdesign/core/Layout';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
+import { Share2 } from 'lucide-react';
 import { SharingWorkspace } from './sharing.jsx';
+
+const poolTheme = defineTheme({
+  name: 'codex-share',
+  extends: neutralTheme,
+  components: {
+    card: {
+      'variant:red': {
+        backgroundColor: 'var(--color-background-card)',
+        boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-border-red), transparent 50%)'
+      }
+    },
+    progressbar: {
+      base: {
+        '--color-background-muted': 'var(--color-track)'
+      },
+      'variant:success': {
+        '--color-success': 'light-dark(#9fe59b, #0c5700)'
+      },
+      'variant:warning': {
+        '--color-background-muted': 'var(--color-background-yellow)'
+      },
+      'variant:error': {
+        '--color-background-muted': 'var(--color-background-red)'
+      }
+    }
+  }
+});
 
 function useStoredValue(key, fallback) {
   const [value, setValue] = useState(() => localStorage.getItem(key) || fallback);
@@ -24,7 +53,7 @@ function useStoredValue(key, fallback) {
 function Product() {
   const [themeMode, setThemeMode] = useStoredValue('codex_pool_theme', 'dark');
   return (
-    <Theme theme={neutralTheme} mode={themeMode}>
+    <Theme theme={poolTheme} mode={themeMode}>
       <ToastViewport position="bottomEnd" maxVisible={3}>
         <ProductShell themeMode={themeMode} setThemeMode={setThemeMode} />
       </ToastViewport>
@@ -38,11 +67,14 @@ function ProductShell({ themeMode, setThemeMode }) {
     toast({ body: text, type: error ? 'error' : 'info', isAutoHide: true });
   }, [toast]);
   return (
-    <AppShell variant="elevated" height="auto" contentPadding={4} mobileNav={false}>
+    <AppShell variant="surface" height="auto" contentPadding={4} mobileNav={false}>
       <VStack gap={6}>
         <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
           <VStack gap={1}>
-            <Heading level={1}>Codex Pool</Heading>
+            <HStack gap={2} vAlign="center">
+              <Icon icon={Share2} size="lg" color="accent" />
+              <Heading level={1}>Codex Share</Heading>
+            </HStack>
             <Text type="supporting" color="secondary">Share delegated Codex quota without sharing provider credentials.</Text>
           </VStack>
           <Button
