@@ -24,6 +24,11 @@ const poolTheme = defineTheme({
         boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--color-border-red), transparent 50%)'
       }
     },
+    banner: {
+      'status:info': {
+        '--color-accent-muted': 'var(--color-background-blue)'
+      }
+    },
     progressbar: {
       base: {
         '--color-background-muted': 'var(--color-track)'
