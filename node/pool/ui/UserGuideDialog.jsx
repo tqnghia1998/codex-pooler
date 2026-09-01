@@ -2,10 +2,8 @@ import React from 'react';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
 import { Button } from '@astryxdesign/core/Button';
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
-import { useLanguage } from './i18n.jsx';
 
 export function UserGuideDialog({ isOpen, onClose, title, subtitle, children }) {
-  const { t } = useLanguage();
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} width={680}>
       <Layout
@@ -14,7 +12,7 @@ export function UserGuideDialog({ isOpen, onClose, title, subtitle, children }) 
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end">
-              <Button label={t('done')} variant="primary" onClick={onClose} />
+              <Button label="Done" variant="primary" onClick={onClose} />
             </HStack>
           </LayoutFooter>
         )}
