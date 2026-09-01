@@ -19,6 +19,10 @@ npm start
 Open `http://localhost:3000`. See [`node/README.md`](node/README.md) for setup,
 routing, supported routes, storage, and operational limits.
 
+Codex Share is a separate friend-sharing product with its own server, login,
+and data. Start it with `cd node && npm run pool:start`; see
+[`node/pool/README.md`](node/pool/README.md).
+
 ## Project direction
 
 - `node/` is the only fork-owned implementation and the target for new work.
