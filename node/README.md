@@ -14,6 +14,13 @@ This is the primary implementation for new development. It is a small single-pro
 Quota sharing is a separate product under `pool/`. It has its own server, UI,
 cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
 not initialize or expose Codex Pool accounts, routes, sessions, or storage.
+Both products route their client-facing gateway surface through
+`src/gateway-dispatch.js`. Add proxy routes or compatibility behavior in the
+shared gateway modules, never as a Relaydeck-only or Codex Share-only route.
+Codex Share is an informal, free friend-sharing tool. It intentionally has no
+payments, marketplace pricing, reputation system, ratings, or availability
+guarantees. Durable operational notifications are delivered by email when its
+optional SMTP settings are configured; see `pool/README.md`.
 
 ## Proxy compatibility status
 
@@ -66,7 +73,7 @@ By default, the server binds `127.0.0.1` and accepts only localhost Host headers
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
 
-Passive compatibility observation is enabled by default with `CODEX_POOLER_COMPATIBILITY_PASSIVE_ENABLED=true`. It retains at most 256 content-free observations in memory and promotes only allowlisted structured rejections after independent requests. Synthetic probes are intentionally omitted because model and quota refresh already cover metadata routes without testing request compatibility.
+Passive compatibility observation is enabled by default with `CODEX_POOLER_COMPATIBILITY_PASSIVE_ENABLED=true`. It retains at most 256 content-free observations in memory and promotes only allowlisted structured rejections after independent requests. The dashboard's explicit Test connection action performs one minimal live generation through the selected upstream; no compatibility probes run automatically.
 
 Sanitized release fixtures live in `fixtures/compatibility/` and cover Codex public HTTP/SSE,
 native HTTP, compact HTTP, public/native WebSockets, and Compass Anthropic Messages. Run
@@ -129,8 +136,9 @@ verified cache-only run. The full contract is in `COMPATIBILITY_RELEASE_GATE_PLA
 Shared Codex host health is enabled conservatively by default. Two proven pre-connect failures within 30 seconds open a 15-second circuit for the normalized Codex origin; requests receive a local retryable `503 codex_host_unavailable` with `Retry-After`, and one half-open probe is admitted after cooldown. Only `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `ENETDOWN`, and `EHOSTUNREACH` count. Timeouts, resets, broken pipes, TLS failures, HTTP responses, and authentication failures remain account-attributed, while any actual HTTP response clears host reachability evidence. Configure this with `CODEX_POOLER_CODEX_HOST_CIRCUIT_ENABLED`, `CODEX_POOLER_CODEX_HOST_FAILURE_THRESHOLD`, `CODEX_POOLER_CODEX_HOST_FAILURE_WINDOW_MS`, `CODEX_POOLER_CODEX_HOST_COOLDOWN_MS`, and `CODEX_POOLER_CODEX_HOST_MAX_ENTRIES`.
 
 Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; when it is expired or rejected, the server refreshes it through `https://auth.openai.com/oauth/token` using OpenAI's Codex client ID and persists rotated tokens. Independently, it checks refreshable Codex tokens at startup and hourly, refreshing those that expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. The dashboard also offers a manual Codex token refresh. The server refreshes all upstream quotas immediately and every minute.
+Adding an upstream performs a best-effort quota refresh before the create response returns. Replacing Codex or Compass quota credentials does the same, while provider failures do not roll back the saved upstream.
 
-Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key` and are never returned by the API or rendered in the browser. `db.sqlite` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Existing `db.json` files migrate automatically on startup. Back up `.data/.key` and `db.sqlite` together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
+Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key`. Public upstream records never include credentials; an authenticated operator can explicitly reveal an upstream's current credential export from the Edit upstream dialog or `GET /api/upstreams/:id/credentials`. `db.sqlite` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Existing `db.json` files migrate automatically on startup. Back up `.data/.key` and `db.sqlite` together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.
 
 `GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only sanitized fixed states.
 
@@ -140,6 +148,7 @@ Spending caps use 25 credits per dollar, rounded to whole credits, and a positiv
 
 ```text
 GET    /api/upstreams
+GET    /api/upstreams/:id/credentials  # explicit current credential export
 GET    /api/upstreams/events             # SSE: ready + upstream-change notifications
 GET    /api/model-catalog                 # sanitized discovery source/freshness/failure status
 GET    /api/codex-host-health             # sanitized aggregate shared-origin circuit status
@@ -156,6 +165,7 @@ POST   /api/upstreams/refresh-quota         # all upstreams, concurrent batches 
 PATCH  /api/upstreams/:id
 DELETE /api/upstreams/:id
 POST   /api/upstreams/:id/refresh-quota
+POST   /api/upstreams/:id/test-connection  # live minimal generation through this upstream
 POST   /api/upstreams/:id/refresh-token
 POST   /api/upstreams/:id/clear-cooldown
 PUT    /api/upstreams/:id/cap       { "capDollars": 100 }
