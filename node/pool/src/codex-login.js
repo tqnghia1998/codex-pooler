@@ -171,5 +171,5 @@ function normalizePastedAuthJson(value) {
 
 function poolDisplayName(email) {
   const local = typeof email === 'string' ? email.trim().split('@')[0] : '';
-  return local || 'Codex Pool user';
+  return local || 'Codex Share user';
 }
