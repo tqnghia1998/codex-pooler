@@ -59,7 +59,7 @@ function csrfToken() {
 function useSharingApi() {
   return useCallback(async (path, options = {}) => {
     const method = options.method || 'GET';
-    const response = await fetch(path, {
+    const response = await fetch(appUrl(path), {
       ...options,
       headers: {
         'content-type': 'application/json',
@@ -1792,7 +1792,7 @@ function KeyDialog({ value, onClose, onNotice }) {
     const controller = new AbortController();
     let active = true;
     setModelState({ status: 'loading', ids: [] });
-    void fetch('/v1/models', {
+    void fetch(appUrl('/v1/models'), {
       headers: { authorization: `Bearer ${value.apiKey}` },
       signal: controller.signal
     })
@@ -1925,7 +1925,11 @@ function quotaProgressVariant(value, isAvailable = true) {
 }
 
 function apiBaseUrl() {
-  return new URL('/v1', window.location.origin).toString();
+  return appUrl('/v1');
+}
+
+function appUrl(path) {
+  return new URL(String(path).replace(/^\//, ''), document.baseURI).toString();
 }
 
 function accountLabel(account) {
