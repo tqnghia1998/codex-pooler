@@ -120,11 +120,12 @@ function useApi() {
 
 const VIRTUAL_MIN_ITEMS = 24;
 const VIRTUAL_OVERSCAN_ROWS = 2;
-const UPSTREAM_GRID_COLUMNS = { minWidth: 280, max: 4, repeat: 'fit' };
+const METRIC_GRID_COLUMNS = { minWidth: 132, max: 3, repeat: 'fill' };
+const UPSTREAM_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
 
 // Windowed grid: renders only the rows near the viewport and reserves the rest
 // of the height with padding. Row height and column count are measured from the
-// live grid, so the responsive `repeat: fit` layout keeps working.
+// live grid, so the responsive `repeat: fill` layout keeps working.
 // ponytail: assumes uniform row height (cards are fixed-height); switch to
 // per-row measurement if card contents ever vary in height.
 function VirtualGrid({ items, renderItem }) {
@@ -187,7 +188,7 @@ function VirtualGrid({ items, renderItem }) {
 
   return (
     <div ref={wrapperRef} style={{ paddingTop, paddingBottom }}>
-      <Grid columns={UPSTREAM_GRID_COLUMNS} gap={3}>{items.slice(start, end).map(renderItem)}</Grid>
+      <Grid columns={UPSTREAM_GRID_COLUMNS} gap={2}>{items.slice(start, end).map(renderItem)}</Grid>
     </div>
   );
 }
@@ -735,9 +736,9 @@ function Dashboard({ themeMode, setThemeMode }) {
   const systemSummary = summarizeSystemStatus(systemStatus, upstreams, systemStatusError);
 
   return (
-    <AppShell variant="elevated" height="auto" contentPadding={4} mobileNav={false}>
-        <VStack gap={6}>
-          <HStack justify="between" vAlign="start" gap={3} wrap="wrap">
+    <AppShell variant="elevated" height="auto" contentPadding={3} mobileNav={false}>
+        <VStack gap={4}>
+          <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
             <VStack gap={1}>
               <Heading level={1}>Relaydeck</Heading>
               <Text type="supporting" color="secondary">Small local upstream and quota dashboard. Credentials never leave this server.</Text>
@@ -752,9 +753,9 @@ function Dashboard({ themeMode, setThemeMode }) {
             </HStack>
           </HStack>
 
-          <VStack gap={2}>
+          <VStack gap={1}>
             <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
-            <HStack gap={2} wrap="wrap" vAlign="start">
+            <HStack gap={1} wrap="wrap" vAlign="start">
               <StackItem size="static">
                 <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
                   <SegmentedControlItem value="all" label="All" />
@@ -777,12 +778,12 @@ function Dashboard({ themeMode, setThemeMode }) {
             </HStack>
           </VStack>
 
-          <VStack gap={2}>
+          <VStack gap={1}>
             <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
             {!hasLoaded ? (
               <MetricSkeletons />
             ) : (
-              <Grid columns={{ minWidth: 132, max: 9, repeat: 'fit' }} gap={2}>
+              <Grid columns={METRIC_GRID_COLUMNS} gap={2}>
                 {filterType !== 'compass' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
                 {filterType !== 'codex' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
                 <Metric label="Cooling down" value={stats.coolingDown} />
@@ -796,10 +797,10 @@ function Dashboard({ themeMode, setThemeMode }) {
             )}
           </VStack>
 
-          <VStack gap={2}>
-            <HStack align="center" justify="between" gap={2} wrap="wrap">
+          <VStack gap={1}>
+            <HStack align="center" justify="between" gap={1} wrap="wrap">
               <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
-              <HStack gap={2} wrap="wrap">
+              <HStack gap={1} wrap="wrap">
                 <Button
                   label="System status"
                   size="sm"
@@ -1168,7 +1169,7 @@ function Metric({ label, value }) {
 
 function MetricSkeletons() {
   return (
-    <Grid columns={{ minWidth: 132, max: 9, repeat: 'fit' }} gap={2}>
+    <Grid columns={METRIC_GRID_COLUMNS} gap={2}>
       {Array.from({ length: 8 }, (_, index) => (
         <Card key={index} variant="muted" padding={2}>
           <VStack gap={2}>
@@ -1183,10 +1184,10 @@ function MetricSkeletons() {
 
 function UpstreamSkeletons() {
   return (
-    <Grid columns={UPSTREAM_GRID_COLUMNS} gap={3}>
+    <Grid columns={UPSTREAM_GRID_COLUMNS} gap={2}>
       {Array.from({ length: 4 }, (_, index) => (
-        <Card key={index}>
-          <VStack gap={3}>
+        <Card key={index} padding={3}>
+          <VStack gap={2}>
             <Skeleton width="65%" height={24} index={index} />
             <Skeleton height={56} index={index + 1} />
             <Skeleton height={56} index={index + 2} />
@@ -1244,8 +1245,8 @@ function UpstreamCard({
     warning: { '--color-background-muted': 'var(--color-background-yellow)' },
   };
   return (
-    <Card height="100%">
-      <VStack gap={3} height="100%" vAlign="between">
+    <Card height="100%" padding={3}>
+      <VStack gap={2} height="100%" vAlign="between">
         <HStack justify="between" vAlign="center" gap={2} height={56}>
           <StackItem size="fill">
             <VStack gap={1}>
@@ -1891,7 +1892,7 @@ function SystemStatusDialog({
                     description={summary.message}
                     status={summary.warningCount ? 'warning' : 'success'}
                   />
-                  <Grid columns={{ minWidth: 160, max: 4, repeat: 'fit' }} gap={2}>
+                  <Grid columns={{ minWidth: 160, max: 3, repeat: 'fill' }} gap={2}>
                     <StatusMetric label="Readiness" value={readinessStatusLabel(readinessState)} variant={diagnosticVariant(readinessState)} />
                     <StatusMetric label="Model catalog" value={catalog ? `${catalog.modelCount} models` : 'unknown'} variant={catalogVariant(catalog)} />
                     <StatusMetric label="Codex host circuit" value={hostHealth?.openOriginCount ? `${hostHealth.openOriginCount} open` : 'closed'} variant={hostHealth?.openOriginCount ? 'warning' : 'success'} />
@@ -1984,7 +1985,7 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
                   <Heading level={3}>Readiness</Heading>
                   <Badge label={readinessStatusLabel(readiness?.status || 'pending')} variant={diagnosticVariant(readiness?.status)} />
                 </HStack>
-                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
                   {checks.map(([name, status]) => (
                     <Card key={name} variant="muted" padding={2}>
                       <ReadinessCheck name={name} status={status} />
@@ -1995,7 +1996,7 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
 
               <VStack gap={2}>
                 <Heading level={3}>Gateway</Heading>
-                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+                <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
                   <Metric label="Active attempts" value={gateway?.runtime?.activeAttemptCount ?? 0} />
                   <Metric label="Retained failures" value={`${gateway?.retainedFailureCount ?? 0}/${gateway?.retentionLimit ?? 100}`} />
                   <Metric label="Recent successes" value={gateway?.runtime?.recentSuccesses?.length ?? 0} />
@@ -2066,7 +2067,7 @@ function CompatibilityDialog({ isOpen, compatibility, isLoading, error, onResetF
           <LayoutContent>
             <VStack gap={4}>
               {error && <Banner title="Compatibility status unavailable" description={error} status="error" />}
-              <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={2}>
+              <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
                 <Metric label="Learned compatibility rules" value={compatibility?.counts?.active ?? 0} />
                 <Metric label="Stale" value={compatibility?.counts?.stale ?? 0} />
                 <Metric label="Pending evidence" value={compatibility?.counts?.observations ?? 0} />
