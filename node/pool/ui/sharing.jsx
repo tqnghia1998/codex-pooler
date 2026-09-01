@@ -466,7 +466,7 @@ export function SharingWorkspace({ onNotice }) {
         </TabList>
         <HStack gap={3} vAlign="center" wrap="wrap">
           <Switch label="Show past data" value={showPastData} onChange={setShowPastData} />
-          {view === 'my-offers' && offerableUpstreams.length > 0 && (
+          {offerableUpstreams.length > 0 && (
             <Button label="Publish offer" variant="primary" onClick={() => setOfferDialog({ upstreamId: offerableUpstreams[0].id, quotaDollars: 10, expiresOn: '' })} />
           )}
           {view === 'quota-requests' && !activeOwnQuotaRequest && (
@@ -584,7 +584,12 @@ export function SharingWorkspace({ onNotice }) {
           sessions={sharingSessions}
           emptyTitle="No active shares"
           emptyDescription="Sessions you approve for other members will appear here."
-          onEdit={(session) => setSessionDialog({ session, quotaDollars: session.grantedQuotaDollars, mode: 'resize' })}
+          onEdit={(session) => setSessionDialog({
+            session,
+            quotaDollars: session.grantedQuotaDollars,
+            expiresOn: dateFromTimestamp(session.expiresAt),
+            mode: 'resize'
+          })}
           onAddQuota={(session) => setSessionDialog({ session, quotaDollars: 1, mode: 'add' })}
           onStatus={(session, status) => void mutate(
             () => api(`/api/pool/sessions/${session.id}`, { method: 'PATCH', body: JSON.stringify({ status }) }),
@@ -689,10 +694,15 @@ export function SharingWorkspace({ onNotice }) {
             method: 'PATCH',
             body: JSON.stringify(value.mode === 'add'
               ? { additionalQuotaDollars: value.quotaDollars }
-              : { quotaDollars: value.quotaDollars })
+              : {
+                  quotaDollars: value.quotaDollars,
+                  ...(value.expiresOn !== dateFromTimestamp(value.session.expiresAt)
+                    ? { expiresAt: expiryTimestamp(value.expiresOn) }
+                    : {})
+                })
           });
           setSessionDialog(null);
-        }, sessionDialog?.mode === 'add' ? 'Session quota added' : 'Session quota updated')}
+        }, sessionDialog?.mode === 'add' ? 'Session quota added' : 'Session updated')}
       />
       <KeyDialog value={keyDialog} onClose={() => setKeyDialog(null)} onNotice={onNotice} />
       <CredentialsDialog
@@ -1526,18 +1536,31 @@ function SessionDialog({ value, onClose, onSave, onChange }) {
         content={(
           <LayoutContent>
             {value && (
-              <NumberInput
-                label={addingQuota ? 'Additional quota (USD)' : 'Granted quota (USD)'}
-                value={value.quotaDollars}
-                onChange={(quotaDollars) => onChange((current) => ({ ...current, quotaDollars }))}
-                onInput={(event) => {
-                  const quotaInputValid = event.currentTarget.validity.valid;
-                  onChange((current) => ({ ...current, quotaInputValid }));
-                }}
-                min={addingQuota ? 0.01 : value.session.consumedQuotaDollars}
-                step={0.01}
-                isRequired
-              />
+              <VStack gap={3}>
+                <NumberInput
+                  label={addingQuota ? 'Additional quota (USD)' : 'Granted quota (USD)'}
+                  value={value.quotaDollars}
+                  onChange={(quotaDollars) => onChange((current) => ({ ...current, quotaDollars }))}
+                  onInput={(event) => {
+                    const quotaInputValid = event.currentTarget.validity.valid;
+                    onChange((current) => ({ ...current, quotaInputValid }));
+                  }}
+                  min={addingQuota ? 0.01 : value.session.consumedQuotaDollars}
+                  step={0.01}
+                  isRequired
+                />
+                {!addingQuota && (
+                  <DateInput
+                    label="Expires on"
+                    description="Can only be extended, subject to the provider quota reset."
+                    value={value.expiresOn || undefined}
+                    onChange={(expiresOn) => onChange((current) => ({ ...current, expiresOn: expiresOn || '' }))}
+                    min={value.expiresOn || todayDate()}
+                    isRequired
+                    width="100%"
+                  />
+                )}
+              </VStack>
             )}
           </LayoutContent>
         )}
@@ -1657,7 +1680,7 @@ function quotaProgressVariant(value, isAvailable = true) {
 }
 
 function apiBaseUrl() {
-  return `${window.location.origin}/v1`;
+  return new URL('/v1', window.location.origin).toString();
 }
 
 function accountLabel(account) {
