@@ -6,8 +6,8 @@
   "scripts": {
     "build": "vite build",
     "pool:build": "vite build --config pool/vite.config.js",
-    "pool:start": "npm run pool:build && sh -c 'if [ -f pool/.env ]; then exec node --env-file=pool/.env pool/src/server.js; else exec node pool/src/server.js; fi'",
-    "pool:dev": "npm run pool:build && sh -c 'if [ -f pool/.env ]; then exec node --env-file=pool/.env --watch pool/src/server.js; else exec node --watch pool/src/server.js; fi'",
+    "pool:start": "npm run pool:build && sh -c 'if [ -f pool/.env ]; then exec node --env-file=pool/.env --watch pool/src/server.js; else exec node --watch pool/src/server.js; fi'",
+    "pool:dev": "npm run pool:start",
     "start": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env src/server.js",
     "dev": "kill $(lsof -tiTCP:3000 -sTCP:LISTEN) 2>/dev/null || true; npm run build && node --env-file=.env --watch src/server.js",
     "compatibility:check": "node scripts/check-compatibility-fixtures.js",
