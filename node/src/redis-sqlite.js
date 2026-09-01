@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { createClient } from 'redis';
 
@@ -18,7 +19,7 @@ export class RedisSqlitePersistence {
     this.client = client || createClient({ url });
     this.prefix = String(prefix || 'codex-share').trim() || 'codex-share';
     this.logger = logger;
-    this.instanceId = randomUUID();
+    this.instanceId = JSON.stringify({ host: hostname(), pid: process.pid, id: randomUUID() });
     this.databases = new Map();
     this.pending = Promise.resolve();
     this.lockTimer = null;
@@ -28,7 +29,10 @@ export class RedisSqlitePersistence {
   async open() {
     this.client.on?.('error', (error) => this.logger?.error?.(`Codex Share Redis error: ${error.message}`));
     if (!this.client.isOpen) await this.client.connect();
-    const acquired = await this.client.set(this.lockKey(), this.instanceId, { NX: true, PX: LOCK_TTL_MS });
+    let acquired = await this.client.set(this.lockKey(), this.instanceId, { NX: true, PX: LOCK_TTL_MS });
+    if (acquired !== 'OK' && await this.releaseStaleLocalLock()) {
+      acquired = await this.client.set(this.lockKey(), this.instanceId, { NX: true, PX: LOCK_TTL_MS });
+    }
     if (acquired !== 'OK') {
       await this.client.close?.();
       throw new Error('POOL_REDIS_URL supports one Codex Share replica; another replica already holds the Redis lock');
@@ -106,6 +110,21 @@ export class RedisSqlitePersistence {
     ).catch(() => {});
   }
 
+  async releaseStaleLocalLock() {
+    const holder = await this.client.get(this.lockKey());
+    try {
+      const lock = JSON.parse(holder);
+      if (lock.host !== hostname() || processExists(lock.pid)) return false;
+    } catch {
+      return false;
+    }
+    const released = await this.client.eval(
+      'if redis.call("GET", KEYS[1]) == ARGV[1] then return redis.call("DEL", KEYS[1]) end return 0',
+      { keys: [this.lockKey()], arguments: [holder] }
+    );
+    return Boolean(released);
+  }
+
   lockKey() {
     return `${this.prefix}:lock`;
   }
@@ -180,4 +199,14 @@ function trackStatement(statement, markDirty) {
 
 function writesSql(source) {
   return /^\s*(?:alter|analyze|create|delete|drop|insert|pragma|reindex|replace|update|vacuum)\b/i.test(String(source));
+}
+
+function processExists(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code !== 'ESRCH';
+  }
 }

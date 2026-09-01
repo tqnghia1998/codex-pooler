@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../../src/store.js';
 import { openRedisSqlitePersistence } from '../../src/redis-sqlite.js';
@@ -105,5 +105,20 @@ test('restores both SQLite stores and encryption keys from Redis', async () => {
     secondProductStore?.sqlite.close();
     rmSync(firstDir, { recursive: true, force: true });
     rmSync(secondDir, { recursive: true, force: true });
+  }
+});
+
+test('reclaims a stale lock from the same local machine', async () => {
+  const redis = new MemoryRedis();
+  redis.values.set('codex-share:lock', JSON.stringify({
+    host: hostname(),
+    pid: process.pid + 1_000_000,
+    id: 'stale'
+  }));
+  const persistence = await openRedisSqlitePersistence({ client: redis });
+  try {
+    assert.equal(JSON.parse(await redis.get('codex-share:lock')).pid, process.pid);
+  } finally {
+    await persistence.close();
   }
 });
