@@ -395,13 +395,20 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     assert.equal(created.response.status, 201);
     assert.equal(created.data.upstream.name, 'p');
     assert.equal(created.data.upstream.baseUrl, undefined);
+    assert.equal(created.data.upstream.quota.remainingPercent, 75);
     const id = created.data.upstream.id;
+    const credentials = await request(base, `/api/upstreams/${id}/credentials`);
+    assert.deepEqual(credentials.data.credentials, {
+      project_id: 'p',
+      project_key: 'secret'
+    });
     const list = await request(base, '/api/upstreams');
     assert.equal(list.data.upstreams.length, 1);
     const show = await request(base, `/api/upstreams/${id}`);
     assert.equal(show.data.upstream.id, id);
     const patched = await request(base, `/api/upstreams/${id}`, { method: 'PATCH', body: JSON.stringify({ projectId: 'project-patched' }) });
     assert.equal(patched.data.upstream.name, 'project-patched');
+    assert.equal(patched.data.upstream.quota.remainingPercent, 75);
     const refreshed = await request(base, `/api/upstreams/${id}/refresh-quota`, { method: 'POST', body: '{}' });
     assert.equal(refreshed.data.upstream.quota.remainingPercent, 75);
 
@@ -452,6 +459,123 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     assert.equal(removed.response.status, 204);
     const missing = await request(base, `/api/upstreams/${id}`);
     assert.equal(missing.response.status, 404);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('tests Codex and Compass connections through the shared proxy path', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-connection-test-'));
+  const store = new Store(dir);
+  const codex = store.create({
+    type: 'codex',
+    accessToken: 'codex-connection-token',
+    accountId: 'codex-connection-account'
+  });
+  const compass = store.create({
+    type: 'compass',
+    projectId: 'compass-connection-project',
+    projectKey: 'compass-connection-key'
+  });
+  const calls = [];
+  const { server, base } = await runningServer(store, {
+    fetchImpl: async (url, options = {}) => {
+      const path = new URL(url).pathname;
+      calls.push({ path, options });
+      if (path === '/backend-api/codex/models') {
+        return new Response(JSON.stringify({
+          models: [{ slug: 'gpt-5.6-sol' }, { slug: 'gpt-5.6-luna' }]
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      if (path === '/backend-api/codex/responses') {
+        return new Response(
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"response-test","status":"completed","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":5,"output_tokens":1}}}\n\n',
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+      if (path === '/compass-api/v1/messages') {
+        return new Response(JSON.stringify({
+          id: 'message-test',
+          type: 'message',
+          model: 'claude-sonnet-5',
+          content: [{ type: 'text', text: 'The current time is now.' }],
+          usage: { input_tokens: 5, output_tokens: 6 }
+        }), { headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error(`Unexpected provider request: ${path}`);
+    }
+  });
+  try {
+    let result = await request(base, `/api/upstreams/${codex.id}/test-connection`, {
+      method: 'POST',
+      body: '{}'
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.data.connection.type, 'codex');
+    assert.equal(result.data.connection.endpoint, '/v1/responses');
+    assert.equal(result.data.connection.model, 'gpt-5.6-luna');
+
+    const codexRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
+    const codexBody = JSON.parse(codexRequest.options.body);
+    assert.equal(codexBody.model, 'gpt-5.6-luna');
+    assert.equal(codexBody.max_output_tokens, 64);
+    assert.equal(codexBody.input[0].content[0].text, 'What is the current time?');
+    assert.equal(codexRequest.options.headers.authorization, 'Bearer codex-connection-token');
+
+    result = await request(base, `/api/upstreams/${compass.id}/test-connection`, {
+      method: 'POST',
+      body: '{}'
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.data.connection.type, 'compass');
+    assert.equal(result.data.connection.endpoint, '/v1/messages');
+    assert.equal(result.data.connection.model, 'claude-sonnet-5');
+
+    const compassRequest = calls.find(({ path }) => path === '/compass-api/v1/messages');
+    assert.deepEqual(JSON.parse(compassRequest.options.body), {
+      model: 'claude-sonnet-5',
+      max_tokens: 64,
+      messages: [{ role: 'user', content: 'What is the current time?' }],
+      stream: false
+    });
+    assert.equal(compassRequest.options.headers.authorization, 'Bearer compass-connection-key');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('keeps saved replacement credentials but clears stale quota when their refresh fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-replacement-quota-'));
+  const store = new Store(dir);
+  let failRefresh = false;
+  const { server, base } = await runningServer(store, {
+    compassGatewayToken: 'gateway-token',
+    fetchImpl: async () => {
+      if (failRefresh) throw new Error('provider unavailable');
+      return new Response(JSON.stringify({
+        retcode: 0,
+        data: { project: { budget_type: 'recurring', quota_detail: { applied_balance: 100, balance: 75 } } }
+      }), { status: 200 });
+    }
+  });
+  try {
+    const created = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'compass', projectId: 'first-project', projectKey: 'first-key' })
+    });
+    assert.equal(created.data.upstream.quota.remainingPercent, 75);
+
+    failRefresh = true;
+    const replaced = await request(base, `/api/upstreams/${created.data.upstream.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ projectId: 'second-project', projectKey: 'second-key' })
+    });
+    assert.equal(replaced.response.status, 200);
+    assert.equal(replaced.data.upstream.name, 'second-project');
+    assert.equal(replaced.data.upstream.quota, null);
+    assert.equal(store.credentials(created.data.upstream.id).projectKey, 'second-key');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

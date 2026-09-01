@@ -9,7 +9,7 @@ import {
   proxyRequest
 } from './proxy.js';
 
-const JSON_RUNTIME_PATHS = new Set(['/v1/responses', '/v1/chat/completions', '/v1/messages', '/v1/messages/count_tokens']);
+const JSON_RUNTIME_PATHS = new Set(['/v1/responses', '/v1/chat/completions', '/v1/messages']);
 
 export function gatewayRequestKind(method, path) {
   if (method === 'GET' && path === '/v1/usage') return 'usage';
@@ -35,8 +35,6 @@ export async function dispatchGatewayRequest({
   logger,
   codexHostHealth,
   modelCatalog,
-  claudeConfig,
-  codexOptions,
   sendJson,
   handleUsage
 }) {
@@ -77,14 +75,12 @@ export async function dispatchGatewayRequest({
       fetchImpl,
       upstreamDeadlines,
       logger,
-      codexHostHealth,
-      claudeConfig,
-      codexOptions
+      codexHostHealth
     });
     return;
   }
   if (kind === 'models') {
-    await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey, fetchImpl, upstreamDeadlines, codexHostHealth, claudeConfig });
+    await proxyModelsRequest({ req, res, path: url.pathname, store, apiKey, fetchImpl, upstreamDeadlines, codexHostHealth });
     return;
   }
   if (kind === 'compatibility') {
