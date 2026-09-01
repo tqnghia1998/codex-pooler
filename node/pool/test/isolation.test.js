@@ -4,10 +4,11 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createApp as createRelaydeckApp } from '../../src/server.js';
 import { Store } from '../../src/store.js';
-import { createApp as createPoolApp } from '../src/server.js';
+import { createApp as createPoolApp, start as startPool } from '../src/server.js';
 import { ProductStore } from '../src/product-store.js';
 
 function digest(path) {
@@ -29,6 +30,8 @@ test('Codex Pool routes, cookies, and data stay isolated from Relaydeck', async 
   try {
     const relaydeckStore = new Store(relaydeckDir);
     relaydeckStore.create({ type: 'compass', projectId: 'relaydeck-only', projectKey: 'secret' });
+    const relaydeckDefaultDataDir = resolve(fileURLToPath(new URL('../../.data', import.meta.url)));
+    assert.throws(() => startPool(0, { dataDir: relaydeckDefaultDataDir }), /must not point to Relaydeck/);
     const relaydeckApp = createRelaydeckApp({ store: relaydeckStore, apiKey: 'relaydeck-key' });
     const relaydeckDigest = digest(relaydeckStore.dbPath);
     const relaydeck = await listen(relaydeckApp);
