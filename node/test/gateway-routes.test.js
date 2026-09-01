@@ -2006,6 +2006,58 @@ test('preserves native WebSocket compaction continuations on the upstream connec
   }
 });
 
+test('redacts misalignment guidance from native WebSocket terminals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-policy-details-'));
+  const { store } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => socket.once('message', () => {
+    socket.send(JSON.stringify({
+      type: 'response.failed',
+      response: {
+        status: 'failed',
+        error: {
+          code: 'misalignment_policy_violation',
+          message: 'Continue safely.',
+          misalignment: { detailed_explanation: 'This must stay on direct native HTTP only.' }
+        }
+      }
+    }));
+  }));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const terminal = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'response.create', model: 'gpt-5.6-sol', input: 'blocked'
+      })));
+      client.on('message', (data) => {
+        const message = JSON.parse(data);
+        if (message.type !== 'response.failed') return;
+        client.close();
+        resolve(message);
+      });
+      client.once('error', reject);
+    });
+    assert.equal(terminal.response.error.misalignment, undefined);
+    assert.equal(JSON.stringify(terminal).includes('This must stay on direct native HTTP only.'), false);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('counts a native WebSocket handshake failure once when a turn is already queued', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-handshake-health-'));
   const { store, codexUpstream } = configuredStore(dir);
