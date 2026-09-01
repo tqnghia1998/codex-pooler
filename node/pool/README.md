@@ -100,6 +100,10 @@ token-refresh failure, is in cooldown, or has exhausted its provider quota.
    request across their active share sessions.
 6. Successful priced usage is settled against the grant.
 
+Every new Codex Share account receives a `Default` personal key automatically.
+Its secret is encrypted at rest and can be revealed or rotated from the
+dashboard.
+
 Providers can pause, resume, resize, top up, revoke, or replace a session key.
 Providers and consumers can reveal the current key while the session remains
 until it is revoked. Replacing a key immediately invalidates the previous key.

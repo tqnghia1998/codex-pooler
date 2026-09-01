@@ -783,7 +783,7 @@ test('a consumer can reveal and rotate one personal key for active share session
     try {
       let result = await request(base, '/api/pool/personal-key', consumerSession);
       assert.equal(result.response.status, 200);
-      assert.equal(result.body.personalKey.hasKey, false);
+      assert.equal(result.body.personalKey.hasKey, true);
       assert.equal(result.body.personalKey.activeSessionCount, 1);
 
       result = await request(base, '/api/pool/personal-key/reveal', consumerSession, { method: 'POST', body: '{}' });
@@ -863,7 +863,7 @@ test('provider controls, named keys, and friend quota requests are available thr
 
       result = await request(base, '/api/pool/personal-keys', consumerSession);
       assert.equal(result.response.status, 200);
-      assert.equal(result.body.personalKeys[0].name, 'Laptop');
+      assert.deepEqual(result.body.personalKeys.map((personalKey) => personalKey.name), ['Default', 'Laptop']);
 
       result = await request(base, `/api/pool/personal-keys/${keyId}/reveal`, consumerSession, {
         method: 'POST',
