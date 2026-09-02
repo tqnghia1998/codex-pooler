@@ -433,6 +433,62 @@ test('renders the configured public base path into the dashboard', async () => {
   }
 });
 
+test('restricts Codex Share analytics to the whitelisted administrator', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-admin-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const admin = sharingStore.upsertCodexAccount({
+      subject: 'admin-user', issuer: 'https://auth.openai.com', email: 'quangnghia.trinh@shopee.com', name: 'Admin'
+    });
+    const member = account(sharingStore, 'member');
+    const adminSession = sharingStore.createAccountSession(admin.id);
+    const memberSession = sharingStore.createAccountSession(member.id);
+    const now = new Date().toISOString();
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1_000).toISOString().slice(0, 10);
+    const today = now.slice(0, 10);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
+      VALUES ('admin-offer', ?, 'admin-upstream', 5000000, 'active', NULL, ?, ?)
+    `).run(admin.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_tickets (id, offer_id, provider_account_id, consumer_account_id, demand_request_id, requested_micros, approved_micros, status, expires_at, created_at, resolved_at)
+      VALUES ('admin-ticket', 'admin-offer', ?, ?, NULL, 5000000, 5000000, 'approved', NULL, ?, ?)
+    `).run(admin.id, member.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_sessions (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id, granted_micros, consumed_micros, status, expires_at, created_at, updated_at)
+      VALUES ('admin-session', 'admin-offer', 'admin-ticket', ?, ?, 'admin-upstream', 'default', 5000000, 2500000, 'active', NULL, ?, ?)
+    `).run(admin.id, member.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_activity (subject_type, subject_id, request_count, success_count, total_micros, today_date, today_micros, last_used_at, last_success_at, models_json, failures_json)
+      VALUES ('session', 'admin-session', 1, 1, 1000000, ?, 1000000, ?, ?, '[]', '[]'),
+        ('session', 'old-session', 1, 1, 2000000, ?, 2000000, ?, ?, '[]', '[]')
+    `).run(today, now, now, yesterday, now, now);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      assert.equal((await fetch(`${base}/admin`)).status, 401);
+      assert.equal((await request(base, '/api/pool/admin/analytics', memberSession)).response.status, 403);
+      const analytics = await request(base, '/api/pool/admin/analytics', adminSession);
+      assert.equal(analytics.response.status, 200);
+      assert.equal(analytics.body.analytics.overview.accounts, 2);
+      assert.equal(analytics.body.analytics.usage.todayMicros, 1000000);
+      assert.deepEqual(analytics.body.analytics.topProviders[0], {
+        id: 'quangnghia.trinh@shopee.com', email: 'quangnghia.trinh@shopee.com', sessionCount: 1, consumedMicros: 2500000
+      });
+      assert.deepEqual(analytics.body.analytics.topConsumers[0], {
+        id: 'member@example.com', email: 'member@example.com', sessionCount: 1, consumedMicros: 2500000
+      });
+      assert.equal((await fetch(`${base}/admin`, { headers: authHeaders(adminSession) })).status, 200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sharing API requires account sessions and CSRF while offers stay public to signed-in accounts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-api-'));
   try {
