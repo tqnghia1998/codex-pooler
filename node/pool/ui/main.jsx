@@ -12,6 +12,7 @@ import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { HStack, VStack } from '@astryxdesign/core/Layout';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
 import { BookOpen, Share2 } from 'lucide-react';
+import { AdminAnalytics } from './admin.jsx';
 import { SharingWorkspace } from './sharing.jsx';
 
 const poolTheme = defineTheme({
@@ -101,7 +102,7 @@ function Product() {
   return (
     <Theme theme={poolTheme} mode="dark">
       <ToastViewport position="bottomEnd" maxVisible={3}>
-        <ProductShell />
+        {window.location.pathname.endsWith('/admin') ? <AdminAnalytics /> : <ProductShell />}
       </ToastViewport>
     </Theme>
   );
