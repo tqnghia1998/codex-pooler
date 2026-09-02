@@ -47,20 +47,23 @@ export const ROUTING_QUOTA_FRESHNESS_MS = 5 * 60_000;
 export const DEFAULT_SCOPE_ID = 'default';
 
 export class Store {
-  constructor(dataDir = process.env.CODEX_POOLER_NODE_DATA_DIR || resolve(process.cwd(), '.data')) {
-    this.dataDir = resolve(dataDir);
-    this.dbPath = join(this.dataDir, 'db.sqlite');
-    this.legacyDbPath = join(this.dataDir, 'db.json');
-    this.keyPath = join(this.dataDir, '.key');
-    mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-    chmodSync(this.dataDir, 0o700);
-    this.key = this.loadKey(existsSync(this.dbPath) || existsSync(this.legacyDbPath));
+  constructor(dataDir = process.env.CODEX_POOLER_NODE_DATA_DIR || resolve(process.cwd(), '.data'), { encryptionKey = null, inMemory = false } = {}) {
+    this.dataDir = inMemory ? null : resolve(dataDir);
+    this.dbPath = inMemory ? ':memory:' : join(this.dataDir, 'db.sqlite');
+    this.legacyDbPath = inMemory ? null : join(this.dataDir, 'db.json');
+    this.keyPath = inMemory ? null : join(this.dataDir, '.key');
+    if (!inMemory) {
+      mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+      chmodSync(this.dataDir, 0o700);
+    }
+    if (inMemory && !encryptionKey) throw new Error('In-memory Store requires an encryption key');
+    this.key = encryptionKey ? normalizeEncryptionKey(encryptionKey) : this.loadKey(existsSync(this.dbPath) || existsSync(this.legacyDbPath));
     this.sqlite = new Database(this.dbPath);
-    chmodSync(this.dbPath, 0o600);
+    if (!inMemory) chmodSync(this.dbPath, 0o600);
     this.sqlite.pragma('journal_mode = DELETE');
     this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
     this.events = new EventEmitter();
-    if (this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
+    if (inMemory || this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
     else {
       this.db = normalizeDatabase(JSON.parse(readFileSync(this.legacyDbPath, 'utf8')));
       this.save(this.db);
@@ -1631,6 +1634,13 @@ function encryptCredentials(credentials, key) {
 
 function decryptCredentials(credentials, key) {
   return Object.fromEntries(Object.entries(credentials || {}).filter(([, value]) => value).map(([name, value]) => [name, decrypt(value, key)]));
+}
+
+function normalizeEncryptionKey(value) {
+  if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) throw new Error('Store encryption key must be exactly 32 bytes');
+  const key = Buffer.from(value);
+  if (key.length !== 32) throw new Error('Store encryption key must be exactly 32 bytes');
+  return key;
 }
 
 function encrypt(value, key) {

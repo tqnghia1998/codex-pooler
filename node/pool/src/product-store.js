@@ -21,17 +21,20 @@ const ACTIVITY_FAILURE_LIMIT = 10;
 const ACTIVITY_MODEL_LIMIT = 20;
 
 export class ProductStore {
-  constructor(dataDir = process.env.POOL_DATA_DIR || resolve(process.cwd(), 'pool/.data')) {
-    this.dataDir = resolve(dataDir);
-    this.dbPath = join(this.dataDir, 'pool.sqlite');
-    this.keyPath = join(this.dataDir, '.pool-key');
+  constructor(dataDir = process.env.POOL_DATA_DIR || resolve(process.cwd(), 'pool/.data'), { encryptionKey = null, inMemory = false } = {}) {
+    this.dataDir = inMemory ? null : resolve(dataDir);
+    this.dbPath = inMemory ? ':memory:' : join(this.dataDir, 'pool.sqlite');
+    this.keyPath = inMemory ? null : join(this.dataDir, '.pool-key');
     this.emailNotificationsEnabled = false;
     this.lastExpiryCheckAt = 0;
-    mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
-    chmodSync(this.dataDir, 0o700);
-    this.key = this.loadKey();
+    if (!inMemory) {
+      mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
+      chmodSync(this.dataDir, 0o700);
+    }
+    if (inMemory && !encryptionKey) throw new Error('In-memory ProductStore requires an encryption key');
+    this.key = encryptionKey ? normalizeEncryptionKey(encryptionKey) : this.loadKey();
     this.sqlite = new Database(this.dbPath);
-    chmodSync(this.dbPath, 0o600);
+    if (!inMemory) chmodSync(this.dbPath, 0o600);
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('foreign_keys = ON');
     this.createSchema();
@@ -65,6 +68,7 @@ export class ProductStore {
         sharing_status TEXT NOT NULL DEFAULT 'active',
         sharing_updated_at TEXT,
         manual_share_budget_micros INTEGER,
+        link_order INTEGER,
         created_at TEXT NOT NULL,
         PRIMARY KEY (account_id, upstream_id)
       );
@@ -309,6 +313,8 @@ export class ProductStore {
     addColumn(this.sqlite, 'account_upstreams', 'sharing_status', "TEXT NOT NULL DEFAULT 'active'");
     addColumn(this.sqlite, 'account_upstreams', 'sharing_updated_at', 'TEXT');
     addColumn(this.sqlite, 'account_upstreams', 'manual_share_budget_micros', 'INTEGER');
+    addColumn(this.sqlite, 'account_upstreams', 'link_order', 'INTEGER');
+    this.sqlite.exec('UPDATE account_upstreams SET link_order = rowid WHERE link_order IS NULL');
     addColumn(this.sqlite, 'sharing_offers', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'sharing_tickets', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'sharing_tickets', 'demand_request_id', 'TEXT');
@@ -465,19 +471,23 @@ export class ProductStore {
   }
 
   linkUpstream(accountId, upstreamId, scopeId = 'default') {
-    this.requireAccount(accountId);
-    const existing = this.sqlite.prepare('SELECT account_id FROM account_upstreams WHERE upstream_id = ?').get(upstreamId);
-    if (existing && existing.account_id !== accountId) {
-      throw Object.assign(new Error('Codex account is already linked to another Codex Share account'), { statusCode: 409 });
-    }
-    const now = new Date().toISOString();
-    this.sqlite.prepare(`
-      INSERT INTO account_upstreams (account_id, upstream_id, scope_id, created_at)
-      VALUES (?, ?, ?, ?)
-      ON CONFLICT(upstream_id) DO UPDATE SET scope_id = excluded.scope_id
-    `).run(accountId, upstreamId, scopeId, now);
+    const link = this.sqlite.transaction(() => {
+      this.requireAccount(accountId);
+      const existing = this.sqlite.prepare('SELECT account_id, link_order FROM account_upstreams WHERE upstream_id = ?').get(upstreamId);
+      if (existing && existing.account_id !== accountId) {
+        throw Object.assign(new Error('Codex account is already linked to another Codex Share account'), { statusCode: 409 });
+      }
+      const now = new Date().toISOString();
+      const linkOrder = existing?.link_order || this.sqlite.prepare('SELECT COALESCE(MAX(link_order), 0) + 1 AS value FROM account_upstreams WHERE account_id = ?').get(accountId).value;
+      this.sqlite.prepare(`
+        INSERT INTO account_upstreams (account_id, upstream_id, scope_id, link_order, created_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(upstream_id) DO UPDATE SET scope_id = excluded.scope_id
+      `).run(accountId, upstreamId, scopeId, linkOrder, now);
+      return { accountId, upstreamId, scopeId, createdAt: now };
+    })();
     this.event(accountId, 'upstream', upstreamId, 'linked', { scopeId });
-    return { accountId, upstreamId, scopeId, createdAt: now };
+    return link;
   }
 
   accountOwnsUpstream(accountId, upstreamId) {
@@ -489,10 +499,11 @@ export class ProductStore {
       SELECT upstream_id AS upstreamId, scope_id AS scopeId, sharing_status AS sharingStatus,
         sharing_updated_at AS sharingUpdatedAt,
         manual_share_budget_micros AS manualShareBudgetMicros,
+        link_order AS linkOrder,
         created_at AS createdAt
       FROM account_upstreams
       WHERE account_id = ?
-      ORDER BY created_at
+      ORDER BY link_order
     `)
       .all(accountId);
   }
@@ -2802,6 +2813,13 @@ function upstreamIdentityKey(upstream) {
   return null;
 }
 
+function normalizeEncryptionKey(value) {
+  if (!Buffer.isBuffer(value) && !(value instanceof Uint8Array)) throw new Error('Product store encryption key must be exactly 32 bytes');
+  const key = Buffer.from(value);
+  if (key.length !== 32) throw new Error('Product store encryption key must be exactly 32 bytes');
+  return key;
+}
+
 function compareCanonicalUpstreams(left, right, productStore) {
   const leftActivity = productStore.upstreamActivity(left.upstream.id);
   const rightActivity = productStore.upstreamActivity(right.upstream.id);
@@ -2810,6 +2828,7 @@ function compareCanonicalUpstreams(left, right, productStore) {
     || rightActivity.activityCount - leftActivity.activityCount
     || Number(right.link.sharingStatus === 'active') - Number(left.link.sharingStatus === 'active')
     || String(right.link.createdAt).localeCompare(String(left.link.createdAt))
+    || Number(right.link.linkOrder || 0) - Number(left.link.linkOrder || 0)
     || String(right.upstream.id).localeCompare(String(left.upstream.id));
 }
 
