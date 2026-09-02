@@ -131,7 +131,8 @@ unavailable. Neither key type can access product management routes.
 If every active provider session needs Codex reauthentication, requests return
 `share_provider_reauth_required` until a provider signs in again.
 
-Offers, tickets, sessions, personal keys, and public quota requests expire.
+Offers, sessions, personal keys, and public quota requests expire. Pending
+tickets remain open until the source offer is closed or expires.
 Offer and session expiry is bounded by the provider quota reset when that reset
 is known. Creating or resizing a grant is rejected atomically when it would
 overcommit the provider's current quota. If provider quota later falls below

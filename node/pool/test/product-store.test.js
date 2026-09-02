@@ -222,6 +222,28 @@ test('shows provider availability issues on offers, tickets, and share sessions'
   }
 });
 
+test('keeps pending tickets open until their source offer expires', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ticket-expiry-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'ticket-expiry', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'ticket-expiry-provider', 'ticket-expiry-provider@example.com');
+    const consumer = account(sharingStore, 'ticket-expiry-consumer', 'ticket-expiry-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, {
+      upstreamId: upstream.id,
+      quotaDollars: 5,
+      expiresAt: new Date(Date.now() + 6 * 24 * 60 * 60 * 1_000).toISOString()
+    }, upstreamStore);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
+
+    assert.equal(ticket.expiresAt, offer.expiresAt);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('approves tickets atomically and enforces session capacity with repeatable key reveal', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-flow-'));
   try {
