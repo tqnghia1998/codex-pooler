@@ -225,10 +225,19 @@ export class ProductStore {
         created_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS sharing_offers_provider_idx ON sharing_offers(provider_account_id);
+      CREATE INDEX IF NOT EXISTS sharing_offers_status_created_idx ON sharing_offers(status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_tickets_provider_idx ON sharing_tickets(provider_account_id, status);
       CREATE INDEX IF NOT EXISTS sharing_tickets_consumer_idx ON sharing_tickets(consumer_account_id, status);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_provider_created_idx ON sharing_tickets(provider_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_consumer_created_idx ON sharing_tickets(consumer_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_provider_status_created_idx ON sharing_tickets(provider_account_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_consumer_status_created_idx ON sharing_tickets(consumer_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_sessions_provider_idx ON sharing_sessions(provider_account_id, status);
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_idx ON sharing_sessions(consumer_account_id, status);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_provider_created_idx ON sharing_sessions(provider_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_created_idx ON sharing_sessions(consumer_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_provider_status_created_idx ON sharing_sessions(provider_account_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_status_created_idx ON sharing_sessions(consumer_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_reservations_session_idx ON sharing_reservations(session_id, status, expires_at);
       CREATE INDEX IF NOT EXISTS sharing_reservations_key_idx ON sharing_reservations(key_id, status);
       CREATE INDEX IF NOT EXISTS quota_requests_status_idx ON quota_requests(status, created_at);
@@ -367,6 +376,15 @@ export class ProductStore {
     }
     this.sqlite.exec(`
       CREATE INDEX IF NOT EXISTS personal_api_keys_account_idx ON personal_api_keys(account_id, created_at);
+      CREATE INDEX IF NOT EXISTS sharing_offers_status_created_idx ON sharing_offers(status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_provider_created_idx ON sharing_tickets(provider_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_consumer_created_idx ON sharing_tickets(consumer_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_provider_status_created_idx ON sharing_tickets(provider_account_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_tickets_consumer_status_created_idx ON sharing_tickets(consumer_account_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_provider_created_idx ON sharing_sessions(provider_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_created_idx ON sharing_sessions(consumer_account_id, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_provider_status_created_idx ON sharing_sessions(provider_account_id, status, created_at DESC, id DESC);
+      CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_status_created_idx ON sharing_sessions(consumer_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_reservations_session_idx ON sharing_reservations(session_id, status, expires_at);
       CREATE INDEX IF NOT EXISTS sharing_reservations_key_idx ON sharing_reservations(key_id, status);
       CREATE INDEX IF NOT EXISTS quota_requests_status_idx ON quota_requests(status, created_at);
@@ -1065,6 +1083,70 @@ export class ProductStore {
     return offers.sort(compareOffers);
   }
 
+  sharingCounts(accountId) {
+    this.expireDue();
+    const count = (sql, ...args) => this.sqlite.prepare(sql).get(...args).count;
+    return {
+      'community-offers': count("SELECT COUNT(*) AS count FROM sharing_offers WHERE provider_account_id != ? AND status = 'active'", accountId),
+      'my-offers': count("SELECT COUNT(*) AS count FROM sharing_offers WHERE provider_account_id = ? AND status = 'active'", accountId),
+      'quota-requests': count("SELECT COUNT(*) AS count FROM quota_requests WHERE status = 'active'"),
+      'sent-requests': count("SELECT COUNT(*) AS count FROM sharing_tickets WHERE consumer_account_id = ? AND status = 'pending'", accountId),
+      approvals: count("SELECT COUNT(*) AS count FROM sharing_tickets WHERE provider_account_id = ? AND status = 'pending'", accountId),
+      'my-access': count("SELECT COUNT(*) AS count FROM sharing_sessions WHERE consumer_account_id = ? AND status NOT IN ('revoked', 'expired')", accountId),
+      'shared-by-me': count("SELECT COUNT(*) AS count FROM sharing_sessions WHERE provider_account_id = ? AND status NOT IN ('revoked', 'expired')", accountId)
+    };
+  }
+
+  listOffersPage(viewerAccountId, upstreamStore, options) {
+    this.expireDue();
+    const conditions = [];
+    const args = [];
+    if (!options.includePast) conditions.push("sharing_offers.status = 'active'");
+    if (options.role === 'mine') {
+      conditions.push('sharing_offers.provider_account_id = ?');
+      args.push(viewerAccountId);
+    } else if (options.role === 'community') {
+      conditions.push('sharing_offers.provider_account_id != ?');
+      args.push(viewerAccountId);
+    }
+    if (options.query) {
+      conditions.push('instr(lower(accounts.email), ?) > 0');
+      args.push(options.query);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const totalItems = this.sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM sharing_offers JOIN accounts ON accounts.id = sharing_offers.provider_account_id
+      ${where}
+    `).get(...args).count;
+    const rows = this.sqlite.prepare(`
+      SELECT sharing_offers.*, accounts.display_name AS provider_name, accounts.email AS provider_email,
+        EXISTS(
+          SELECT 1 FROM sharing_tickets
+          WHERE sharing_tickets.offer_id = sharing_offers.id
+            AND sharing_tickets.consumer_account_id = ?
+            AND sharing_tickets.status = 'pending'
+        ) AS has_pending_request
+      FROM sharing_offers JOIN accounts ON accounts.id = sharing_offers.provider_account_id
+      ${where}
+      ORDER BY sharing_offers.created_at DESC, sharing_offers.id DESC
+      LIMIT ? OFFSET ?
+    `).all(viewerAccountId, ...args, options.limit, options.offset);
+    const commitmentCache = new Map();
+    const allocations = this.offerAllocations(rows.map(({ id }) => id));
+    const offers = rows.flatMap((row) => {
+      const upstream = upstreamStore.getPublic(row.upstream_id);
+      if (!upstream) return [];
+      const commitment = this.providerCommitment(row.upstream_id, upstreamStore, commitmentCache);
+      return [publicOffer(row, upstream, allocations.get(row.id) || 0, viewerAccountId, {
+        sharing: this.providerSharingState(row.upstream_id),
+        backedMicros: commitment.offerBacking.get(row.id) ?? row.quota_micros,
+        underfundedMicros: commitment.underfundedMicros
+      })];
+    });
+    return sharingListPage('offers', offers, totalItems, options);
+  }
+
   offer(id, viewerAccountId, upstreamStore) {
     this.expireDue();
     const row = this.sqlite.prepare(`
@@ -1148,6 +1230,43 @@ export class ProductStore {
       WHERE sharing_tickets.provider_account_id = ? OR sharing_tickets.consumer_account_id = ?
       ORDER BY sharing_tickets.created_at DESC
     `).all(accountId, accountId).map((row) => publicTicket(row, accountId, upstreamStore.getPublic(row.upstream_id)));
+  }
+
+  listTicketsPage(accountId, upstreamStore, options) {
+    this.expireDue();
+    const conditions = [];
+    const args = [];
+    if (options.role === 'sent') {
+      conditions.push('sharing_tickets.consumer_account_id = ?');
+      args.push(accountId);
+    } else if (options.role === 'received') {
+      conditions.push('sharing_tickets.provider_account_id = ?');
+      args.push(accountId);
+    } else {
+      conditions.push('(sharing_tickets.provider_account_id = ? OR sharing_tickets.consumer_account_id = ?)');
+      args.push(accountId, accountId);
+    }
+    if (!options.includePast) conditions.push("sharing_tickets.status = 'pending'");
+    if (options.query) {
+      conditions.push('(instr(lower(provider.email), ?) > 0 OR instr(lower(consumer.email), ?) > 0)');
+      args.push(options.query, options.query);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+    const select = `
+      FROM sharing_tickets
+      JOIN accounts provider ON provider.id = sharing_tickets.provider_account_id
+      JOIN accounts consumer ON consumer.id = sharing_tickets.consumer_account_id
+      JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
+      ${where}`;
+    const totalItems = this.sqlite.prepare(`SELECT COUNT(*) AS count ${select}`).get(...args).count;
+    const rows = this.sqlite.prepare(`
+      SELECT sharing_tickets.*, provider.display_name AS provider_name, provider.email AS provider_email,
+        consumer.display_name AS consumer_name, consumer.email AS consumer_email, sharing_offers.upstream_id
+      ${select}
+      ORDER BY sharing_tickets.created_at DESC, sharing_tickets.id DESC
+      LIMIT ? OFFSET ?
+    `).all(...args, options.limit, options.offset);
+    return sharingListPage('tickets', rows.map((row) => publicTicket(row, accountId, upstreamStore.getPublic(row.upstream_id))), totalItems, options);
   }
 
   ticket(id, accountId, upstreamStore) {
@@ -1284,6 +1403,52 @@ export class ProductStore {
         activity: this.activity('session', row.id)
       });
     });
+  }
+
+  listSessionsPage(accountId, upstreamStore, options) {
+    this.expireDue();
+    const conditions = [];
+    const args = [];
+    if (options.role === 'consumer') {
+      conditions.push('sharing_sessions.consumer_account_id = ?');
+      args.push(accountId);
+    } else if (options.role === 'provider') {
+      conditions.push('sharing_sessions.provider_account_id = ?');
+      args.push(accountId);
+    } else {
+      conditions.push('(sharing_sessions.provider_account_id = ? OR sharing_sessions.consumer_account_id = ?)');
+      args.push(accountId, accountId);
+    }
+    if (!options.includePast) conditions.push("sharing_sessions.status NOT IN ('revoked', 'expired')");
+    if (options.query) {
+      conditions.push('(instr(lower(provider.email), ?) > 0 OR instr(lower(consumer.email), ?) > 0)');
+      args.push(options.query, options.query);
+    }
+    const where = `WHERE ${conditions.join(' AND ')}`;
+    const select = `
+      FROM sharing_sessions
+      JOIN accounts provider ON provider.id = sharing_sessions.provider_account_id
+      JOIN accounts consumer ON consumer.id = sharing_sessions.consumer_account_id
+      ${where}`;
+    const totalItems = this.sqlite.prepare(`SELECT COUNT(*) AS count ${select}`).get(...args).count;
+    const rows = this.sqlite.prepare(`
+      SELECT sharing_sessions.*, provider.display_name AS provider_name, provider.email AS provider_email,
+        consumer.display_name AS consumer_name, consumer.email AS consumer_email
+      ${select}
+      ORDER BY sharing_sessions.created_at DESC, sharing_sessions.id DESC
+      LIMIT ? OFFSET ?
+    `).all(...args, options.limit, options.offset);
+    const activities = this.activities('session', rows.map(({ id }) => id));
+    const commitmentCache = new Map();
+    const sessions = rows.map((row) => {
+      const commitment = this.providerCommitment(row.upstream_id, upstreamStore, commitmentCache);
+      return publicShareSession(row, accountId, upstreamStore.getPublic(row.upstream_id), {
+        sharing: this.providerSharingState(row.upstream_id),
+        backedMicros: commitment.sessionBacking.get(row.id) ?? Math.max(0, row.granted_micros - row.consumed_micros),
+        activity: activities.get(row.id) || emptyActivity()
+      });
+    });
+    return sharingListPage('sessions', sessions, totalItems, options);
   }
 
   session(id, accountId, upstreamStore) {
@@ -1929,6 +2094,32 @@ export class ProductStore {
     `).all().map((row) => publicQuotaRequest(row, viewerAccountId));
   }
 
+  listQuotaRequestsPage(viewerAccountId, options) {
+    this.expireDue();
+    const conditions = [];
+    const args = [];
+    if (!options.includePast) conditions.push("quota_requests.status = 'active'");
+    if (options.query) {
+      conditions.push('instr(lower(accounts.email), ?) > 0');
+      args.push(options.query);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+    const select = `FROM quota_requests JOIN accounts ON accounts.id = quota_requests.account_id ${where}`;
+    const totalItems = this.sqlite.prepare(`SELECT COUNT(*) AS count ${select}`).get(...args).count;
+    const rows = this.sqlite.prepare(`
+      SELECT quota_requests.*, accounts.email, accounts.display_name
+      ${select}
+      ORDER BY quota_requests.status = 'active' DESC, quota_requests.created_at DESC, quota_requests.id DESC
+      LIMIT ? OFFSET ?
+    `).all(...args, options.limit, options.offset);
+    return {
+      ...sharingListPage('quotaRequests', rows.map((row) => publicQuotaRequest(row, viewerAccountId)), totalItems, options),
+      hasActiveOwnQuotaRequest: Boolean(this.sqlite.prepare(`
+        SELECT 1 FROM quota_requests WHERE account_id = ? AND status = 'active'
+      `).get(viewerAccountId))
+    };
+  }
+
   createQuotaRequest(accountId, { quotaDollars, expiresAt } = {}) {
     this.requireAccount(accountId);
     this.expireDue(new Date(), { force: true });
@@ -1982,18 +2173,16 @@ export class ProductStore {
       SELECT * FROM sharing_activity
       WHERE subject_type = ? AND subject_id = ?
     `).get(subjectType, subjectId);
-    if (!row) return emptyActivity();
-    const today = utcDate();
-    return {
-      requestCount: row.request_count,
-      successCount: row.success_count,
-      totalSpendDollars: microsToDollars(row.total_micros),
-      spendTodayDollars: microsToDollars(row.today_date === today ? row.today_micros : 0),
-      lastUsedAt: row.last_used_at || null,
-      lastSuccessfulAt: row.last_success_at || null,
-      models: parseJsonArray(row.models_json),
-      recentFailures: parseJsonArray(row.failures_json)
-    };
+    return publicActivity(row);
+  }
+
+  activities(subjectType, subjectIds) {
+    if (!subjectIds.length) return new Map();
+    const placeholders = subjectIds.map(() => '?').join(', ');
+    return new Map(this.sqlite.prepare(`
+      SELECT * FROM sharing_activity
+      WHERE subject_type = ? AND subject_id IN (${placeholders})
+    `).all(subjectType, ...subjectIds).map((row) => [row.subject_id, publicActivity(row)]));
   }
 
   recordActivityStart(subjectType, subjectId, { model = '', now = new Date() } = {}) {
@@ -2412,6 +2601,7 @@ function publicOffer(row, upstream, allocatedMicros, viewerAccountId, {
       || (exceedsProviderQuota ? 'The provider has less actual quota than this offer.' : null)
       || (row.status !== 'active' ? 'The offer is not active.' : null),
     isProvider: viewerAccountId === row.provider_account_id,
+    hasPendingRequest: Boolean(row.has_pending_request),
     expiresAt: row.expires_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -2614,6 +2804,16 @@ function compareOffers(left, right) {
   return Date.parse(right.createdAt) - Date.parse(left.createdAt);
 }
 
+function sharingListPage(key, items, totalItems, { limit = 10, offset = 0 } = {}) {
+  const nextOffset = offset + items.length;
+  return {
+    [key]: items,
+    totalItems,
+    hasMore: nextOffset < totalItems,
+    nextOffset: nextOffset < totalItems ? nextOffset : null
+  };
+}
+
 function publicPersonalKey(row, access, activity) {
   const status = row.disabled_at ? 'revoked' : isExpired(row.expires_at) ? 'expired' : 'active';
   return {
@@ -2681,6 +2881,21 @@ function emptyActivity() {
     lastSuccessfulAt: null,
     models: [],
     recentFailures: []
+  };
+}
+
+function publicActivity(row) {
+  if (!row) return emptyActivity();
+  const today = utcDate();
+  return {
+    requestCount: row.request_count,
+    successCount: row.success_count,
+    totalSpendDollars: microsToDollars(row.total_micros),
+    spendTodayDollars: microsToDollars(row.today_date === today ? row.today_micros : 0),
+    lastUsedAt: row.last_used_at || null,
+    lastSuccessfulAt: row.last_success_at || null,
+    models: parseJsonArray(row.models_json),
+    recentFailures: parseJsonArray(row.failures_json)
   };
 }
 
