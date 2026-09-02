@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@astryxdesign/core/reset.css';
 import '@astryxdesign/core/astryx.css';
@@ -6,6 +6,8 @@ import '@astryxdesign/theme-neutral/theme.css';
 import { AppShell } from '@astryxdesign/core/AppShell';
 import { Button } from '@astryxdesign/core/Button';
 import { Icon } from '@astryxdesign/core/Icon';
+import { Overlay } from '@astryxdesign/core/Overlay';
+import { Spinner } from '@astryxdesign/core/Spinner';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
@@ -18,6 +20,9 @@ import { SharingWorkspace } from './sharing.jsx';
 const poolTheme = defineTheme({
   name: 'codex-share',
   extends: neutralTheme,
+  tokens: {
+    '--color-overlay': '#00000080'
+  },
   components: {
     card: {
       'variant:red': {
@@ -102,19 +107,29 @@ function Product() {
   return (
     <Theme theme={poolTheme} mode="dark">
       <ToastViewport position="bottomEnd" maxVisible={3}>
-        {window.location.pathname.endsWith('/admin') ? <AdminAnalytics /> : <ProductShell />}
+        {window.location.pathname.endsWith('/admin') ? <AdminShell /> : <ProductShell />}
       </ToastViewport>
     </Theme>
   );
 }
 
+function AdminShell() {
+  return (
+    <AppShell variant="surface" height="auto" contentPadding={3} mobileNav={false}>
+      <AdminAnalytics />
+    </AppShell>
+  );
+}
+
 function ProductShell() {
+  const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const toast = useToast();
   const show = useCallback((text, error = false) => {
     toast({ body: text, type: error ? 'error' : 'info', isAutoHide: true });
   }, [toast]);
   return (
-    <AppShell variant="surface" height="auto" contentPadding={3} mobileNav={false}>
+    <Overlay isOpen={workspaceLoading} position="fill" align="center" content={<Spinner size="lg" shade="onMedia" aria-label="Loading sharing workspace" />}>
+      <AppShell variant="surface" height="fill" contentPadding={3} mobileNav={false}>
       <VStack gap={4}>
         <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
           <VStack gap={1}>
@@ -128,9 +143,10 @@ function ProductShell() {
             <GuideButton />
           </HStack>
         </HStack>
-        <SharingWorkspace onNotice={show} />
+        <SharingWorkspace onNotice={show} onLoadingChange={setWorkspaceLoading} />
       </VStack>
-    </AppShell>
+      </AppShell>
+    </Overlay>
   );
 }
 
