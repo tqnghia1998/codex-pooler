@@ -1097,6 +1097,87 @@ export class ProductStore {
     };
   }
 
+  adminAnalytics() {
+    this.expireDue();
+    const row = (sql, ...args) => this.sqlite.prepare(sql).get(...args);
+    const count = (sql, ...args) => row(sql, ...args).count;
+    const usage = row(`
+      SELECT COALESCE(SUM(request_count), 0) AS requests,
+        COALESCE(SUM(success_count), 0) AS successes,
+        COALESCE(SUM(total_micros), 0) AS settled_micros,
+        COALESCE(SUM(CASE WHEN today_date = ? THEN today_micros ELSE 0 END), 0) AS today_micros
+      FROM sharing_activity WHERE subject_type = 'session'
+    `, utcDate());
+    const tickets = row(`
+      SELECT COUNT(*) AS total,
+        COALESCE(SUM(status = 'approved'), 0) AS approved,
+        COALESCE(SUM(status = 'rejected'), 0) AS rejected,
+        COALESCE(SUM(status = 'pending'), 0) AS pending
+      FROM sharing_tickets
+    `);
+    return {
+      overview: {
+        accounts: count('SELECT COUNT(*) AS count FROM accounts'),
+        linkedProviders: count('SELECT COUNT(*) AS count FROM account_upstreams'),
+        activeOffers: count("SELECT COUNT(*) AS count FROM sharing_offers WHERE status = 'active'"),
+        activeSessions: count("SELECT COUNT(*) AS count FROM sharing_sessions WHERE status IN ('active', 'paused')"),
+        pendingTickets: tickets.pending,
+        activeQuotaRequests: count("SELECT COUNT(*) AS count FROM quota_requests WHERE status = 'active'")
+      },
+      usage: {
+        requests: usage.requests,
+        successes: usage.successes,
+        settledMicros: usage.settled_micros,
+        todayMicros: usage.today_micros
+      },
+      tickets: {
+        total: tickets.total,
+        approved: tickets.approved,
+        rejected: tickets.rejected,
+        pending: tickets.pending
+      },
+      providers: {
+        sharingActive: count("SELECT COUNT(*) AS count FROM account_upstreams WHERE sharing_status = 'active'"),
+        sharingPaused: count("SELECT COUNT(*) AS count FROM account_upstreams WHERE sharing_status = 'paused'"),
+        unavailable: count('SELECT COUNT(*) AS count FROM provider_observations WHERE issue_code IS NOT NULL')
+      },
+      topProviders: this.adminUsageLeaders('provider'),
+      topConsumers: this.adminUsageLeaders('consumer'),
+      recentEvents: this.sqlite.prepare(`
+        SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
+          accounts.email AS actor_email
+        FROM sharing_events
+        LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
+        ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
+        LIMIT 12
+      `).all().map((event) => ({
+        id: event.id,
+        entityType: event.entity_type,
+        action: event.action,
+        createdAt: event.created_at,
+        actorEmail: event.actor_email || 'System'
+      }))
+    };
+  }
+
+  adminUsageLeaders(role) {
+    const accountColumn = role === 'provider' ? 'provider_account_id' : 'consumer_account_id';
+    return this.sqlite.prepare(`
+      SELECT accounts.email, COUNT(sharing_sessions.id) AS session_count,
+        COALESCE(SUM(sharing_sessions.consumed_micros), 0) AS consumed_micros
+      FROM sharing_sessions
+      JOIN accounts ON accounts.id = sharing_sessions.${accountColumn}
+      GROUP BY accounts.id
+      ORDER BY consumed_micros DESC, session_count DESC, accounts.email ASC
+      LIMIT 5
+    `).all().map((leader) => ({
+      id: leader.email,
+      email: leader.email,
+      sessionCount: leader.session_count,
+      consumedMicros: leader.consumed_micros
+    }));
+  }
+
   listOffersPage(viewerAccountId, upstreamStore, options) {
     this.expireDue();
     const conditions = [];
