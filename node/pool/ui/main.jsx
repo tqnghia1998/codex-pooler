@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@astryxdesign/core/reset.css';
 import '@astryxdesign/core/astryx.css';
@@ -97,27 +97,17 @@ function GuideButton() {
   );
 }
 
-function useStoredValue(key, fallback) {
-  const [value, setValue] = useState(() => localStorage.getItem(key) || fallback);
-  const update = useCallback((next) => {
-    setValue(next);
-    localStorage.setItem(key, next);
-  }, [key]);
-  return [value, update];
-}
-
 function Product() {
-  const [themeMode, setThemeMode] = useStoredValue('codex_pool_theme', 'dark');
   return (
-    <Theme theme={poolTheme} mode={themeMode}>
+    <Theme theme={poolTheme} mode="dark">
       <ToastViewport position="bottomEnd" maxVisible={3}>
-        <ProductShell themeMode={themeMode} setThemeMode={setThemeMode} />
+        <ProductShell />
       </ToastViewport>
     </Theme>
   );
 }
 
-function ProductShell({ themeMode, setThemeMode }) {
+function ProductShell() {
   const toast = useToast();
   const show = useCallback((text, error = false) => {
     toast({ body: text, type: error ? 'error' : 'info', isAutoHide: true });
@@ -135,11 +125,6 @@ function ProductShell({ themeMode, setThemeMode }) {
           </VStack>
           <HStack gap={2} wrap="wrap">
             <GuideButton />
-            <Button
-              label={themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
-              variant="secondary"
-              onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
-            />
           </HStack>
         </HStack>
         <SharingWorkspace onNotice={show} />
