@@ -6,7 +6,6 @@ import { offerExceedsProviderQuota, providerIssue } from './provider-availabilit
 
 const LOGIN_ATTEMPT_TTL_MS = 20 * 60 * 1_000;
 const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-const TICKET_TTL_MS = 2 * 24 * 60 * 60 * 1_000;
 const SHARE_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const RESERVATION_TTL_MS = 2 * 60 * 60 * 1_000;
 const LOGIN_ATTEMPT_RETENTION_MS = 24 * 60 * 60 * 1_000;
@@ -1275,10 +1274,7 @@ export class ProductStore {
       ORDER BY created_at DESC
       LIMIT 1
     `).get(accountId);
-    const expiry = earliestExpiry(
-      offer.expires_at,
-      new Date(now.getTime() + TICKET_TTL_MS).toISOString()
-    );
+    const expiry = offer.expires_at;
     this.sqlite.prepare(`
       INSERT INTO sharing_tickets
       (id, offer_id, provider_account_id, consumer_account_id, demand_request_id,
