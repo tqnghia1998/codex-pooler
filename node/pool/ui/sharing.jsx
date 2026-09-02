@@ -20,6 +20,7 @@ import { Pagination } from '@astryxdesign/core/Pagination';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
+import { Switch } from '@astryxdesign/core/Switch';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
@@ -109,6 +110,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [tableTotals, setTableTotals] = useState({});
   const [tableOffset, setTableOffset] = useState(0);
   const [tablePageSize, setTablePageSize] = useState(10);
+  const [showPastData, setShowPastData] = useState(false);
   const [upstreams, setUpstreams] = useState([]);
   const [loading, setLoading] = useState(true);
   const [offerDialog, setOfferDialog] = useState(null);
@@ -198,7 +200,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     const params = new URLSearchParams({
       limit: String(tablePageSize),
       offset: String(tableOffset),
-      includePast: 'false'
+      includePast: String(showPastData)
     });
     if (config.role) params.set('role', config.role);
     if (emailQuery.trim()) params.set('q', emailQuery.trim());
@@ -217,12 +219,11 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         nextOffset: data.nextOffset ?? null,
         hasActiveOwnQuotaRequest: Boolean(data.hasActiveOwnQuotaRequest)
       });
-      setTableTotals((totals) => ({ ...totals, [view]: data.totalItems || 0 }));
     } catch (nextError) {
       if (requestVersion !== tableRequestVersion.current) return;
       if (!background) onNotice(nextError.message, true);
     }
-  }, [account, api, emailQuery, onNotice, tableOffset, tablePageSize, view]);
+  }, [account, api, emailQuery, onNotice, showPastData, tableOffset, tablePageSize, view]);
 
   useEffect(() => {
     if (!account) return undefined;
@@ -565,7 +566,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           />
         </GridSpan>
         <PersonalKeyCard
-          personalKeys={personalKeys.filter((key) => key.status === 'active')}
+          personalKeys={showPastData ? personalKeys : personalKeys.filter((key) => key.status === 'active')}
           onCreate={() => setPersonalKeyDialog({ name: '', expiresOn: '' })}
           onReveal={(personalKey) => mutate(async () => {
               const data = await api(`/api/pool/personal-keys/${personalKey.id}/reveal`, { method: 'POST', body: '{}' });
@@ -601,6 +602,15 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             <SegmentedControlItem value="shared-by-me" label={tabLabel('Shared by me', 'shared-by-me')} />
           </SegmentedControl>
           <HStack gap={2} vAlign="center" wrap="wrap">
+            <Switch
+              label="See past data"
+              value={showPastData}
+              onChange={(nextShowPastData) => {
+                setShowPastData(nextShowPastData);
+                setTableOffset(0);
+                resetTablePage();
+              }}
+            />
             <TextInput
               label="Search provider or consumer email"
               isLabelHidden
