@@ -174,9 +174,12 @@ export function SharingWorkspace({ onNotice }) {
 
   useEffect(() => {
     if (!login || ['completed', 'failed', 'cancelled'].includes(login.status)) return undefined;
-    const timer = window.setInterval(async () => {
+    let active = true;
+    let timer = null;
+    const poll = async () => {
       try {
         const data = await api('/auth/codex/status');
+        if (!active) return;
         if (data.login.status === 'completed') {
           setLogin(null);
           onNotice('Signed in with Codex');
@@ -185,10 +188,15 @@ export function SharingWorkspace({ onNotice }) {
           setLogin(data.login);
         }
       } catch (nextError) {
-        onNotice(nextError.message, true);
+        if (active) onNotice(nextError.message, true);
       }
-    }, 1500);
-    return () => window.clearInterval(timer);
+      if (active) timer = window.setTimeout(() => void poll(), 1500);
+    };
+    void poll();
+    return () => {
+      active = false;
+      if (timer) window.clearTimeout(timer);
+    };
   }, [api, load, login, onNotice]);
 
   const mutate = useCallback(async (operation, message) => {
@@ -345,8 +353,8 @@ export function SharingWorkspace({ onNotice }) {
   if (!account) {
     return (
       <VStack gap={2}>
-        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
-          <Card padding={3}>
+        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2} minHeight={120}>
+          <Card height="100%" padding={3}>
             <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
               <VStack gap={1}>
                 <Heading level={2} maxLines={1}>Quota sharing</Heading>
@@ -1386,7 +1394,7 @@ function CodexLoginCard({ login, onCancel, onRetry }) {
   const waiting = ['starting', 'waiting'].includes(login.status);
   const retryable = ['failed', 'cancelled'].includes(login.status);
   return (
-    <Card variant="muted" padding={3}>
+    <Card variant="muted" height="100%" padding={3}>
       <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
         <VStack gap={1}>
           <HStack gap={2} vAlign="center">
