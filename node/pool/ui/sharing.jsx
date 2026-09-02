@@ -16,15 +16,14 @@ import { Heading, Text } from '@astryxdesign/core/Text';
 import { IconButton } from '@astryxdesign/core/IconButton';
 import { Link } from '@astryxdesign/core/Link';
 import { NumberInput } from '@astryxdesign/core/NumberInput';
-import { Overlay } from '@astryxdesign/core/Overlay';
 import { Pagination } from '@astryxdesign/core/Pagination';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
-import { Spinner } from '@astryxdesign/core/Spinner';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
+import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
 import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
@@ -102,7 +101,7 @@ function useSharingApi() {
   }, []);
 }
 
-export function SharingWorkspace({ onNotice }) {
+export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const api = useSharingApi();
   const [account, setAccount] = useState(null);
   const [view, setView] = useState(initialSharingView);
@@ -186,6 +185,11 @@ export function SharingWorkspace({ onNotice }) {
   }, [api, onNotice]);
 
   useEffect(() => { void load(); }, [load]);
+
+  useEffect(() => {
+    onLoadingChange(loading);
+    return () => onLoadingChange(false);
+  }, [loading, onLoadingChange]);
 
   const loadTable = useCallback(async ({ background = true } = {}) => {
     if (!account) return;
@@ -445,7 +449,6 @@ export function SharingWorkspace({ onNotice }) {
 
   if (!account) {
     return (
-      <LoadingOverlay isLoading={loading}>
       <VStack gap={2}>
         <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2} minHeight={120}>
           <Card height="100%" padding={3}>
@@ -484,7 +487,6 @@ export function SharingWorkspace({ onNotice }) {
           }}
         />
       </VStack>
-      </LoadingOverlay>
     );
   }
 
@@ -516,7 +518,6 @@ export function SharingWorkspace({ onNotice }) {
   const tabLabel = (label, tab) => `${label}${tableTotals[tab] === undefined ? '' : ` (${tableTotals[tab]})`}`;
 
   return (
-    <LoadingOverlay isLoading={loading}>
     <VStack gap={2}>
       <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
         <VStack gap={1}>
@@ -583,8 +584,9 @@ export function SharingWorkspace({ onNotice }) {
           <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />
         </Grid>
       )}
-      <VStack gap={4}>
-        <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+      <VStack gap={2}>
+        <VStack paddingBlock={2}>
+          <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <SegmentedControl label="Sharing workspace" value={view} onChange={(nextView) => {
             setView(nextView);
             setTableOffset(0);
@@ -619,7 +621,8 @@ export function SharingWorkspace({ onNotice }) {
               <Button label="Ask friends" variant="primary" onClick={() => setQuotaRequestDialog({ quotaDollars: 10, expiresOn: '' })} />
             )}
           </HStack>
-        </HStack>
+          </HStack>
+        </VStack>
 
       {view === 'community-offers' && (
         <OffersView
@@ -950,20 +953,6 @@ export function SharingWorkspace({ onNotice }) {
         }}
       />
     </VStack>
-    </LoadingOverlay>
-  );
-}
-
-function LoadingOverlay({ isLoading, children }) {
-  return (
-    <Overlay
-      isOpen={isLoading}
-      position="fill"
-      align="center"
-      content={<Spinner size="lg" shade="onMedia" aria-label="Loading sharing workspace" />}
-    >
-      {children}
-    </Overlay>
   );
 }
 
@@ -1005,7 +994,7 @@ function QuotaOverview({
     );
   }
   return (
-    <Card variant="muted" height="100%" padding={3}>
+    <Card variant="muted" height="100%" padding={2}>
       <VStack gap={2}>
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
@@ -1048,12 +1037,12 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
   const activeSessionCount = personalKeys[0]?.activeSessionCount || 0;
   const remainingQuota = personalKeys[0]?.remainingQuotaDollars || 0;
   return (
-    <Card variant="muted" height="100%" padding={3}>
+    <Card variant="muted" height="100%" padding={2}>
       <VStack gap={2}>
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
             <HStack gap={2} vAlign="center" wrap="wrap">
-              <Heading level={3} maxLines={1}>My Pool Keys</Heading>
+              <Heading level={3} maxLines={1}>My keys</Heading>
               <Badge label={activeSessionCount ? 'active access' : 'no active access'} variant={activeSessionCount ? 'green' : 'neutral'} />
             </HStack>
             <Text type="supporting" color="secondary" maxLines={1}>
@@ -1338,7 +1327,7 @@ function SessionsView({
         const quotaVariant = quotaProgressVariant(remainingPercent, ['active', 'paused', 'exhausted'].includes(session.status));
         return (
           <VStack gap={1}>
-            <Text weight="bold" maxLines={1}>${money(session.consumedQuotaDollars)} used of ${money(session.grantedQuotaDollars)} · ${money(session.remainingQuotaDollars)} remaining</Text>
+            <Text type="supporting" color="secondary" maxLines={1}>${money(session.consumedQuotaDollars)} used of ${money(session.grantedQuotaDollars)} · ${money(session.remainingQuotaDollars)} remaining</Text>
             <ProgressBar label="Share quota remaining" isLabelHidden value={remainingPercent} max={100} variant={quotaVariant} />
             {session.isUnderfunded && session.status === 'active' && (
               <Text type="supporting" color="secondary" maxLines={1}>${money(session.backedRemainingQuotaDollars)} currently backed</Text>
@@ -1430,7 +1419,19 @@ function ActivitySummary({ activity }) {
   if (activity?.recentFailures?.length > 0) {
     details.push(`Recent errors: ${activity.recentFailures.map((failure) => failure.code).join(', ')}`);
   }
-  return <Text type="supporting" color="secondary" maxLines={1} hasTruncateTooltip={false}>{details.join(' · ')}</Text>;
+  const summary = details.join(' · ');
+  return (
+    <Tooltip
+      content={(
+        <VStack gap={0} maxWidth={300}>
+          {details.map((detail) => <Text key={detail} color="inherit" display="block" textWrap="wrap">{detail}</Text>)}
+        </VStack>
+      )}
+      hasHoverIndication={false}
+    >
+      <Text type="supporting" color="secondary" maxLines={1} hasTruncateTooltip={false}>{summary}</Text>
+    </Tooltip>
+  );
 }
 
 function ProviderIssueBadge({ issue }) {
@@ -2078,7 +2079,7 @@ function quotaTiming(quota) {
 function activitySummary(activity) {
   if (!activity || activity.requestCount === 0) return 'No API activity yet';
   const lastUsed = activity.lastUsedAt ? ` · Last used ${dateTime(activity.lastUsedAt)}` : '';
-  return `${activity.successCount} of ${activity.requestCount} requests succeeded · $${money(activity.spendTodayDollars)} today · $${money(activity.totalSpendDollars)} total${lastUsed}`;
+  return `${activity.successCount}/${activity.requestCount} succeeded · $${money(activity.spendTodayDollars)} today · $${money(activity.totalSpendDollars)} total${lastUsed}`;
 }
 
 function todayDate() {
