@@ -190,6 +190,7 @@ DELETE /auth/codex/login
 POST   /auth/logout
 
 GET    /api/pool/me
+GET    /api/pool/admin/analytics                 # quangnghia.trinh@shopee.com only
 GET    /api/pool/personal-key
 POST   /api/pool/personal-key/reveal
 POST   /api/pool/personal-key/rotate

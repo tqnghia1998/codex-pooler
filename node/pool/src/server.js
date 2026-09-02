@@ -40,6 +40,7 @@ const COOKIE_NAMES = {
 export const QUOTA_REFRESH_INTERVAL_MS = 60_000;
 export const PRODUCT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const ACCOUNT_COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60;
+const ADMIN_EMAIL = 'quangnghia.trinh@shopee.com';
 
 export function createApp({
   store = new Store(resolve(productRoot, '.data')),
@@ -88,6 +89,11 @@ export function createApp({
       }
       if (url.pathname.startsWith('/api/pool/')) {
         await productApi(req, res, url, { store, productStore, fetchImpl });
+        return;
+      }
+      if (url.pathname === '/admin') {
+        requireAdmin(accountSession(req, productStore, false).account);
+        await staticFile(req, res, '/', ingress, basePath);
         return;
       }
 
@@ -466,6 +472,11 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 200, { counts: productStore.sharingCounts(accountId) });
     return;
   }
+  if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
+    requireAdmin(auth.account);
+    sendJson(res, 200, { analytics: productStore.adminAnalytics() });
+    return;
+  }
   if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
     const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
       .flatMap(({ upstreamId }) => {
@@ -635,6 +646,12 @@ function accountSession(req, productStore, requireCsrf) {
     throw new HttpError(403, 'permission_error', 'CSRF validation failed');
   }
   return auth;
+}
+
+function requireAdmin(account) {
+  if (String(account.email || '').toLowerCase() !== ADMIN_EMAIL) {
+    throw new HttpError(403, 'permission_error', 'Administrator access is required');
+  }
 }
 
 async function jsonBody(req, ingress) {
