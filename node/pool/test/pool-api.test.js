@@ -469,6 +469,26 @@ test('sharing API requires account sessions and CSRF while offers stay public to
       assert.equal(result.response.status, 200);
       assert.equal(result.body.offers[0].id, offerId);
 
+      result = await request(base, '/api/pool/offers?limit=1&offset=0&includePast=false&role=community&q=provider%40example.com', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.totalItems, 1);
+      assert.equal(result.body.hasMore, false);
+      assert.equal(result.body.nextOffset, null);
+      assert.equal(result.body.offers.length, 1);
+      assert.equal(result.body.offers[0].id, offerId);
+
+      result = await request(base, '/api/pool/sharing-counts', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.deepEqual(result.body.counts, {
+        'community-offers': 1,
+        'my-offers': 0,
+        'quota-requests': 0,
+        'sent-requests': 0,
+        approvals: 0,
+        'my-access': 0,
+        'shared-by-me': 0
+      });
+
       result = await request(base, '/api/pool/tickets', consumerSession, {
         method: 'POST',
         body: JSON.stringify({ offerId, quotaDollars: 4 })
