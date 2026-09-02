@@ -258,6 +258,12 @@ POST   /backend-api/codex/images/generations
 POST   /backend-api/codex/images/edits
 ```
 
+The sharing list endpoints (`offers`, `tickets`, `sessions`, and
+`quota-requests`) are paged. They accept `limit` (1–50, default 10), `offset`,
+`q` (case-insensitive provider or consumer email search where applicable), and
+`includePast=true`. The dashboard also supplies a route-specific `role` filter.
+Responses contain the list field plus `totalItems`, `hasMore`, and `nextOffset`.
+
 Gateway routes require a valid `cp_share_...` or `cp_personal_...` key in a
 Bearer token; `POST /v1/messages` also accepts that key in `x-api-key`.
 Personal-key model lists are the union of active-session catalogs. Ordinary

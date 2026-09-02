@@ -462,6 +462,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 200, { upstreams });
     return;
   }
+  if (req.method === 'GET' && resource === 'sharing-counts' && parts.length === 3) {
+    sendJson(res, 200, { counts: productStore.sharingCounts(accountId) });
+    return;
+  }
   if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
     const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
       .flatMap(({ upstreamId }) => {
@@ -524,7 +528,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'offers' && parts.length === 3) {
-    sendJson(res, 200, { offers: productStore.listOffers(accountId, store) });
+    sendJson(res, 200, productStore.listOffersPage(accountId, store, sharingListQuery(url)));
     return;
   }
   if (req.method === 'POST' && resource === 'offers' && parts.length === 3) {
@@ -536,7 +540,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'tickets' && parts.length === 3) {
-    sendJson(res, 200, { tickets: productStore.listTickets(accountId, store) });
+    sendJson(res, 200, productStore.listTicketsPage(accountId, store, sharingListQuery(url)));
     return;
   }
   if (req.method === 'POST' && resource === 'tickets' && parts.length === 3) {
@@ -556,7 +560,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'sessions' && parts.length === 3) {
-    sendJson(res, 200, { sessions: productStore.listSessions(accountId, store) });
+    sendJson(res, 200, productStore.listSessionsPage(accountId, store, sharingListQuery(url)));
     return;
   }
   if (req.method === 'PATCH' && resource === 'sessions' && id && parts.length === 4) {
@@ -599,7 +603,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     return;
   }
   if (req.method === 'GET' && resource === 'quota-requests' && parts.length === 3) {
-    sendJson(res, 200, { quotaRequests: productStore.listQuotaRequests(accountId) });
+    sendJson(res, 200, productStore.listQuotaRequestsPage(accountId, sharingListQuery(url)));
     return;
   }
   if (req.method === 'POST' && resource === 'quota-requests' && parts.length === 3) {
@@ -730,6 +734,17 @@ function isMutation(method) {
 function envBoolean(value, fallback) {
   if (value === undefined) return fallback;
   return String(value).toLowerCase() === 'true';
+}
+
+function sharingListQuery(url) {
+  const rawLimit = Number(url.searchParams.get('limit') || 10);
+  const limit = Number.isInteger(rawLimit) ? Math.min(50, Math.max(1, rawLimit)) : 10;
+  const rawOffset = Number(url.searchParams.get('offset') || 0);
+  const offset = Number.isInteger(rawOffset) ? Math.max(0, rawOffset) : 0;
+  const query = String(url.searchParams.get('q') || '').trim().toLowerCase().slice(0, 320);
+  const includePast = !url.searchParams.has('includePast') || url.searchParams.get('includePast') === 'true';
+  const role = String(url.searchParams.get('role') || '').trim();
+  return { limit, offset, query, includePast, role };
 }
 
 function poolErrorEnvelope(error) {
