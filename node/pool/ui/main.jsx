@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@astryxdesign/core/reset.css';
 import '@astryxdesign/core/astryx.css';
@@ -11,7 +11,7 @@ import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { HStack, VStack } from '@astryxdesign/core/Layout';
 import { neutralTheme } from '@astryxdesign/theme-neutral/built';
-import { Share2 } from 'lucide-react';
+import { BookOpen, Share2 } from 'lucide-react';
 import { SharingWorkspace } from './sharing.jsx';
 
 const poolTheme = defineTheme({
@@ -60,6 +60,43 @@ const poolTheme = defineTheme({
   }
 });
 
+function GuideButton() {
+  const buttonRef = useRef(null);
+
+  useEffect(() => {
+    const element = buttonRef.current;
+    const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (!element || reducedMotion || typeof element.animate !== 'function') return undefined;
+    const animation = element.animate(
+      [
+        {
+          backgroundColor: 'var(--color-neutral)'
+        },
+        {
+          backgroundColor: 'color-mix(in srgb, var(--color-accent), var(--color-neutral) 78%)'
+        },
+        {
+          backgroundColor: 'var(--color-neutral)'
+        }
+      ],
+      { duration: 2600, easing: 'ease-in-out', iterations: Infinity }
+    );
+    return () => animation.cancel();
+  }, []);
+
+  return (
+    <Button
+      ref={buttonRef}
+      label="User Guide"
+      icon={<Icon icon={BookOpen} size="sm" />}
+      variant="secondary"
+      href="https://confluence.shopee.io/x/y6Vyx"
+      target="_blank"
+      rel="noopener noreferrer"
+    />
+  );
+}
+
 function useStoredValue(key, fallback) {
   const [value, setValue] = useState(() => localStorage.getItem(key) || fallback);
   const update = useCallback((next) => {
@@ -96,11 +133,14 @@ function ProductShell({ themeMode, setThemeMode }) {
             </HStack>
             <Text type="supporting" color="secondary">Share delegated Codex quota or AISwitch project budget without sharing provider credentials.</Text>
           </VStack>
-          <Button
-            label={themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
-            variant="secondary"
-            onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
-          />
+          <HStack gap={2} wrap="wrap">
+            <GuideButton />
+            <Button
+              label={themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
+              variant="secondary"
+              onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
+            />
+          </HStack>
         </HStack>
         <SharingWorkspace onNotice={show} />
       </VStack>
