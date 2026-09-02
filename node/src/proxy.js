@@ -2261,7 +2261,7 @@ export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store) } = {}) {
+export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const websocketIdleMs = Number.isFinite(ingress.websocketIdleMs) && ingress.websocketIdleMs > 0 ? ingress.websocketIdleMs : 30 * 60 * 1000;
@@ -2317,8 +2317,23 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
       });
     })().catch(() => socket.destroy());
   });
-  wss.on('connection', (client, req) => relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth));
+  wss.on('connection', (client, req) => {
+    if (beforeSend) deferWebSocketSends(client, beforeSend);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth);
+  });
   return wss;
+}
+
+function deferWebSocketSends(client, beforeSend) {
+  const send = client.send.bind(client);
+  client.send = (...args) => {
+    void Promise.resolve(beforeSend()).then(
+      () => {
+        if (client.readyState === WebSocket.OPEN) send(...args);
+      },
+      () => client.close(1011, 'Codex Share persistence is unavailable')
+    );
+  };
 }
 
 async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store)) {
