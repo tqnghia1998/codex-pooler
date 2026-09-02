@@ -122,10 +122,12 @@ export function SharingWorkspace({ onNotice }) {
         setAccount(null);
         try {
           const data = await api('/auth/codex/status');
-          setLogin(data.login);
           if (data.login.status === 'completed') {
+            setLogin(null);
             onNotice('Signed in with Codex');
             await load();
+          } else {
+            setLogin(data.login);
           }
         } catch {}
       } else if (!background) onNotice(nextError.message, true);
@@ -175,10 +177,12 @@ export function SharingWorkspace({ onNotice }) {
     const timer = window.setInterval(async () => {
       try {
         const data = await api('/auth/codex/status');
-        setLogin(data.login);
         if (data.login.status === 'completed') {
+          setLogin(null);
           onNotice('Signed in with Codex');
           await load();
+        } else {
+          setLogin(data.login);
         }
       } catch (nextError) {
         onNotice(nextError.message, true);
