@@ -11,6 +11,19 @@ const productRoot = join(nodeRoot, 'pool');
 const sharedRoot = join(nodeRoot, 'src');
 const defaultTarget = '/Users/quangnghia.trinh/Documents/Git/codex-share';
 const blockingTerms = /relaydeck|codex-pooler|icoretech/i;
+const standaloneOverlayFiles = [
+  '.env.example',
+  '.gitignore',
+  'README.md',
+  'package.json',
+  'package-lock.json',
+  'shared/master-key.js',
+  'shared/redis-document-persistence.js',
+  'src/kms-master-key.js',
+  'src/server.js',
+  'test/persistence-http.test.js',
+  'test/kms-master-key.test.js'
+];
 const generatedPaths = [
   '.env.example',
   '.gitignore',
@@ -27,10 +40,10 @@ const generatedPaths = [
 ];
 
 async function main() {
-  const clean = exportOptions();
-  const targetRoot = defaultTarget;
+  const { clean, targetRoot } = exportOptions();
   await assertGitRepository(targetRoot);
   assertCleanWorktree(targetRoot);
+  const overlay = await readStandaloneOverlay(targetRoot);
 
   if (clean) {
     await cleanTarget(targetRoot);
@@ -44,7 +57,7 @@ async function main() {
     copyProductTests(targetRoot),
     copyUi(targetRoot),
     copySharedSource(targetRoot, sharedFiles),
-    writeProjectFiles(targetRoot)
+    writeProjectFiles(targetRoot, overlay)
   ]);
 
   const matches = await findBlockingTerms(targetRoot);
@@ -59,16 +72,28 @@ async function main() {
 function exportOptions() {
   const args = process.argv.slice(2);
   if (args.includes('--help') || args.includes('-h')) usage(0);
-  if (args.some((argument) => argument !== '--clean')) usage(1);
-  return args.includes('--clean');
+  let targetRoot = defaultTarget;
+  let clean = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === '--clean') {
+      clean = true;
+    } else if (argument === '--target' && args[index + 1]) {
+      targetRoot = resolve(args[++index]);
+    } else {
+      usage(1);
+    }
+  }
+  return { clean, targetRoot };
 }
 
 function usage(code) {
-  console.log(`Usage: node scripts/export-codex-share.mjs [--clean]
+  console.log(`Usage: node scripts/export-codex-share.mjs [--clean] [--target <directory>]
 
 Exports to ${defaultTarget}. The target must be an existing, clean Git repository.
 --clean removes all target files except .git before exporting; use it only for the
-initial conversion of a placeholder repository.`);
+initial conversion of a repository that already contains the standalone overlay.
+--target is useful for exporting to a local checkout or a verification copy.`);
   process.exit(code);
 }
 
@@ -88,10 +113,25 @@ function assertCleanWorktree(targetRoot) {
   }
 }
 
-async function cleanTarget(targetRoot) {
-  for (const entry of await readdir(targetRoot)) {
-    if (entry !== '.git') await rm(join(targetRoot, entry), { recursive: true, force: true });
+async function readStandaloneOverlay(targetRoot) {
+  const overlay = new Map();
+  const missing = [];
+  for (const relativePath of standaloneOverlayFiles) {
+    try {
+      overlay.set(relativePath, await readFile(join(targetRoot, relativePath)));
+    } catch (error) {
+      if (error.code === 'ENOENT') missing.push(relativePath);
+      else throw error;
+    }
   }
+  if (missing.length) {
+    throw new Error(`Standalone overlay is incomplete. Add these files before exporting:\n${missing.join('\n')}`);
+  }
+  return overlay;
+}
+
+async function cleanTarget(targetRoot) {
+  await removeGeneratedPaths(targetRoot);
 }
 
 async function removeGeneratedPaths(targetRoot) {
@@ -130,25 +170,18 @@ async function sharedImports(sourceFile) {
 async function copyProductSource(targetRoot) {
   for (const sourceFile of await filesIn(join(productRoot, 'src'))) {
     const destination = join(targetRoot, 'src', relative(join(productRoot, 'src'), sourceFile));
+    if (standaloneOverlayFiles.includes(relative(targetRoot, destination))) continue;
     let source = await readFile(sourceFile, 'utf8');
     source = source.replaceAll('../../src/', '../shared/');
-    if (sourceFile.endsWith('/server.js')) source = standaloneServerSource(source);
     await writeText(destination, source);
   }
-}
-
-function standaloneServerSource(source) {
-  return source
-    .replace("const relaydeckDataDir = resolve(productRoot, '../.data');\n", '')
-    .replace('const poolDataDir = requirePoolDataDir(dataDir);', 'const poolDataDir = resolve(dataDir);')
-    .replace('  requirePoolDataDir(dataDir);\n', '')
-    .replace(/\nfunction requirePoolDataDir\(dataDir\) \{\n  const resolved = resolve\(dataDir\);\n  if \(resolved === relaydeckDataDir\) \{\n    throw new Error\('POOL_DATA_DIR must not point to Relaydeck node\/\.data'\);\n  \}\n  return resolved;\n\}\n/, '\n');
 }
 
 async function copyProductTests(targetRoot) {
   for (const sourceFile of await filesIn(join(productRoot, 'test'))) {
     if (sourceFile.endsWith('/isolation.test.js')) continue;
     const destination = join(targetRoot, 'test', relative(join(productRoot, 'test'), sourceFile));
+    if (standaloneOverlayFiles.includes(relative(targetRoot, destination))) continue;
     let source = await readFile(sourceFile, 'utf8');
     source = source
       .replaceAll('../../src/', '../shared/')
@@ -167,6 +200,7 @@ async function copyUi(targetRoot) {
 async function copySharedSource(targetRoot, sharedFiles) {
   for (const sourceFile of sharedFiles) {
     const destination = join(targetRoot, 'shared', relative(sharedRoot, sourceFile));
+    if (standaloneOverlayFiles.includes(relative(targetRoot, destination))) continue;
     let source = await readFile(sourceFile, 'utf8');
     source = source
       .replaceAll('relaydeckAdmission', 'gatewayAdmission')
@@ -176,10 +210,14 @@ async function copySharedSource(targetRoot, sharedFiles) {
   }
 }
 
-async function writeProjectFiles(targetRoot) {
+async function writeProjectFiles(targetRoot, overlay) {
   const sourcePackage = JSON.parse(await readFile(join(nodeRoot, 'package.json'), 'utf8'));
+  const standalonePackage = JSON.parse(overlay.get('package.json').toString('utf8'));
   const packageJson = {
     ...sourcePackage,
+    ...standalonePackage,
+    dependencies: mergePackageEntries(standalonePackage.dependencies, sourcePackage.dependencies),
+    devDependencies: mergePackageEntries(standalonePackage.devDependencies, sourcePackage.devDependencies),
     name: 'codex-share',
     description: 'Share delegated Codex quota or AISwitch project budget without sharing provider credentials.',
     private: true,
@@ -193,43 +231,38 @@ async function writeProjectFiles(targetRoot) {
   await writeText(join(targetRoot, 'package.json'), `${JSON.stringify(packageJson, null, 2)}\n`);
 
   const packageLock = JSON.parse(await readFile(join(nodeRoot, 'package-lock.json'), 'utf8'));
-  packageLock.name = 'codex-share';
-  packageLock.packages[''].name = 'codex-share';
+  const standaloneLock = JSON.parse(overlay.get('package-lock.json').toString('utf8'));
+  const rootPackage = {
+    ...packageLock.packages[''],
+    ...standaloneLock.packages[''],
+    dependencies: mergePackageEntries(standaloneLock.packages[''].dependencies, packageLock.packages[''].dependencies),
+    devDependencies: mergePackageEntries(standaloneLock.packages[''].devDependencies, packageLock.packages[''].devDependencies)
+  };
+  const lockDependencies = mergePackageEntries(standaloneLock.dependencies, packageLock.dependencies);
+  Object.assign(packageLock, standaloneLock, {
+    name: 'codex-share',
+    packages: { ...standaloneLock.packages, ...packageLock.packages, '': { ...rootPackage, name: 'codex-share' } },
+    ...(Object.keys(lockDependencies).length ? { dependencies: lockDependencies } : {})
+  });
   await writeText(join(targetRoot, 'package-lock.json'), `${JSON.stringify(packageLock, null, 2)}\n`);
 
   const viteConfig = (await readFile(join(productRoot, 'vite.config.js'), 'utf8'))
     .replace("root: 'pool/ui'", "root: 'ui'");
   await writeText(join(targetRoot, 'vite.config.js'), viteConfig);
 
-  await writeText(join(targetRoot, '.gitignore'), 'node_modules/\npublic/\n.data/\n.env\n.DS_Store\n');
-  await writeText(join(targetRoot, '.env.example'), standaloneEnvironment(await readFile(join(productRoot, '.env.example'), 'utf8')));
-  await writeText(join(targetRoot, 'README.md'), standaloneReadme(await readFile(join(productRoot, 'README.md'), 'utf8')));
+  await writeFile(join(targetRoot, '.gitignore'), overlay.get('.gitignore'));
+  await writeFile(join(targetRoot, '.env.example'), overlay.get('.env.example'));
+  await writeFile(join(targetRoot, 'README.md'), overlay.get('README.md'));
+  for (const relativePath of standaloneOverlayFiles) {
+    if (['.env.example', '.gitignore', 'README.md', 'package.json', 'package-lock.json'].includes(relativePath)) continue;
+    const destination = join(targetRoot, relativePath);
+    await writeFile(destination, overlay.get(relativePath));
+  }
   await cp(join(workspaceRoot, 'LICENSE.md'), join(targetRoot, 'LICENSE.md'));
 }
 
-function standaloneEnvironment(source) {
-  return source
-    .replace('# Defaults to node/pool/.data when omitted.\n', '# Defaults to .data when omitted.\n')
-    .replace("# It must not point to Relaydeck's node/.data.\n", '');
-}
-
-function standaloneReadme(source) {
-  return source
-    .replace('It has its own server, UI,\ncookies, environment, and runtime data. It reuses the Node gateway\'s provider\nadapters and proxy compatibility code, but it does not run inside Relaydeck and\nnever opens Relaydeck\'s `node/.data`.', 'It includes its own server, UI, cookies, environment, runtime data, provider adapters, and proxy compatibility code.')
-    .replace('cd node\n', '')
-    .replaceAll('npm run pool:start', 'npm start')
-    .replaceAll('npm run pool:dev', 'npm run dev')
-    .replaceAll('pool/.env', '.env')
-    .replaceAll('pool/.data', '.data')
-    .replaceAll('pool/src/', 'src/')
-    .replaceAll('pool/ui/', 'ui/')
-    .replaceAll('pool/public/', 'public/')
-    .replace('`npm start` runs the server in Node watch mode; `npm run dev` is\nan alias.', '`npm start` starts the server. Use `npm run dev` for Node watch mode.')
-    .replace("use the `POOL_*` prefix; Relaydeck's `CODEX_POOLER_*` variables are not product\nconfiguration.", 'use the `POOL_*` prefix.')
-    .replace('Relaydeck uses `node/.data`, port `3000`, and its own operator authentication.\nStarting either product does not start, configure, migrate, or mutate the\nother. `POOL_DATA_DIR` must not point to `node/.data`; Codex Share startup\nrejects that configuration.\n\n', '')
-    .replace('Personal-key model lists are the union of active-session catalogs. Ordinary\nRelaydeck API keys are rejected.', 'Personal-key model lists are the union of active-session catalogs. Only Codex Share API keys are accepted.')
-    .replace('Codex Share dispatches the same Codex Responses, Chat Completions, streaming,\ntool-call, compaction, model-catalog, public file/audio/image, and native\nWebSocket implementations as Relaydeck. A share key limits candidate accounts\nand accounting; it does not create a second protocol adapter.', 'Codex Share supports Codex Responses, Chat Completions, streaming, tool calls,\ncompaction, model catalogs, public file/audio/image, and native WebSockets. A\nshare key limits candidate accounts and accounting; it does not create a second\nprotocol adapter.')
-    .replace('Client-facing gateway route classification and dispatch live in\n`../src/gateway-dispatch.js`, shared with Relaydeck. Future proxy or\ncompatibility functionality must be added to that shared layer so it reaches\nboth products automatically; Codex Share-specific code is limited to share-key\nauthorization, session selection, and settlement.', 'Client-facing gateway route classification and dispatch live in\n`shared/gateway-dispatch.js`. Codex Share-specific code is limited to share-key\nauthorization, session selection, and settlement.');
+function mergePackageEntries(standalone, source) {
+  return { ...(standalone || {}), ...(source || {}) };
 }
 
 async function findBlockingTerms(targetRoot) {
