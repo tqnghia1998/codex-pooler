@@ -44,13 +44,9 @@ store for imported Codex credentials. `pool/.data/pool.sqlite` and
 `pool/.data/.pool-key` hold product accounts, offers, tickets, sessions, key
 hashes, and audit events. Back up all four files together.
 
-Set `POOL_REDIS_URL` when the deployment has no persistent volume. Codex Share
-uses Redis as the durable record store. It creates an isolated temporary
-working directory from the Redis records and encryption keys, then removes it
-on shutdown; it does not read, create, or update `POOL_DATA_DIR`. Redis must be
-a durable, private service because it contains encrypted provider credentials
-and the keys needed to decrypt them. SQLite remains the local-development
-default when `POOL_REDIS_URL` is not set.
+The embedded pool always uses local SQLite. Deploy it with a persistent volume
+for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone
+`codex-share` repository.
 
 Relaydeck uses `node/.data`, port `3000`, and its own operator authentication.
 Starting either product does not start, configure, migrate, or mutate the
@@ -294,8 +290,6 @@ POOL_COOKIE_SECURE
 POOL_PUBLIC_BASE_PATH
 POOL_CODEX_CLI
 POOL_DATA_DIR
-POOL_REDIS_URL
-POOL_REDIS_PREFIX
 POOL_QUOTA_REFRESH_INTERVAL_MS
 POOL_TOKEN_REFRESH_INTERVAL_MS
 POOL_SMTP_HOST
@@ -311,9 +305,7 @@ POOL_PRODUCT_CLEANUP_INTERVAL_MS
 The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
 executable, refresh quota every 60 seconds, check due tokens every hour, and
 store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
-a 15-second outbox delivery interval are the defaults. `POOL_REDIS_PREFIX`
-defaults to `codex-share`; set it differently for each environment sharing a
-Redis service.
+a 15-second outbox delivery interval are the defaults.
 
 Set `POOL_PUBLIC_BASE_PATH=/codex-share` when a reverse proxy or API Gateway
 publishes Codex Share below that path and strips the prefix before forwarding.
