@@ -40,6 +40,7 @@ const SHARING_VIEWS = new Set([
 ]);
 const SHARING_VIEW_STORAGE_KEY = 'codex_pool_sharing_view';
 const SHARING_CARD_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
+const LOGIN_CARD_GRID_COLUMNS = { minWidth: 280, max: 2, repeat: 'fill' };
 const PROVIDER_CARD_GRID_COLUMNS = { minWidth: 220, max: 2, repeat: 'fill' };
 const SHARING_LIST_CONFIG = {
   'community-offers': { resource: 'offers', key: 'offers', role: 'community' },
@@ -451,15 +452,15 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   if (!account) {
     return (
       <VStack gap={2}>
-        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2} minHeight={120}>
+        <Grid columns={LOGIN_CARD_GRID_COLUMNS} gap={2} minHeight={120}>
           <Card height="100%" padding={3}>
-            <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+            <VStack height="100%" justify="between" gap={2}>
               <VStack gap={1}>
                 <Heading level={2} maxLines={1}>Quota sharing</Heading>
                 <Text type="supporting" color="secondary" maxLines={1}>Sign in with Codex to publish quota, request access, and manage share sessions.</Text>
               </VStack>
               {!login && (
-                <HStack gap={1} wrap="wrap">
+                <HStack justify="end" gap={1} wrap="wrap">
                   <Button label="Login with Codex" variant="primary" isLoading={loginLoading} onClick={() => void startCodexLogin()} />
                   <Button
                     label="Login with auth.json"
@@ -468,7 +469,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
                   />
                 </HStack>
               )}
-            </HStack>
+            </VStack>
           </Card>
           {login && <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />}
         </Grid>
@@ -1456,25 +1457,39 @@ function UpstreamSourceBadge({ upstream }) {
 function CodexLoginCard({ login, onCancel, onRetry }) {
   const waiting = ['starting', 'waiting'].includes(login.status);
   const retryable = ['failed', 'cancelled'].includes(login.status);
+  const [isOpeningSignIn, setIsOpeningSignIn] = useState(false);
+
+  useEffect(() => {
+    if (!waiting) setIsOpeningSignIn(false);
+  }, [waiting]);
+
+  const openSignIn = () => {
+    setIsOpeningSignIn(true);
+    window.open(login.verificationUrl, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <Card variant="muted" height="100%" padding={3}>
-      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+      <VStack height="100%" justify="between" gap={2}>
         <VStack gap={1}>
           <HStack gap={2} vAlign="center">
             <Text weight="bold" maxLines={1}>Codex sign-in</Text>
             <Badge label={login.status} variant={login.status === 'completed' ? 'green' : login.status === 'failed' ? 'error' : 'warning'} />
           </HStack>
           {login.userCode
-            ? <Text maxLines={1}>{`Open ${login.verificationUrl} and enter code ${login.userCode}.`}</Text>
+            ? <HStack gap={1} vAlign="center" wrap="wrap">
+              <Text>{`Open ${login.verificationUrl} and enter code`}</Text>
+              <Text type="large" weight="bold" hasTabularNumbers>{login.userCode}</Text>
+            </HStack>
             : <Text type="supporting" color="secondary" maxLines={1}>Starting the OpenAI device sign-in flow...</Text>}
           {login.errorCode && <Text type="supporting" color="secondary" maxLines={1}>{login.errorCode}</Text>}
         </VStack>
-        <HStack gap={1}>
-          {login.verificationUrl && <Button label="Open OpenAI sign-in" variant="primary" onClick={() => window.open(login.verificationUrl, '_blank', 'noopener,noreferrer')} />}
+        <HStack justify="end" gap={1} wrap="wrap">
+          {login.verificationUrl && <Button label="Open OpenAI sign-in" variant="primary" isLoading={isOpeningSignIn} onClick={openSignIn} />}
           {retryable && <Button label="Try again" variant="primary" onClick={onRetry} />}
           {waiting && <Button label="Cancel" variant="secondary" onClick={onCancel} />}
         </HStack>
-      </HStack>
+      </VStack>
     </Card>
   );
 }

@@ -116,7 +116,9 @@ function Product() {
 function AdminShell() {
   return (
     <AppShell variant="surface" height="auto" contentPadding={3} mobileNav={false}>
-      <AdminAnalytics />
+      <VStack width="max(1280px, 100%)">
+        <AdminAnalytics />
+      </VStack>
     </AppShell>
   );
 }
@@ -130,7 +132,7 @@ function ProductShell() {
   return (
     <Overlay isOpen={workspaceLoading} position="fill" align="center" content={<Spinner size="lg" shade="onMedia" aria-label="Loading sharing workspace" />}>
       <AppShell variant="surface" height="fill" contentPadding={3} mobileNav={false}>
-      <VStack gap={4}>
+      <VStack gap={4} width="max(1280px, 100%)">
         <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
           <VStack gap={1}>
             <HStack gap={2} vAlign="center">
