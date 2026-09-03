@@ -122,6 +122,7 @@ export function createApp({
         }
       }
       if (gatewayKind) {
+        req.disablePacing = true;
         await dispatchGatewayRequest({
           kind: gatewayKind,
           req,
@@ -226,6 +227,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     store,
     sharingStore: productStore,
     shareKeysOnly: true,
+    disablePacing: true,
     apiKey: null,
     fetchImpl,
     ingress,
@@ -511,6 +513,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     if (!productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
+    req.disablePacing = true;
     sendJson(res, 200, {
       connection: await testUpstreamConnection({
         store,
@@ -599,6 +602,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     if (session.providerIssue) {
       throw new HttpError(409, session.providerIssue.code, session.providerIssue.message);
     }
+    req.disablePacing = true;
     sendJson(res, 200, {
       connection: await testUpstreamConnection({
         store,

@@ -392,7 +392,9 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
   const abort = downstreamAbortSignal(context.req, context.res);
   let response;
   try {
-    await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+    if (!context.req.disablePacing) {
+      await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+    }
     response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
     persistCookies(response, context);
     if ((response.status === 401 || response.status === 403) && context.credentials.refreshToken) {
@@ -411,7 +413,9 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
         error.upstreamOutcomeSettled = true;
         throw error;
       }
-      await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+      if (!context.req.disablePacing) {
+        await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
+      }
       response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
       persistCookies(response, context);
     }
