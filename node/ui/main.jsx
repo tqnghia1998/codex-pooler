@@ -737,7 +737,7 @@ function Dashboard({ themeMode, setThemeMode }) {
 
   return (
     <AppShell variant="elevated" height="auto" contentPadding={3} mobileNav={false}>
-        <VStack gap={4}>
+      <VStack gap={4} width="max(1280px, 100%)">
           <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
             <VStack gap={1}>
               <Heading level={1}>Relaydeck</Heading>
