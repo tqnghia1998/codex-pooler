@@ -8,6 +8,7 @@ import { createApp, refreshAllQuotas, start } from '../src/server.js';
 import { Store } from '../../src/store.js';
 import { ProductStore } from '../src/product-store.js';
 import { CodexLoginManager } from '../src/codex-login.js';
+import { upstreamPacerForStore } from '../../src/upstream-pacer.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -652,11 +653,15 @@ test('a provider can test only its own linked Codex connection', async () => {
     const store = new Store(dir);
     const upstream = store.create({
       type: 'codex',
+      pacing: { enabled: true, minStartIntervalMs: 60_000, maxQueueDepth: 1, maxQueueAgeMs: 60_000 },
       authJson: authJson({
         subject: 'connection-provider',
         accountId: 'connection-provider-account'
       })
     });
+    const pacer = upstreamPacerForStore(store);
+    await pacer.acquire(upstream.id);
+    void pacer.acquire(upstream.id).catch(() => {});
     const sharingStore = new ProductStore(dir);
     const provider = account(sharingStore, 'connection-provider');
     const other = account(sharingStore, 'connection-other');
@@ -709,6 +714,7 @@ test('a provider can test only its own linked Codex connection', async () => {
       assert.equal(calls.length, callCount);
     } finally {
       await new Promise((resolve) => server.close(resolve));
+      pacer.close();
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });

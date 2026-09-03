@@ -1080,7 +1080,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
   const abort = downstream ? downstreamAbortSignal(downstream.req, downstream.res) : null;
   const diagnostics = pacing?.store && pacing.attemptId ? gatewayDiagnosticsForStore(pacing.store) : null;
   try {
-    if (pacing?.store && pacing.upstreamId) {
+    if (pacing?.store && pacing.upstreamId && !pacing.disable && !downstream?.req?.disablePacing) {
       const pacingResult = await upstreamPacerForStore(pacing.store).acquire(pacing.upstreamId, {
         model: pacing.model,
         signal: abort?.signal,
@@ -2261,7 +2261,7 @@ export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null } = {}) {
+export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const websocketIdleMs = Number.isFinite(ingress.websocketIdleMs) && ingress.websocketIdleMs > 0 ? ingress.websocketIdleMs : 30 * 60 * 1000;
@@ -2319,7 +2319,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   wss.on('connection', (client, req) => {
     if (beforeSend) deferWebSocketSends(client, beforeSend);
-    relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth, disablePacing);
   });
   return wss;
 }
@@ -2336,7 +2336,7 @@ function deferWebSocketSends(client, beforeSend) {
   };
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store)) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
@@ -2463,7 +2463,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     const task = async () => {
       if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
       const model = framePacingModel(frame);
-      if (model) {
+      if (model && !disablePacing) {
         const pacingResult = await upstreamPacerForStore(store).acquire(candidate.id, {
           model,
           signal: socketPacingAborts.get(socket)?.signal || pacingAbort.signal
@@ -2826,7 +2826,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
         store,
         upstreamId: candidate.id,
-        model: compactPayload?.model
+        model: compactPayload?.model,
+        disable: disablePacing
       });
       const initialPolicyFailure = [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
@@ -2846,7 +2847,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
             store,
             upstreamId: candidate.id,
-            model: compactPayload?.model
+            model: compactPayload?.model,
+            disable: disablePacing
           });
         } catch (error) {
           settlePublicAdmission({ class: 'neutral', retryable: false });
@@ -2870,7 +2872,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
           store,
           upstreamId: candidate.id,
-          model: compactPayload?.model
+          model: compactPayload?.model,
+          disable: disablePacing
         });
       }
       if (!response.ok) {
@@ -2958,11 +2961,13 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       nativeConnectionAdmission = { upstreamId: connectionUpstream.id, admission };
     }
     try {
-      const pacingResult = await upstreamPacerForStore(store).acquire(connectionUpstream.id, {
-        model: publicResponses ? publicPayload?.model : '',
-        signal: pacingAbort.signal
-      });
-      if (publicResponses) gatewayDiagnosticsForStore(store).queueWaited(publicAttempt?.id, pacingResult.waitedMs);
+      if (!disablePacing) {
+        const pacingResult = await upstreamPacerForStore(store).acquire(connectionUpstream.id, {
+          model: publicResponses ? publicPayload?.model : '',
+          signal: pacingAbort.signal
+        });
+        if (publicResponses) gatewayDiagnosticsForStore(store).queueWaited(publicAttempt?.id, pacingResult.waitedMs);
+      }
     } catch (error) {
       if (error instanceof PacingError) {
         if (publicResponses) handleFramePacingFailure(error);
