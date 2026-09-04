@@ -70,6 +70,11 @@ function csrfToken() {
   return '';
 }
 
+function connectionSuccessMessage(connection) {
+  const answer = typeof connection?.answer === 'string' && connection.answer.trim() ? ` with answer '${connection.answer.trim()}'` : '';
+  return `Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms${answer}`;
+}
+
 function useStoredValue(key, fallback = '') {
   const [value, setValue] = useState(() => {
     try { return window.localStorage.getItem(key) || fallback; } catch { return fallback; }
@@ -407,7 +412,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         body: '{}'
       });
       const connection = data.connection;
-      onNotice(`Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms`);
+      onNotice(connectionSuccessMessage(connection));
       await load();
     } catch (nextError) {
       onNotice(nextError.message, true);
@@ -424,7 +429,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         body: '{}'
       });
       const connection = data.connection;
-      onNotice(`Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms`);
+      onNotice(connectionSuccessMessage(connection));
       await load();
     } catch (nextError) {
       onNotice(nextError.message, true);

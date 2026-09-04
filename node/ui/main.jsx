@@ -25,10 +25,10 @@ import { Skeleton } from '@astryxdesign/core/Skeleton';
 import { Switch } from '@astryxdesign/core/Switch';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
-import { Theme } from '@astryxdesign/core/theme';
+import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { VisuallyHidden } from '@astryxdesign/core/VisuallyHidden';
-import { neutralTheme } from '@astryxdesign/theme-neutral/built';
+import { neutralTheme } from '@astryxdesign/theme-neutral';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
 import { closestCenter, DndContext, KeyboardSensor, PointerSensor, useSensor, useSensors } from '@dnd-kit/core';
 import { restrictToParentElement, restrictToVerticalAxis } from '@dnd-kit/modifiers';
@@ -120,8 +120,17 @@ function useApi() {
 
 const VIRTUAL_MIN_ITEMS = 24;
 const VIRTUAL_OVERSCAN_ROWS = 2;
-const METRIC_GRID_COLUMNS = { minWidth: 132, max: 3, repeat: 'fill' };
+const METRIC_GRID_COLUMNS = { minWidth: 132, max: 9, repeat: 'fill' };
 const UPSTREAM_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
+const relayTheme = defineTheme({
+  name: 'relaydeck',
+  extends: neutralTheme,
+  components: {
+    toast: {
+      base: { userSelect: 'text' }
+    }
+  }
+});
 
 // Windowed grid: renders only the rows near the viewport and reserves the rest
 // of the height with padding. Row height and column count are measured from the
@@ -257,6 +266,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       isAutoHide: !error,
       uniqueID: error ? 'relaydeck-error' : undefined
     });
+    if (error) raiseToastViewport();
   }, [toast]);
   const loadSystemStatus = useCallback(async (pacingRows = null) => {
     const [diagnosticsData, catalogData, hostData, compatibilityData, pacingData] = await Promise.all([
@@ -538,9 +548,10 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       await api(refreshTarget.all ? '/api/upstreams/refresh-quota' : `/api/upstreams/${refreshTarget.id}/refresh-quota`, { method: 'POST' });
       await load();
-      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota refreshed');
+      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota and profile refreshed');
       setRefreshTarget(null);
     } catch (error) {
+      setRefreshTarget(null);
       show(error.message, true);
     } finally {
       setIsRefreshing(false);
@@ -576,7 +587,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       const data = await api(`/api/upstreams/${upstream.id}/test-connection`, { method: 'POST', body: '{}' });
       const connection = data.connection;
-      show(`Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms`);
+      show(connectionSuccessMessage(connection));
       await load();
     } catch (error) {
       show(error.message, true);
@@ -856,7 +867,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                 )}
               />
             ) : (
-              <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex or Compass upstream to start routing requests.'} />
+              <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex, Compass, or Claude upstream to start routing requests.'} />
             )}
           </VStack>
 
@@ -955,8 +966,8 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(refreshTarget)}
             onOpenChange={(isOpen) => { if (!isOpen) setRefreshTarget(null); }}
-            title={refreshTarget?.all ? 'Refresh all upstream quotas?' : 'Refresh upstream quota?'}
-            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
+            title={refreshTarget?.all ? 'Refresh all upstream quotas?' : refreshTarget?.type === 'claude' ? 'Refresh Claude quota and profile?' : 'Refresh upstream quota?'}
+            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget?.type === 'claude' ? `Fetch the latest usage and account identity for "${refreshTarget.name}"?` : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
             actionLabel="Refresh"
             actionVariant="primary"
             isActionLoading={isRefreshing}
@@ -1178,7 +1189,7 @@ function Metric({ label, value }) {
     <Card variant="muted" padding={2}>
       <VStack gap={1}>
         <Text type="supporting" color="secondary" maxLines={1}>{label}</Text>
-        <Heading level={3} type="display-3" maxLines={1}>{value}</Heading>
+        <Heading level={3} maxLines={1}>{value}</Heading>
       </VStack>
     </Card>
   );
@@ -1279,11 +1290,11 @@ function UpstreamCard({
           </StackItem>
           <HStack gap={1} vAlign="center">
             {Number.isInteger(upstream.priority) && <Badge label={`${ordinal(upstream.priority + 1)} priority`} variant="blue" />}
-            <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : 'purple'} />
+            <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : upstream.type === 'claude' ? 'orange' : 'purple'} />
           </HStack>
         </HStack>
         <VStack gap={1} height={56}>
-          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : 'Click refresh to read provider quota'}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type === 'claude' ? 'Quota unavailable' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : upstream.type === 'claude' ? 'Click refresh to read Claude usage' : 'Click refresh to read provider quota'}</Text></HStack>
           <ProgressBar
             label="Quota remaining"
             value={!quota ? 0 : quotaRemaining}
@@ -1292,7 +1303,7 @@ function UpstreamCard({
             variant={quotaVariant}
             style={progressStyleMap[quotaVariant]}
           />
-          <Text type="supporting" color="secondary" minHeight={20} maxLines={1}>{quotaCount(quota)}</Text>
+          <Text type="supporting" color="secondary" minHeight={20} maxLines={1}>{quotaCount(quota, upstream.type)}</Text>
         </VStack>
         <VStack gap={1}>
           <Text type="label" weight="bold" maxLines={1}>{capHeading}</Text>
@@ -1310,15 +1321,17 @@ function UpstreamCard({
           </HStack>
         </VStack>
         <HStack gap={1} vAlign="center" wrap="wrap">
-          <Button
-            label="Refresh quota"
-            tooltip="Refresh quota"
-            icon={<Icon icon="clock" size="sm" />}
-            isIconOnly
-            size="sm"
-            variant="secondary"
-            onClick={() => onRefresh(upstream)}
-          />
+          {(upstream.type !== 'claude' || upstream.metadata?.auth_kind !== 'claude_api_key') && (
+            <Button
+              label="Refresh quota"
+              tooltip="Refresh quota"
+              icon={<Icon icon="clock" size="sm" />}
+              isIconOnly
+              size="sm"
+              variant="secondary"
+              onClick={() => onRefresh(upstream)}
+            />
+          )}
           <Button
             label="Test connection"
             tooltip="Test connection"
@@ -1626,10 +1639,22 @@ function ordinal(value) {
   return `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
 }
 function formatPercent(value) { return `${Math.round(Number(value) || 0)}%`; }
-function quotaCount(quota) {
-  if (!quota || !Number.isFinite(quota.remainingDollars) || !Number.isFinite(quota.limitDollars)) return '';
-  const remaining = Math.max(0, quota.remainingDollars);
-  return `$${formatNumber(remaining)} left of $${formatNumber(quota.limitDollars)}`;
+function connectionSuccessMessage(connection) {
+  const answer = typeof connection?.answer === 'string' && connection.answer.trim() ? ` with answer '${connection.answer.trim()}'` : '';
+  return `Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms${answer}`;
+}
+function quotaCount(quota, upstreamType = '') {
+  const windows = Array.isArray(quota?.windows) && quota.windows.length
+    ? quota.windows
+      .slice(0, 4)
+      .map((window) => `${window.key === 'session' ? '5h' : window.key === '7d' ? '7d' : window.key.replace(/^7d_/, '')} ${formatPercent(window.remainingPercent)} left`)
+      .join(' · ')
+    : '';
+  const dollars = quota && Number.isFinite(quota.remainingDollars) && Number.isFinite(quota.limitDollars)
+    ? `$${formatNumber(Math.max(0, quota.remainingDollars))} left of $${formatNumber(quota.limitDollars)}`
+    : '';
+  const dollarStatus = upstreamType === 'claude' && !dollars ? 'USD unavailable from provider' : '';
+  return [dollars, windows, dollarStatus].filter(Boolean).join(' · ');
 }
 function formatDate(value) { return value ? new Date(value).toLocaleString() : 'unknown'; }
 function formatShortTime(value) {
@@ -2300,12 +2325,22 @@ function formatFailovers(failure = {}) {
 function App() {
   const [themeMode, setThemeMode] = useStoredValue('codex_theme_mode', 'dark');
   return (
-    <Theme theme={neutralTheme} mode={themeMode}>
-      <ToastViewport position="bottomEnd" maxVisible={3}>
+    <Theme theme={relayTheme} mode={themeMode}>
+      <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
         <Dashboard themeMode={themeMode} setThemeMode={setThemeMode} />
       </ToastViewport>
     </Theme>
   );
+}
+
+function raiseToastViewport() {
+  const promote = () => {
+    const viewport = document.querySelector('[popover="manual"][role="region"]');
+    if (!viewport || typeof viewport.showPopover !== 'function') return;
+    try { viewport.hidePopover?.(); } catch {}
+    try { viewport.showPopover(); } catch {}
+  };
+  requestAnimationFrame(() => requestAnimationFrame(promote));
 }
 
 createRoot(document.getElementById('root')).render(<App />);

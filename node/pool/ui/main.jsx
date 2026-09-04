@@ -12,7 +12,7 @@ import { Heading, Text } from '@astryxdesign/core/Text';
 import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
 import { HStack, VStack } from '@astryxdesign/core/Layout';
-import { neutralTheme } from '@astryxdesign/theme-neutral/built';
+import { neutralTheme } from '@astryxdesign/theme-neutral';
 import { BookOpen, Share2 } from 'lucide-react';
 import { AdminAnalytics } from './admin.jsx';
 import { SharingWorkspace } from './sharing.jsx';
@@ -24,6 +24,9 @@ const poolTheme = defineTheme({
     '--color-overlay': '#00000080'
   },
   components: {
+    toast: {
+      base: { userSelect: 'text' }
+    },
     card: {
       'variant:red': {
         backgroundColor: 'var(--color-background-card)',
@@ -106,7 +109,7 @@ function GuideButton() {
 function Product() {
   return (
     <Theme theme={poolTheme} mode="dark">
-      <ToastViewport position="bottomEnd" maxVisible={3}>
+      <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
         {window.location.pathname.endsWith('/admin') ? <AdminShell /> : <ProductShell />}
       </ToastViewport>
     </Theme>
@@ -128,6 +131,7 @@ function ProductShell() {
   const toast = useToast();
   const show = useCallback((text, error = false) => {
     toast({ body: text, type: error ? 'error' : 'info', isAutoHide: true });
+    if (error) raiseToastViewport();
   }, [toast]);
   return (
     <Overlay isOpen={workspaceLoading} position="fill" align="center" content={<Spinner size="lg" shade="onMedia" aria-label="Loading sharing workspace" />}>
@@ -150,6 +154,16 @@ function ProductShell() {
       </AppShell>
     </Overlay>
   );
+}
+
+function raiseToastViewport() {
+  const promote = () => {
+    const viewport = document.querySelector('[popover="manual"][role="region"]');
+    if (!viewport || typeof viewport.showPopover !== 'function') return;
+    try { viewport.hidePopover?.(); } catch {}
+    try { viewport.showPopover(); } catch {}
+  };
+  requestAnimationFrame(() => requestAnimationFrame(promote));
 }
 
 createRoot(document.getElementById('root')).render(<Product />);
