@@ -334,7 +334,7 @@ async function codexContext(store, req, res, fetchImpl, upstreamDeadlines = {}, 
   if (personalKey && headerRequestedId) return null;
   if (sharedUpstreamId && headerRequestedId && headerRequestedId !== sharedUpstreamId) return null;
   const requestedId = sharedUpstreamId || headerRequestedId;
-  const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass });
+  const candidates = store.candidatePlan({ affinityId: pinnedId, requestedId, preferredType: 'codex', requiredType: 'codex', rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId, scopeId, routeClass: COMPATIBILITY_CIRCUIT_SCOPE.routeClass, ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) });
   const allowed = personalKey
     ? candidates.filter((candidate) => personalSessions.some((session) => session.upstreamId === candidate.id))
     : candidates;
@@ -387,7 +387,8 @@ function pinCompatibilitySession(context) {
 }
 
 async function codexFetch(context, path, options, { deferSettlement = false, pacingModel = '' } = {}) {
-  let admission = context.store.beginUpstreamAttempt(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+  const scope = { ...COMPATIBILITY_CIRCUIT_SCOPE, ignoreQuotaCooldown: Boolean(context.req.ignoreQuotaCooldown) };
+  let admission = context.store.beginUpstreamAttempt(context.upstream.id, scope);
   if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
   const abort = downstreamAbortSignal(context.req, context.res);
   let response;
@@ -405,7 +406,7 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
         });
         if (refreshed) {
           context.store.settleUpstreamAttempt(context.upstream.id, admission, { class: 'neutral', retryable: false });
-          admission = context.store.beginUpstreamAttempt(context.upstream.id, COMPATIBILITY_CIRCUIT_SCOPE);
+          admission = context.store.beginUpstreamAttempt(context.upstream.id, scope);
           if (!admission) throw Object.assign(new Error('Codex upstream is not currently eligible'), { statusCode: 503 });
         }
       } catch (error) {
