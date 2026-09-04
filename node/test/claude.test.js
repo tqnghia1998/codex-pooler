@@ -1659,7 +1659,14 @@ test('forwards a Claude OAuth upstream directly to Anthropic Messages', async ()
       model: 'claude-sonnet-4-6',
       content: [{ type: 'text', text: 'hello' }],
       usage: { input_tokens: 7, output_tokens: 3 }
-    })), { status: 200, headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' } });
+    })), { status: 200, headers: {
+      'content-type': 'application/json',
+      'content-encoding': 'gzip',
+      'anthropic-ratelimit-unified-5h-utilization': '0.12',
+      'anthropic-ratelimit-unified-5h-reset': '1800000000',
+      'anthropic-ratelimit-unified-7d-utilization': '0.34',
+      'anthropic-ratelimit-unified-7d-reset': '1800600000'
+    } });
   });
   try {
     const response = await request(base, '/v1/messages', {
@@ -1689,6 +1696,9 @@ test('forwards a Claude OAuth upstream directly to Anthropic Messages', async ()
     assert.match(userId.account_uuid, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     assert.match(userId.session_id, /^[0-9a-f-]{36}$/);
     assert.equal(userId.session_id, call.options.headers['x-claude-code-session-id']);
+    assert.equal(store.get(upstream.id).quota.source, 'claude_oauth_headers');
+    assert.equal(store.get(upstream.id).quota.remainingPercent, 88);
+    assert.equal(store.get(upstream.id).quota.windows[1].remainingPercent, 66);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });

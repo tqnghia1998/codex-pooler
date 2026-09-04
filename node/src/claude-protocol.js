@@ -248,14 +248,14 @@ export function prepareClaudeLocalCountTokensBody({ body, upstream = null, claud
 }
 
 // CPA prepares one stable device/account identity before the first OAuth call.
-// Keep the same behavior in Node: profile lookup is only needed when imported
-// credentials lack a canonical account UUID, and the lookup is single-flight.
-export async function ensureClaudeCredentialIdentity({ upstream, credentials, store = null, fetchImpl = globalThis.fetch } = {}) {
+// Keep the same behavior in Node: profile lookup is single-flight, and callers
+// may explicitly refresh it for management/API lifecycle operations.
+export async function ensureClaudeCredentialIdentity({ upstream, credentials, store = null, fetchImpl = globalThis.fetch, refreshProfile = false } = {}) {
   if (upstream?.type !== 'claude' || !isClaudeOAuthToken(credentials?.accessToken)) return upstream;
   const key = upstream.id || credentials.accessToken;
   let pending = claudeIdentityPrepares.get(key);
   if (!pending) {
-    pending = prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+    pending = prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile });
     claudeIdentityPrepares.set(key, pending);
     void pending.finally(() => {
       if (claudeIdentityPrepares.get(key) === pending) claudeIdentityPrepares.delete(key);
@@ -264,7 +264,7 @@ export async function ensureClaudeCredentialIdentity({ upstream, credentials, st
   return pending;
 }
 
-async function prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl }) {
+async function prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile = false }) {
   const expectedEpoch = Number(credentials?.credentialEpoch) || 0;
   const expectedAccessToken = String(credentials?.accessToken || '');
   const metadata = plainObject(upstream.metadata) ? upstream.metadata : {};
@@ -279,10 +279,11 @@ async function prepareClaudeCredentialIdentity({ upstream, credentials, store, f
   let email = upstream.email || '';
   let organizationId = credentials.organizationId || '';
   let organizationName = credentials.organizationName || '';
-  if (!accountId && !isClaudeSetupToken({ upstream, credentials })) {
+  if ((refreshProfile || !accountId) && !isClaudeSetupToken({ upstream, credentials })) {
     try {
       const profile = await fetchProfile(credentials.accessToken, fetchImpl, { proxyUrl: claudeProxyUrl(upstream) });
-      accountId = String(profile?.account?.uuid || '').trim();
+      const profileAccountId = String(profile?.account?.uuid || '').trim();
+      if (profileAccountId) accountId = profileAccountId;
       email ||= String(profile?.account?.email || profile?.account?.email_address || '').trim();
       organizationId ||= String(profile?.organization?.uuid || '').trim();
       organizationName ||= String(profile?.organization?.name || '').trim();

@@ -9,6 +9,7 @@ import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 import { Readiness } from '../src/readiness.js';
+import { CLAUDE_OAUTH_PROFILE_URL, CLAUDE_OAUTH_USAGE_URL } from '../src/providers.js';
 
 async function runningServer(store, options = {}) {
   const server = createServer(createApp({ store, ...options }));
@@ -50,6 +51,178 @@ test('serves the Relaydeck favicon', async () => {
   }
 });
 
+test('hydrates Claude OAuth profile metadata on create and manual refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-profile-api-'));
+  const store = new Store(dir);
+  const profileCalls = [];
+  const usageCalls = [];
+  const { server, base } = await runningServer(store, {
+    apiKey: 'claude-profile-key',
+    fetchImpl: async (url, options) => {
+      if (url === CLAUDE_OAUTH_USAGE_URL) {
+        usageCalls.push({ url, options });
+        return new Response(JSON.stringify({
+          five_hour: { utilization: usageCalls.length === 1 ? 48 : 63, resets_at: '2026-09-04T05:00:00Z' },
+          seven_day: { utilization: 64, resets_at: '2026-09-10T05:00:00Z' }
+        }), { status: 200 });
+      }
+      profileCalls.push({ url, options });
+      return new Response(JSON.stringify({
+        account: { ...(profileCalls.length === 1 ? { uuid: 'profile-account' } : {}), email: 'profile@example.com' },
+        organization: { uuid: 'profile-org', name: 'Profile Org' }
+      }), { status: 200 });
+    }
+  });
+  try {
+    const created = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', accessToken: 'sk-ant-oat-profile-create', accountId: 'imported-account' })
+    });
+    assert.equal(created.response.status, 201);
+    assert.equal(created.data.upstream.email, 'profile@example.com');
+    assert.equal(created.data.upstream.accountId, 'profile-account');
+    assert.equal(created.data.upstream.name === 'imported-account', false);
+    assert.equal(created.data.upstream.quota.remainingPercent, 52);
+    assert.equal(created.data.upstream.quota.windows[1].remainingPercent, 36);
+    assert.equal(profileCalls[0].url, CLAUDE_OAUTH_PROFILE_URL);
+    assert.equal(profileCalls[0].options.headers.authorization, 'Bearer sk-ant-oat-profile-create');
+    assert.equal(usageCalls[0].url, CLAUDE_OAUTH_USAGE_URL);
+    assert.equal(usageCalls[0].options.headers.authorization, 'Bearer sk-ant-oat-profile-create');
+    assert.equal(usageCalls[0].options.headers['anthropic-beta'], 'oauth-2025-04-20');
+
+    const existing = store.create({ type: 'claude', accessToken: 'sk-ant-oat-profile-existing', accountId: 'existing-account' });
+    const refreshed = await request(base, `/api/upstreams/${existing.id}/refresh-profile`, { method: 'POST' });
+    assert.equal(refreshed.response.status, 200);
+    assert.equal(refreshed.data.upstream.email, 'profile@example.com');
+    assert.equal(refreshed.data.upstream.accountId, 'existing-account');
+    assert.equal(profileCalls.length, 2);
+
+    const quota = await request(base, `/api/upstreams/${created.data.upstream.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(quota.response.status, 200);
+    assert.equal(quota.data.upstream.quota.remainingPercent, 37);
+    assert.equal(usageCalls.length, 2);
+    assert.equal(profileCalls.length, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('falls back to Claude Messages quota headers when OAuth usage scope is insufficient', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-quota-probe-'));
+  const messagesUrl = 'https://api.anthropic.com/v1/messages?beta=true';
+  const calls = [];
+  const { server, base } = await runningServer(new Store(dir), {
+    apiKey: 'claude-quota-probe-key',
+    fetchImpl: async (url, options) => {
+      calls.push({ url, options });
+      if (url === CLAUDE_OAUTH_PROFILE_URL) {
+        return new Response(JSON.stringify({ account: { email: 'probe@example.com' } }), { status: 200 });
+      }
+      if (url === CLAUDE_OAUTH_USAGE_URL) {
+        return new Response(JSON.stringify({
+          type: 'error',
+          error: {
+            type: 'permission_error',
+            details: { required_scopes: ['user:profile'], error_code: 'oauth_scope_insufficient' }
+          }
+        }), { status: 403 });
+      }
+      if (url === messagesUrl) {
+        return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }), {
+          status: 429,
+          headers: {
+            'anthropic-ratelimit-unified-5h-utilization': '0.30',
+            'anthropic-ratelimit-unified-5h-reset': '1800000000',
+            'anthropic-ratelimit-unified-7d-utilization': '0.45',
+            'anthropic-ratelimit-unified-7d-reset': '1800600000',
+            'anthropic-ratelimit-unified-representative-claim': 'five_hour'
+          }
+        });
+      }
+      return new Response('{}', { status: 404 });
+    }
+  });
+  try {
+    const created = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', accessToken: 'sk-ant-oat-quota-probe' })
+    });
+    assert.equal(created.response.status, 201);
+    assert.equal(created.data.upstream.quota.source, 'claude_oauth_headers');
+    assert.equal(created.data.upstream.quota.remainingPercent, 70);
+    assert.equal(created.data.upstream.quota.windows[1].remainingPercent, 55);
+    const probe = calls.find(({ url }) => url === messagesUrl);
+    assert.ok(probe);
+    assert.equal(probe.options.headers.authorization, 'Bearer sk-ant-oat-quota-probe');
+    assert.match(probe.options.headers['anthropic-beta'], /claude-code-20250219/);
+    assert.match(probe.options.headers['anthropic-beta'], /oauth-2025-04-20/);
+    assert.equal(probe.options.headers['x-app'], 'cli');
+    const probeBody = JSON.parse(probe.options.body);
+    assert.equal(probeBody.model, 'claude-sonnet-4-6');
+    assert.equal(probeBody.max_tokens, 1);
+    assert.equal(probeBody.messages[0].role, 'user');
+    assert.equal(probeBody.messages[0].content.at(-1).text, '.');
+    assert.match(probeBody.metadata.user_id, /"device_id":"[a-f0-9]{64}"/);
+    assert.match(probeBody.system[0].text, /^x-anthropic-billing-header:/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns Claude quota Retry-After details for a manual rate-limited refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-quota-retry-after-'));
+  const store = new Store(dir);
+  const created = store.create({ type: 'claude', accessToken: 'sk-ant-oat-quota-retry-after', metadata: { auth_kind: 'oauth' } });
+  const { server, base } = await runningServer(store, {
+    apiKey: 'claude-quota-retry-after-key',
+    fetchImpl: async (url) => {
+      if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response('{}', { status: 403 });
+      if (url === CLAUDE_OAUTH_USAGE_URL) return new Response(JSON.stringify({
+        error: { details: { required_scopes: ['user:profile'], error_code: 'oauth_scope_insufficient' } }
+      }), { status: 403 });
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', message: 'Rate limited' } }), {
+        status: 429,
+        headers: { 'retry-after': '600' }
+      });
+    }
+  });
+  try {
+    const refreshed = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(refreshed.response.status, 429);
+    assert.equal(refreshed.data.error.code, 'claude_quota_rate_limited');
+    assert.match(refreshed.data.error.message, /Retry-After: 600 seconds/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('shows a local retry estimate when Claude omits Retry-After', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-quota-retry-estimate-'));
+  const store = new Store(dir);
+  const created = store.create({ type: 'claude', accessToken: 'sk-ant-oat-quota-retry-estimate', metadata: { auth_kind: 'oauth' } });
+  const { server, base } = await runningServer(store, {
+    apiKey: 'claude-quota-retry-estimate-key',
+    fetchImpl: async (url) => {
+      if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response('{}', { status: 403 });
+      if (url === CLAUDE_OAUTH_USAGE_URL) return new Response(JSON.stringify({
+        error: { details: { required_scopes: ['user:profile'], error_code: 'oauth_scope_insufficient' } }
+      }), { status: 403 });
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', message: 'Rate limited' } }), { status: 429 });
+    }
+  });
+  try {
+    const refreshed = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(refreshed.response.status, 429);
+    assert.match(refreshed.data.error.message, /Retry-After not provided; local retry estimate: 600 seconds/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('automatically refreshes Codex quotas for all stored upstreams', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-poll-'));
   try {
@@ -66,6 +239,30 @@ test('automatically refreshes Codex quotas for all stored upstreams', async () =
     const quota = store.getPublic(created.id).quota;
     assert.equal(quota.remainingPercent, 94);
     assert.equal(quota.remainingDollars, 1226.7);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('automatically refreshes legacy Claude OAuth records without auth metadata', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-legacy-claude-poll-'));
+  try {
+    const store = new Store(dir);
+    const created = store.create({ type: 'claude', accessToken: 'sk-ant-oat-legacy', accountId: 'legacy-account' });
+    const saved = store.load().upstreams.find((upstream) => upstream.id === created.id);
+    delete saved.metadata.auth_kind;
+    saved.accessTokenExpiresAt = null;
+    store.save(store.load());
+    await refreshAllQuotas(store, {
+      fetchImpl: async (url) => {
+        if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response(JSON.stringify({ account: { email: 'legacy@example.com' } }), { status: 200 });
+        assert.equal(url, CLAUDE_OAUTH_USAGE_URL);
+        return new Response(JSON.stringify({ five_hour: { utilization: 25, resets_at: '2026-09-04T05:00:00Z' } }), { status: 200 });
+      }
+    });
+    const upstream = store.getPublic(created.id);
+    assert.equal(upstream.email, 'legacy@example.com');
+    assert.equal(upstream.quota.remainingPercent, 75);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -490,7 +687,7 @@ test('tests Codex and Compass connections through the shared proxy path', async 
       }
       if (path === '/backend-api/codex/responses') {
         return new Response(
-          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"response-test","status":"completed","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":5,"output_tokens":1}}}\n\n',
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"response-test","status":"completed","model":"gpt-5.6-luna","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The current time is now."}]}],"usage":{"input_tokens":5,"output_tokens":1}}}\n\n',
           { headers: { 'content-type': 'text/event-stream' } }
         );
       }
@@ -515,6 +712,7 @@ test('tests Codex and Compass connections through the shared proxy path', async 
     assert.equal(result.data.connection.type, 'codex');
     assert.equal(result.data.connection.endpoint, '/v1/responses');
     assert.equal(result.data.connection.model, 'gpt-5.6-luna');
+    assert.equal(result.data.connection.answer, 'The current time is now.');
 
     const codexRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
     const codexBody = JSON.parse(codexRequest.options.body);
@@ -531,6 +729,7 @@ test('tests Codex and Compass connections through the shared proxy path', async 
     assert.equal(result.data.connection.type, 'compass');
     assert.equal(result.data.connection.endpoint, '/v1/messages');
     assert.equal(result.data.connection.model, 'claude-sonnet-5');
+    assert.equal(result.data.connection.answer, 'The current time is now.');
 
     const compassRequest = calls.find(({ path }) => path === '/compass-api/v1/messages');
     assert.deepEqual(JSON.parse(compassRequest.options.body), {

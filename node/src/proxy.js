@@ -3,7 +3,7 @@ import { once } from 'node:events';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { request as undiciRequest } from 'undici';
-import { defaultBaseUrl, normalizeClaudeBaseUrl, STATIC_MODEL_CATALOG } from './domain.js';
+import { defaultBaseUrl, isClaudeOAuthUpstream, normalizeClaudeBaseUrl, parseClaudeQuotaHeaders, STATIC_MODEL_CATALOG } from './domain.js';
 import { buildClaudeModelsResponse, isClaudeModelsRequest, resolveClaudeModelListId } from './claude-models.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { modelCatalogForStore } from './codex-model-catalog.js';
@@ -82,6 +82,12 @@ const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('co
 const COMPATIBILITY_RETRY_LIMIT = Math.max(CODEX_OPTIONAL_FALLBACK_FIELDS.size, COMPASS_OPTIONAL_FALLBACK_FIELDS.size + 1);
 const ANTHROPIC_BETA_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORWARDED_HEADER_MAX_BYTES = 1024;
+const CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS = 5 * 60_000;
+const CLAUDE_QUOTA_HEADER_NAMES = [
+  'anthropic-ratelimit-unified-5h-utilization',
+  'anthropic-ratelimit-unified-7d-utilization',
+  'anthropic-ratelimit-unified-overage-utilization'
+];
 const PROMPT_CACHE_BREAKPOINT_TYPES = new Set(['input_text', 'input_image', 'input_file']);
 const COMPACT_PAYLOAD_FIELDS = new Set([
   'model',
@@ -413,14 +419,38 @@ export async function testUpstreamConnection({
     null,
     dispatched.response.status
   );
+  const answer = connectionTestAnswer(body);
   return {
     ok: true,
     upstreamId,
     type: upstream.type,
     endpoint: path,
     model,
+    ...(answer ? { answer } : {}),
     latencyMs: Math.max(0, Date.now() - started)
   };
+}
+
+function connectionTestAnswer(body) {
+  if (typeof body?.output_text === 'string' && body.output_text.trim()) return normalizeConnectionTestAnswer(body.output_text);
+  const texts = [];
+  const collect = (blocks) => {
+    if (!Array.isArray(blocks)) return;
+    for (const block of blocks) {
+      if (typeof block?.text === 'string' && block.text.trim()) texts.push(block.text);
+      if (Array.isArray(block?.content)) collect(block.content);
+    }
+  };
+  collect(body?.content);
+  collect(body?.output);
+  for (const choice of body?.choices || []) {
+    if (typeof choice?.message?.content === 'string') texts.push(choice.message.content);
+  }
+  return normalizeConnectionTestAnswer(texts.join(' '));
+}
+
+function normalizeConnectionTestAnswer(value) {
+  return value.replace(/\s+/g, ' ').trim().slice(0, 300) || null;
 }
 
 async function connectionTestModel(store, upstream, modelCatalog, options) {
@@ -1323,6 +1353,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
       }, upstreamDeadlines));
     if (request.upstreamType === 'claude') {
       response = await decodeClaudeResponse(response);
+      persistClaudeResponseQuota(response, pacing);
       if (request.claudeThinkingReplay) {
         if (response.ok) void captureClaudeThinkingReplayResponse(request.claudeThinkingReplay, response);
         else if ([400, 422].includes(response.status) && request.claudeThinkingReplay.replayApplied) forgetClaudeThinkingReplay(request.claudeThinkingReplay);
@@ -1347,6 +1378,27 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
     throw wrapped;
   } finally {
     abort?.cleanup();
+  }
+}
+
+function persistClaudeResponseQuota(response, pacing) {
+  if (!CLAUDE_QUOTA_HEADER_NAMES.some((name) => response?.headers?.get?.(name))) return;
+  if (!pacing?.store || !pacing.upstreamId) return;
+  try {
+    const upstream = pacing.store.get(pacing.upstreamId);
+    if (!upstream || !isClaudeOAuthUpstream(upstream)) return;
+    const observedAt = Date.parse(upstream.quota?.observedAt);
+    if (Number.isFinite(observedAt) && observedAt + CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS > Date.now()) return;
+    const quota = parseClaudeQuotaHeaders(response.headers);
+    const previousExtraUsage = upstream.quota?.extraUsage;
+    if (previousExtraUsage && Number.isFinite(upstream.quota?.remainingDollars) && Number.isFinite(upstream.quota?.limitDollars)) {
+      quota.extraUsage = previousExtraUsage;
+      quota.remainingDollars = upstream.quota.remainingDollars;
+      quota.limitDollars = upstream.quota.limitDollars;
+    }
+    pacing.store.setQuota(pacing.upstreamId, quota, { notify: false });
+  } catch {
+    // Quota observation is advisory and must never change the proxy outcome.
   }
 }
 
