@@ -1,7 +1,10 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
+import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
-import { defaultBaseUrl, STATIC_MODEL_CATALOG } from './domain.js';
+import { request as undiciRequest } from 'undici';
+import { defaultBaseUrl, normalizeClaudeBaseUrl, STATIC_MODEL_CATALOG } from './domain.js';
+import { buildClaudeModelsResponse, isClaudeModelsRequest, resolveClaudeModelListId } from './claude-models.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { modelCatalogForStore } from './codex-model-catalog.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
@@ -15,7 +18,7 @@ import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage } from './pri
 import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
-import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
+import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
 import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, nativeMisalignmentError, publicMisalignmentError } from './policy-failures.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
@@ -33,9 +36,13 @@ import {
   compatibilityEvidenceFeature
 } from './compatibility-learning.js';
 import { compatibilityOptionalFields } from './compatibility-policy.js';
+import { claudeDiagnosticsState, claudeModelAlias, claudeRequestHeaders, claudeRequestedBetas, claudeSessionIdForRequest, claudeToolAliases, commitClaudeDiagnostics, ensureClaudeCredentialIdentity, forgetClaudeThinkingReplay, isAnthropicClaudeBaseUrl, prepareClaudeLocalCountTokensBody, prepareClaudeRequestBody, prepareClaudeThinkingReplayRequest, restoreClaudeModelAlias, restoreClaudeToolAliases } from './claude-protocol.js';
+import { captureClaudeThinkingReplayResponse } from './claude-thinking-replay.js';
+import { claudeProxyDispatcher } from './claude-transport.js';
+import { decodeClaudeResponse } from './upstream-response.js';
+import { countClaudeInputTokens } from './claude-input-tokens.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
-
 export const PROXY_ENDPOINTS = new Set([
   '/v1/responses',
   '/v1/responses/compact',
@@ -45,7 +52,8 @@ export const PROXY_ENDPOINTS = new Set([
   '/backend-api/codex/v1/responses',
   '/backend-api/codex/responses/compact',
   '/backend-api/codex/v1/responses/compact',
-  '/backend-api/codex/v1/chat/completions'
+  '/backend-api/codex/v1/chat/completions',
+  '/v1/messages/count_tokens'
 ]);
 const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 const CODEX_COMPACT_PATH = '/backend-api/codex/responses/compact';
@@ -84,7 +92,15 @@ const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
 const MAX_GATEWAY_CANDIDATE_ATTEMPTS = 8;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
-const SESSION_HEADERS = ['x-codex-window-id', 'x-codex-session-id', 'session-id', 'x-session-id', 'x-session-affinity', 'session_id', 'x-codex-conversation-id'];
+// Keep Claude Code and CPA-compatible affinity signals ahead of generic
+// request IDs so OAuth conversations remain pinned across provider retries.
+const SESSION_HEADERS = [
+  'x-claude-code-session-id', 'x-codex-window-id', 'x-codex-session-id',
+  'session-id', 'session_id', 'x-session-id', 'x-http-session-id',
+  'x-session-affinity', 'x-slot-session-id', 'x-conversation-id', 'x-thread-id',
+  'thread-id', 'x-codex-conversation-id', 'x-client-request-id'
+];
+const CLAUDE_MESSAGES_PATHS = new Set(['/v1/messages', '/v1/messages/count_tokens']);
 const TERMINAL_EVENT_TYPE = Symbol('terminalEventType');
 const POLICY_ROUTES = new Set([
   '/v1/responses',
@@ -97,7 +113,7 @@ const POLICY_ROUTES = new Set([
   '/backend-api/codex/v1/responses/compact'
 ]);
 
-export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store) }) {
+export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
@@ -121,14 +137,18 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
   const v2Compaction = compactionBridge && v2CompactionRequest(req);
-  const dispatchPayload = v2Compaction
+  let dispatchPayload = v2Compaction
     ? { ...compactionBridge.payload, stream: true }
     : compactionBridge?.payload || payload;
+  if (CLAUDE_MESSAGES_PATHS.has(sourcePath) && typeof dispatchPayload?.model === 'string') {
+    const resolvedModel = resolveClaudeModelListId(dispatchPayload.model);
+    if (resolvedModel !== dispatchPayload.model) dispatchPayload = { ...dispatchPayload, model: resolvedModel };
+  }
   if (sourcePath === '/v1/chat/completions' && normalizedServiceTier(payload?.service_tier) === 'ultrafast') {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_request', message: 'service_tier is not supported', param: 'service_tier' } });
     return;
   }
-  if (sourcePath === '/v1/messages') {
+  if (CLAUDE_MESSAGES_PATHS.has(sourcePath)) {
     const anthropicHeaderError = validateAnthropicHeaders(req);
     if (anthropicHeaderError) {
       sendJson(res, 400, { type: 'error', error: { type: 'invalid_request_error', message: anthropicHeaderError } });
@@ -144,7 +164,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     if (!(error instanceof AdapterError)) throw error;
     codexAdapterError = error;
   }
-  const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
+  const model = typeof dispatchPayload?.model === 'string' ? dispatchPayload.model.toLowerCase() : '';
   if (model && !store.modelAllowed(authScopeId, model)) {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_model', message: `Model ${payload.model} is not available`, param: 'model' } });
     return;
@@ -152,7 +172,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   const routingPlan = chooseUpstreamPlan(store, req, sourcePath, dispatchPayload, path, modelCatalog);
   let candidates = routingPlan.candidates;
   if (codexAdapterError) {
-    candidates = candidates.filter((candidate) => store.get(candidate.id, authScopeId)?.type === 'compass');
+    candidates = candidates.filter((candidate) => ['compass', 'claude'].includes(store.get(candidate.id, authScopeId)?.type));
     if (!candidates.length) {
       routingPlan.diagnostics.exclusions.push({ code: 'codex_adapter_incompatible' });
       sendJson(res, 400, { error: { message: codexAdapterError.message, type: 'invalid_request_error', code: codexAdapterError.code, param: codexAdapterError.param } });
@@ -170,12 +190,12 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     });
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
-  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth });
+  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth, claudeConfig });
   if (!dispatched) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
-  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode } = dispatched;
+  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState } = dispatched;
   if (pacingError) {
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
     const failure = pacingUnavailable(pacingError);
@@ -201,13 +221,14 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     const errorBytes = await readBoundedResponse(response);
     const policyError = policyErrorForRoute(errorBytes, path, sourcePath);
     const outcome = classifyHttpResponse(response, parseJson(errorBytes), {
-      allowMisalignmentPolicy: policyRoute(path, sourcePath)
+      allowMisalignmentPolicy: policyRoute(path, sourcePath),
+      upstreamType: upstream.type
     });
     finalizeGatewayFailure(store, lifecycle, attemptId, {
       errorCode: policyError?.code || failureCode || gatewayOutcomeCode(outcome),
       responseStatusCode: response.status
     });
-    const validAnthropic = response.status >= 400 && response.status < 500 && upstream.type === 'compass' && sourcePath === '/v1/messages' && validAnthropicError(errorBytes);
+    const validAnthropic = response.status >= 400 && response.status < 500 && ['compass', 'claude'].includes(upstream.type) && CLAUDE_MESSAGES_PATHS.has(sourcePath) && validAnthropicError(errorBytes);
     if (policyError) sendJson(res, response.status, { error: policyError });
     else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
     else sendFailure(res, retryAfterHeader(response));
@@ -255,7 +276,10 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       responseOptions: { ...responseOptions, modelsEtag },
       upstreamDeadlines,
       admission,
+      claudeDiagnosticsState: dispatchedDiagnosticsState,
       nativeMisalignmentDetails: isBackendResponsesRoute(path),
+      claudeToolAliases: dispatchedToolAliases,
+      claudeModelAlias: dispatchedModelAlias,
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId, req) : null,
       logger
     });
@@ -263,7 +287,19 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
 
   const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+  if (upstream.type === 'claude') commitClaudeDiagnostics(dispatchedDiagnosticsState, parseJson(bytes)?.id);
   let output = bytes;
+  if (upstream.type === 'claude' && (dispatchedToolAliases?.size || dispatchedModelAlias?.forceMapping)) {
+    try {
+      const parsed = restoreClaudeModelAlias(
+        restoreClaudeToolAliases(JSON.parse(bytes.toString('utf8')), dispatchedToolAliases),
+        dispatchedModelAlias
+      );
+      output = Buffer.from(JSON.stringify(parsed));
+    } catch {
+      // Preserve an unexpected successful upstream body rather than inventing a response.
+    }
+  }
   if (upstream.type === 'codex' && sourcePath === '/v1/chat/completions') {
     try {
       output = Buffer.from(JSON.stringify(responsesToChat(JSON.parse(bytes.toString('utf8')), payload)));
@@ -298,8 +334,8 @@ export async function testUpstreamConnection({
   });
   if (!model) throw new HttpError(409, 'connection_test_model_unavailable', 'No compatible model is available for this upstream');
 
-  const path = upstream.type === 'compass' ? '/v1/messages' : '/v1/responses';
-  const payload = upstream.type === 'compass'
+  const path = ['compass', 'claude'].includes(upstream.type) ? '/v1/messages' : '/v1/responses';
+  const payload = ['compass', 'claude'].includes(upstream.type)
     ? {
         model,
         max_tokens: 64,
@@ -349,7 +385,7 @@ export async function testUpstreamConnection({
   } else {
     body = parseJson(await readResponseBytes(dispatched.response, 2 * 1024 * 1024, upstreamDeadlines));
     if (!validCompassConnectionTestResponse(body)) {
-      throw new HttpError(502, 'connection_test_failed', 'Connection test returned an invalid Compass response');
+      throw new HttpError(502, 'connection_test_failed', `Connection test returned an invalid ${upstream.type === 'claude' ? 'Claude' : 'Compass'} response`);
     }
   }
   settleUsage(
@@ -588,7 +624,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
   const ultrafast = normalizedServiceTier(payload?.service_tier) === 'ultrafast';
-  const preferredType = path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
+  const preferredType = path === '/v1/messages' ? (requestedType || 'compass') : path === '/v1/messages/count_tokens' ? 'claude' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
   if (personalKey && (headerRequestedId || requestedType)) {
     return { candidates: [], diagnostics: { exclusions: [{ code: 'personal_key_upstream_conflict' }] } };
   }
@@ -604,7 +640,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
     affinityId: pinnedId,
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
-    requiredType: path === '/v1/messages' ? 'compass' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
+    requiredType: path === '/v1/messages/count_tokens' ? 'claude' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
     rotateFromId: pinnedId || responsePinnedId || requestedId || requestedType ? '' : rotationUpstreamId,
     model,
     modelSupport: (upstreamId, requestedModel, generation) => {
@@ -618,6 +654,11 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
     requirements: requestRequirements(path, payload),
     routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http'
   });
+  // Claude OAuth is currently a native Anthropic Messages adapter. Do not
+  // accidentally send OpenAI Chat/Responses payloads to /v1/messages upstreams.
+  if (path === '/v1/messages') plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'codex');
+  else if (path === '/v1/messages/count_tokens') plan.candidates = plan.candidates.filter((candidate) => candidate.type === 'claude');
+  else plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'claude');
   if (!personalKey) return plan;
   const position = new Map(personalSessions.map((session, index) => [session.upstreamId, index]));
   plan.candidates = plan.candidates
@@ -626,13 +667,20 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   return plan;
 }
 
-async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false }) {
+async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false, claudeConfig = null }) {
   const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http' };
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
   let codexHostBlocked = false;
   let candidatesAttempted = 0;
-  for (const [candidateIndex, candidate] of candidates.entries()) {
+  const candidateAttempts = [];
+  for (let retryRound = 0; retryRound <= MAX_GATEWAY_CANDIDATE_ATTEMPTS; retryRound += 1) {
+    for (const candidate of candidates) {
+      const upstream = store.get(candidate.id, scopeId);
+      if (retryRound === 0 || claudeRequestRetryLimit(upstream, claudeConfig) >= retryRound) candidateAttempts.push({ candidate, retryRound });
+    }
+  }
+  for (const [candidateIndex, { candidate }] of candidateAttempts.entries()) {
     if (candidatesAttempted >= MAX_GATEWAY_CANDIDATE_ATTEMPTS) break;
     if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionAffinity(req), allowReselect: true })) continue;
     const upstream = store.get(candidate.id, scopeId);
@@ -640,7 +688,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     let admission = upstream && store.beginUpstreamAttempt(upstream.id, scope);
     if (!upstream || !admission && !allowUnavailableCandidate) continue;
     candidatesAttempted += 1;
-    const queuePacing = candidateIndex === candidates.length - 1
+    const queuePacing = candidateIndex === candidateAttempts.length - 1
       || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
     const credentials = store.credentials(upstream.id);
     const startedAt = new Date().toISOString();
@@ -661,12 +709,16 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const diagnostics = gatewayDiagnosticsForStore(store);
     let response;
     let collected;
+    let request;
     const compatibilityService = compatibilityLearningForStore(store);
     let compatibilityScope = compatibilityFactContext(upstream, sourcePath, payload, req, path);
     let compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
+    const localClaudeTokenCount = upstream.type === 'claude'
+      && sourcePath === '/v1/messages/count_tokens'
+      && !isAnthropicClaudeBaseUrl(upstream.baseUrl);
     diagnostics.credentialStarted(attemptId);
     try {
-      const refreshed = await ensureProviderCredentials(upstream, credentials, {
+      const refreshed = localClaudeTokenCount ? false : await ensureProviderCredentials(upstream, credentials, {
         fetchImpl,
         saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
       });
@@ -689,20 +741,23 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       diagnostics.credentialPrepared(attemptId);
     }
     try {
-      let request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
-      response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
-        store,
-        upstreamId: upstream.id,
-        model: payload?.model,
-        queue: queuePacing,
-        attemptId
-      });
+      if (!localClaudeTokenCount) await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+      request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
+      response = localClaudeTokenCount
+        ? new Response(JSON.stringify({ input_tokens: countClaudeInputTokens(request.body) }), { status: 200, headers: { 'content-type': 'application/json' } })
+        : await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
+          store,
+          upstreamId: upstream.id,
+          model: payload?.model,
+          queue: queuePacing,
+          attemptId
+        });
       persistResponseCookies(response, upstream, credentials, store);
       let authenticationRetried = false;
       const initialPolicyFailure = policyRoute(path, sourcePath) && [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
         : null;
-      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && upstream.type === 'codex' && credentials.refreshToken) {
+      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
         try {
           const refreshed = await refreshProviderCredentials(upstream, credentials, {
             fetchImpl,
@@ -718,8 +773,9 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             compatibilityScope = compatibilityFactContext(store.get(upstream.id) || upstream, sourcePath, payload, req, path);
             compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
           }
-          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
-          response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, codexHostHealth, {
+          await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
+          response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
             store,
             upstreamId: upstream.id,
             model: payload?.model,
@@ -755,7 +811,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           observationId: attemptId
         });
         void response.body?.cancel('Retrying with provider-directed compatibility fallback').catch(() => {});
-        request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility);
+        await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+        request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
         response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
           store,
           upstreamId: upstream.id,
@@ -774,9 +831,15 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             modelCatalog.markUnsupported(upstream.id, payload?.model);
           }
           void response.body?.cancel('Retrying a withheld first SSE event').catch(() => {});
-          store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent(inspected.firstEvent, {
-            allowMisalignmentPolicy: policyRoute(path, sourcePath)
-          }));
+          const sseOutcome = {
+            ...applyClaudeRequestScopedAction(classifySseEvent(inspected.firstEvent, {
+              allowMisalignmentPolicy: policyRoute(path, sourcePath),
+              upstreamType: upstream.type,
+              headers: response.headers
+            }), upstream, response.status, inspected.firstEvent, claudeConfig),
+            model: payload?.model
+          };
+          store.settleUpstreamAttempt(upstream.id, admission, sseOutcome);
           releaseShareRequest(req, attemptId, 'upstream_first_event_failed');
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_first_event_failed', responseStatusCode: response.status });
           terminalFailure = {
@@ -792,9 +855,13 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       }
       if (authenticationRetried && (response.status === 401 || response.status === 403) && sourcePath !== '/v1/responses/compact') {
         const body = parseJson(await readBoundedResponse(response.clone()));
-        const outcome = classifyHttpResponse(response, body, {
-          allowMisalignmentPolicy: policyRoute(path, sourcePath)
-        });
+        const outcome = {
+          ...applyClaudeRequestScopedAction(classifyHttpResponse(response, body, {
+            allowMisalignmentPolicy: policyRoute(path, sourcePath),
+            upstreamType: upstream.type
+          }), upstream, response.status, body, claudeConfig),
+          model: payload?.model
+        };
         if (outcome.errorCode === MISALIGNMENT_POLICY_CODE) {
           store.settleUpstreamAttempt(upstream.id, admission, outcome);
           releaseShareRequest(req, attemptId, outcome.errorCode);
@@ -840,6 +907,11 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         }
       }
     } catch (error) {
+      if (error instanceof HttpError) {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        releaseShareRequest(req, attemptId, error.code || 'invalid_request');
+        throw error;
+      }
       if (error instanceof PacingError) {
         try { store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false }); } catch {}
         releaseShareRequest(req, attemptId, `local_pacing_${error.code}`);
@@ -892,12 +964,16 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     if (response.ok) {
       const streaming = isEventStream(response) || upstream.type === 'codex' && payload?.stream === true;
       if (!streaming || collected) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
-      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null };
+      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState };
     }
     const body = parseJson(await readBoundedResponse(response.clone()));
-    const outcome = classifyHttpResponse(response, body, {
-      allowMisalignmentPolicy: policyRoute(path, sourcePath)
-    });
+    const outcome = {
+      ...applyClaudeRequestScopedAction(classifyHttpResponse(response, body, {
+        allowMisalignmentPolicy: policyRoute(path, sourcePath),
+        upstreamType: upstream.type
+      }), upstream, response.status, body, claudeConfig),
+      model: payload?.model
+    };
     const retryable = sourcePath !== '/v1/responses/compact' && outcome.retryable;
     if (retryable) {
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
@@ -999,9 +1075,15 @@ function modelNotFoundFailure(event) {
     || error.type === 'invalid_request_error' && error.param === 'model';
 }
 
-function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}) {
-  const direct = upstream.type === 'compass';
-  const { targetPath, body } = projectProxyRequest({
+function claudeProxyAgent(upstream) {
+  if (upstream?.type !== 'claude') return null;
+  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  return claudeProxyDispatcher(metadata.proxy_url ?? metadata['proxy-url']);
+}
+
+function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}, claudeConfig = null, store = null) {
+  const direct = ['compass', 'claude'].includes(upstream.type);
+  const { targetPath, body: projectedBody } = projectProxyRequest({
     upstreamType: upstream.type,
     sourcePath,
     payload,
@@ -1009,19 +1091,51 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
     codexPayload,
     compatibility
   });
-  const baseUrl = defaultBaseUrl(upstream.type);
+  const countTokens = upstream.type === 'claude' && sourcePath === '/v1/messages/count_tokens';
+  const sessionId = upstream.type === 'claude'
+    ? claudeSessionIdForRequest(req, projectedBody, countTokens)
+    : null;
+  const claudeReplay = upstream.type === 'claude'
+    ? prepareClaudeThinkingReplayRequest({ req, body: projectedBody, credentials, upstream, sessionId, claudeConfig })
+    : { body: projectedBody, scope: null };
+  const body = upstream.type === 'claude'
+    ? countTokens && !isAnthropicClaudeBaseUrl(upstream.baseUrl)
+      ? prepareClaudeLocalCountTokensBody({ body: projectedBody, upstream, claudeConfig })
+      : prepareClaudeRequestBody({ req, body: claudeReplay.body, credentials, upstream, sessionId, countTokens, claudeConfig, requestPath: originalPath })
+    : projectedBody;
+  const requestedClaudeBetas = upstream.type === 'claude'
+    ? claudeRequestedBetas({ req, body: projectedBody })
+    : [];
+  const baseUrl = upstream.type === 'claude'
+    ? normalizeClaudeBaseUrl(upstream.baseUrl)
+    : defaultBaseUrl(upstream.type);
   const headers = {
     'content-type': 'application/json',
     accept: body.stream ? 'text/event-stream' : 'application/json',
-    authorization: `Bearer ${credentials.accessToken || credentials.projectKey}`
+    ...(upstream.type === 'claude'
+      ? {}
+      : { authorization: `Bearer ${credentials.accessToken || credentials.projectKey}` })
   };
+  if (upstream.type === 'claude') Object.assign(headers, claudeRequestHeaders({
+    req,
+    body,
+    credentials,
+    upstream,
+    sessionId,
+    requestedBetas: requestedClaudeBetas,
+    countTokens,
+    claudeConfig
+  }));
+  if (upstream.type === 'claude' && store?.persistClaudeDeviceProfiles && upstream.claudeDeviceProfiles) {
+    store.persistClaudeDeviceProfiles(upstream.id, upstream.claudeDeviceProfiles);
+  }
   if (!direct) Object.assign(
     headers,
     codexProtocolHeaders(req, { inheritClient: isBackendMetadataRoute(originalPath) }),
     codexCookieHeaders(credentials),
     upstream.accountId ? { 'chatgpt-account-id': upstream.accountId } : {}
   );
-  const forwarded = direct && sourcePath === '/v1/messages'
+  const forwarded = upstream.type === 'compass' && sourcePath === '/v1/messages'
     ? ANTHROPIC_HEADERS
     : !direct && isBackendMetadataRoute(originalPath) && sourcePath !== '/v1/chat/completions'
       ? BACKEND_METADATA_HEADERS
@@ -1031,7 +1145,17 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
     if (typeof value === 'string' && value) headers[name] = projectMetadataHeader(name, value);
   }
   if (direct && sourcePath === '/v1/messages' && !headers['anthropic-version']) headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
-  return { url: `${baseUrl}${targetPath}`, headers, body: JSON.stringify(body) };
+  return {
+    upstreamType: upstream.type,
+    dispatcher: claudeProxyAgent(upstream),
+    url: `${baseUrl}${targetPath}`,
+    headers,
+    body: JSON.stringify(body),
+    claudeThinkingReplay: claudeReplay.scope,
+    claudeToolAliases: upstream.type === 'claude' ? claudeToolAliases(body) : new Map(),
+    claudeModelAlias: upstream.type === 'claude' ? claudeModelAlias(body) : null,
+    claudeDiagnosticsState: upstream.type === 'claude' ? claudeDiagnosticsState(body) : null
+  };
 }
 
 export function projectProxyRequest({
@@ -1042,13 +1166,13 @@ export function projectProxyRequest({
   codexPayload = payload,
   compatibility = {}
 }) {
-  const direct = upstreamType === 'compass';
+  const direct = ['compass', 'claude'].includes(upstreamType);
   const publicCompaction = sourcePath === '/v1/responses/compact' && originalPath === '/v1/responses';
   const targetPath = direct
-    ? COMPASS_PATHS[sourcePath]
+    ? upstreamType === 'claude' ? `${sourcePath}?beta=true` : COMPASS_PATHS[sourcePath]
     : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
   const normalizedBody = direct
-    ? directUpstreamPayload(payload, sourcePath)
+    ? upstreamType === 'compass' ? directUpstreamPayload(payload, sourcePath) : payload
     : sourcePath === '/v1/chat/completions'
       ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
       : publicCompaction
@@ -1089,12 +1213,30 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
       diagnostics?.queueWaited(pacing.attemptId, pacingResult.waitedMs);
     }
     diagnostics?.connectionStarted(pacing.attemptId);
-    const response = await withCodexHostHealth(codexHostHealth, request.url, () => fetchWithHeaderDeadline(fetchImpl, request.url, {
+    const wireHeaders = request.upstreamType === 'claude'
+      ? claudeWireHeaders(request.headers)
+      : request.headers;
+    // The built-in fetch layer adds browser-oriented defaults such as
+    // Accept-Language and Sec-Fetch-Mode. CPA's Claude transport uses the
+    // lower-level HTTP client and sends only the negotiated request headers,
+    // so keep Claude's real network path on the same lower-level boundary.
+    const fetchRequest = request.upstreamType === 'claude' && fetchImpl === globalThis.fetch
+      ? fetchWithHostOverride
+      : fetchImpl;
+    let response = await withCodexHostHealth(codexHostHealth, request.url, () => fetchWithHeaderDeadline(fetchRequest, request.url, {
         method: request.method || 'POST',
-        headers: request.headers,
+        headers: wireHeaders,
         ...(request.body === undefined ? {} : { body: request.body }),
+        ...(request.dispatcher ? { dispatcher: request.dispatcher } : {}),
         signal: abort?.signal
       }, upstreamDeadlines));
+    if (request.upstreamType === 'claude') {
+      response = await decodeClaudeResponse(response);
+      if (request.claudeThinkingReplay) {
+        if (response.ok) void captureClaudeThinkingReplayResponse(request.claudeThinkingReplay, response);
+        else if ([400, 422].includes(response.status) && request.claudeThinkingReplay.replayApplied) forgetClaudeThinkingReplay(request.claudeThinkingReplay);
+      }
+    }
     diagnostics?.responseHeaders(pacing.attemptId);
     return response;
   } catch (error) {
@@ -1115,6 +1257,42 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
   } finally {
     abort?.cleanup();
   }
+}
+
+// Node's fetch preserves the casing supplied by callers, while CPA's final
+// Claude HTTP transport rewrites the one client header whose observed wire
+// spelling differs from its normal canonical form. Keep request.headers in
+// the lowercase shape used by the routing/projection pipeline and apply this
+// cosmetic protocol detail only at the egress boundary.
+function claudeWireHeaders(headers) {
+  if (!headers || typeof headers !== 'object') return headers;
+  const wire = { ...headers };
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() !== 'x-stainless-os') continue;
+    delete wire[name];
+    wire['X-Stainless-OS'] = value;
+  }
+  return wire;
+}
+
+async function fetchWithHostOverride(url, options = {}) {
+  const response = await undiciRequest(url, {
+    method: options.method || 'GET',
+    headers: options.headers,
+    ...(options.body === undefined ? {} : { body: options.body }),
+    ...(options.dispatcher ? { dispatcher: options.dispatcher } : {}),
+    ...(options.signal ? { signal: options.signal } : {})
+  });
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(response.headers)) {
+    if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+    else if (value !== undefined) headers.set(name, value);
+  }
+  return new Response(Readable.toWeb(response.body), {
+    status: response.statusCode,
+    statusText: response.statusText,
+    headers
+  });
 }
 
 function localHostFailureResponse(retryAfterSeconds) {
@@ -1461,8 +1639,10 @@ function anthropicHeader(req, name) {
 }
 
 function rawHeader(req, name) {
-  const value = req?.headers?.[name];
-  if (value === undefined) return null;
+  const wanted = String(name || '').trim().toLowerCase();
+  const entry = Object.entries(req?.headers || {}).find(([headerName]) => headerName.toLowerCase() === wanted);
+  if (!entry) return null;
+  const value = Array.isArray(entry[1]) ? entry[1][0] : entry[1];
   return typeof value === 'string' && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : '';
 }
 
@@ -1537,7 +1717,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -1553,6 +1733,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   let terminal = false;
   let completed = false;
   let usage;
+  let claudeMessageId = '';
   let healthOutcome = null;
   let parserState = createSseParserState();
   const decoder = new TextDecoder();
@@ -1568,7 +1749,9 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (terminal || downstreamClosed) return;
     if (hasSseData(event)) gatewayDiagnosticsForStore(store).firstSseEvent(attemptId);
     const decoded = decodeSseBlock(event);
-    const parsed = decoded.kind === 'event' ? decoded.event : null;
+    const parsedRaw = decoded.kind === 'event' ? decoded.event : null;
+    const parsedWithTools = parsedRaw ? restoreClaudeToolAliases(parsedRaw, claudeToolAliases) : null;
+    const parsed = parsedWithTools ? restoreClaudeModelAlias(parsedWithTools, claudeModelAlias) : null;
     if (!parsed) {
       if (!hasSseData(event)) return;
       if (event.includes('data: [DONE]')) {
@@ -1587,11 +1770,17 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       return;
     }
     usage = mergeUsage(usage, extractUsage(parsed));
+    if (upstream.type === 'claude' && parsed?.type === 'message_start' && typeof parsed.message?.id === 'string') claudeMessageId = parsed.message.id;
     const successfulTerminal = successfulSseTerminal(parsed, upstream.type, sourcePath);
     if (['response.failed', 'error'].includes(parsed.type) || parsed.type === 'response.incomplete' && !successfulTerminal) {
-      healthOutcome = classifySseEvent(parsed, {
-        allowMisalignmentPolicy: transformChat || sanitizePublicResponses
-      });
+      healthOutcome = {
+        ...classifySseEvent(parsed, {
+          allowMisalignmentPolicy: transformChat || sanitizePublicResponses,
+          upstreamType: upstream.type,
+          headers: response.headers
+        }),
+        model: payload?.model
+      };
     }
     if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
     if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
@@ -1612,14 +1801,19 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     const type = parsed.type;
     if (type === 'response.failed' || type === 'error') {
       terminal = true;
-      healthOutcome = classifySseEvent(parsed, {
-        allowMisalignmentPolicy: transformChat || sanitizePublicResponses
-      });
+      healthOutcome = {
+        ...classifySseEvent(parsed, {
+          allowMisalignmentPolicy: transformChat || sanitizePublicResponses,
+          upstreamType: upstream.type,
+          headers: response.headers
+        }),
+        model: payload?.model
+      };
       if (transformChat) await writeChunk(res, chatStreamFailure('upstream_response_failed', 'Upstream response failed'));
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else {
         const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-        await writeChunk(res, nativeEvent === parsed ? `${event}\n\n` : encodeSseEvent(nativeEvent));
+        await writeChunk(res, claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`);
       }
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
@@ -1630,7 +1824,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     }
     if (parsed) visible = true;
     const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-    await writeChunk(res, nativeEvent === parsed ? `${event}\n\n` : encodeSseEvent(nativeEvent));
+    await writeChunk(res, claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`);
     if (successfulTerminal) void reader.cancel('Upstream terminal event').catch(() => {});
   };
   try {
@@ -1665,6 +1859,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   } finally {
     reader.releaseLock();
     if (!res.writableEnded && !res.destroyed) res.end();
+    if (upstream.type === 'claude' && completed) commitClaudeDiagnostics(claudeDiagnosticsState, claudeMessageId);
     if (completed) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
     else {
       accounting.sharingStore?.releaseReservation(
@@ -1701,7 +1896,7 @@ function eventData(event) {
 }
 
 function successfulSseTerminal(event, upstreamType, sourcePath) {
-  if (upstreamType === 'compass' && sourcePath === '/v1/messages' && event?.type === 'message_stop') return true;
+  if (['compass', 'claude'].includes(upstreamType) && sourcePath === '/v1/messages' && event?.type === 'message_stop') return true;
   return ['response.completed', 'response.incomplete'].includes(event?.type)
     && event.response?.status !== 'failed'
     && !event.error
@@ -1880,7 +2075,7 @@ function sessionAffinity(req) {
 
 function requestRequirements(path, payload = {}) {
   return {
-    responses: path !== '/v1/messages',
+    responses: !CLAUDE_MESSAGES_PATHS.has(path),
     streaming: payload.stream === true,
     tools: Array.isArray(payload.tools) && payload.tools.length > 0,
     imageInput: hasInputImage(payload.input || payload.messages),
@@ -1911,7 +2106,9 @@ function requestAccounting(req) {
 }
 
 function header(req, name) {
-  const value = req.headers[name];
+  const wanted = String(name || '').trim().toLowerCase();
+  const entry = Object.entries(req?.headers || {}).find(([headerName]) => headerName.toLowerCase() === wanted);
+  const value = Array.isArray(entry?.[1]) ? entry[1][0] : entry?.[1];
   return typeof value === 'string' ? value.trim() : '';
 }
 
@@ -2090,9 +2287,13 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   writeResponse(res, response, bytes);
 }
 
-export async function proxyModelsRequest({ req, res, path, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, codexHostHealth = codexHostHealthForStore(store) }) {
+export async function proxyModelsRequest({ req, res, path, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
+    return;
+  }
+  if (isClaudeModelsRequest(req)) {
+    sendJson(res, 200, buildClaudeModelsResponse(store, requestScopeId(req), claudeConfig));
     return;
   }
   const modelCatalog = modelCatalogForStore(store);
@@ -2822,7 +3023,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (!publicTurnActive || client.readyState !== WebSocket.OPEN) return;
       let compatibilityScope = compatibilityFactContext(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
       let compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
-      let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+      let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
       let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
         store,
         upstreamId: candidate.id,
@@ -2843,7 +3044,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
             compatibilityScope = compatibilityFactContext(store.get(candidate.id) || candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
             compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
           }
-          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
           response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
             store,
             upstreamId: candidate.id,
@@ -2868,7 +3069,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           observationId: publicAttempt?.id || ''
         });
         void response.body?.cancel('Retrying WebSocket compaction with provider-directed compatibility fallback').catch(() => {});
-        request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility);
+          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
         response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
           store,
           upstreamId: candidate.id,
