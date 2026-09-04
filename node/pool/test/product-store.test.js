@@ -280,6 +280,8 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     assert.equal(sharingStore.authenticateShareKey(revealed.apiKey), null);
     assert.equal(sharingStore.authenticateShareKey(replacement.apiKey).upstreamId, upstream.id);
     assert.equal(sharingStore.revealSessionKey(first.id, session.id).apiKey, replacement.apiKey);
+    assert.equal(sharingStore.reserveSession(session.id, 'attempt-1', { upstreamStore }).reservedMicros, 0);
+    assert.equal(sharingStore.reserveSession(session.id, 'attempt-2', { upstreamStore }).reservedMicros, 0);
 
     sharingStore.settleSession(session.id, 'attempt-1', 2_000_000);
     sharingStore.settleSession(session.id, 'attempt-1', 2_000_000);

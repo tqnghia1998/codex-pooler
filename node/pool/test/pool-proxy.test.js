@@ -560,7 +560,7 @@ test('personal keys identify when every available provider needs to sign in agai
   }
 });
 
-test('rechecks share-session state before every WebSocket turn', async () => {
+test('routes cooled providers over WebSocket and rechecks share-session state before every turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-websocket-'));
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   await new Promise((resolve) => target.once('listening', resolve));
@@ -576,6 +576,9 @@ test('rechecks share-session state before every WebSocket turn', async () => {
       id_token: jwt({ email: 'websocket@example.com' })
     }}) });
     store.setCap(upstream.id, { capDollars: 100 });
+    const cooldown = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_stream', model: 'gpt-5.6-sol' });
+    store.settleUpstreamAttempt(upstream.id, cooldown, { class: 'quota', retryable: true, retryAfter: '60' });
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
     const sharingStore = new ProductStore(dir);
     const provider = account(sharingStore, 'websocket-provider');
     const consumer = account(sharingStore, 'websocket-consumer');
@@ -590,6 +593,8 @@ test('rechecks share-session state before every WebSocket turn', async () => {
       store,
       sharingStore,
       shareKeysOnly: true,
+      disablePacing: true,
+      ignoreQuotaCooldown: true,
       apiKey: null,
       websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
       fetchImpl: async () => new Response('{}')
@@ -616,6 +621,7 @@ test('rechecks share-session state before every WebSocket turn', async () => {
         client.once('error', reject);
       });
       assert.equal(messages[0].type, 'response.completed');
+      assert.equal(store.get(upstream.id).health, undefined);
       assert.equal(messages[1].type, 'error');
       assert.equal(messages[1].error.code, 'share_session_paused');
       assert.equal(providerTurns, 1);
