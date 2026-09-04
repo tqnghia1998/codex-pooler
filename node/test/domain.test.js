@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createUpstream, dollarsToCredits, filterSpendCapEligible, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
+import { createUpstream, dollarsToCredits, filterSpendCapEligible, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -131,6 +131,78 @@ test('converts recurring Compass balance to monthly remaining percent', () => {
   assert.equal(quota.remainingDollars, 72.5);
   assert.equal(quota.limitDollars, 100);
   assert.equal(quota.resetAt, '2026-08-01T00:00:00.000Z');
+});
+
+test('parses Claude OAuth session, weekly, and model-scoped usage windows', () => {
+  const quota = parseClaudeQuota({
+    limits: [
+      { kind: 'session', percent: 48, resets_at: '2026-09-04T05:00:00+00:00' },
+      { kind: 'weekly_all', percent: 64, resets_at: '2026-09-10T05:00:00+00:00' },
+      { kind: 'weekly_scoped', percent: 2, resets_at: '2026-09-08T05:00:00+00:00', scope: { model: { display_name: 'Sonnet' } } }
+    ],
+    extra_usage: { is_enabled: true, monthly_limit: 100000, used_credits: 1250 }
+  }, new Date('2026-09-04T00:00:00Z'));
+  assert.equal(quota.source, 'claude_oauth_usage');
+  assert.equal(quota.label, 'Session (5h)');
+  assert.equal(quota.usedPercent, 48);
+  assert.equal(quota.remainingPercent, 52);
+  assert.equal(quota.resetAt, '2026-09-04T05:00:00.000Z');
+  assert.deepEqual(quota.windows.map(({ key, label, remainingPercent }) => ({ key, label, remainingPercent })), [
+    { key: 'session', label: 'Session (5h)', remainingPercent: 52 },
+    { key: '7d', label: 'Week (all)', remainingPercent: 36 },
+    { key: '7d_sonnet', label: 'Week (Sonnet)', remainingPercent: 98 }
+  ]);
+  assert.equal(quota.remainingDollars, 987.5);
+  assert.equal(quota.limitDollars, 1000);
+  assert.equal(quota.extraUsage.enabled, true);
+});
+
+test('parses legacy Claude OAuth usage windows and rejects empty responses', () => {
+  const quota = parseClaudeQuota({
+    five_hour: { utilization: 12, resets_at: 1_800_000_000 },
+    seven_day: { utilization: 34, resets_at: '2026-09-10T00:00:00Z' }
+  });
+  assert.equal(quota.remainingPercent, 88);
+  assert.equal(quota.windows[1].remainingPercent, 66);
+  assert.throws(() => parseClaudeQuota({ limits: [] }), /no usable quota window/);
+});
+
+test('does not expose disabled Claude extra usage as a dollar quota', () => {
+  const quota = parseClaudeQuota({
+    five_hour: { utilization: 12 },
+    extra_usage: { is_enabled: false, monthly_limit: 100000, used_credits: 1250 }
+  });
+  assert.equal(quota.remainingDollars, null);
+  assert.equal(quota.limitDollars, null);
+  assert.equal(quota.extraUsage, undefined);
+});
+
+test('parses Claude OAuth utilization and reset headers', () => {
+  const quota = parseClaudeQuotaHeaders(new Headers({
+    'anthropic-ratelimit-unified-5h-utilization': '0.0184',
+    'anthropic-ratelimit-unified-5h-reset': '1800000000',
+    'anthropic-ratelimit-unified-7d-utilization': '0.737',
+    'anthropic-ratelimit-unified-7d-reset': '1800600000',
+    'anthropic-ratelimit-unified-representative-claim': 'seven_day'
+  }), new Date('2026-09-04T00:00:00Z'));
+  assert.equal(quota.source, 'claude_oauth_headers');
+  assert.equal(quota.usedPercent, 73.7);
+  assert.equal(quota.remainingPercent, 26.3);
+  assert.equal(quota.resetAt, '2027-01-22T06:40:00.000Z');
+  assert.equal(quota.windows[0].remainingPercent, 98.16);
+});
+
+test('parses Claude overage quota headers when standard windows are absent', () => {
+  const quota = parseClaudeQuotaHeaders(new Headers({
+    'anthropic-ratelimit-unified-overage-utilization': '0.3',
+    'anthropic-ratelimit-unified-overage-reset': '1790812800',
+    'anthropic-ratelimit-unified-overage-status': 'allowed',
+    'anthropic-ratelimit-unified-representative-claim': 'overage'
+  }), new Date('2026-09-04T00:00:00Z'));
+  assert.equal(quota.label, 'Overage');
+  assert.equal(quota.remainingPercent, 70);
+  assert.equal(quota.resetAt, '2026-10-01T00:00:00.000Z');
+  assert.equal(quota.windows[0].key, 'overage');
 });
 
 test('priced usage updates spend, replacement applies only its delta, and old attempts do not count', () => {
