@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createUpstream, dollarsToCredits, filterSpendCapEligible, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
+import { createUpstream, deriveClaudeAccountId, dollarsToCredits, filterSpendCapEligible, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexAuthJson, parseCodexQuota, parseCompassQuota, publicUpstream, recordUsage, setSpendingCap, spendingSummary } from '../src/domain.js';
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
@@ -51,8 +51,29 @@ test('preserves CPA-compatible Claude base URLs while rejecting malformed target
     type: 'claude',
     baseUrl: 'not a URL',
     projectKey: 'sk-ant-api-base-url-test'
-  });
+  }, { allowLegacyClaudeApiKey: true });
   assert.equal(malformed.baseUrl, 'https://api.anthropic.com');
+});
+
+test('rejects Claude API-key credential shapes by default', () => {
+  assert.throws(
+    () => createUpstream({ type: 'claude', accessToken: 'sk-ant-api-key' }),
+    /Enterprise OAuth credentials/
+  );
+  assert.throws(
+    () => createUpstream({ type: 'claude', accessToken: 'opaque-key', metadata: { auth_kind: 'claude_api_key' } }),
+    /Enterprise OAuth credentials/
+  );
+});
+
+test('derives a stable local Claude account UUID from the credential token', () => {
+  const first = deriveClaudeAccountId({ refreshToken: 'refresh-a', accessToken: 'access-a' });
+  const rotated = deriveClaudeAccountId({ refreshToken: 'refresh-a', accessToken: 'access-b' });
+  const different = deriveClaudeAccountId({ refreshToken: 'refresh-b', accessToken: 'access-a' });
+  assert.match(first, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.equal(rotated, first);
+  assert.notEqual(different, first);
+  assert.equal(createUpstream({ type: 'claude', accessToken: 'sk-ant-oat-local-id', refreshToken: 'refresh-local-id' }).accountId, deriveClaudeAccountId({ accessToken: 'sk-ant-oat-local-id', refreshToken: 'refresh-local-id' }));
 });
 
 test('selects a monthly Codex window and reports remaining percent', () => {

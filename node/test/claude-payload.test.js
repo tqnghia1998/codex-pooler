@@ -148,7 +148,7 @@ test('ports global OAuth aliases, exclusions, and request-scoped error rules', (
   const parsedOAuth = createUpstream({ type: 'claude', accessToken: 'sk-ant-oat-no-exp-claim' });
   assert.equal(isClaudeOAuthUpstream(parsedOAuth), true);
   assert.equal(claudeMetadataModelExcluded(parsedOAuth, 'claude-haiku-4', config), true);
-  const parsedApiKey = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-test' });
+  const parsedApiKey = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-test' }, { allowLegacyClaudeApiKey: true });
   assert.equal(isClaudeOAuthUpstream(parsedApiKey), false);
   assert.equal(isClaudeOAuthUpstream({ type: 'claude', accessTokenExpiresAt: null, credentials: { accessToken: 'legacy-token' } }), true);
   assert.equal(isClaudeOAuthUpstream({ type: 'claude', accessTokenExpiresAt: null, credentials: { projectKey: 'legacy-key' } }), false);
