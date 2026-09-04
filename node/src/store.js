@@ -5,22 +5,27 @@ import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import {
   createUpstream,
+  claudeModelNameVariants,
+  claudeMetadataModelExcluded,
+  claudeMetadataModelPrefix,
   defaultBaseUrl,
   deriveUpstreamName,
   dollarsToCredits,
   ensureSpending,
   filterSpendCapEligible,
   isAiswitchUpstream,
+  isClaudeOAuthUpstream,
   number,
+  normalizeClaudeBaseUrl,
   publicUpstream,
   recordUsage,
   setSpendingCap,
   spendingSummary,
   updateUpstream
 } from './domain.js';
-import { codexRefreshFailureCode, codexRefreshFailureDetail } from './providers.js';
+import { providerRefreshFailureCode, providerRefreshFailureDetail } from './providers.js';
 import { safeCompatibilityValue, validCompatibilityFeature } from './compatibility-policy.js';
-import { quotaCooldown } from './upstream-outcomes.js';
+import { claudeCoolingDisabled, quotaCooldown } from './upstream-outcomes.js';
 import { normalizePacingPolicy } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore, sanitizeAttemptTimings, sanitizeExclusionReasons } from './gateway-diagnostics.js';
 
@@ -63,6 +68,7 @@ export class Store {
     this.sqlite.pragma('journal_mode = DELETE');
     this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
     this.events = new EventEmitter();
+    this.claudeRuntimeConfig = {};
     if (inMemory || this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
     else {
       this.db = normalizeDatabase(JSON.parse(readFileSync(this.legacyDbPath, 'utf8')));
@@ -74,6 +80,11 @@ export class Store {
   onUpstreamsChange(listener) {
     this.events.on('upstreams', listener);
     return () => this.events.off('upstreams', listener);
+  }
+
+  configureClaudeRuntime(config = {}) {
+    this.claudeRuntimeConfig = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
+    return this.claudeRuntimeConfig;
   }
 
   notifyUpstreamsChange() {
@@ -156,6 +167,12 @@ export class Store {
   }
 
   list(scopeId = null) {
+    return this.listForModelCatalog(scopeId).map(publicUpstream);
+  }
+
+  // Internal model/routing consumers need the full sanitized upstream record,
+  // but should not repeatedly project and rescan the same collection.
+  listForModelCatalog(scopeId = null) {
     const db = this.load();
     let changed = false;
     for (const upstream of db.upstreams) {
@@ -164,7 +181,7 @@ export class Store {
       changed ||= before !== JSON.stringify(upstream.spending);
     }
     if (changed) this.save(db);
-    return scoped(db.upstreams, scopeId).map(publicUpstream);
+    return scoped(db.upstreams, scopeId);
   }
 
   get(id, scopeId = null) {
@@ -185,7 +202,9 @@ export class Store {
 
     const isDuplicate = db.upstreams.some((item) => (item.scopeId || DEFAULT_SCOPE_ID) === scopeId && item.type === upstream.type && (upstream.type === 'codex'
       ? (upstream.email ? item.email === upstream.email : upstream.accountId && item.accountId === upstream.accountId)
-      : item.projectId === upstream.projectId));
+      : upstream.type === 'compass'
+        ? item.projectId === upstream.projectId
+        : upstream.email && item.email === upstream.email || upstream.accountId && item.accountId === upstream.accountId));
     if (isDuplicate && !(allowDuplicateCodexIdentity && upstream.type === 'codex')) {
       throw new Error(`${upstream.type} upstream already exists`);
     }
@@ -207,11 +226,11 @@ export class Store {
     const previousCredentials = decryptCredentials(upstream.credentials, this.key);
     upstream.credentials = previousCredentials;
     updateUpstream(upstream, input);
-    if (upstream.type === 'codex' && (input.authJson || input.accessToken)) {
+    if (['codex', 'claude'].includes(upstream.type) && (input.authJson || input.accessToken || input.projectKey !== undefined)) {
       upstream.quota = null;
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
       upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
-      upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
+      if (upstream.type === 'codex') upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
       delete upstream.tokenRefresh;
       clearHealthAfterCredentialReplacement(upstream);
       delete upstream.compatibility;
@@ -282,7 +301,7 @@ export class Store {
     const upstream = this.get(id);
     if (!upstream) throw notFound();
     const credentials = decryptCredentials(upstream.credentials, this.key);
-    if (upstream.type === 'codex') {
+    if (['codex', 'claude'].includes(upstream.type)) {
       Object.defineProperties(credentials, {
         credentialEpoch: { value: Number(upstream.credentialEpoch) || 0, enumerable: false },
         modelCatalogEpoch: { value: Number(upstream.modelCatalogEpoch) || 0, enumerable: false },
@@ -301,8 +320,8 @@ export class Store {
     const db = this.load();
     const upstream = findOrThrow(db, id);
     if (expectedEpoch !== null && expectedEpoch !== (Number(upstream.credentialEpoch) || 0)) return null;
-    const status = codexRefreshFailureCode(error);
-    upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status, errorDetail: codexRefreshFailureDetail(error) };
+    const status = providerRefreshFailureCode(upstream.type, error);
+    upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status, errorDetail: providerRefreshFailureDetail(upstream.type, error) };
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
@@ -348,10 +367,10 @@ export class Store {
       Object.assign(credentials, previousCredentials);
       return true;
     }
-    const accessTokenChanged = upstream.type === 'codex'
+    const accessTokenChanged = ['codex', 'claude'].includes(upstream.type)
       && String(previousCredentials.accessToken || '') !== String(credentials?.accessToken || '');
-    const authenticationChanged = upstream.type === 'codex'
-      ? ['accessToken', 'refreshToken', 'idToken'].some((name) => String(previousCredentials[name] || '') !== String(credentials?.[name] || ''))
+    const authenticationChanged = ['codex', 'claude'].includes(upstream.type)
+      ? ['accessToken', 'refreshToken', 'idToken', 'projectKey'].some((name) => String(previousCredentials[name] || '') !== String(credentials?.[name] || ''))
       : String(previousCredentials.projectKey || '') !== String(credentials?.projectKey || '');
     upstream.credentials = encryptCredentials(credentials, this.key);
     if (accessTokenExpiresAt !== upstream.accessTokenExpiresAt) delete upstream.tokenRefresh;
@@ -363,6 +382,71 @@ export class Store {
       clearHealthAfterCredentialReplacement(upstream);
       delete upstream.compatibility;
     }
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return true;
+  }
+
+  persistClaudeIdentity(id, { accountId = '', email = '', organizationId = '', organizationName = '', deviceId = '' } = {}, { expectedEpoch = null, expectedAccessToken = null } = {}) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    if (upstream.type !== 'claude') throw new Error('upstream is not Claude');
+    const credentials = decryptCredentials(upstream.credentials, this.key);
+    if (expectedEpoch !== null && (Number(upstream.credentialEpoch) || 0) !== Number(expectedEpoch)) return false;
+    if (expectedAccessToken !== null && String(credentials.accessToken || '') !== String(expectedAccessToken || '')) return false;
+    let changed = false;
+    if (accountId && upstream.accountId !== String(accountId)) {
+      upstream.accountId = String(accountId);
+      changed = true;
+    }
+    if (email && upstream.email !== String(email)) {
+      upstream.email = String(email);
+      changed = true;
+    }
+    if (organizationId && credentials.organizationId !== String(organizationId)) {
+      credentials.organizationId = String(organizationId);
+      changed = true;
+    }
+    if (organizationName && credentials.organizationName !== String(organizationName)) {
+      credentials.organizationName = String(organizationName);
+      changed = true;
+    }
+    if (deviceId) {
+      const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+      const devices = Array.isArray(metadata.claude_device_ids) ? metadata.claude_device_ids : [];
+      if (devices[0] !== deviceId || devices.length !== 1) {
+        upstream.metadata = { ...metadata, claude_device_ids: [deviceId] };
+        changed = true;
+      }
+    }
+    if (!changed) return upstream;
+    upstream.name = deriveUpstreamName(upstream.type, upstream);
+    upstream.credentials = encryptCredentials(credentials, this.key);
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    this.notifyUpstreamsChange();
+    return upstream;
+  }
+
+  persistClaudeDeviceProfiles(id, profiles) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    if (upstream.type !== 'claude' || !profiles || typeof profiles !== 'object' || Array.isArray(profiles)) return false;
+    const sanitized = {};
+    for (const name of ['cli', 'vscode']) {
+      const profile = profiles[name];
+      if (!profile || typeof profile !== 'object' || Array.isArray(profile)) continue;
+      const values = {};
+      for (const field of ['userAgent', 'packageVersion', 'runtimeVersion', 'os', 'arch']) {
+        if (typeof profile[field] === 'string' && profile[field].length <= 256) values[field] = profile[field];
+      }
+      if (values.userAgent && values.packageVersion && values.runtimeVersion) sanitized[name] = values;
+    }
+    if (!Object.keys(sanitized).length) return false;
+    const previous = this.persisted?.upstreams?.find((item) => item.id === id)?.claudeDeviceProfiles || null;
+    if (JSON.stringify(previous) === JSON.stringify(sanitized)) return false;
+    upstream.claudeDeviceProfiles = sanitized;
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
     this.notifyUpstreamsChange();
@@ -605,7 +689,7 @@ export class Store {
       if (upstream && !exclusions.has(upstream.id)) exclusions.set(upstream.id, routingDiagnostic(upstream, now, { code }));
     };
     const scope = scopeId ? activeScope(db, scopeId, false) : null;
-    if (scopeId && model && (!scope || scope.models.length && !scope.models.includes(String(model).toLowerCase()))) {
+    if (scopeId && model && (!scope || scope.models.length && !configuredClaudeModelMatches(scope.models, model, null, this.claudeRuntimeConfig))) {
       for (const upstream of upstreams) exclude(upstream, 'scope_model_not_allowed');
       return routingPlanResult([], selectedStrategy, exclusions, now);
     }
@@ -620,7 +704,7 @@ export class Store {
     else if (pinnedId) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id === pinnedId, exclude, 'not_affinity_selected');
     if (requiredType) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.type === requiredType, exclude, 'required_type_mismatch');
     candidates = candidates.filter((upstream) => {
-      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now });
+      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now, claudeConfig: this.claudeRuntimeConfig });
       if (code) exclude(upstream, code);
       return !code;
     });
@@ -668,6 +752,7 @@ export class Store {
       accountProbe = true;
       upstream.health = { ...health, probeInFlight: true, lastProbeAt: new Date(now).toISOString() };
     }
+    if (upstream.type === 'claude' && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig) && modelCooldownBlocks(upstream, scope?.model, now)) return null;
     const circuitLease = beginCircuitLease(upstream, scope, now);
     if (!circuitLease) return null;
     this.save(db);
@@ -686,8 +771,14 @@ export class Store {
     const health = upstream.health || {};
     const accountGeneration = Math.max(0, Number(health.generation ?? upstream.healthGeneration) || 0);
     const accountCurrent = admission.accountGeneration === accountGeneration;
-    if (outcome.class === 'quota') {
-      if (accountCurrent) {
+    const model = normalizeModelKey(outcome.model || admission.scope?.model);
+    if (outcome.modelScoped && upstream.type === 'claude' && model) {
+      if (claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) deleteModelCooldown(upstream, model);
+      else setModelCooldown(upstream, model, quotaCooldown(outcome, now), now);
+      if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
+      releaseCircuitLease(upstream, admission, now);
+    } else if (outcome.class === 'quota') {
+      if (accountCurrent && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) {
         const cooldown = quotaCooldown(outcome, now);
         upstream.health = {
           status: 'cooldown',
@@ -700,6 +791,11 @@ export class Store {
         };
         upstream.healthGeneration = accountGeneration + 1;
         clearSessionPinsForUpstream(db, id);
+      } else if (accountCurrent && upstream.health?.status === 'cooldown') {
+        // CPA's per-credential disable_cooling override also clears a probe
+        // that was already in flight when the override became active.
+        upstream.healthGeneration = accountGeneration + 1;
+        delete upstream.health;
       }
       releaseCircuitLease(upstream, admission, now);
     } else if (outcome.class === 'credential') {
@@ -721,10 +817,12 @@ export class Store {
       }
       releaseCircuitLease(upstream, admission, now);
     } else if (outcome.class === 'transient') {
-      recordCircuitLeaseFailure(upstream, admission, now, 'transient');
+      if (claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) releaseCircuitLease(upstream, admission, now);
+      else recordCircuitLeaseFailure(upstream, admission, now, 'transient');
       if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
     } else if (outcome.class === 'success') {
       completeCircuitLease(upstream, admission, now);
+      if (upstream.type === 'claude' && model) deleteModelCooldown(upstream, model);
       if (accountCurrent && upstream.health && (admission.accountProbe || Date.parse(health.nextEligibleAt) <= now)) {
         upstream.healthGeneration = accountGeneration + 1;
         delete upstream.health;
@@ -1062,7 +1160,11 @@ function normalizeDatabase(parsed) {
     upstream.pacing = normalizePacingPolicy(upstream.pacing);
     upstream.compatibility = normalizeCompatibilityState(upstream.compatibility);
     if (!Object.keys(upstream.compatibility.facts).length) delete upstream.compatibility;
-    upstream.baseUrl = defaultBaseUrl(upstream.type);
+    upstream.modelHealth = normalizeModelHealth(upstream.modelHealth);
+    if (!Object.keys(upstream.modelHealth).length) delete upstream.modelHealth;
+    upstream.baseUrl = upstream.type === 'claude'
+      ? normalizeClaudeBaseUrl(upstream.baseUrl)
+      : defaultBaseUrl(upstream.type);
     upstream.name = deriveUpstreamName(upstream.type, upstream);
   }
   for (const file of parsed.files) file.scopeId ||= DEFAULT_SCOPE_ID;
@@ -1312,16 +1414,29 @@ function filterRoutingCandidates(candidates, predicate, exclude, code) {
   return kept;
 }
 
-function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now }) {
-  if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions })) {
+function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now, claudeConfig = null }) {
+  if (upstream.type === 'claude' && !ignoreModelRestrictions && claudeModelPrefixMismatch(upstream, model)) return 'upstream_model_prefix_mismatch';
+  if (!claudeCoolingDisabled(upstream, claudeConfig) && modelCooldownBlocks(upstream, model, now)) return 'upstream_model_cooldown';
+  if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions, claudeConfig })) {
     const routing = normalizeRouting(upstream.routing);
-    if (!ignoreModelRestrictions && routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return 'upstream_model_not_allowed';
+    const modelNotAllowed = routing.models.length && !(upstream.type === 'claude'
+      ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig)
+      : routing.models.includes(String(model || '').toLowerCase()));
+    if (!ignoreModelRestrictions && (modelNotAllowed || claudeMetadataModelExcluded(upstream, model, claudeConfig))) return 'upstream_model_not_allowed';
     if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return 'quota_exhausted';
     return 'capability_not_supported';
   }
   if (!dynamicallySupportsModel(upstream, model, modelSupport)) return 'model_not_supported';
   if (!circuitEligible(upstream, { model, routeClass }, now)) return 'circuit_open';
   return null;
+}
+
+function claudeModelPrefixMismatch(upstream, model) {
+  const requested = typeof model === 'string' ? model.trim() : '';
+  const separator = requested.indexOf('/');
+  if (separator <= 0) return false;
+  const requestedPrefix = requested.slice(0, separator);
+  return claudeMetadataModelPrefix(upstream) !== requestedPrefix;
 }
 
 function routingDiagnostic(upstream, now, extra = {}) {
@@ -1355,13 +1470,47 @@ function routingPlanResult(upstreams, strategy, exclusions, now) {
   };
 }
 
-function candidateEligible(upstream, model, requirements, { ignoreModelRestrictions = false } = {}) {
+function candidateEligible(upstream, model, requirements, { ignoreModelRestrictions = false, claudeConfig = null } = {}) {
   if (!upstream) return false;
   const routing = normalizeRouting(upstream.routing);
-  if (!ignoreModelRestrictions && routing.models.length && !routing.models.includes(String(model || '').toLowerCase())) return false;
+  if (!ignoreModelRestrictions && routing.models.length && !(upstream.type === 'claude' ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig) : routing.models.includes(String(model || '').toLowerCase()))) return false;
+  if (!ignoreModelRestrictions && claudeMetadataModelExcluded(upstream, model, claudeConfig)) return false;
   if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
+}
+
+function configuredClaudeModelMatches(models, model, upstream = null, claudeConfig = null) {
+  const variants = new Set(claudeModelNameVariants(model));
+  for (const alias of claudeRoutingAliases(upstream, claudeConfig)) {
+    if (claudeModelNameVariants(alias.alias).some((variant) => variants.has(variant))) {
+      for (const variant of claudeModelNameVariants(alias.name)) variants.add(variant);
+    }
+  }
+  return models.some((candidate) => claudeModelNameVariants(candidate).some((variant) => variants.has(variant)));
+}
+
+function claudeRoutingAliases(upstream, claudeConfig) {
+  const values = [];
+  const add = (raw) => {
+    let entries = raw;
+    if (typeof entries === 'string') {
+      try { entries = JSON.parse(entries); } catch { entries = []; }
+    }
+    if (!Array.isArray(entries)) return;
+    for (const entry of entries.slice(0, 128)) {
+      const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+      const alias = typeof entry?.alias === 'string' ? entry.alias.trim() : '';
+      if (name && alias) values.push({ name, alias });
+    }
+  };
+  add(upstream?.metadata?.model_aliases ?? upstream?.metadata?.['model-aliases']);
+  add(upstream?.metadata?.models ?? upstream?.metadata?.['model-configs'] ?? upstream?.metadata?.model_configs);
+  if (isClaudeOAuthUpstream(upstream)) {
+    const global = claudeConfig?.oauthModelAlias ?? claudeConfig?.['oauth-model-alias'];
+    if (global && typeof global === 'object' && !Array.isArray(global)) add(global.claude ?? global.anthropic);
+  }
+  return values;
 }
 
 function dynamicallySupportsModel(upstream, model, modelSupport) {
@@ -1497,7 +1646,83 @@ function clearSessionPinsForUpstream(db, upstreamId) {
 function clearHealthAfterCredentialReplacement(upstream) {
   const generation = Math.max(0, Number(upstream.health?.generation ?? upstream.healthGeneration) || 0);
   delete upstream.health;
+  delete upstream.modelHealth;
   upstream.healthGeneration = generation + 1;
+}
+
+function normalizeModelKey(value) {
+  const model = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return model && model.length <= 256 ? model : '';
+}
+
+function normalizeModelHealth(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const normalized = {};
+  for (const [rawModel, state] of Object.entries(value).slice(0, 256)) {
+    const model = normalizeModelKey(rawModel);
+    if (!model || !state || typeof state !== 'object' || Array.isArray(state)) continue;
+    const nextEligibleAt = Date.parse(state.nextEligibleAt);
+    if (state.status !== 'cooldown' || !Number.isFinite(nextEligibleAt)) continue;
+    normalized[model] = {
+      status: 'cooldown',
+      failureClass: 'quota',
+      cooldownSource: typeof state.cooldownSource === 'string' ? state.cooldownSource.slice(0, 32) : 'default',
+      cooldownStartedAt: typeof state.cooldownStartedAt === 'string' ? state.cooldownStartedAt : null,
+      nextEligibleAt: new Date(nextEligibleAt).toISOString()
+    };
+  }
+  return normalized;
+}
+
+function modelCooldownBlocks(upstream, model, now) {
+  if (upstream?.type !== 'claude') return false;
+  return claudeModelHealthKeys(upstream, model).some((key) => {
+    const nextEligibleAt = Date.parse(upstream.modelHealth?.[key]?.nextEligibleAt);
+    return Number.isFinite(nextEligibleAt) && nextEligibleAt > now;
+  });
+}
+
+function setModelCooldown(upstream, model, cooldown, now) {
+  upstream.modelHealth ||= {};
+  for (const key of claudeModelHealthKeys(upstream, model)) upstream.modelHealth[key] = {
+      status: 'cooldown',
+      failureClass: 'quota',
+      cooldownSource: cooldown.cooldownSource,
+      cooldownStartedAt: new Date(now).toISOString(),
+      nextEligibleAt: new Date(cooldown.nextEligibleAt).toISOString()
+    };
+}
+
+function deleteModelCooldown(upstream, model) {
+  for (const key of claudeModelHealthKeys(upstream, model)) delete upstream.modelHealth?.[key];
+  if (upstream.modelHealth && !Object.keys(upstream.modelHealth).length) delete upstream.modelHealth;
+}
+
+function claudeModelHealthKeys(upstream, model) {
+  const key = normalizeModelKey(model);
+  if (upstream?.type !== 'claude' || !key) return [];
+  const keys = new Set([key, ...claudeModelNameVariants(key)]);
+  const prefix = claudeMetadataModelPrefix(upstream);
+  for (const variant of [...keys]) {
+    if (prefix && variant.startsWith(`${prefix.toLowerCase()}/`)) keys.add(variant.slice(prefix.length + 1));
+  }
+  let aliases = upstream.metadata?.model_aliases ?? upstream.metadata?.['model-aliases'];
+  if (typeof aliases === 'string') {
+    try { aliases = JSON.parse(aliases); } catch { aliases = []; }
+  }
+  if (Array.isArray(aliases)) {
+    for (const alias of aliases.slice(0, 128)) {
+      const aliasKey = normalizeModelKey(alias?.alias);
+      const nameKey = normalizeModelKey(alias?.name);
+      if ([...keys].some((candidate) => claudeModelNameVariants(candidate).includes(aliasKey) || claudeModelNameVariants(candidate).includes(nameKey))) {
+        for (const value of [aliasKey, nameKey]) {
+          if (!value) continue;
+          for (const variant of claudeModelNameVariants(value)) keys.add(variant);
+        }
+      }
+    }
+  }
+  return [...keys];
 }
 
 function normalizeCompatibilityState(value) {
@@ -1569,7 +1794,7 @@ function sameCompatibilityGeneration(upstream, generation) {
 }
 
 function sameAuthentication(type, left, right) {
-  const fields = type === 'codex' ? ['accessToken', 'refreshToken', 'idToken'] : ['projectKey'];
+  const fields = type === 'codex' ? ['accessToken', 'refreshToken', 'idToken'] : type === 'claude' ? ['accessToken', 'refreshToken', 'idToken', 'projectKey'] : ['projectKey'];
   return fields.every((field) => String(left?.[field] || '') === String(right?.[field] || ''));
 }
 
