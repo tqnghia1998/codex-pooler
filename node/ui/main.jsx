@@ -137,7 +137,7 @@ const relayTheme = defineTheme({
 // live grid, so the responsive `repeat: fill` layout keeps working.
 // ponytail: assumes uniform row height (cards are fixed-height); switch to
 // per-row measurement if card contents ever vary in height.
-function VirtualGrid({ items, renderItem }) {
+function VirtualGrid({ items, renderItem, onVisibleItemsChange }) {
   const wrapperRef = useRef(null);
   const [metrics, setMetrics] = useState(null);
   const [range, setRange] = useState({ start: 0, end: VIRTUAL_MIN_ITEMS });
@@ -194,6 +194,12 @@ function VirtualGrid({ items, renderItem }) {
   const totalRows = Math.ceil(items.length / columns);
   const paddingTop = windowed ? (start / columns) * metrics.rowHeight : 0;
   const paddingBottom = windowed ? Math.max(0, (totalRows - Math.ceil(end / columns)) * metrics.rowHeight) : 0;
+
+  useEffect(() => {
+    onVisibleItemsChange?.(items.slice(start, end).map(({ id }) => id));
+  }, [end, items, onVisibleItemsChange, start]);
+
+  useEffect(() => () => onVisibleItemsChange?.([]), [onVisibleItemsChange]);
 
   return (
     <div ref={wrapperRef} style={{ paddingTop, paddingBottom }}>
@@ -255,9 +261,11 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [filterStatus, setFilterStatus] = useStoredValue('codex_filter_filter-status');
   const [filterQuota, setFilterQuota] = useStoredValue('codex_filter_filter-quota');
   const [filterSort, setFilterSort] = useStoredValue('codex_filter_filter-sort', 'recent_active');
+  const [visibleUpstreamIds, setVisibleUpstreamIds] = useState([]);
   const reloadTimer = useRef(null);
   const loadingRef = useRef(false);
   const hasLoadedRef = useRef(false);
+  const focusedQuotaRefreshingRef = useRef(false);
 
   const show = useCallback((text, error = false) => {
     toast({
@@ -324,7 +332,49 @@ function Dashboard({ themeMode, setThemeMode }) {
     }
   }, [api, loadSystemStatus, show]);
 
+  const updateVisibleUpstreamIds = useCallback((nextIds) => {
+    setVisibleUpstreamIds((current) => current.length === nextIds.length && current.every((id, index) => id === nextIds[index]) ? current : nextIds);
+  }, []);
+
   useEffect(() => { void load(false, true); }, [load]);
+
+  useEffect(() => {
+    let timer = null;
+    let cancelled = false;
+    const focused = () => document.visibilityState === 'visible' && document.hasFocus();
+    const refreshFocusedQuota = async () => {
+      if (cancelled || !focused() || focusedQuotaRefreshingRef.current || !visibleUpstreamIds.length) return;
+      focusedQuotaRefreshingRef.current = true;
+      try {
+        const ids = encodeURIComponent(visibleUpstreamIds.join(','));
+        await api(`/api/upstreams/refresh-quota?ids=${ids}&force=false`, { method: 'POST' });
+        if (!cancelled) await load();
+      } catch {
+        // Background refresh remains available.
+      } finally {
+        focusedQuotaRefreshingRef.current = false;
+      }
+    };
+    const updateTimer = () => {
+      if (timer) window.clearInterval(timer);
+      timer = null;
+      if (focused()) {
+        void refreshFocusedQuota();
+        timer = window.setInterval(() => void refreshFocusedQuota(), 60_000);
+      }
+    };
+    window.addEventListener('focus', updateTimer);
+    window.addEventListener('blur', updateTimer);
+    document.addEventListener('visibilitychange', updateTimer);
+    updateTimer();
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', updateTimer);
+      window.removeEventListener('blur', updateTimer);
+      document.removeEventListener('visibilitychange', updateTimer);
+      if (timer) window.clearInterval(timer);
+    };
+  }, [api, load, visibleUpstreamIds]);
 
   useEffect(() => {
     let cancelled = false;
@@ -524,7 +574,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         body: JSON.stringify(credentialTarget.type === 'codex'
           ? { authJson: credentialValue }
           : credentialTarget.type === 'claude'
-            ? (/^\s*\{/.test(credentialValue) ? { authJson: credentialValue } : { projectKey: credentialValue })
+            ? { authJson: credentialValue }
           : { projectKey: credentialValue })
       });
       setCredentialTarget(null);
@@ -548,7 +598,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       await api(refreshTarget.all ? '/api/upstreams/refresh-quota' : `/api/upstreams/${refreshTarget.id}/refresh-quota`, { method: 'POST' });
       await load();
-      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota and profile refreshed');
+      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota refreshed');
       setRefreshTarget(null);
     } catch (error) {
       setRefreshTarget(null);
@@ -847,6 +897,7 @@ function Dashboard({ themeMode, setThemeMode }) {
             ) : filteredUpstreams.length ? (
               <VirtualGrid
                 items={filteredUpstreams}
+                onVisibleItemsChange={updateVisibleUpstreamIds}
                 renderItem={(upstream) => (
                   <UpstreamCard
                     key={upstream.id}
@@ -967,7 +1018,7 @@ function Dashboard({ themeMode, setThemeMode }) {
             isOpen={Boolean(refreshTarget)}
             onOpenChange={(isOpen) => { if (!isOpen) setRefreshTarget(null); }}
             title={refreshTarget?.all ? 'Refresh all upstream quotas?' : refreshTarget?.type === 'claude' ? 'Refresh Claude quota and profile?' : 'Refresh upstream quota?'}
-            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget?.type === 'claude' ? `Fetch the latest usage and account identity for "${refreshTarget.name}"?` : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
+            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
             actionLabel="Refresh"
             actionVariant="primary"
             isActionLoading={isRefreshing}
@@ -1009,7 +1060,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                     <VStack gap={3}>
                       <Selector
                         label="Type"
-                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: 'Claude OAuth / API key' }]}
+                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: 'Claude Enterprise OAuth' }]}
                         value={formValues.type}
                         onChange={(value) => updateForm('type', value)}
                         isDisabled={formDialog.mode === 'edit'}
@@ -1027,17 +1078,16 @@ function Dashboard({ themeMode, setThemeMode }) {
                         />
                       ) : formValues.type === 'claude' ? (
                         <VStack gap={2}>
-                          {formDialog.mode === 'add' && <TextInput label="Claude API key (optional)" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="sk-ant-api..." />}
                           <TextArea
-                            label="Claude OAuth credentials (optional)"
-                            description="Paste a Claude OAuth token export, or use the API-key field above. The access_token is required for OAuth; refresh_token enables automatic renewal."
+                            label="Claude Enterprise OAuth credentials"
+                            description="Paste the Claude Code OAuth token export. The access_token is required; refresh_token enables automatic renewal."
                             value={formValues.authJson || ''}
                             onChange={(value) => updateForm('authJson', value)}
                             placeholder={'{"access_token":"sk-ant-oat...","refresh_token":"...","expires_at":"..."}'}
                             rows={12}
                             htmlName="authJson"
                           />
-                          <Text type="supporting" color="secondary">OAuth uses Claude Code-compatible shaping and refresh. API keys use Anthropic's caller-owned Messages path.</Text>
+                          <Text type="supporting" color="secondary">Claude Enterprise OAuth uses Claude Code-compatible shaping, profile lookup, and quota refresh.</Text>
                         </VStack>
                       ) : formValues.type === 'compass' ? (
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
@@ -1447,15 +1497,14 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
                     htmlName="authJson"
                   />
                 ) : upstream?.type === 'claude' ? (
-                  <VStack gap={2}>
-                    <TextInput
-                      label="Claude API key or OAuth JSON"
-                      value={value}
-                      onChange={onValueChange}
-                      placeholder="sk-ant-api... or paste JSON"
-                    />
-                    <Text type="supporting" color="secondary">Paste a JSON OAuth export when replacing OAuth credentials; paste an sk-ant-api key for API-key authentication.</Text>
-                  </VStack>
+                  <TextArea
+                    label="Claude Enterprise OAuth credentials"
+                    value={value}
+                    onChange={onValueChange}
+                    placeholder="Paste Claude OAuth JSON"
+                    rows={12}
+                    htmlName="authJson"
+                  />
                 ) : (
                   <TextInput
                     label="Project key"
@@ -1843,7 +1892,7 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
                     options={[
                       { value: 'codex', label: 'Codex' },
                       { value: 'compass', label: 'Compass' },
-                      { value: 'claude', label: 'Claude OAuth / API key' }
+                      { value: 'claude', label: 'Claude Enterprise OAuth' }
                     ]}
                     onChange={setPreferredType}
                   />
