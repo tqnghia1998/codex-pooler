@@ -38,6 +38,23 @@ test('derives names and provider URLs instead of accepting operator labels', () 
   assert.equal(compass.baseUrl, 'https://compass.llm.shopee.io/compass-api/v1');
 });
 
+test('preserves CPA-compatible Claude base URLs while rejecting malformed targets', () => {
+  const parsed = createUpstream({
+    type: 'claude',
+    base_url: 'https://claude-gateway.example/compat',
+    authJson: JSON.stringify({ access_token: 'sk-ant-oat-base-url-test' })
+  });
+  assert.equal(parsed.baseUrl, 'https://claude-gateway.example/compat');
+  assert.equal(publicUpstream(parsed).baseUrl, parsed.baseUrl);
+
+  const malformed = createUpstream({
+    type: 'claude',
+    baseUrl: 'not a URL',
+    projectKey: 'sk-ant-api-base-url-test'
+  });
+  assert.equal(malformed.baseUrl, 'https://api.anthropic.com');
+});
+
 test('selects a monthly Codex window and reports remaining percent', () => {
   const quota = parseCodexQuota({ rate_limit: {
     primary_window: { used_percent: 25, limit_window_seconds: 2_592_000, reset_after_seconds: 60 }
