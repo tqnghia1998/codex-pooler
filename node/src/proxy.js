@@ -41,6 +41,12 @@ import { captureClaudeThinkingReplayResponse } from './claude-thinking-replay.js
 import { claudeProxyDispatcher } from './claude-transport.js';
 import { decodeClaudeResponse } from './upstream-response.js';
 import { countClaudeInputTokens } from './claude-input-tokens.js';
+import {
+  codexGatewayOptions,
+  prepareCodexMultiAgentRequest,
+  restoreCodexMultiAgentResponse,
+  sanitizeCodexInputItemIds
+} from './codex-compatibility.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
 export const PROXY_ENDPOINTS = new Set([
@@ -88,7 +94,6 @@ const COMPACT_PAYLOAD_FIELDS = new Set([
   'prompt_cache_key',
   'text'
 ]);
-const MAX_WEBSOCKET_PENDING_BYTES = 2 * 1024 * 1024;
 const MAX_SESSION_ID_LENGTH = 200;
 const MAX_GATEWAY_CANDIDATE_ATTEMPTS = 8;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
@@ -113,7 +118,7 @@ const POLICY_ROUTES = new Set([
   '/backend-api/codex/v1/responses/compact'
 ]);
 
-export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null }) {
+export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null, codexOptions = codexGatewayOptions() }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
@@ -190,12 +195,12 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     });
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
-  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth, claudeConfig });
+  const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth, claudeConfig, codexOptions });
   if (!dispatched) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
-  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState } = dispatched;
+  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState, codexMultiAgentOptimized } = dispatched;
   if (pacingError) {
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
     const failure = pacingUnavailable(pacingError);
@@ -261,7 +266,8 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     const collected = dispatchedCollection;
     settleUsage(store, upstream, attemptId, startedAt, collected, payload, accounting, lifecycle, response.status);
     if (path === '/v1/responses') learnResponsePin(store, collected, upstream.id, authScopeId, accounting.apiKeyId, req);
-    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(collected, payload) : restoreCustomToolCallNamespaces({ object: 'response', ...collected }, customToolNamespaces(codexPayload.tools));
+    const restored = restoreCodexMultiAgentResponse(collected, codexMultiAgentOptimized);
+    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(restored, payload) : restoreCustomToolCallNamespaces({ object: 'response', ...restored }, customToolNamespaces(codexPayload.tools));
     sendJson(res, 200, output);
     return;
   }
@@ -278,6 +284,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       admission,
       claudeDiagnosticsState: dispatchedDiagnosticsState,
       nativeMisalignmentDetails: isBackendResponsesRoute(path),
+      restoreCodexMultiAgent: codexMultiAgentOptimized,
       claudeToolAliases: dispatchedToolAliases,
       claudeModelAlias: dispatchedModelAlias,
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId, req) : null,
@@ -296,6 +303,13 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
         dispatchedModelAlias
       );
       output = Buffer.from(JSON.stringify(parsed));
+    } catch {
+      // Preserve an unexpected successful upstream body rather than inventing a response.
+    }
+  }
+  if (upstream.type === 'codex' && codexMultiAgentOptimized) {
+    try {
+      output = Buffer.from(JSON.stringify(restoreCodexMultiAgentResponse(JSON.parse(bytes.toString('utf8')), true)));
     } catch {
       // Preserve an unexpected successful upstream body rather than inventing a response.
     }
@@ -667,7 +681,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   return plan;
 }
 
-async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false, claudeConfig = null }) {
+async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false, claudeConfig = null, codexOptions = codexGatewayOptions() }) {
   const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http' };
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
@@ -742,7 +756,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     }
     try {
       if (!localClaudeTokenCount) await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
-      request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
+      request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
       response = localClaudeTokenCount
         ? new Response(JSON.stringify({ input_tokens: countClaudeInputTokens(request.body) }), { status: 200, headers: { 'content-type': 'application/json' } })
         : await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
@@ -774,7 +788,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
           }
           await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
-          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
+          request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
           response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
             store,
             upstreamId: upstream.id,
@@ -793,7 +807,12 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       let inspectedSse = null;
       for (let retries = 0; retries < COMPATIBILITY_RETRY_LIMIT; retries += 1) {
         if (response.ok && isEventStream(response)) {
-          inspectedSse = await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId));
+          inspectedSse = await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId), {
+            bootstrap: codexOptions.streamBootstrapBuffering && upstream.type === 'codex' && path === '/v1/responses' && payload?.stream === true,
+            maxBytes: codexOptions.streamBootstrapBytes,
+            maxEvents: codexOptions.streamBootstrapEvents,
+            timeoutMs: codexOptions.streamBootstrapTimeoutMs
+          });
           response = inspectedSse.response;
         }
         const compatibilityResponse = ['error', 'response.failed'].includes(inspectedSse?.firstEvent?.type)
@@ -812,7 +831,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         });
         void response.body?.cancel('Retrying with provider-directed compatibility fallback').catch(() => {});
         await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
-        request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store);
+        request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
         response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
           store,
           upstreamId: upstream.id,
@@ -824,7 +843,12 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         inspectedSse = null;
       }
       if (response.ok && isEventStream(response)) {
-        const inspected = inspectedSse || await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId));
+        const inspected = inspectedSse || await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId), {
+          bootstrap: codexOptions.streamBootstrapBuffering && upstream.type === 'codex' && path === '/v1/responses' && payload?.stream === true,
+          maxBytes: codexOptions.streamBootstrapBytes,
+          maxEvents: codexOptions.streamBootstrapEvents,
+          timeoutMs: codexOptions.streamBootstrapTimeoutMs
+        });
         response = inspected.response;
         if (sourcePath !== '/v1/responses/compact' && inspected.retryable) {
           if (modelNotFoundFailure(inspected.firstEvent) && upstream.type === 'codex') {
@@ -964,7 +988,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     if (response.ok) {
       const streaming = isEventStream(response) || upstream.type === 'codex' && payload?.stream === true;
       if (!streaming || collected) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
-      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState };
+      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState, codexMultiAgentOptimized: request.codexMultiAgentOptimized === true };
     }
     const body = parseJson(await readBoundedResponse(response.clone()));
     const outcome = {
@@ -1011,19 +1035,50 @@ async function retryableUpstreamResponse(response, upstream) {
   return modelNotFound ? { modelNotFound: true } : null;
 }
 
-async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstEvent = null) {
+export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstEvent = null, { bootstrap = false, maxBytes = 512 * 1024, maxEvents = 32, timeoutMs = 1_000 } = {}) {
   if (!response.body) return { response, retryable: true };
   const [probe, downstream] = response.body.tee();
   const reader = probe.getReader();
   const decoder = new TextDecoder();
   let parserState = createSseParserState();
+  let seenEvents = 0;
+  let bootstrapBytes = 0;
+  const startedAt = Date.now();
+  let firstEvent;
+  let firstEventObserved = false;
   const finish = (result) => {
     void reader.cancel('Initial SSE event classified').catch(() => {});
     return result;
   };
   try {
     while (true) {
-      const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
+      const remainingBootstrapMs = bootstrap ? timeoutMs - (Date.now() - startedAt) : 0;
+      if (bootstrap && remainingBootstrapMs <= 0) {
+        return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
+      }
+      let read;
+      if (bootstrap) {
+        let timer;
+        try {
+          read = await Promise.race([
+            readWithIdleDeadline(reader, upstreamDeadlines),
+            new Promise((resolve) => {
+              timer = setTimeout(() => {
+                void reader.cancel('Initial SSE bootstrap timed out').catch(() => {});
+                resolve({ bootstrapTimedOut: true });
+              }, remainingBootstrapMs);
+            })
+          ]);
+        } finally {
+          clearTimeout(timer);
+        }
+      } else {
+        read = await readWithIdleDeadline(reader, upstreamDeadlines);
+      }
+      if (read.bootstrapTimedOut) {
+        return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
+      }
+      const { done, value } = read;
       const result = consumeSseChunk(parserState, done ? decoder.decode() : decoder.decode(value, { stream: true }));
       parserState = result.state;
       if (result.overflow) {
@@ -1037,17 +1092,36 @@ async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstE
         : result.blocks;
       for (const event of events) {
         if (!hasSseData(event)) continue;
-        onFirstEvent?.();
+        seenEvents += 1;
+        bootstrapBytes += Buffer.byteLength(event);
+        if (bootstrap && (seenEvents > maxEvents || bootstrapBytes > maxBytes || Date.now() - startedAt >= timeoutMs)) {
+          return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
+        }
+        if (!firstEventObserved) {
+          firstEventObserved = true;
+          onFirstEvent?.();
+        }
         const parsed = eventData(event);
-        if (parsed) return finish({ response: streamResponseClone(response, downstream), retryable: retryableSseFailure(parsed), firstEvent: parsed });
+        if (parsed) {
+          firstEvent ||= parsed;
+          const retryable = retryableSseFailure(parsed);
+          if (retryable || !bootstrap || parsed.type === 'error' || parsed.type === 'response.failed' || isSseBootstrapComplete(parsed)) {
+            return finish({ response: streamResponseClone(response, downstream), retryable, firstEvent: parsed });
+          }
+          continue;
+        }
         if (event.includes('data: [DONE]')) return finish({ response: streamResponseClone(response, downstream), retryable: false });
-        return finish({ response: streamResponseClone(response, downstream), retryable: false });
+        if (!bootstrap) return finish({ response: streamResponseClone(response, downstream), retryable: false });
       }
       if (done) return finish({ response: streamResponseClone(response, downstream), retryable: true });
     }
   } finally {
     reader.releaseLock();
   }
+}
+
+function isSseBootstrapComplete(event) {
+  return !['response.created', 'response.queued', 'response.in_progress', 'codex.response.metadata'].includes(event?.type);
 }
 
 function streamResponseClone(response, body) {
@@ -1081,15 +1155,17 @@ function claudeProxyAgent(upstream) {
   return claudeProxyDispatcher(metadata.proxy_url ?? metadata['proxy-url']);
 }
 
-function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}, claudeConfig = null, store = null) {
+function buildRequest(upstream, sourcePath, payload, req, credentials, originalPath, codexPayload = payload, compatibility = {}, claudeConfig = null, store = null, codexOptions = codexGatewayOptions()) {
   const direct = ['compass', 'claude'].includes(upstream.type);
-  const { targetPath, body: projectedBody } = projectProxyRequest({
+  const { targetPath, body: projectedBody, codexMultiAgentOptimized } = projectProxyRequest({
     upstreamType: upstream.type,
     sourcePath,
     payload,
     originalPath,
     codexPayload,
-    compatibility
+    compatibility,
+    req,
+    codexOptions
   });
   const countTokens = upstream.type === 'claude' && sourcePath === '/v1/messages/count_tokens';
   const sessionId = upstream.type === 'claude'
@@ -1151,6 +1227,7 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
     url: `${baseUrl}${targetPath}`,
     headers,
     body: JSON.stringify(body),
+    codexMultiAgentOptimized,
     claudeThinkingReplay: claudeReplay.scope,
     claudeToolAliases: upstream.type === 'claude' ? claudeToolAliases(body) : new Map(),
     claudeModelAlias: upstream.type === 'claude' ? claudeModelAlias(body) : null,
@@ -1164,14 +1241,16 @@ export function projectProxyRequest({
   payload,
   originalPath = sourcePath,
   codexPayload = payload,
-  compatibility = {}
+  compatibility = {},
+  req = null,
+  codexOptions = codexGatewayOptions()
 }) {
   const direct = ['compass', 'claude'].includes(upstreamType);
   const publicCompaction = sourcePath === '/v1/responses/compact' && originalPath === '/v1/responses';
   const targetPath = direct
     ? upstreamType === 'claude' ? `${sourcePath}?beta=true` : COMPASS_PATHS[sourcePath]
     : sourcePath === '/v1/responses/compact' && !publicCompaction ? CODEX_COMPACT_PATH : CODEX_RESPONSES_PATH;
-  const normalizedBody = direct
+  let normalizedBody = direct
     ? upstreamType === 'compass' ? directUpstreamPayload(payload, sourcePath) : payload
     : sourcePath === '/v1/chat/completions'
       ? normalizeCodexInput({ ...codexPayload, store: false, stream: true }, { native: isBackendMetadataRoute(originalPath) })
@@ -1182,22 +1261,33 @@ export function projectProxyRequest({
         : sourcePath === '/v1/responses/compact'
           ? normalizeCodexInput(payload, { compact: true, native: isBackendMetadataRoute(originalPath) })
           : normalizeCodexInput(payload, { native: isBackendMetadataRoute(originalPath) });
+  let codexMultiAgentOptimized = false;
+  if (!direct) {
+    const prepared = prepareCodexMultiAgentRequest(normalizedBody, req, codexOptions);
+    normalizedBody = sanitizeCodexInputItemIds(prepared.payload);
+    codexMultiAgentOptimized = prepared.optimized;
+  }
   return {
     targetPath,
     body: omitCompatibilityFields(
       normalizedBody,
       compatibility.unsupportedFields,
       new Set(compatibilityOptionalFields(upstreamType, sourcePath))
-    )
+    ),
+    codexMultiAgentOptimized
   };
 }
 
-export function projectPublicWebSocketFrame(payload, { generate = true, compatibility = {} } = {}) {
-  return {
+export function projectPublicWebSocketFrame(payload, { generate = true, compatibility = {}, req = null, codexOptions = codexGatewayOptions() } = {}) {
+  const prepared = prepareCodexMultiAgentRequest(publicResponsesPayload(payload), req, codexOptions);
+  const normalized = sanitizeCodexInputItemIds(prepared.payload);
+  const projected = {
     type: 'response.create',
-    ...omitCompatibilityFields(publicResponsesPayload(payload), compatibility.unsupportedFields, CODEX_OPTIONAL_FALLBACK_FIELDS),
+    ...omitCompatibilityFields(normalized, compatibility.unsupportedFields, CODEX_OPTIONAL_FALLBACK_FIELDS),
     generate
   };
+  Object.defineProperty(projected, 'codexMultiAgentOptimized', { value: prepared.optimized, enumerable: false });
+  return projected;
 }
 
 async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}, codexHostHealth = null, pacing = null) {
@@ -1717,7 +1807,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -1749,7 +1839,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (terminal || downstreamClosed) return;
     if (hasSseData(event)) gatewayDiagnosticsForStore(store).firstSseEvent(attemptId);
     const decoded = decodeSseBlock(event);
-    const parsedRaw = decoded.kind === 'event' ? decoded.event : null;
+    const parsedRaw = decoded.kind === 'event' ? restoreCodexMultiAgentResponse(decoded.event, restoreCodexMultiAgent) : null;
     const parsedWithTools = parsedRaw ? restoreClaudeToolAliases(parsedRaw, claudeToolAliases) : null;
     const parsed = parsedWithTools ? restoreClaudeModelAlias(parsedWithTools, claudeModelAlias) : null;
     if (!parsed) {
@@ -2462,11 +2552,10 @@ export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null } = {}) {
+export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null, codexOptions = codexGatewayOptions(ingress) } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
-  const websocketIdleMs = Number.isFinite(ingress.websocketIdleMs) && ingress.websocketIdleMs > 0 ? ingress.websocketIdleMs : 30 * 60 * 1000;
-  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_PENDING_BYTES });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: codexOptions.websocketFrameBytes });
   wss.on('headers', (headers, req) => {
     if (req.codexModelsEtag) headers.push(`x-models-etag: ${req.codexModelsEtag}`);
     if (isBackendResponsesRoute(new URL(req.url, 'http://localhost').pathname)) {
@@ -2520,7 +2609,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   wss.on('connection', (client, req) => {
     if (beforeSend) deferWebSocketSends(client, beforeSend);
-    relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog, codexHostHealth, disablePacing);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing);
   });
   return wss;
 }
@@ -2537,7 +2626,7 @@ function deferWebSocketSends(client, beforeSend) {
   };
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, websocketIdleMs, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
@@ -2561,11 +2650,13 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   let publicOutput = false;
   let publicStreamId = null;
   let publicGenerate = true;
+  let publicMultiAgentOptimized = false;
   let nativeAttempt;
   let nativePayload;
   let nativeUsage;
   let nativeResponseControls = {};
   let nativeMetadataSent = false;
+  let nativeMultiAgentOptimized = false;
   let retriedTurn = false;
   let publicCompatibilityRetries = 0;
   let activeFrame;
@@ -2579,10 +2670,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   const queuedTurns = [];
   let queuedTurnBytes = 0;
   let idleTimer = null;
+  let keepAliveTimer = null;
   const pacingAbort = new AbortController();
   let sendChain = Promise.resolve();
   const socketPacingAborts = new WeakMap();
   const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
+  const clearKeepAlive = () => { if (keepAliveTimer) clearInterval(keepAliveTimer); keepAliveTimer = null; };
   const settlePublicAdmission = (outcome) => {
     const active = publicAdmission;
     publicAdmission = null;
@@ -2642,7 +2735,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   const publicWebSocketFrame = (candidate, payload, generate = publicGenerate, compatibilityOverride = null) => {
     const context = compatibilityFactContext(candidate, '/v1/responses', payload, req, '/v1/responses', { websocket: true });
     const compatibility = compatibilityState(candidate, compatibilityOverride || compatibilityLearningForStore(store).activeFact(candidate.id, context));
-    return Buffer.from(JSON.stringify(projectPublicWebSocketFrame(payload, { generate, compatibility })));
+    const projected = projectPublicWebSocketFrame(payload, { generate, compatibility, req, codexOptions });
+    publicMultiAgentOptimized = projected.codexMultiAgentOptimized === true;
+    return Buffer.from(JSON.stringify(projected));
   };
   const replacePendingPublicFrame = (candidate) => {
     if (!publicTurnActive || !publicPayload) return;
@@ -2672,7 +2767,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         gatewayDiagnosticsForStore(store).queueWaited(attemptId, pacingResult.waitedMs);
       }
       if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
-      if (socket.bufferedAmount + frame.data.byteLength > MAX_WEBSOCKET_PENDING_BYTES) {
+      if (socket.bufferedAmount + frame.data.byteLength > codexOptions.websocketBackpressureBytes) {
         closeBoth(1009, 'Websocket backpressure limit exceeded');
         return;
       }
@@ -2751,7 +2846,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     }
     return true;
   };
-  const failActiveTurn = (code, message, outcome = { class: 'transient', retryable: true }) => {
+  const failActiveTurn = (code, message, outcome = { class: 'transient', retryable: true }, publicError = {}) => {
     if (!publicResponses || !publicTurnActive) return;
     publicTurnActive = false;
     activeFrame = null;
@@ -2765,12 +2860,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     publicUsage = null;
     publicWebSocketFailure(
       client,
-      code === 'codex_host_unavailable' || code === MISALIGNMENT_POLICY_CODE ? code : 'server_error',
+      publicError.code || (code === 'codex_host_unavailable' || code === MISALIGNMENT_POLICY_CODE ? code : 'server_error'),
       message,
       publicSequence++,
       publicStreamId,
       null,
-      code === MISALIGNMENT_POLICY_CODE ? 403 : null
+      publicError.status || (code === MISALIGNMENT_POLICY_CODE ? 403 : null)
     );
     publicStreamId = null;
     startNextPublicTurn();
@@ -2780,7 +2875,18 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     idleTimer = setTimeout(() => {
       if (publicTurnActive) failActiveTurn('upstream_websocket_idle_timeout', 'Upstream websocket timed out', classifyTransportError(Object.assign(new Error('WebSocket idle timeout'), { upstreamFailureKind: 'timeout' })));
       if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(1011, 'Upstream websocket timed out');
-    }, websocketIdleMs);
+    }, codexOptions.websocketIdleMs);
+  };
+  const startKeepAlive = () => {
+    clearKeepAlive();
+    if (codexOptions.websocketKeepAliveMs <= 0) return;
+    keepAliveTimer = setInterval(() => {
+      for (const socket of [client, targetSocket]) {
+        if (socket?.readyState !== WebSocket.OPEN) continue;
+        try { socket.ping(); } catch { closeBoth(1011, 'WebSocket keepalive failed'); }
+      }
+    }, codexOptions.websocketKeepAliveMs);
+    keepAliveTimer.unref?.();
   };
   const startNextPublicTurn = () => {
     const next = queuedTurns.shift();
@@ -2826,7 +2932,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         if (!frame || typeof frame !== 'object' || Array.isArray(frame) || frame.type !== 'response.create') throw new AdapterError('Invalid response.create frame');
         if (publicTurnActive) {
           const queued = Buffer.from(data);
-          if (queuedTurnBytes + queued.byteLength > MAX_WEBSOCKET_PENDING_BYTES) return client.close(1009, 'Pending websocket data exceeded limit');
+          if (queuedTurnBytes + queued.byteLength > codexOptions.websocketPendingBytes) return client.close(1009, 'Pending websocket data exceeded limit');
           queuedTurnBytes += queued.byteLength;
           queuedTurns.push(queued);
           return;
@@ -2924,12 +3030,23 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (!admission) return client.close(1013, 'No eligible Codex upstream is available');
       nativeAdmission = { upstreamId: upstream.id, admission };
     }
+    if (!publicResponses && !isBinary) {
+      try {
+        const nativeFrame = JSON.parse(data.toString());
+        if (nativeFrame?.type === 'response.create') {
+          const prepared = prepareCodexMultiAgentRequest(nativeFrame, req, codexOptions);
+          const sanitized = sanitizeCodexInputItemIds(prepared.payload);
+          nativeMultiAgentOptimized = prepared.optimized;
+          data = Buffer.from(JSON.stringify(sanitized));
+        }
+      } catch {}
+    }
     if (targetSocket?.readyState === WebSocket.OPEN) {
       const frame = { data, isBinary };
       void sendFrame(targetSocket, frame, upstream).catch(handleFramePacingFailure);
     } else {
       pendingBytes += data.byteLength;
-      if (pendingBytes > MAX_WEBSOCKET_PENDING_BYTES) client.close(1009, 'Pending websocket data exceeded limit');
+      if (pendingBytes > codexOptions.websocketPendingBytes) client.close(1009, 'Pending websocket data exceeded limit');
       else pending.push({ data, isBinary });
     }
   });
@@ -2937,6 +3054,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
     pacingAbort.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     if (targetSocket) socketPacingAborts.get(targetSocket)?.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     clearIdle();
+    clearKeepAlive();
     if (publicTurnActive) {
       settlePublicAdmission({ class: 'neutral', retryable: false });
       releasePublicAttempt('downstream_closed');
@@ -2963,7 +3081,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
   client.on('error', () => closeBoth(1011, 'Client websocket error'));
 
   const retryPublicTurn = (outcome = { class: 'transient', retryable: true }) => {
-    if (!publicResponses || !publicTurnActive || publicOutput || retriedTurn || !activeFrame) return false;
+    if (!publicResponses || !publicTurnActive || publicOutput || retriedTurn || !activeFrame || outcome.requestScoped) return false;
     settlePublicAdmission(outcome);
     const acquired = acquirePublicCandidate(turnCandidateIndex + 1, { model: publicPayload.model, routeClass: 'proxy_stream' });
     if (!acquired) return false;
@@ -3023,7 +3141,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (!publicTurnActive || client.readyState !== WebSocket.OPEN) return;
       let compatibilityScope = compatibilityFactContext(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
       let compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
-      let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
+      let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store, codexOptions);
       let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
         store,
         upstreamId: candidate.id,
@@ -3044,7 +3162,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
             compatibilityScope = compatibilityFactContext(store.get(candidate.id) || candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
             compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
           }
-          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
+          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store, codexOptions);
           response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
             store,
             upstreamId: candidate.id,
@@ -3069,7 +3187,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           observationId: publicAttempt?.id || ''
         });
         void response.body?.cancel('Retrying WebSocket compaction with provider-directed compatibility fallback').catch(() => {});
-          request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store);
+        request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store, codexOptions);
         response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
           store,
           upstreamId: candidate.id,
@@ -3205,7 +3323,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
           origin: 'https://chatgpt.com'
         },
         handshakeTimeout: 120_000,
-        maxPayload: MAX_WEBSOCKET_PENDING_BYTES
+        maxPayload: codexOptions.websocketFrameBytes
       });
     } catch (error) {
       codexHostHealth.release(hostAdmission.lease);
@@ -3244,6 +3362,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return socket.close();
       if (!publicResponses) settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
       resetIdle();
+      startKeepAlive();
       for (const frame of pending.splice(0)) void sendFrame(socket, frame, connectionUpstream).catch(handleFramePacingFailure);
       pendingBytes = 0;
     });
@@ -3254,6 +3373,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         let frame;
         try { frame = JSON.parse(data.toString()); } catch { return; }
         if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
+        frame = restoreCodexMultiAgentResponse(frame, publicMultiAgentOptimized);
         gatewayDiagnosticsForStore(store).firstSseEvent(publicAttempt?.id);
         if (retryPublicWebSocketCompatibility(frame, connectionUpstream)) return;
         const frameOutcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
@@ -3273,7 +3393,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
         }
         for (const event of events) {
           const encoded = JSON.stringify(publicStreamId ? { ...event, stream_id: publicStreamId } : event);
-          if (client.bufferedAmount + Buffer.byteLength(encoded) > MAX_WEBSOCKET_PENDING_BYTES) return closeBoth(1009, 'Websocket backpressure limit exceeded');
+          if (client.bufferedAmount + Buffer.byteLength(encoded) > codexOptions.websocketBackpressureBytes) return closeBoth(1009, 'Websocket backpressure limit exceeded');
           client.send(encoded);
         }
         if (!terminal) return;
@@ -3327,11 +3447,15 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
             ...(nativeResponseControls['openai-model'] ? { 'openai-model': nativeResponseControls['openai-model'] } : {})
           }
         });
-        if (client.bufferedAmount + Buffer.byteLength(metadata) > MAX_WEBSOCKET_PENDING_BYTES) return closeBoth(1009, 'Websocket backpressure limit exceeded');
+        if (client.bufferedAmount + Buffer.byteLength(metadata) > codexOptions.websocketBackpressureBytes) return closeBoth(1009, 'Websocket backpressure limit exceeded');
         client.send(metadata);
       }
-      const sanitized = sanitizeNativeResponseControlFrame(data, isBinary);
-      if (client.bufferedAmount + sanitized.byteLength > MAX_WEBSOCKET_PENDING_BYTES) closeBoth(1009, 'Websocket backpressure limit exceeded');
+      let nativeResponseData = data;
+      if (!isBinary && nativeMultiAgentOptimized) {
+        try { nativeResponseData = Buffer.from(JSON.stringify(restoreCodexMultiAgentResponse(JSON.parse(data.toString()), true))); } catch {}
+      }
+      const sanitized = sanitizeNativeResponseControlFrame(nativeResponseData, isBinary);
+      if (client.bufferedAmount + sanitized.byteLength > codexOptions.websocketBackpressureBytes) closeBoth(1009, 'Websocket backpressure limit exceeded');
       else client.send(sanitized, { binary: isBinary });
     });
     socket.on('unexpected-response', async (_request, response) => {
@@ -3404,11 +3528,17 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, webso
       if (socket !== targetSocket || refreshingConnection || client.readyState !== WebSocket.OPEN) return;
       targetSocket = undefined;
       targetUpstreamId = null;
-      const outcome = socketTransportOutcome || classifyTransportError(new Error('Upstream WebSocket closed'));
+      const outcome = code === 1009
+        ? { class: 'neutral', retryable: false, requestScoped: true, status: 413, errorCode: 'request_too_large' }
+        : socketTransportOutcome || classifyTransportError(new Error('Upstream WebSocket closed'));
       if (retryPublicTurn(outcome)) return;
       if (publicResponses && publicTurnActive) {
         clearIdle();
-        failActiveTurn('upstream_websocket_interrupted', 'Upstream response interrupted', outcome);
+        if (code === 1009) {
+          failActiveTurn('request_too_large', 'The Codex WebSocket request exceeded the upstream message limit', outcome, { code: 'request_too_large', status: 413 });
+        } else {
+          failActiveTurn('upstream_websocket_interrupted', 'Upstream response interrupted', outcome);
+        }
         return;
       }
       if (publicResponses) {
