@@ -726,6 +726,15 @@ test('a provider can test only its own linked Codex connection', async () => {
       assert.equal(body.max_output_tokens, 64);
       assert.equal(body.input[0].content[0].text, 'What is the current time?');
 
+      const cooldown = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'gpt-5.6-luna' });
+      store.settleUpstreamAttempt(upstream.id, cooldown, { class: 'quota', retryable: true, retryAfter: '60' });
+      result = await request(base, `/api/pool/upstreams/${upstream.id}/test-connection`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(store.get(upstream.id).health.status, 'cooldown');
+
       const callCount = calls.length;
       result = await request(base, `/api/pool/upstreams/${upstream.id}/test-connection`, otherSession, {
         method: 'POST',

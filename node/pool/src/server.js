@@ -123,6 +123,7 @@ export function createApp({
       }
       if (gatewayKind) {
         req.disablePacing = true;
+        req.ignoreQuotaCooldown = true;
         await dispatchGatewayRequest({
           kind: gatewayKind,
           req,
@@ -228,6 +229,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     sharingStore: productStore,
     shareKeysOnly: true,
     disablePacing: true,
+    ignoreQuotaCooldown: true,
     apiKey: null,
     fetchImpl,
     ingress,

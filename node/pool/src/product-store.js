@@ -1937,12 +1937,7 @@ export class ProductStore {
         : null;
       const sessionRemaining = Math.max(0, row.granted_micros - row.consumed_micros);
       const backedMicros = commitment?.sessionBacking.get(row.id) ?? sessionRemaining;
-      const activeReserved = this.sqlite.prepare(`
-        SELECT COALESCE(SUM(reserved_micros), 0) AS reserved_micros
-        FROM sharing_reservations
-        WHERE session_id = ? AND status = 'active' AND expires_at > ?
-      `).get(sessionId, new Date().toISOString()).reserved_micros;
-      const availableMicros = Math.max(0, Math.min(sessionRemaining, backedMicros) - activeReserved);
+      const availableMicros = Math.max(0, Math.min(sessionRemaining, backedMicros));
       if (!availableMicros) return null;
       const now = new Date();
       this.sqlite.prepare(`
@@ -1953,7 +1948,7 @@ export class ProductStore {
         attemptId,
         sessionId,
         keyId,
-        availableMicros,
+        0,
         cleanModel(model),
         cleanRoute(route),
         now.toISOString(),
@@ -2135,7 +2130,6 @@ export class ProductStore {
 
   activeConsumerSessions(accountId, upstreamStore) {
     this.expireDue();
-    const now = new Date().toISOString();
     const pausedUpstreams = new Set(this.sqlite.prepare(`
       SELECT upstream_id
       FROM account_upstreams
@@ -2149,20 +2143,12 @@ export class ProductStore {
       .filter((row) => personalSessionAvailable(row, upstreamStore))
       .filter((row) => !pausedUpstreams.has(row.upstream_id));
     if (!rows.length) return [];
-    const placeholders = rows.map(() => '?').join(', ');
-    const reservedBySession = new Map(this.sqlite.prepare(`
-      SELECT session_id, COALESCE(SUM(reserved_micros), 0) AS reserved_micros
-      FROM sharing_reservations
-      WHERE session_id IN (${placeholders}) AND status = 'active' AND expires_at > ?
-      GROUP BY session_id
-    `).all(...rows.map(({ id }) => id), now).map(({ session_id, reserved_micros }) => [session_id, reserved_micros]));
     const commitmentCache = new Map();
     return rows.flatMap((row) => {
       const commitment = upstreamStore ? this.providerCommitment(row.upstream_id, upstreamStore, commitmentCache) : null;
       const sessionRemaining = Math.max(0, row.granted_micros - row.consumed_micros);
       const backedMicros = commitment?.sessionBacking.get(row.id) ?? sessionRemaining;
-      const reservedMicros = reservedBySession.get(row.id) || 0;
-      const remainingMicros = Math.max(0, Math.min(sessionRemaining, backedMicros) - reservedMicros);
+      const remainingMicros = Math.max(0, Math.min(sessionRemaining, backedMicros));
       return remainingMicros ? [personalSessionAccess({ ...row, remainingMicros })] : [];
     });
   }

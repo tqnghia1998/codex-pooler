@@ -154,6 +154,10 @@ test('quota routing excludes cooldowns and restores recovered accounts', () => {
     settle(store, first.id, { model: 'gpt-5.6-sol', routeClass: 'proxy_http' }, { class: 'quota', retryable: true, retryAfter: '60' }, now);
 
     assert.deepEqual(store.candidatePlan({ preferredType: 'codex', now: now + 30_000 }).map((item) => item.id), [second.id]);
+    assert.deepEqual(store.candidatePlan({ preferredType: 'codex', ignoreQuotaCooldown: true, now: now + 30_000 }).map((item) => item.id), [first.id, second.id]);
+    const retry = store.beginUpstreamAttempt(first.id, { model: 'gpt-5.6-sol', routeClass: 'proxy_http', ignoreQuotaCooldown: true }, now + 30_000);
+    store.settleUpstreamAttempt(first.id, retry, { class: 'quota', retryable: true }, now + 30_001);
+    assert.equal(store.get(first.id).health, undefined);
     assert.deepEqual(store.candidatePlan({ preferredType: 'codex', now: now + 60_001 }).map((item) => item.id), [first.id, second.id]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
