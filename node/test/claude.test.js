@@ -9,7 +9,7 @@ import { join } from 'node:path';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { claudeMetadataModelExcluded, createUpstream, parseClaudeAuthJson } from '../src/domain.js';
-import { CLAUDE_OAUTH_PROFILE_URL, CLAUDE_OAUTH_ROLES_URL, CLAUDE_OAUTH_TOKEN_URL } from '../src/providers.js';
+import { CLAUDE_OAUTH_PROFILE_URL, CLAUDE_OAUTH_TOKEN_URL } from '../src/providers.js';
 import { claudeModelAlias, claudeRequestedBetas, claudeRequestHeaders, claudeSessionIdForRequest, ensureClaudeCredentialIdentity, forgetClaudeThinkingReplay, prepareClaudeRequestBody, prepareClaudeThinkingReplayRequest, recordClaudeThinkingReplay, signClaudeOAuthBody } from '../src/claude-protocol.js';
 import { captureClaudeThinkingReplayResponse } from '../src/claude-thinking-replay.js';
 import { countClaudeInputTokens } from '../src/claude-input-tokens.js';
@@ -316,7 +316,7 @@ test('accepts CPA ClaudeKey fields at the upstream management boundary', () => {
     disableCooling: true,
     requestRetry: 3,
     fingerprintProfile: 'claude-code-cli'
-  });
+  }, { allowLegacyClaudeApiKey: true });
   assert.equal(upstream.metadata['header:Cookie'], 'session=operator');
   assert.equal(upstream.metadata['header:X-Tenant'], 'west');
   assert.deepEqual(upstream.metadata.models, [{ name: 'claude-sonnet-4-6', alias: 'tenant-sonnet', 'display-name': 'Tenant Sonnet', 'max-context-length': 123456, 'force-mapping': true }]);
@@ -403,7 +403,7 @@ test('strips a matching CPA Claude model prefix before dispatch', () => {
     type: 'claude',
     projectKey: 'sk-ant-api-prefix-test',
     metadata: { prefix: 'team-a' }
-  });
+  }, { allowLegacyClaudeApiKey: true });
   const prepared = prepareClaudeRequestBody({
     req: { headers: {} },
     body: { model: 'team-a/claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }] },
@@ -574,7 +574,7 @@ test('restores CPA force-mapped Claude model names in JSON and SSE', async () =>
 });
 
 test('supports CPA-style Claude API-key credentials without OAuth shaping', () => {
-  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-test' });
+  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-test' }, { allowLegacyClaudeApiKey: true });
   const req = { headers: {
     accept: 'application/json',
     'accept-encoding': 'gzip',
@@ -700,7 +700,7 @@ test('supports Claude API-key fingerprint-profile opt-in independently of OAuth'
     type: 'claude',
     projectKey: 'sk-ant-api-profile-test',
     metadata: { fingerprint_profile: 'claude-code-cli' }
-  });
+  }, { allowLegacyClaudeApiKey: true });
   const prepared = prepareClaudeRequestBody({
     req: { headers: {} },
     body: { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }] },
@@ -727,7 +727,7 @@ test('applies explicit Claude cloak mode to an API key without OAuth controls', 
     type: 'claude',
     projectKey: 'sk-ant-api-cloak-test',
     metadata: { cloak_mode: 'always' }
-  });
+  }, { allowLegacyClaudeApiKey: true });
   const prepared = prepareClaudeRequestBody({
     req: { headers: {} },
     body: {
@@ -831,7 +831,7 @@ test('an empty CPA cloak object still enables the default cloak policy', () => {
 
 test('forwards a stored Claude API key with caller-owned Messages semantics', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-api-key-'));
-  const store = new Store(dir);
+  const store = new Store(dir, { allowLegacyClaudeApiKey: true });
   const upstream = store.create({ type: 'claude', projectKey: 'sk-ant-api-proxy-test' });
   store.setCap(upstream.id, { capDollars: 100 });
   let call;
@@ -872,7 +872,7 @@ test('forwards a stored Claude API key with caller-owned Messages semantics', as
 
 test('dispatches Claude requests through the configured CPA base URL', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-base-url-'));
-  const store = new Store(dir);
+  const store = new Store(dir, { allowLegacyClaudeApiKey: true });
   const upstream = store.create({
     type: 'claude',
     baseUrl: 'https://claude-gateway.example/compat',
@@ -919,7 +919,7 @@ test('sends CPA-configured Claude Host headers on the wire', async () => {
   });
   await new Promise((resolve) => upstreamServer.listen(0, '127.0.0.1', resolve));
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-host-'));
-  const store = new Store(dir);
+  const store = new Store(dir, { allowLegacyClaudeApiKey: true });
   const upstream = store.create({
     type: 'claude',
     baseUrl: `http://127.0.0.1:${upstreamServer.address().port}/compat`,
@@ -1010,7 +1010,7 @@ test('routes Claude requests through a per-credential HTTP proxy URL', async () 
     targetSocket.on('error', () => client.destroy());
   });
   await new Promise((resolve) => proxy.listen(0, '127.0.0.1', resolve));
-  const store = new Store(dir);
+  const store = new Store(dir, { allowLegacyClaudeApiKey: true });
   const upstream = store.create({
     type: 'claude',
     baseUrl: `http://127.0.0.1:${target.address().port}`,
@@ -1043,7 +1043,7 @@ test('routes Claude requests through CPA-compatible SOCKS5h proxy URLs', async (
   });
   await new Promise((resolve) => target.listen(0, '127.0.0.1', resolve));
   const proxy = await startSocks5Proxy({ username: 'proxy-user', password: 'proxy-pass' });
-  const store = new Store(dir);
+  const store = new Store(dir, { allowLegacyClaudeApiKey: true });
   const upstream = store.create({
     type: 'claude',
     baseUrl: `http://localhost:${target.address().port}`,
@@ -1069,7 +1069,7 @@ test('routes Claude requests through CPA-compatible SOCKS5h proxy URLs', async (
 });
 
 test('does not inject CPA OAuth context management into caller-owned API-key bodies', () => {
-  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-context-test' });
+  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-context-test' }, { allowLegacyClaudeApiKey: true });
   const prepared = prepareClaudeRequestBody({
     req: { headers: {} },
     body: {
@@ -1086,7 +1086,7 @@ test('does not inject CPA OAuth context management into caller-owned API-key bod
 });
 
 test('places the CPA rolling cache marker on a final string system turn', () => {
-  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-cache-turn-test' });
+  const upstream = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-cache-turn-test' }, { allowLegacyClaudeApiKey: true });
   const prepared = prepareClaudeRequestBody({
     req: { headers: {} },
     body: {
@@ -1279,7 +1279,7 @@ test('does not persist stale Claude identity after credential replacement', asyn
   releaseProfile();
   await identityPreparation;
   try {
-    assert.equal(store.get(created.id).accountId, '');
+    assert.match(store.get(created.id).accountId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     assert.equal(store.credentials(created.id).accessToken, 'sk-ant-oat-new-token');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1894,7 +1894,7 @@ test('refreshes an expired Claude OAuth credential and retries the request', asy
   const store = new Store(dir);
   const upstream = store.create({
     type: 'claude',
-    accessToken: 'old-access',
+    accessToken: 'sk-ant-oat-old-access',
     refreshToken: 'old-refresh',
     accessTokenExpiresAt: new Date(Date.now() - 1_000).toISOString()
   });
@@ -1902,7 +1902,7 @@ test('refreshes an expired Claude OAuth credential and retries the request', asy
   const calls = [];
   const { server, base } = await start(store, async (url, options) => {
     calls.push({ url, options });
-    if (url === CLAUDE_OAUTH_TOKEN_URL) return new Response(JSON.stringify({ access_token: 'new-access', refresh_token: 'new-refresh', expires_in: 3600 }), { status: 200 });
+    if (url === CLAUDE_OAUTH_TOKEN_URL) return new Response(JSON.stringify({ access_token: 'sk-ant-oat-new-access', refresh_token: 'new-refresh', expires_in: 3600 }), { status: 200 });
     if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response(JSON.stringify({ account: { uuid: 'refreshed-account', email: 'refreshed@example.com' }, organization: { uuid: 'refreshed-org', name: 'Refreshed Org' } }), { status: 200 });
     return new Response(JSON.stringify({ id: 'msg_refresh', content: [], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
   });
@@ -1915,8 +1915,8 @@ test('refreshes an expired Claude OAuth credential and retries the request', asy
     assert.equal(response.status, 200);
     assert.equal(calls[0].url, CLAUDE_OAUTH_TOKEN_URL);
     assert.equal(JSON.parse(calls[0].options.body).refresh_token, 'old-refresh');
-    assert.equal(calls.at(-1).options.headers.authorization, 'Bearer new-access');
-    assert.equal(store.credentials(upstream.id).accessToken, 'new-access');
+    assert.equal(calls.at(-1).options.headers.authorization, 'Bearer sk-ant-oat-new-access');
+    assert.equal(store.credentials(upstream.id).accessToken, 'sk-ant-oat-new-access');
     assert.equal(store.credentials(upstream.id).refreshToken, 'new-refresh');
     assert.equal(store.get(upstream.id).accountId, 'refreshed-account');
     assert.equal(store.get(upstream.id).email, 'refreshed@example.com');
@@ -1932,9 +1932,8 @@ test('completes Claude OAuth PKCE exchange and creates an upstream', async () =>
   const visited = [];
   const { server, base } = await start(store, async (url) => {
     visited.push(url);
-    if (url === CLAUDE_OAUTH_TOKEN_URL) return new Response(JSON.stringify({ access_token: 'oauth-access', refresh_token: 'oauth-refresh', expires_in: 3600 }), { status: 200 });
-    if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response(JSON.stringify({ account: { uuid: 'oauth-account', email: 'oauth@example.com' }, organization: { uuid: 'oauth-org', name: 'OAuth Org' } }), { status: 200 });
-    if (url === CLAUDE_OAUTH_ROLES_URL) return new Response(JSON.stringify({ roles: [] }), { status: 200 });
+    if (url === CLAUDE_OAUTH_TOKEN_URL) return new Response(JSON.stringify({ access_token: 'sk-ant-oat-oauth-access', refresh_token: 'oauth-refresh', expires_in: 3600 }), { status: 200 });
+    if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response(JSON.stringify({ account: { uuid: 'oauth-account', email: 'oauth@example.com' } }), { status: 200 });
     throw new Error(`unexpected URL ${url}`);
   });
   try {
@@ -1950,9 +1949,10 @@ test('completes Claude OAuth PKCE exchange and creates an upstream', async () =>
     const result = await exchangeResponse.json();
     assert.equal(result.upstream.type, 'claude');
     assert.equal(result.upstream.email, 'oauth@example.com');
-    assert.equal(store.credentials(result.upstream.id).accessToken, 'oauth-access');
+    assert.equal(result.upstream.accountId, 'oauth-account');
+    assert.equal(store.credentials(result.upstream.id).accessToken, 'sk-ant-oat-oauth-access');
     assert.match(result.upstream.metadata.claude_device_ids[0], /^[a-f0-9]{64}$/);
-    assert.deepEqual(visited, [CLAUDE_OAUTH_TOKEN_URL, CLAUDE_OAUTH_PROFILE_URL, CLAUDE_OAUTH_ROLES_URL]);
+    assert.deepEqual(visited, [CLAUDE_OAUTH_TOKEN_URL, CLAUDE_OAUTH_PROFILE_URL]);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });

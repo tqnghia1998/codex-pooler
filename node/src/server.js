@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
-import { dollarsToMicros, exportUpstreamCredentials, isAiswitchUpstream } from './domain.js';
+import { claudeOAuthInputError, dollarsToMicros, exportUpstreamCredentials, isAiswitchUpstream, isSupportedClaudeOAuthUpstream, retryAfterSeconds } from './domain.js';
 import {
   createTokenRefreshScheduler,
   refreshClaudeToken,
@@ -35,7 +35,7 @@ import { codexGatewayOptions } from './codex-compatibility.js';
 
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
-export const AUTO_REFRESH_INTERVAL_MS = 60_000;
+export const AUTO_REFRESH_INTERVAL_MS = 10 * 60_000;
 export { createTokenRefreshScheduler, refreshClaudeToken, refreshCodexToken, refreshDueClaudeTokens, refreshDueCodexTokens, TOKEN_REFRESH_INTERVAL_MS };
 
 export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness(), claudeConfig = claudeConfigFromEnv() } = {}) {
@@ -202,12 +202,7 @@ export async function refreshAllQuotas(store, options = {}) {
   return refreshAllUpstreamQuotas(store, {
     ...options,
     shouldRefresh: (upstream) => !isAiswitchUpstream(upstream) && (upstream.type !== 'claude' || hasClaudeOAuthQuota(store, upstream)),
-    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: upstream.type === 'claude' ? 'claude_api_key' : 'aiswitch' }),
-    beforeRefresh: async (upstream) => {
-      if (upstream.type === 'claude' && (!upstream.email || !upstream.accountId)) {
-        await refreshSavedClaudeIdentity(store, upstream.id, { fetchImpl: options.fetchImpl });
-      }
-    }
+    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: upstream.type === 'claude' ? 'claude_api_key' : 'aiswitch' })
   });
 }
 
@@ -323,15 +318,19 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     return;
   }
   if (req.method === 'POST' && parts.length === 2 && parts[1] === 'upstreams') {
-    const upstream = store.create(await body(req));
-    await refreshSavedClaudeIdentity(store, upstream.id, { fetchImpl });
+    const input = await body(req);
+    assertClaudeOAuthInput(input, true);
+    const upstream = store.create(input);
+    await refreshSavedClaudeIdentity(store, upstream.id, { fetchImpl, force: true });
     sendJson(res, 201, {
       upstream: await refreshSavedUpstreamQuota(store, upstream.id, { fetchImpl, compassGatewayToken })
     });
     return;
   }
   if (req.method === 'POST' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'refresh-quota') {
-    const results = await refreshAllQuotas(store, { fetchImpl, compassGatewayToken, force: true });
+    const force = url.searchParams.get('force') !== 'false';
+    const ids = parseRefreshIds(url.searchParams.get('ids'));
+    const results = await refreshAllQuotas(store, { fetchImpl, compassGatewayToken, force, ids });
     sendJson(res, 200, { results: results.map(({ status, value }) => status === 'fulfilled' ? value : { status: 'failed' }) });
     return;
   }
@@ -358,6 +357,8 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   }
   if (req.method === 'PATCH' && parts.length === 3) {
     const input = await body(req);
+    const existing = store.get(id);
+    if (existing?.type === 'claude') assertClaudeOAuthInput(input, false);
     const upstream = store.update(id, input);
     if (upstream.type === 'claude' && quotaCredentialsChanged(upstream, input)) {
       await refreshSavedClaudeIdentity(store, id, { fetchImpl, force: true });
@@ -410,7 +411,6 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     }
     try {
       if (upstream.type === 'claude') {
-        await refreshSavedClaudeIdentity(store, id, { fetchImpl, force: true });
         if (!hasClaudeOAuthQuota(store, upstream)) {
           sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'claude_api_key' });
           return;
@@ -453,6 +453,11 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   throw notFound();
 }
 
+function assertClaudeOAuthInput(input, creating) {
+  const policyError = claudeOAuthInputError(input, { creating });
+  if (policyError) throw new HttpError(400, policyError.code, policyError.message);
+}
+
 async function refreshSavedUpstreamQuota(store, id, options) {
   const upstream = store.get(id);
   if (!upstream || isAiswitchUpstream(upstream) || (upstream.type === 'claude' && !hasClaudeOAuthQuota(store, upstream))) return store.getPublic(id);
@@ -465,8 +470,8 @@ async function refreshSavedUpstreamQuota(store, id, options) {
 
 function hasClaudeOAuthQuota(store, upstream) {
   if (upstream?.type !== 'claude') return false;
-  const credentials = store.credentials(upstream.id);
-  return Boolean(credentials.accessToken && !credentials.projectKey);
+  const stored = { ...upstream, credentials: store.credentials(upstream.id) };
+  return isSupportedClaudeOAuthUpstream(stored);
 }
 
 function claudeQuotaRefreshError(error) {
@@ -479,23 +484,48 @@ function claudeQuotaRefreshError(error) {
   const status = Number.isInteger(error?.statusCode) ? ` (HTTP ${error.statusCode})` : '';
   const message = detail.replace(/\s+/g, ' ').trim().slice(0, 300) || 'provider rejected the quota request';
   const retryAfterValue = typeof error?.retryAfter === 'string' ? error.retryAfter.trim() : '';
+  const formattedRetryAfter = formatRetryAfter(retryAfterValue);
+  const retryAfterSecondsValue = retryAfterSeconds(retryAfterValue);
+  const capped = retryAfterSecondsValue !== null && retryAfterSecondsValue > 3_600;
+  const capNote = capped ? ' Local cooldown is capped at 1 hour.' : '';
   const retryAfter = error?.statusCode === 429 && retryAfterValue
     ? error.retryAfterEstimated
-      ? ` Retry-After not provided; local retry estimate: ${/^\d+(?:\.\d+)?$/.test(retryAfterValue) ? `${retryAfterValue} seconds` : retryAfterValue}.`
-      : ` Retry-After: ${/^\d+(?:\.\d+)?$/.test(retryAfterValue) ? `${retryAfterValue} seconds` : retryAfterValue}.`
+      ? ` Retry-After not provided; local retry estimate: ${formattedRetryAfter}.${capNote}`
+      : ` Retry-After: ${formattedRetryAfter}.${capNote}`
     : error?.statusCode === 429 ? ' Retry-After was not provided; retry later.' : '';
   return new HttpError(error?.statusCode === 429 ? 429 : 502, error?.statusCode === 429 ? 'claude_quota_rate_limited' : 'claude_quota_refresh_failed', `Claude quota refresh failed${status}: ${message}.${retryAfter}`);
+}
+
+function formatRetryAfter(value) {
+  const parsed = retryAfterSeconds(value);
+  if (parsed === null) return value;
+  let seconds = parsed;
+  const hours = Math.floor(seconds / 3_600);
+  seconds %= 3_600;
+  const minutes = Math.floor(seconds / 60);
+  seconds %= 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`);
+  if (minutes) parts.push(`${minutes} minute${minutes === 1 ? '' : 's'}`);
+  if (seconds || !parts.length) parts.push(`${seconds} second${seconds === 1 ? '' : 's'}`);
+  return parts.join(' ');
+}
+
+function parseRefreshIds(value) {
+  if (value === null) return null;
+  return [...new Set(value.split(',').map((id) => id.trim()).filter(Boolean))];
 }
 
 async function refreshSavedClaudeIdentity(store, id, { fetchImpl = globalThis.fetch, force = false } = {}) {
   const upstream = store.get(id);
   if (!upstream || upstream.type !== 'claude') return store.getPublic(id);
   const credentials = store.credentials(id);
-  if (!credentials.accessToken || credentials.projectKey) return store.getPublic(id);
+  if (!isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) return store.getPublic(id);
   if (!force && upstream.email && upstream.accountId) return store.getPublic(id);
   try {
     await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile: true });
-  } catch {
+  } catch (error) {
+    if (!isAdvisoryLookupError(error)) throw error;
     // Profile metadata is advisory. Keep the saved credential usable when the
     // control-plane endpoint is unavailable or rejects an enterprise token.
   }
@@ -509,6 +539,10 @@ function quotaCredentialsChanged(upstream, input) {
     || input.quotaSource !== undefined
     || input.metadata?.quota_type !== undefined
     || input.metadata?.quotaType !== undefined;
+}
+
+function isAdvisoryLookupError(error) {
+  return Number.isInteger(error?.statusCode) || error?.name === 'AbortError' || error instanceof TypeError;
 }
 
 async function body(req) {

@@ -15,6 +15,7 @@ import {
   filterSpendCapEligible,
   isAiswitchUpstream,
   isClaudeOAuthUpstream,
+  isSupportedClaudeOAuthUpstream,
   number,
   normalizeClaudeBaseUrl,
   publicUpstream,
@@ -52,7 +53,7 @@ export const ROUTING_QUOTA_FRESHNESS_MS = 5 * 60_000;
 export const DEFAULT_SCOPE_ID = 'default';
 
 export class Store {
-  constructor(dataDir = process.env.CODEX_POOLER_NODE_DATA_DIR || resolve(process.cwd(), '.data'), { encryptionKey = null, inMemory = false } = {}) {
+  constructor(dataDir = process.env.CODEX_POOLER_NODE_DATA_DIR || resolve(process.cwd(), '.data'), { encryptionKey = null, inMemory = false, allowLegacyClaudeApiKey = false } = {}) {
     this.dataDir = inMemory ? null : resolve(dataDir);
     this.dbPath = inMemory ? ':memory:' : join(this.dataDir, 'db.sqlite');
     this.legacyDbPath = inMemory ? null : join(this.dataDir, 'db.json');
@@ -68,6 +69,7 @@ export class Store {
     this.sqlite.pragma('journal_mode = DELETE');
     this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
     this.events = new EventEmitter();
+    this.allowLegacyClaudeApiKey = Boolean(allowLegacyClaudeApiKey);
     this.claudeRuntimeConfig = {};
     if (inMemory || this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
     else {
@@ -196,7 +198,7 @@ export class Store {
   }
 
   create(input, { scopeId = input?.scopeId || DEFAULT_SCOPE_ID, allowDuplicateCodexIdentity = false } = {}) {
-    const upstream = createUpstream(input);
+    const upstream = createUpstream(input, { allowLegacyClaudeApiKey: this.allowLegacyClaudeApiKey });
     const db = this.load();
     activeScope(db, scopeId);
 
@@ -225,7 +227,7 @@ export class Store {
     ensureSpending(upstream);
     const previousCredentials = decryptCredentials(upstream.credentials, this.key);
     upstream.credentials = previousCredentials;
-    updateUpstream(upstream, input);
+    updateUpstream(upstream, input, { allowLegacyClaudeApiKey: this.allowLegacyClaudeApiKey });
     if (['codex', 'claude'].includes(upstream.type) && (input.authJson || input.accessToken || input.projectKey !== undefined)) {
       upstream.quota = null;
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
@@ -704,7 +706,7 @@ export class Store {
     else if (pinnedId) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id === pinnedId, exclude, 'not_affinity_selected');
     if (requiredType) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.type === requiredType, exclude, 'required_type_mismatch');
     candidates = candidates.filter((upstream) => {
-      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig: this.claudeRuntimeConfig });
+      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig: this.claudeRuntimeConfig, allowLegacyClaudeApiKey: this.allowLegacyClaudeApiKey });
       if (code) exclude(upstream, code);
       return !code;
     });
@@ -1421,7 +1423,8 @@ function filterRoutingCandidates(candidates, predicate, exclude, code) {
   return kept;
 }
 
-function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig = null }) {
+function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig = null, allowLegacyClaudeApiKey = false }) {
+  if (upstream.type === 'claude' && !allowLegacyClaudeApiKey && !isSupportedClaudeOAuthUpstream(upstream)) return 'claude_oauth_required';
   if (upstream.type === 'claude' && !ignoreModelRestrictions && claudeModelPrefixMismatch(upstream, model)) return 'upstream_model_prefix_mismatch';
   if (!ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, claudeConfig) && modelCooldownBlocks(upstream, model, now)) return 'upstream_model_cooldown';
   if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions, claudeConfig })) {

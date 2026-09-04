@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { accessTokenExpiresAt, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, isAiswitchUpstream, isClaudeOAuthUpstream, normalizeBaseUrl, normalizeClaudeBaseUrl, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexQuota, parseCompassQuota } from './domain.js';
+import { accessTokenExpiresAt, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, isAiswitchUpstream, isSupportedClaudeOAuthUpstream, normalizeBaseUrl, normalizeClaudeBaseUrl, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexQuota, parseCompassQuota, retryAfterSeconds } from './domain.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { fetchClaudeUsage } from './claude-oauth.js';
 import { claudeRequestHeaders, prepareClaudeRequestBody } from './claude-protocol.js';
@@ -13,7 +13,6 @@ export const CLAUDE_OAUTH_AUTH_URL = 'https://claude.ai/oauth/authorize';
 export const CLAUDE_OAUTH_TOKEN_URL = 'https://platform.claude.com/v1/oauth/token';
 export const CLAUDE_OAUTH_PROFILE_URL = 'https://api.anthropic.com/api/oauth/profile';
 export const CLAUDE_OAUTH_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
-export const CLAUDE_OAUTH_ROLES_URL = 'https://api.anthropic.com/api/oauth/claude_cli/roles';
 export const CLAUDE_OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
 export const CLAUDE_OAUTH_REDIRECT_URI = 'http://localhost:54545/callback';
 export const CLAUDE_OAUTH_SCOPE = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload';
@@ -21,7 +20,6 @@ const REFRESH_SKEW_MS = 5 * 60 * 1000;
 const CLAUDE_REFRESH_MAX_ATTEMPTS = 3;
 const CLAUDE_REFRESH_MIN_BACKOFF_MS = 5_000;
 const CLAUDE_REFRESH_MAX_BACKOFF_MS = 5 * 60_000;
-const CLAUDE_QUOTA_CACHE_MS = 5 * 60_000;
 const CLAUDE_QUOTA_DEFAULT_BACKOFF_MS = 10 * 60_000;
 const CLAUDE_QUOTA_MAX_BACKOFF_MS = 60 * 60_000;
 const CLAUDE_QUOTA_PROBE_MODEL = 'claude-sonnet-4-6';
@@ -49,8 +47,7 @@ export async function refreshQuota(upstream, credentials, {
 } = {}) {
   if (isAiswitchUpstream(upstream)) throw new Error('AISwitch quota requires a Compass SSO session');
   if (upstream.type === 'claude') {
-    if (!isClaudeOAuthUpstream(upstream) || !credentials?.accessToken || credentials.projectKey) return upstream.quota || null;
-    if (!force && quotaFresh(upstream.quota)) return upstream.quota;
+    if (!isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) return upstream.quota || null;
     return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force);
   }
   if (upstream.type === 'compass') return refreshCompassQuota(upstream, compassGatewayToken, fetchImpl);
@@ -221,7 +218,7 @@ async function fetchClaudeQuotaFromMessages(upstream, accessToken, fetchImpl) {
   try {
     return parseClaudeQuotaHeaders(response.headers);
   } catch (error) {
-  if (!response.ok) throw providerError(response.status, response.body, response.headers);
+    if (!response.ok) throw providerError(response.status, response.body, response.headers);
     error.statusCode = 502;
     throw error;
   }
@@ -240,9 +237,9 @@ function isClaudeQuotaRateLimited(error) {
 }
 
 function blockClaudeQuota(key, error) {
-  const retryAfter = Number(error?.retryAfter);
-  const waitMs = Number.isFinite(retryAfter) && retryAfter >= 0
-    ? Math.min(Math.max(retryAfter * 1_000, 1_000), CLAUDE_QUOTA_MAX_BACKOFF_MS)
+  const retryAfterMs = claudeQuotaRetryAfterMs(error?.retryAfter);
+  const waitMs = retryAfterMs !== null
+    ? Math.min(Math.max(retryAfterMs, 1_000), CLAUDE_QUOTA_MAX_BACKOFF_MS)
     : CLAUDE_QUOTA_DEFAULT_BACKOFF_MS;
   const retryAfterValue = error?.retryAfter || String(Math.ceil(waitMs / 1_000));
   const retryAfterEstimated = !error?.retryAfter;
@@ -255,6 +252,11 @@ function blockClaudeQuota(key, error) {
     retryAfter: retryAfterValue,
     retryAfterEstimated
   });
+}
+
+function claudeQuotaRetryAfterMs(value) {
+  const seconds = retryAfterSeconds(value);
+  return seconds === null ? null : seconds * 1_000;
 }
 
 function claudeQuotaRateLimitError(retryAfter = null, retryAfterEstimated = false) {
@@ -474,11 +476,6 @@ async function fetchClaudeRefreshProfile(accessToken, fetchImpl, proxyUrl = '') 
 function tokenRefreshDue(upstream, credentials) {
   const expiresAt = upstream.accessTokenExpiresAt || accessTokenExpiresAt(credentials.accessToken);
   return Boolean(expiresAt) && new Date(expiresAt).getTime() <= Date.now() + REFRESH_SKEW_MS;
-}
-
-function quotaFresh(quota) {
-  const observedAt = Date.parse(quota?.observedAt);
-  return Number.isFinite(observedAt) && observedAt + CLAUDE_QUOTA_CACHE_MS > Date.now();
 }
 
 async function refreshCompassQuota(upstream, gatewayToken, fetchImpl) {

@@ -10,6 +10,7 @@ import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 import { Readiness } from '../src/readiness.js';
 import { CLAUDE_OAUTH_PROFILE_URL, CLAUDE_OAUTH_USAGE_URL } from '../src/providers.js';
+import { refreshUpstreamQuota } from '../src/upstream-quota-refresh.js';
 
 async function runningServer(store, options = {}) {
   const server = createServer(createApp({ store, ...options }));
@@ -76,7 +77,7 @@ test('hydrates Claude OAuth profile metadata on create and manual refresh', asyn
   try {
     const created = await request(base, '/api/upstreams', {
       method: 'POST',
-      body: JSON.stringify({ type: 'claude', accessToken: 'sk-ant-oat-profile-create', accountId: 'imported-account' })
+      body: JSON.stringify({ type: 'claude', accessToken: 'sk-ant-oat-profile-create' })
     });
     assert.equal(created.response.status, 201);
     assert.equal(created.data.upstream.email, 'profile@example.com');
@@ -89,6 +90,12 @@ test('hydrates Claude OAuth profile metadata on create and manual refresh', asyn
     assert.equal(usageCalls[0].url, CLAUDE_OAUTH_USAGE_URL);
     assert.equal(usageCalls[0].options.headers.authorization, 'Bearer sk-ant-oat-profile-create');
     assert.equal(usageCalls[0].options.headers['anthropic-beta'], 'oauth-2025-04-20');
+    assert.equal(usageCalls[0].options.headers['user-agent'], 'claude-code/2.1.260');
+
+    const automatic = await request(base, '/api/upstreams/refresh-quota?force=false', { method: 'POST' });
+    assert.equal(automatic.response.status, 200);
+    assert.equal(automatic.data.results[0].status, 'refreshed');
+    assert.equal(usageCalls.length, 2);
 
     const existing = store.create({ type: 'claude', accessToken: 'sk-ant-oat-profile-existing', accountId: 'existing-account' });
     const refreshed = await request(base, `/api/upstreams/${existing.id}/refresh-profile`, { method: 'POST' });
@@ -100,8 +107,8 @@ test('hydrates Claude OAuth profile metadata on create and manual refresh', asyn
     const quota = await request(base, `/api/upstreams/${created.data.upstream.id}/refresh-quota`, { method: 'POST' });
     assert.equal(quota.response.status, 200);
     assert.equal(quota.data.upstream.quota.remainingPercent, 37);
-    assert.equal(usageCalls.length, 2);
-    assert.equal(profileCalls.length, 3);
+    assert.equal(usageCalls.length, 3);
+    assert.equal(profileCalls.length, 2);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -192,9 +199,62 @@ test('returns Claude quota Retry-After details for a manual rate-limited refresh
     const refreshed = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
     assert.equal(refreshed.response.status, 429);
     assert.equal(refreshed.data.error.code, 'claude_quota_rate_limited');
-    assert.match(refreshed.data.error.message, /Retry-After: 600 seconds/);
+    assert.match(refreshed.data.error.message, /Retry-After: 10 minutes/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('preserves Retry-After from the direct Claude usage endpoint', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-usage-retry-after-'));
+  const store = new Store(dir);
+  const created = store.create({ type: 'claude', accessToken: 'sk-ant-oat-direct-usage-retry-after', accountId: 'direct-usage-account', metadata: { auth_kind: 'oauth' } });
+  let usageCalls = 0;
+  const { server, base } = await runningServer(store, {
+    apiKey: 'claude-direct-usage-retry-after-key',
+    fetchImpl: async (url) => {
+      if (url !== CLAUDE_OAUTH_USAGE_URL) return new Response('{}', { status: 200 });
+      usageCalls += 1;
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', message: 'Rate limited' } }), { status: 429, headers: { 'retry-after': '1641' } });
+    }
+  });
+  try {
+    const refreshed = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(refreshed.response.status, 429);
+    assert.match(refreshed.data.error.message, /Retry-After: 27 minutes 21 seconds/);
+    const blocked = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(blocked.response.status, 429);
+    assert.match(blocked.data.error.message, /Retry-After: 27 minutes 21 seconds/);
+    assert.equal(usageCalls, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coalesces concurrent quota refreshes for one upstream', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-quota-coalesce-'));
+  const store = new Store(dir);
+  const created = store.create({ type: 'claude', accessToken: 'sk-ant-oat-quota-coalesce', metadata: { auth_kind: 'oauth' } });
+  let calls = 0;
+  let release;
+  const fetchImpl = async (url) => {
+    assert.equal(url, CLAUDE_OAUTH_USAGE_URL);
+    calls += 1;
+    await new Promise((resolve) => { release = resolve; });
+    return new Response(JSON.stringify({ five_hour: { utilization: 20, resets_at: '2026-09-04T05:00:00Z' } }), { status: 200 });
+  };
+  try {
+    const first = refreshUpstreamQuota(store, created.id, { fetchImpl });
+    const second = refreshUpstreamQuota(store, created.id, { fetchImpl, notify: true });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 1);
+    release();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+    assert.equal(firstResult.quota.remainingPercent, 80);
+    assert.equal(secondResult.quota.remainingPercent, 80);
+  } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
@@ -216,7 +276,7 @@ test('shows a local retry estimate when Claude omits Retry-After', async () => {
   try {
     const refreshed = await request(base, `/api/upstreams/${created.id}/refresh-quota`, { method: 'POST' });
     assert.equal(refreshed.response.status, 429);
-    assert.match(refreshed.data.error.message, /Retry-After not provided; local retry estimate: 600 seconds/);
+    assert.match(refreshed.data.error.message, /Retry-After not provided; local retry estimate: 10 minutes/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -255,13 +315,12 @@ test('automatically refreshes legacy Claude OAuth records without auth metadata'
     store.save(store.load());
     await refreshAllQuotas(store, {
       fetchImpl: async (url) => {
-        if (url === CLAUDE_OAUTH_PROFILE_URL) return new Response(JSON.stringify({ account: { email: 'legacy@example.com' } }), { status: 200 });
         assert.equal(url, CLAUDE_OAUTH_USAGE_URL);
         return new Response(JSON.stringify({ five_hour: { utilization: 25, resets_at: '2026-09-04T05:00:00Z' } }), { status: 200 });
       }
     });
     const upstream = store.getPublic(created.id);
-    assert.equal(upstream.email, 'legacy@example.com');
+    assert.equal(upstream.email, null);
     assert.equal(upstream.quota.remainingPercent, 75);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -292,6 +351,27 @@ test('refreshes all quotas in sequential batches of ten', async () => {
     assert.equal(peak, 10);
     assert.equal(completed, 21);
     assert.equal(changes, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refreshes only selected upstream quota ids', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-selected-quota-'));
+  try {
+    const store = new Store(dir);
+    const first = store.create({ type: 'codex', accessToken: 'selected-token-1', accountId: 'selected-account-1' });
+    store.create({ type: 'codex', accessToken: 'selected-token-2', accountId: 'selected-account-2' });
+    const calls = [];
+    const results = await refreshAllQuotas(store, {
+      ids: [first.id],
+      fetchImpl: async (_url, options) => {
+        calls.push(options.headers.authorization);
+        return new Response(JSON.stringify({ rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 2_592_000 } } }), { status: 200 });
+      }
+    });
+    assert.equal(results.length, 1);
+    assert.deepEqual(calls, ['Bearer selected-token-1']);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -573,6 +653,86 @@ test('returns client errors for invalid management request bodies', async () => 
     const oversized = await request(base, '/api/upstreams', { method: 'POST', body: JSON.stringify({ value: 'x'.repeat(2 * 1024 * 1024) }) });
     assert.equal(oversized.response.status, 413);
     assert.equal(oversized.data.error.code, 'request_too_large');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('accepts only Claude Enterprise OAuth credentials through management APIs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-oauth-only-'));
+  const store = new Store(dir);
+  const existing = store.create({ type: 'claude', accessToken: 'sk-ant-oat-existing', metadata: { auth_kind: 'oauth' } });
+  const { server, base } = await runningServer(store, { apiKey: 'claude-oauth-only-key' });
+  try {
+    const apiKeyCreate = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', projectKey: 'sk-ant-api-key' })
+    });
+    assert.equal(apiKeyCreate.response.status, 400);
+    assert.equal(apiKeyCreate.data.error.code, 'claude_oauth_required');
+
+    const apiKeyJsonCreate = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', authJson: JSON.stringify({ projectKey: 'sk-ant-api-key' }) })
+    });
+    assert.equal(apiKeyJsonCreate.response.status, 400);
+    assert.equal(apiKeyJsonCreate.data.error.code, 'claude_oauth_required');
+
+    const apiKeyAccessTokenCreate = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', accessToken: 'sk-ant-api-key' })
+    });
+    assert.equal(apiKeyAccessTokenCreate.response.status, 400);
+    assert.equal(apiKeyAccessTokenCreate.data.error.code, 'claude_oauth_required');
+
+    const apiKeyMetadataCreate = await request(base, '/api/upstreams', {
+      method: 'POST',
+      body: JSON.stringify({ type: 'claude', accessToken: 'opaque-key', metadata: { auth_kind: 'claude_api_key' } })
+    });
+    assert.equal(apiKeyMetadataCreate.response.status, 400);
+    assert.equal(apiKeyMetadataCreate.data.error.code, 'claude_oauth_required');
+
+    const apiKeyReplace = await request(base, `/api/upstreams/${existing.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ projectKey: 'sk-ant-api-key' })
+    });
+    assert.equal(apiKeyReplace.response.status, 400);
+    assert.equal(apiKeyReplace.data.error.code, 'claude_oauth_required');
+    assert.equal(store.credentials(existing.id).accessToken, 'sk-ant-oat-existing');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not route legacy Claude API-key records or query their OAuth quota', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-legacy-block-'));
+  const writer = new Store(dir, { allowLegacyClaudeApiKey: true });
+  const legacy = writer.create({ type: 'claude', projectKey: 'sk-ant-api-legacy' });
+  writer.sqlite.close();
+  const store = new Store(dir);
+  let upstreamCalls = 0;
+  const { server, base } = await runningServer(store, {
+    apiKey: 'claude-legacy-block-key',
+    fetchImpl: async () => {
+      upstreamCalls += 1;
+      return new Response('{}', { status: 200 });
+    }
+  });
+  try {
+    const inference = await request(base, '/v1/messages', {
+      method: 'POST',
+      headers: { authorization: 'Bearer claude-legacy-block-key', 'x-upstream-id': legacy.id },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1, messages: [{ role: 'user', content: 'hello' }] })
+    });
+    assert.equal(inference.response.status, 503);
+    assert.equal(inference.data.error.code, 'no_eligible_backend');
+
+    const quota = await request(base, `/api/upstreams/${legacy.id}/refresh-quota`, { method: 'POST' });
+    assert.equal(quota.response.status, 200);
+    assert.equal(quota.data.skipped, 'claude_api_key');
+    assert.equal(upstreamCalls, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
