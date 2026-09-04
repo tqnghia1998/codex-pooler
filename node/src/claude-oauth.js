@@ -4,6 +4,7 @@ import {
   CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_OAUTH_PROFILE_URL,
   CLAUDE_OAUTH_ROLES_URL,
+  CLAUDE_OAUTH_USAGE_URL,
   CLAUDE_OAUTH_REDIRECT_URI,
   CLAUDE_OAUTH_SCOPE,
   CLAUDE_OAUTH_TOKEN_URL
@@ -129,6 +130,22 @@ export async function fetchProfile(accessToken, fetchImpl = globalThis.fetch, { 
     }
   }, fetchImpl, proxyUrl);
   if (!response.ok) throw providerError(response.status, body, 'Claude OAuth profile lookup failed');
+  return body;
+}
+
+export async function fetchClaudeUsage(accessToken, fetchImpl = globalThis.fetch, { proxyUrl = '' } = {}) {
+  const { response, body } = await fetchClaudeOAuth(CLAUDE_OAUTH_USAGE_URL, {
+    headers: {
+      accept: 'application/json, text/plain, */*',
+      authorization: `Bearer ${clean(accessToken)}`,
+      'content-type': 'application/json',
+      'user-agent': 'claude-code/2.1.71',
+      'anthropic-beta': 'oauth-2025-04-20',
+      'cache-control': 'no-cache',
+      connection: 'close'
+    }
+  }, fetchImpl, proxyUrl);
+  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth usage lookup failed');
   return body;
 }
 
