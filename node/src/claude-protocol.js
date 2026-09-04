@@ -3,7 +3,7 @@ import { DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { CLAUDE_BIP39_WORDS } from './claude-bip39.js';
 import { fetchProfile } from './claude-oauth.js';
 import { HttpError } from './http-ingress.js';
-import { claudeMetadataModelConfigs, claudeMetadataModelPrefix, isClaudeOAuthUpstream } from './domain.js';
+import { claudeCredentialKind, claudeMetadataModelConfigs, claudeMetadataModelPrefix, deriveClaudeAccountId, isClaudeOAuthToken, isClaudeOAuthUpstream } from './domain.js';
 import { applyClaudePayloadConfig } from './claude-payload.js';
 import { cacheClaudeThinkingReplay, clearClaudeThinkingReplay, getClaudeThinkingReplay, restoreClaudeThinkingReplay } from './claude-thinking-replay.js';
 
@@ -279,7 +279,9 @@ async function prepareClaudeCredentialIdentity({ upstream, credentials, store, f
   let email = upstream.email || '';
   let organizationId = credentials.organizationId || '';
   let organizationName = credentials.organizationName || '';
-  if ((refreshProfile || !accountId) && !isClaudeSetupToken({ upstream, credentials })) {
+  const generatedAccountId = deriveClaudeAccountId(credentials);
+  const accountIdIsLocal = Boolean(accountId && generatedAccountId && accountId === generatedAccountId);
+  if ((refreshProfile || !accountId || accountIdIsLocal) && !isClaudeSetupToken({ upstream, credentials })) {
     try {
       const profile = await fetchProfile(credentials.accessToken, fetchImpl, { proxyUrl: claudeProxyUrl(upstream) });
       const profileAccountId = String(profile?.account?.uuid || '').trim();
@@ -770,25 +772,12 @@ function incomingClaudeHeader(req, name) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function isClaudeOAuthToken(token) {
-  return typeof token === 'string' && token.startsWith('sk-ant-oat');
-}
-
 function isClaudeOAuthCredential(credentials, upstream = null) {
-  if (isClaudeOAuthToken(credentials?.accessToken)) return true;
-  if (credentials?.projectKey) return false;
-  const metadata = plainObject(upstream?.metadata) ? upstream.metadata : {};
-  const kind = String(credentials?.authKind || credentials?.auth_kind || metadata.auth_kind || metadata['auth-kind'] || '').trim().toLowerCase();
-  if (['api_key', 'apikey', 'claude_api_key', 'claude-api-key'].includes(kind)) return false;
-  return typeof credentials?.accessToken === 'string' && credentials.accessToken.length > 0;
+  return ['oauth', 'legacy_oauth'].includes(claudeCredentialKind(upstream, credentials));
 }
 
 function isClaudeApiKeyCredential(credentials, upstream = null) {
-  if (credentials?.projectKey) return true;
-  if (isClaudeOAuthToken(credentials?.accessToken)) return false;
-  const metadata = plainObject(upstream?.metadata) ? upstream.metadata : {};
-  const kind = String(credentials?.authKind || credentials?.auth_kind || metadata.auth_kind || metadata['auth-kind'] || '').trim().toLowerCase();
-  return ['api_key', 'apikey', 'claude_api_key', 'claude-api-key'].includes(kind);
+  return claudeCredentialKind(upstream, credentials) === 'api_key';
 }
 
 function isClaudeCliProfileCredential(credentials, upstream) {
