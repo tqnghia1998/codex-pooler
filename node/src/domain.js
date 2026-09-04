@@ -30,6 +30,17 @@ export function number(value, label, { integer = false, min = 0 } = {}) {
   return parsed;
 }
 
+export function retryAfterSeconds(value, now = Date.now()) {
+  const normalized = text(value);
+  if (!normalized) return null;
+  if (/^\d+(?:\.\d+)?$/.test(normalized)) {
+    const seconds = Number(normalized);
+    return Number.isFinite(seconds) ? Math.max(0, Math.ceil(seconds)) : null;
+  }
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? Math.max(0, Math.ceil((timestamp - now) / 1_000)) : null;
+}
+
 export function dollarsToCredits(value) {
   const dollars = number(value, 'capDollars');
   // Zero credits means "no cap", so a positive cap never rounds down into an unset one.
@@ -101,15 +112,7 @@ export function claudeMetadataModelExcluded(upstream, model, claudeConfig = null
 }
 
 export function isClaudeOAuthUpstream(upstream) {
-  if (upstream?.type !== 'claude') return false;
-  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
-  const kind = String(metadata.auth_kind || metadata['auth-kind'] || metadata.auth_mode || '').toLowerCase();
-  return upstream.accessTokenExpiresAt !== null && upstream.accessTokenExpiresAt !== undefined
-    || ['oauth', 'claude_oauth', 'oauth_token'].includes(kind)
-    // Older local records predate auth_kind and expiry persistence. The
-    // credential field is still enough to distinguish an OAuth token from a
-    // Claude API key without exposing or decoding the secret here.
-    || Object.hasOwn(upstream.credentials || {}, 'accessToken') && !Object.hasOwn(upstream.credentials || {}, 'projectKey');
+  return ['oauth', 'legacy_oauth'].includes(claudeCredentialKind(upstream));
 }
 
 export function claudeModelNameVariants(value) {
@@ -307,6 +310,74 @@ export function parseClaudeAuthJson(raw) {
   };
 }
 
+const CLAUDE_API_KEY_AUTH_KINDS = new Set(['api_key', 'apikey', 'claude_api_key', 'claude-api-key']);
+const CLAUDE_OAUTH_AUTH_KINDS = new Set(['oauth', 'claude_oauth', 'oauth_token']);
+
+export function isClaudeOAuthToken(token) {
+  return typeof token === 'string' && token.startsWith('sk-ant-oat');
+}
+
+export function normalizeClaudeAuthKind(value) {
+  return text(value).toLowerCase();
+}
+
+export function claudeCredentialKind(upstream, credentials = null) {
+  if (upstream?.type !== 'claude' && !credentials) return 'unknown';
+  const source = credentials && typeof credentials === 'object' ? credentials : upstream?.credentials || {};
+  const metadata = upstream?.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  const authKind = normalizeClaudeAuthKind(
+    source.authKind || source.auth_kind || metadata.auth_kind || metadata['auth-kind'] || metadata.auth_mode || metadata['auth-mode']
+  );
+  if (text(source.projectKey) || CLAUDE_API_KEY_AUTH_KINDS.has(authKind)) return 'api_key';
+  if (CLAUDE_OAUTH_AUTH_KINDS.has(authKind)) return 'oauth';
+  if (isClaudeOAuthToken(source.accessToken)) return 'oauth';
+  if (Object.hasOwn(source, 'accessToken') && !Object.hasOwn(source, 'projectKey')) return 'legacy_oauth';
+  if (text(source.accessToken)
+    || upstream?.accessTokenExpiresAt !== null && upstream?.accessTokenExpiresAt !== undefined) return 'legacy_oauth';
+  return 'unknown';
+}
+
+// Prefer the refresh token so access-token rotation keeps the local UUID stable.
+export function deriveClaudeAccountId({ refreshToken = '', accessToken = '' } = {}) {
+  const seed = text(refreshToken) || text(accessToken);
+  if (!seed) return '';
+  const hex = createHash('sha256')
+    .update('codex-pooler:claude-account-id\0')
+    .update(seed)
+    .digest('hex')
+    .slice(0, 32);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${((Number.parseInt(hex[16], 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20)}`;
+}
+
+export function claudeOAuthInputError(input, { creating = false } = {}) {
+  if (creating && text(input?.type).toLowerCase() !== 'claude') return null;
+  const metadata = input?.metadata && typeof input.metadata === 'object' && !Array.isArray(input.metadata) ? input.metadata : {};
+  const hasCredentialInput = input?.authJson !== undefined || input?.accessToken !== undefined || input?.projectKey !== undefined;
+  const inputAuthKind = normalizeClaudeAuthKind(input?.authKind || input?.['auth-kind'] || input?.auth_mode || input?.['auth-mode'] || metadata.auth_kind || metadata['auth-kind'] || metadata.auth_mode || metadata['auth-mode']);
+  if (!hasCredentialInput && !CLAUDE_API_KEY_AUTH_KINDS.has(inputAuthKind)) return null;
+  let auth;
+  try {
+    auth = input?.authJson !== undefined ? parseClaudeAuthJson(input.authJson) : parseClaudeAuthJson({
+      access_token: input?.accessToken,
+      project_key: input?.projectKey,
+      refresh_token: input?.refreshToken,
+      expires_at: input?.accessTokenExpiresAt
+    });
+  } catch (error) {
+    return { code: 'invalid_request', message: error.message || 'Claude OAuth credentials are invalid' };
+  }
+  const authMetadata = auth.metadata && typeof auth.metadata === 'object' ? auth.metadata : {};
+  const authKind = normalizeClaudeAuthKind(authMetadata.auth_kind || authMetadata['auth-kind'] || authMetadata.auth_mode || authMetadata['auth-mode'] || inputAuthKind);
+  if (auth.projectKey || !auth.accessToken || !isClaudeOAuthToken(auth.accessToken) || CLAUDE_API_KEY_AUTH_KINDS.has(authKind)) {
+    return { code: 'claude_oauth_required', message: 'Claude upstreams require Enterprise OAuth credentials; API keys are not supported' };
+  }
+  return null;
+}
+
+export function isSupportedClaudeOAuthUpstream(upstream) {
+  return ['oauth', 'legacy_oauth'].includes(claudeCredentialKind(upstream));
+}
+
 function claudeAuthMetadata(payload, source) {
   const metadata = {};
   const sources = [payload?.metadata, source?.metadata, payload, source].filter((value) => value && typeof value === 'object' && !Array.isArray(value));
@@ -395,9 +466,13 @@ function normalizeClaudeExpiresAt(value) {
   return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
 }
 
-export function createUpstream(input) {
+export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) {
   const type = text(input.type).toLowerCase();
   if (!SUPPORTED_TYPES.has(type)) throw new Error('type must be codex, compass, or claude');
+  if (type === 'claude' && !allowLegacyClaudeApiKey) {
+    const policyError = claudeOAuthInputError(input, { creating: true });
+    if (policyError) throw new Error(policyError.message);
+  }
   const quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
   const upstream = {
     id: randomUUID(),
@@ -452,7 +527,7 @@ export function createUpstream(input) {
       organization_id: input.organizationId,
       organization_name: input.organizationName
     });
-    upstream.accountId = auth.accountId;
+    upstream.accountId = auth.accountId || (auth.projectKey ? '' : deriveClaudeAccountId(auth));
     upstream.email = auth.email;
     upstream.baseUrl = normalizeClaudeBaseUrl(input.baseUrl || input.base_url || auth.baseUrl, DEFAULT_CLAUDE_BASE_URL);
     upstream.name = deriveUpstreamName(type, upstream);
@@ -475,7 +550,11 @@ export function createUpstream(input) {
   return upstream;
 }
 
-export function updateUpstream(upstream, input) {
+export function updateUpstream(upstream, input, { allowLegacyClaudeApiKey = false } = {}) {
+  if (upstream.type === 'claude' && !allowLegacyClaudeApiKey) {
+    const policyError = claudeOAuthInputError(input);
+    if (policyError) throw new Error(policyError.message);
+  }
   if (upstream.type !== 'claude') upstream.baseUrl = defaultBaseUrl(upstream.type);
   else upstream.baseUrl = normalizeClaudeBaseUrl(upstream.baseUrl, DEFAULT_CLAUDE_BASE_URL);
 
@@ -524,7 +603,7 @@ export function updateUpstream(upstream, input) {
         organization_name: input.organizationName || upstream.credentials.organizationName
       });
       if (auth.baseUrl) upstream.baseUrl = normalizeClaudeBaseUrl(auth.baseUrl, upstream.baseUrl);
-      upstream.accountId = auth.accountId || upstream.accountId;
+      upstream.accountId = auth.accountId || upstream.accountId || (auth.projectKey ? '' : deriveClaudeAccountId(auth));
       upstream.email = auth.email || upstream.email;
       upstream.accessTokenExpiresAt = auth.accessTokenExpiresAt;
       upstream.credentials = {
