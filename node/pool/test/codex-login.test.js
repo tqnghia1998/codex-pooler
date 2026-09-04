@@ -167,6 +167,10 @@ test('auth.json import signs into the same account and replaces stored credentia
     assert.equal(second.upstream.id, first.upstream.id);
     assert.equal(upstreamStore.list().length, 1);
     assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'second-refresh');
+    assert.equal(sharingStore.sqlite.prepare(`
+      SELECT COUNT(*) AS count FROM sharing_events
+      WHERE entity_type = 'upstream' AND entity_id = ? AND action = 'linked'
+    `).get(first.upstream.id).count, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -17,17 +17,23 @@ export function AdminAnalytics() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [events, setEvents] = useState({ items: [], nextCursor: null });
   const requestVersion = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async ({ eventCursor = null, appendEvents = false } = {}) => {
     const version = ++requestVersion.current;
     setRefreshing(true);
     try {
-      const response = await fetch(appUrl('/api/pool/admin/analytics'));
+      const suffix = eventCursor ? `?eventCursor=${encodeURIComponent(eventCursor)}` : '';
+      const response = await fetch(appUrl(`/api/pool/admin/analytics${suffix}`));
       const body = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(body.error?.message || 'Unable to load analytics');
       if (version !== requestVersion.current) return;
-      setAnalytics(body.analytics);
+      if (!appendEvents) setAnalytics(body.analytics);
+      setEvents((current) => ({
+        items: appendEvents ? [...current.items, ...body.analytics.recentEvents] : body.analytics.recentEvents,
+        nextCursor: body.analytics.nextEventCursor
+      }));
       setError('');
     } catch (nextError) {
       if (version !== requestVersion.current) return;
@@ -53,7 +59,7 @@ export function AdminAnalytics() {
     );
   }
 
-  const { overview, usage, tickets, providers, topProviders, topConsumers, recentEvents } = analytics;
+  const { overview, usage, tickets, providers, topProviders, topConsumers } = analytics;
   const successRate = percentage(usage.successes, usage.requests);
   const approvalRate = percentage(tickets.approved, tickets.total);
   const leaderColumns = [
@@ -117,7 +123,17 @@ export function AdminAnalytics() {
         <AnalyticsTable title="Top providers by settled usage" items={topProviders} columns={leaderColumns} emptyDescription="Settled provider usage will appear here." />
         <AnalyticsTable title="Top consumers by settled usage" items={topConsumers} columns={leaderColumns} emptyDescription="Settled consumer usage will appear here." />
       </Grid>
-      <AnalyticsTable title="Recent sharing activity" items={recentEvents} columns={eventColumns} emptyDescription="Sharing lifecycle events will appear here." />
+      <AnalyticsTable
+        title="Recent sharing activity"
+        items={events.items}
+        columns={eventColumns}
+        emptyDescription="Sharing lifecycle events will appear here."
+        footer={events.nextCursor && (
+          <HStack justify="center">
+            <Button label="Load more events" variant="secondary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load({ eventCursor: events.nextCursor, appendEvents: true })} />
+          </HStack>
+        )}
+      />
     </VStack>
   );
 }
@@ -153,7 +169,7 @@ function InsightCard({ title, rows }) {
   );
 }
 
-function AnalyticsTable({ title, items, columns, emptyDescription }) {
+function AnalyticsTable({ title, items, columns, emptyDescription, footer = null }) {
   return (
     <Card padding={0}>
       <VStack gap={2} padding={3}>
@@ -161,6 +177,7 @@ function AnalyticsTable({ title, items, columns, emptyDescription }) {
         {items.length
           ? <Table data={items} columns={columns} idKey="id" textOverflow="truncate" />
           : <EmptyState title="No data yet" description={emptyDescription} />}
+        {footer}
       </VStack>
     </Card>
   );
