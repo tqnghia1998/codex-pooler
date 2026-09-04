@@ -465,6 +465,14 @@ test('restricts Codex Share analytics to the whitelisted administrator', async (
       VALUES ('session', 'admin-session', 1, 1, 1000000, ?, 1000000, ?, ?, '[]', '[]'),
         ('session', 'old-session', 1, 1, 2000000, ?, 2000000, ?, ?, '[]', '[]')
     `).run(today, now, now, yesterday, now, now);
+    const addEvent = sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_events (id, actor_account_id, entity_type, entity_id, action, detail_json, created_at)
+      VALUES (?, ?, 'upstream', ?, 'linked', '{}', '2099-01-01T00:00:00.000Z')
+    `);
+    for (let index = 1; index <= 13; index += 1) {
+      const id = `pagination-${String(index).padStart(2, '0')}`;
+      addEvent.run(id, admin.id, id);
+    }
     const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
@@ -473,6 +481,19 @@ test('restricts Codex Share analytics to the whitelisted administrator', async (
       assert.equal((await request(base, '/api/pool/admin/analytics', memberSession)).response.status, 403);
       const analytics = await request(base, '/api/pool/admin/analytics', adminSession);
       assert.equal(analytics.response.status, 200);
+      assert.deepEqual(analytics.body.analytics.recentEvents.map(({ id }) => id), [
+        'pagination-13', 'pagination-12', 'pagination-11', 'pagination-10', 'pagination-09', 'pagination-08',
+        'pagination-07', 'pagination-06', 'pagination-05', 'pagination-04', 'pagination-03', 'pagination-02'
+      ]);
+      assert.ok(analytics.body.analytics.nextEventCursor);
+      const nextEvents = await request(base, `/api/pool/admin/analytics?eventCursor=${encodeURIComponent(analytics.body.analytics.nextEventCursor)}`, adminSession);
+      assert.equal(nextEvents.response.status, 200);
+      assert.deepEqual(nextEvents.body.analytics.recentEvents.map(({ id }) => id), ['pagination-01']);
+      assert.equal(nextEvents.body.analytics.nextEventCursor, null);
+      assert.equal(nextEvents.body.analytics.overview, undefined);
+      const malformedCursor = await request(base, '/api/pool/admin/analytics?eventCursor=not-a-cursor', adminSession);
+      assert.equal(malformedCursor.response.status, 200);
+      assert.deepEqual(malformedCursor.body.analytics.recentEvents.map(({ id }) => id), analytics.body.analytics.recentEvents.map(({ id }) => id));
       assert.equal(analytics.body.analytics.overview.accounts, 2);
       assert.equal(analytics.body.analytics.usage.todayMicros, 1000000);
       assert.deepEqual(analytics.body.analytics.topProviders[0], {
