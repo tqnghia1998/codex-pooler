@@ -105,7 +105,11 @@ export function isClaudeOAuthUpstream(upstream) {
   const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
   const kind = String(metadata.auth_kind || metadata['auth-kind'] || metadata.auth_mode || '').toLowerCase();
   return upstream.accessTokenExpiresAt !== null && upstream.accessTokenExpiresAt !== undefined
-    || ['oauth', 'claude_oauth', 'oauth_token'].includes(kind);
+    || ['oauth', 'claude_oauth', 'oauth_token'].includes(kind)
+    // Older local records predate auth_kind and expiry persistence. The
+    // credential field is still enough to distinguish an OAuth token from a
+    // Claude API key without exposing or decoding the secret here.
+    || Object.hasOwn(upstream.credentials || {}, 'accessToken') && !Object.hasOwn(upstream.credentials || {}, 'projectKey');
 }
 
 export function claudeModelNameVariants(value) {
@@ -804,6 +808,143 @@ export function parseCompassQuota(payload, observedAt = new Date()) {
   };
 }
 
+export function parseClaudeQuota(payload, observedAt = new Date()) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('Claude OAuth usage response must be an object');
+  const windows = [];
+  const seen = new Set();
+  const addWindow = (key, label, windowSeconds, value) => {
+    if (seen.has(key) || !value || typeof value !== 'object' || Array.isArray(value)) return;
+    const usedPercent = Number(value.percent ?? value.utilization);
+    if (!Number.isFinite(usedPercent) || usedPercent < 0 || usedPercent > 100) return;
+    seen.add(key);
+    windows.push({
+      key,
+      label,
+      usedPercent,
+      remainingPercent: claudeRemainingPercent(usedPercent),
+      remainingUnits: null,
+      limitUnits: null,
+      remainingDollars: null,
+      limitDollars: null,
+      windowSeconds,
+      resetAt: claudeResetTime(value.resets_at ?? value.reset_at),
+      observedAt: new Date(observedAt).toISOString()
+    });
+  };
+  const limits = Array.isArray(payload.limits) ? payload.limits : null;
+  if (limits) {
+    for (const entry of limits) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+      const kind = text(entry.kind);
+      if (kind === 'session') addWindow('session', 'Session (5h)', 5 * 60 * 60, entry);
+      else if (kind === 'weekly_all') addWindow('7d', 'Week (all)', 7 * 24 * 60 * 60, entry);
+      else if (kind === 'weekly_scoped') {
+        const model = entry.scope?.model;
+        const name = text(model?.display_name || model?.id);
+        if (name) addWindow(`7d_${name.toLowerCase().replace(/[^a-z0-9]+/g, '_')}`, `Week (${name})`, 7 * 24 * 60 * 60, entry);
+      } else if (kind) {
+        addWindow(kind, kind.replace(/[_-]+/g, ' '), null, entry);
+      }
+    }
+  }
+  addWindow('session', 'Session (5h)', 5 * 60 * 60, payload.five_hour);
+  addWindow('7d', 'Week (all)', 7 * 24 * 60 * 60, payload.seven_day);
+  for (const [key, value] of Object.entries(payload)) {
+    if (!key.startsWith('seven_day_') || key === 'seven_day_oauth_apps' || key === 'seven_day_cowork') continue;
+    const name = key.slice('seven_day_'.length).replace(/[_-]+/g, ' ');
+    addWindow(key, `Week (${name.replace(/\b\w/g, (letter) => letter.toUpperCase())})`, 7 * 24 * 60 * 60, value);
+  }
+  if (!windows.length) throw new Error('Claude OAuth usage response had no usable quota window');
+  const extraUsage = parseClaudeExtraUsage(payload.extra_usage, observedAt);
+  const selected = windows.find(({ key }) => key === 'session') || windows.find(({ key }) => key === '7d') || windows[0];
+  const observed = new Date(observedAt).toISOString();
+  return {
+    label: selected.label,
+    usedPercent: selected.usedPercent,
+    remainingPercent: selected.remainingPercent,
+    remainingUnits: null,
+    limitUnits: null,
+    remainingDollars: extraUsage?.remainingDollars ?? null,
+    limitDollars: extraUsage?.limitDollars ?? null,
+    windowSeconds: selected.windowSeconds,
+    resetAt: selected.resetAt,
+    observedAt: observed,
+    source: 'claude_oauth_usage',
+    ...(extraUsage ? { extraUsage } : {}),
+    windows
+  };
+}
+
+function parseClaudeExtraUsage(value, observedAt) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  if (value.is_enabled !== true) return null;
+  const monthlyLimitCredits = Number(value.monthly_limit);
+  const usedCredits = Number(value.used_credits);
+  if (!Number.isFinite(monthlyLimitCredits) || monthlyLimitCredits <= 0 || !Number.isFinite(usedCredits) || usedCredits < 0) return null;
+  const limitDollars = monthlyLimitCredits / 100;
+  const usedDollars = usedCredits / 100;
+  return {
+    enabled: value.is_enabled === true,
+    usedDollars,
+    remainingDollars: Math.max(0, limitDollars - usedDollars),
+    limitDollars,
+    observedAt: new Date(observedAt).toISOString()
+  };
+}
+
+export function parseClaudeQuotaHeaders(headers, observedAt = new Date()) {
+  const read = (name) => {
+    const value = headers?.get?.(name) ?? headers?.[name] ?? headers?.[name.toLowerCase()];
+    return typeof value === 'string' ? value.trim() : '';
+  };
+  const windows = [];
+  const addWindow = (key, label, windowSeconds, utilizationName, resetName) => {
+    const rawUtilization = read(utilizationName);
+    if (!rawUtilization) return;
+    const utilization = Number(rawUtilization);
+    if (!Number.isFinite(utilization) || utilization < 0) return;
+    const usedPercent = Math.min(100, utilization * 100);
+    windows.push({
+      key,
+      label,
+      usedPercent,
+      remainingPercent: claudeRemainingPercent(usedPercent),
+      remainingUnits: null,
+      limitUnits: null,
+      remainingDollars: null,
+      limitDollars: null,
+      windowSeconds,
+      resetAt: claudeResetTime(read(resetName)),
+      observedAt: new Date(observedAt).toISOString()
+    });
+  };
+  addWindow('session', 'Session (5h)', 5 * 60 * 60, 'anthropic-ratelimit-unified-5h-utilization', 'anthropic-ratelimit-unified-5h-reset');
+  addWindow('7d', 'Week (all)', 7 * 24 * 60 * 60, 'anthropic-ratelimit-unified-7d-utilization', 'anthropic-ratelimit-unified-7d-reset');
+  addWindow('overage', 'Overage', null, 'anthropic-ratelimit-unified-overage-utilization', 'anthropic-ratelimit-unified-overage-reset');
+  if (!windows.length) throw new Error('Claude response had no usable quota headers');
+  const representative = read('anthropic-ratelimit-unified-representative-claim');
+  const representativeKey = representative === 'seven_day' ? '7d' : representative === 'five_hour' ? 'session' : representative === 'overage' ? 'overage' : null;
+  const selected = windows.find(({ key }) => key === representativeKey)
+    || windows.find(({ key }) => key === 'session')
+    || windows.find(({ key }) => key === '7d')
+    || windows[0];
+  const observed = new Date(observedAt).toISOString();
+  return {
+    label: selected.label,
+    usedPercent: selected.usedPercent,
+    remainingPercent: selected.remainingPercent,
+    remainingUnits: null,
+    limitUnits: null,
+    remainingDollars: null,
+    limitDollars: null,
+    windowSeconds: selected.windowSeconds,
+    resetAt: selected.resetAt,
+    observedAt: observed,
+    source: 'claude_oauth_headers',
+    windows
+  };
+}
+
 function publicTokenRefresh(value) {
   if (!value || !['succeeded', 'refreshing', 'failed', 'reauth_required'].includes(value.status)) return null;
   return {
@@ -828,6 +969,19 @@ function resetTime(window, observedAt) {
   const after = Number(window.reset_after_seconds);
   if (Number.isFinite(after) && after >= 0) return new Date(new Date(observedAt).getTime() + after * 1000).toISOString();
   return null;
+}
+
+function claudeResetTime(value) {
+  if (typeof value === 'number' && value > 0) return new Date(value > 10_000_000_000 ? value : value * 1000).toISOString();
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const normalized = value.trim();
+  if (/^\d+$/.test(normalized)) return claudeResetTime(Number(normalized));
+  const date = new Date(normalized);
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
+}
+
+function claudeRemainingPercent(usedPercent) {
+  return Number(Math.max(0, 100 - usedPercent).toFixed(6));
 }
 
 export function isAiswitchUpstream(upstream) {
