@@ -80,7 +80,7 @@ const DEFAULT_PACING = {
   maxQueueDepth: 20,
   maxQueueAgeMs: 30000
 };
-const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
+const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', accessToken: '', refreshToken: '', email: '', accountId: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
 
 function useStoredValue(key, fallback = '') {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? fallback);
@@ -513,6 +513,8 @@ function Dashboard({ themeMode, setThemeMode }) {
         method: 'PATCH',
         body: JSON.stringify(credentialTarget.type === 'codex'
           ? { authJson: credentialValue }
+          : credentialTarget.type === 'claude'
+            ? (/^\s*\{/.test(credentialValue) ? { authJson: credentialValue } : { projectKey: credentialValue })
           : { projectKey: credentialValue })
       });
       setCredentialTarget(null);
@@ -761,6 +763,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                   <SegmentedControlItem value="all" label="All" />
                   <SegmentedControlItem value="codex" label="Codex" />
                   <SegmentedControlItem value="compass" label="Compass" />
+                  <SegmentedControlItem value="claude" label="Claude" />
                 </SegmentedControl>
               </StackItem>
               <StackItem size="fill">
@@ -784,8 +787,8 @@ function Dashboard({ themeMode, setThemeMode }) {
               <MetricSkeletons />
             ) : (
               <Grid columns={METRIC_GRID_COLUMNS} gap={2}>
-                {filterType !== 'compass' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
-                {filterType !== 'codex' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
+                {filterType !== 'compass' && filterType !== 'claude' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
+                {filterType !== 'codex' && filterType !== 'claude' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
                 <Metric label="Cooling down" value={stats.coolingDown} />
                 <Metric label="Reauth required" value={stats.reauth} />
                 <Metric label="Low quota (<30%)" value={stats.lowQuota} />
@@ -995,7 +998,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                     <VStack gap={3}>
                       <Selector
                         label="Type"
-                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }]}
+                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: 'Claude OAuth / API key' }]}
                         value={formValues.type}
                         onChange={(value) => updateForm('type', value)}
                         isDisabled={formDialog.mode === 'edit'}
@@ -1011,6 +1014,20 @@ function Dashboard({ themeMode, setThemeMode }) {
                           rows={20}
                           htmlName="authJson"
                         />
+                      ) : formValues.type === 'claude' ? (
+                        <VStack gap={2}>
+                          {formDialog.mode === 'add' && <TextInput label="Claude API key (optional)" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="sk-ant-api..." />}
+                          <TextArea
+                            label="Claude OAuth credentials (optional)"
+                            description="Paste a Claude OAuth token export, or use the API-key field above. The access_token is required for OAuth; refresh_token enables automatic renewal."
+                            value={formValues.authJson || ''}
+                            onChange={(value) => updateForm('authJson', value)}
+                            placeholder={'{"access_token":"sk-ant-oat...","refresh_token":"...","expires_at":"..."}'}
+                            rows={12}
+                            htmlName="authJson"
+                          />
+                          <Text type="supporting" color="secondary">OAuth uses Claude Code-compatible shaping and refresh. API keys use Anthropic's caller-owned Messages path.</Text>
+                        </VStack>
                       ) : formValues.type === 'compass' ? (
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
                           <TextInput label="Project ID" value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
@@ -1227,7 +1244,7 @@ function UpstreamCard({
   const tokenExpiry = upstream.type === 'compass'
     ? (compassUrl ? <a href={compassUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-text-link, inherit)', textDecoration: 'underline' }}>More Info</a> : 'No expiry')
     : upstream.accessTokenExpiresAt ? formatTokenExpiry(upstream.accessTokenExpiresAt) : 'Expiry unknown';
-  const expiresSoon = upstream.type === 'codex' && upstream.accessTokenExpiresAt && new Date(upstream.accessTokenExpiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000;
+  const expiresSoon = ['codex', 'claude'].includes(upstream.type) && upstream.accessTokenExpiresAt && new Date(upstream.accessTokenExpiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000;
   const capHeading = spending.capCredits > 0 ? `${formatPercent(spendingRemaining)} left` : 'No spending cap';
   const capUsage = spending.capCredits > 0
     ? `$${formatNumber(Math.max(0, (spending.capDollars || 0) - (spending.spentDollars || 0)))} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
@@ -1313,7 +1330,7 @@ function UpstreamCard({
             isDisabled={isTestingConnection}
             onClick={() => onTestConnection(upstream)}
           />
-          {upstream.type === 'codex' && (
+          {['codex', 'claude'].includes(upstream.type) && (
             <Button
               label="Refresh token"
               tooltip="Refresh token"
@@ -1416,6 +1433,16 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
                     rows={20}
                     htmlName="authJson"
                   />
+                ) : upstream?.type === 'claude' ? (
+                  <VStack gap={2}>
+                    <TextInput
+                      label="Claude API key or OAuth JSON"
+                      value={value}
+                      onChange={onValueChange}
+                      placeholder="sk-ant-api... or paste JSON"
+                    />
+                    <Text type="supporting" color="secondary">Paste a JSON OAuth export when replacing OAuth credentials; paste an sk-ant-api key for API-key authentication.</Text>
+                  </VStack>
                 ) : (
                   <TextInput
                     label="Project key"
@@ -1790,7 +1817,8 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
                     value={preferredType}
                     options={[
                       { value: 'codex', label: 'Codex' },
-                      { value: 'compass', label: 'Compass' }
+                      { value: 'compass', label: 'Compass' },
+                      { value: 'claude', label: 'Claude OAuth / API key' }
                     ]}
                     onChange={setPreferredType}
                   />
