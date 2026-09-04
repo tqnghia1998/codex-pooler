@@ -5,11 +5,42 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
+import { claudeRequestHeaders } from '../src/claude-protocol.js';
 
 function tempStore() {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-'));
   return { dir, store: new Store(dir) };
 }
+
+test('persists stabilized Claude device profiles without exposing them publicly', () => {
+  const { dir, store } = tempStore();
+  try {
+    const created = store.create({ type: 'claude', projectKey: 'sk-ant-api-device-profile-test', metadata: { fingerprint_profile: 'claude-code-cli' } });
+    const upstream = store.get(created.id);
+    const sessionId = '22222222-3333-4444-8555-666666666666';
+    const req = { headers: {
+      'user-agent': 'claude-cli/2.1.220 (external, claude-vscode, agent-sdk/0.3.220)',
+      'x-claude-code-session-id': sessionId,
+      'x-stainless-package-version': '0.94.0',
+      'x-stainless-runtime-version': 'v26.3.0',
+      'x-stainless-os': 'Windows',
+      'x-stainless-arch': 'x64',
+      'x-app': 'cli',
+      'anthropic-beta': 'claude-code-20250219'
+    }};
+    const body = { model: 'claude-sonnet-4', metadata: { user_id: JSON.stringify({ device_id: 'a'.repeat(64), account_uuid: '11111111-2222-4333-8444-555555555555', session_id: sessionId }) }, messages: [{ role: 'user', content: 'hello' }] };
+    claudeRequestHeaders({ req, body, credentials: { projectKey: 'sk-ant-api-device-profile-test' }, upstream, claudeConfig: { claudeHeaderDefaults: { stabilizeDeviceProfile: true } } });
+    assert.ok(upstream.claudeDeviceProfiles?.vscode);
+    assert.equal(store.persistClaudeDeviceProfiles(created.id, upstream.claudeDeviceProfiles), true);
+    assert.equal(store.getPublic(created.id).claudeDeviceProfiles, undefined);
+    store.sqlite.close();
+    const reopened = new Store(dir);
+    assert.equal(reopened.get(created.id).claudeDeviceProfiles.vscode.userAgent, req.headers['user-agent']);
+    reopened.sqlite.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('persists CRUD while keeping credentials out of public records', () => {
   const { dir, store } = tempStore();
@@ -322,6 +353,102 @@ test('persists account cooldowns, clears session affinity, and fences stale succ
     assert.equal(reopened.candidatePlan({ preferredType: 'compass', routeClass: 'proxy_http', now: now + 30_000 }).length, 0);
     assert.equal(reopened.clearUpstreamCooldown(upstream.id).health, null);
     assert.equal(reopened.candidatePlan({ preferredType: 'compass', routeClass: 'proxy_http', now: now + 30_000 }).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude disable_cooling prevents account quota cooldowns', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({ access_token: 'oauth-token', disable_cooling: true })
+    });
+    const admission = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-sonnet-4-6' });
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: true }, Date.now());
+    assert.equal(store.get(upstream.id).health, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude model-scoped cooldown blocks only the rejected model', () => {
+  const { dir, store } = tempStore();
+  const now = Date.parse('2026-08-15T00:00:00Z');
+  try {
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'claude@example.com' })
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const fable = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5' }, now);
+    store.settleUpstreamAttempt(upstream.id, fable, {
+      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5', retryAfter: '120'
+    }, now);
+
+    assert.equal(store.get(upstream.id).health, undefined);
+    assert.equal(store.get(upstream.id).modelHealth['claude-fable-5'].nextEligibleAt, new Date(now + 120_000).toISOString());
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5', now }).map(({ id }) => id), []);
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5(8192)', now }).map(({ id }) => id), []);
+    assert.deepEqual(store.candidatePlan({ model: 'claude-opus-5', now }).map(({ id }) => id), [upstream.id]);
+    assert.equal(store.candidatePlanDetails({ model: 'claude-fable-5', now }).diagnostics.exclusions[0].code, 'upstream_model_cooldown');
+
+    const sonnet = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-sonnet-5' }, now);
+    store.settleUpstreamAttempt(upstream.id, sonnet, {
+      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-sonnet-5', resetAt: String(now + 7 * 24 * 60 * 60_000)
+    }, now);
+    const sonnetNext = Date.parse(store.get(upstream.id).modelHealth['claude-sonnet-5'].nextEligibleAt);
+    assert.ok(sonnetNext <= now + 15 * 60_000);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude model prefixes namespace credential routing', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'prefixed@example.com', prefix: 'team-a' })
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    assert.deepEqual(store.candidatePlan({ model: 'team-a/claude-sonnet-5' }).map(({ id }) => id), [upstream.id]);
+    assert.deepEqual(store.candidatePlan({ model: 'team-b/claude-sonnet-5' }), []);
+    assert.deepEqual(store.candidatePlan({ model: 'claude-sonnet-5' }).map(({ id }) => id), [upstream.id]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude routing model restrictions accept thinking suffixes', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'suffix-routing@example.com' }),
+      routing: { models: ['claude-sonnet-5'] }
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    assert.deepEqual(store.candidatePlan({ model: 'claude-sonnet-5(8192)' }).map(({ id }) => id), [upstream.id]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Claude routing model restrictions accept OAuth aliases from global config', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({ access_token: 'sk-ant-oat-no-exp-claim', email: 'alias-routing@example.com' }),
+      routing: { models: ['claude-sonnet-5'] }
+    });
+    store.configureClaudeRuntime({
+      oauthModelAlias: { claude: [{ name: 'claude-sonnet-5', alias: 'team-sonnet' }] }
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    assert.deepEqual(store.candidatePlan({ model: 'team-sonnet' }).map(({ id }) => id), [upstream.id]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

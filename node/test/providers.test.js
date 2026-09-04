@@ -95,6 +95,43 @@ test('coalesces concurrent Codex token refreshes for one upstream', async () => 
   assert.equal(second.refreshToken, 'shared-refresh');
 });
 
+test('retries transient Claude OAuth refresh failures and refreshes advisory identity', async () => {
+  const requests = [];
+  const fetchImpl = async (url) => {
+    requests.push(url);
+    if (url === 'https://platform.claude.com/v1/oauth/token') {
+      if (requests.filter((candidate) => candidate === url).length === 1) return new Response('{}', { status: 503 });
+      return new Response(JSON.stringify({ access_token: 'claude-new-access', refresh_token: 'claude-new-refresh', expires_in: 3600 }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ account: { uuid: 'account-after-refresh', email: 'refreshed@example.com' }, organization: { uuid: 'org-after-refresh', name: 'Refreshed Org' } }), { status: 200 });
+  };
+  const upstream = { id: 'claude-refresh-retry', type: 'claude', accessTokenExpiresAt: new Date(Date.now() - 1_000).toISOString() };
+  const credentials = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-retry-token' };
+  await ensureProviderCredentials(upstream, credentials, { fetchImpl });
+  assert.deepEqual(requests, [
+    'https://platform.claude.com/v1/oauth/token',
+    'https://platform.claude.com/v1/oauth/token',
+    'https://api.anthropic.com/api/oauth/profile'
+  ]);
+  assert.equal(credentials.accessToken, 'claude-new-access');
+  assert.equal(upstream.accountId, 'account-after-refresh');
+  assert.equal(upstream.email, 'refreshed@example.com');
+});
+
+test('blocks repeated Claude OAuth refresh attempts after a 429', async () => {
+  let refreshCalls = 0;
+  const fetchImpl = async () => {
+    refreshCalls += 1;
+    return new Response('{}', { status: 429, headers: { 'retry-after': '60' } });
+  };
+  const upstream = { id: 'claude-refresh-429', type: 'claude', accessTokenExpiresAt: new Date(Date.now() - 1_000).toISOString() };
+  const first = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-429-token' };
+  const second = { accessToken: 'claude-old-access', refreshToken: 'claude-refresh-429-token' };
+  await assert.rejects(ensureProviderCredentials(upstream, first, { fetchImpl }), (error) => error.statusCode === 429);
+  await assert.rejects(ensureProviderCredentials(upstream, second, { fetchImpl }), (error) => error.statusCode === 429);
+  assert.equal(refreshCalls, 1);
+});
+
 test('does not attempt AISwitch quota refresh without its SSO session', async () => {
   await assert.rejects(
     refreshQuota({ type: 'compass', projectId: 'aiswitch', projectKey: 'key', quotaSource: 'aiswitch' }, {}, { fetchImpl: async () => { throw new Error('must not fetch'); } }),
