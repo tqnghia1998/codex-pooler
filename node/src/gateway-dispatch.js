@@ -36,6 +36,7 @@ export async function dispatchGatewayRequest({
   codexHostHealth,
   modelCatalog,
   claudeConfig,
+  codexOptions,
   sendJson,
   handleUsage
 }) {
@@ -77,7 +78,8 @@ export async function dispatchGatewayRequest({
       upstreamDeadlines,
       logger,
       codexHostHealth,
-      claudeConfig
+      claudeConfig,
+      codexOptions
     });
     return;
   }

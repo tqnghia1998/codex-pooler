@@ -30,6 +30,7 @@ import {
   testUpstreamConnection,
   validProxyApiKey
 } from './proxy.js';
+import { codexGatewayOptions } from './codex-compatibility.js';
 
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
@@ -41,6 +42,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
   store.configureClaudeRuntime?.(claudeConfig);
   store.configureApiKey(apiKey);
   const admission = admissionPolicy(ingress);
+  const codexOptions = codexGatewayOptions(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const upstreamPacer = upstreamPacerForStore(store);
   const compatibilityLearning = compatibilityLearningForStore(store);
@@ -97,6 +99,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           codexHostHealth,
           modelCatalog,
           claudeConfig,
+          codexOptions,
           sendJson,
           handleUsage: () => {
             const parameter = url.searchParams.keys().next().value;
@@ -152,7 +155,7 @@ export function start(port = Number(process.env.PORT) || 3000, {
   const upstreamPacer = upstreamPacerForStore(store);
   const modelCatalog = modelCatalogForStore(store);
   const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress, codexHostHealth, readiness, claudeConfig }));
-  attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress, codexHostHealth });
+  attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress, codexHostHealth, codexOptions: codexGatewayOptions(ingress) });
   let polling = false;
   const poll = async () => {
     if (polling) return;
