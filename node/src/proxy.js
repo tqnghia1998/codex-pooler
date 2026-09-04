@@ -652,6 +652,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   }
   const plan = store.candidatePlanDetails({
     affinityId: pinnedId,
+    ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown),
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
     requiredType: path === '/v1/messages/count_tokens' ? 'claude' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
@@ -682,7 +683,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
 }
 
 async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false, claudeConfig = null, codexOptions = codexGatewayOptions() }) {
-  const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http' };
+  const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http', ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) };
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
   let codexHostBlocked = false;
@@ -716,7 +717,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         startedAt,
         response: new Response(null, { status: 429 }),
         admission: null,
-        failureCode: 'share_quota_in_flight'
+        failureCode: 'share_session_exhausted'
       };
       continue;
     }
@@ -2219,7 +2220,7 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   }
   const upstream = chooseRawUpstream(store, req);
   if (!upstream) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
-  const scope = { model: '', routeClass: 'raw_native' };
+  const scope = { model: '', routeClass: 'raw_native', ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) };
   let admission = store.beginUpstreamAttempt(upstream.id, scope);
   if (!admission) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
   const credentials = store.credentials(upstream.id);
@@ -2230,8 +2231,8 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
     sendJson(res, 429, {
       error: {
         type: 'rate_limit_error',
-        code: 'share_quota_in_flight',
-        message: 'This share session is already serving a request'
+        code: 'share_session_exhausted',
+        message: 'The share session quota is exhausted'
       }
     });
     return;
@@ -2424,6 +2425,7 @@ function chooseRawUpstream(store, req) {
   const requestedId = sharedUpstreamId || headerRequestedId;
   const candidates = store.candidatePlan({
     affinityId: pinnedId,
+    ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown),
     requestedId,
     preferredType: 'codex',
     requiredType: 'codex',
@@ -2552,7 +2554,7 @@ export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
 
-export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null, codexOptions = codexGatewayOptions(ingress) } = {}) {
+export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, ignoreQuotaCooldown = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null, codexOptions = codexGatewayOptions(ingress) } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const wss = new WebSocketServer({ noServer: true, maxPayload: codexOptions.websocketFrameBytes });
@@ -2579,6 +2581,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
       req.proxyAuth = auth;
       req.sharingStore = sharingStore;
       req.upstreamStore = store;
+      req.ignoreQuotaCooldown = ignoreQuotaCooldown;
       const denial = shareSessionDenial(req.proxyAuth);
       if (denial) {
         socket.write(`HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n${JSON.stringify({ error: { type: 'permission_error', ...denial } })}`);
@@ -2609,7 +2612,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   wss.on('connection', (client, req) => {
     if (beforeSend) deferWebSocketSends(client, beforeSend);
-    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing, ignoreQuotaCooldown);
   });
   return wss;
 }
@@ -2626,7 +2629,7 @@ function deferWebSocketSends(client, beforeSend) {
   };
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false, ignoreQuotaCooldown = false) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
@@ -2663,7 +2666,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let turnCandidates = [];
   let turnCandidateIndex = 0;
   let publicAdmission = null;
-  const nativeCircuitScope = { model: '', routeClass: 'raw_native' };
+  const nativeCircuitScope = { model: '', routeClass: 'raw_native', ignoreQuotaCooldown: Boolean(ignoreQuotaCooldown) };
   let nativeConnectionAdmission = null;
   let nativeAdmission = null;
   const pending = [];
@@ -2702,7 +2705,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
   const renewPublicAdmission = (candidate) => {
     settlePublicAdmission({ class: 'neutral', retryable: false });
-    const scope = { model: publicPayload?.model, routeClass: 'proxy_stream' };
+    const scope = { model: publicPayload?.model, routeClass: 'proxy_stream', ignoreQuotaCooldown: Boolean(ignoreQuotaCooldown) };
     const admission = store.beginUpstreamAttempt(candidate.id, scope);
     if (!admission) return false;
     publicAdmission = { upstreamId: candidate.id, admission };
@@ -2922,7 +2925,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         })) {
           nativeAttempt = null;
           nativePayload = null;
-          return client.close(1013, 'Shared quota is already serving another request');
+          return client.close(1008, 'The share session quota is exhausted');
         }
       }
     }
@@ -2944,7 +2947,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         const compactionBridge = prepareCompactionTriggerBridge('/v1/responses', payload);
         if (compactionBridge?.error) throw new AdapterError(compactionBridge.error.message, compactionBridge.error.param);
         turnCandidates = chooseUpstreams(store, req, '/v1/responses', payload, '/v1/responses', modelCatalog).map((entry) => store.get(entry.id, requestScopeId(req))).filter((entry) => entry?.type === 'codex');
-        const acquired = acquirePublicCandidate(0, { model: payload.model, routeClass: 'proxy_stream' });
+        const acquired = acquirePublicCandidate(0, { model: payload.model, routeClass: 'proxy_stream', ignoreQuotaCooldown: Boolean(ignoreQuotaCooldown) });
         if (!acquired) throw new AdapterError('No eligible Codex upstream');
         const candidate = activatePublicCandidate(acquired);
         if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionId })) throw new AdapterError('No eligible Codex upstream');
@@ -2959,8 +2962,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           settlePublicAdmission({ class: 'neutral', retryable: false });
           return publicWebSocketFailure(
             client,
-            'share_quota_in_flight',
-            'This share session is already serving a request',
+            'share_session_exhausted',
+            'The share session quota is exhausted',
             0,
             streamId,
             null,
@@ -3083,7 +3086,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   const retryPublicTurn = (outcome = { class: 'transient', retryable: true }) => {
     if (!publicResponses || !publicTurnActive || publicOutput || retriedTurn || !activeFrame || outcome.requestScoped) return false;
     settlePublicAdmission(outcome);
-    const acquired = acquirePublicCandidate(turnCandidateIndex + 1, { model: publicPayload.model, routeClass: 'proxy_stream' });
+    const acquired = acquirePublicCandidate(turnCandidateIndex + 1, { model: publicPayload.model, routeClass: 'proxy_stream', ignoreQuotaCooldown: Boolean(ignoreQuotaCooldown) });
     if (!acquired) return false;
     retryGatewayAttempt(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_websocket_retryable_failure' });
     retriedTurn = true;
@@ -3101,8 +3104,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       : { id: randomUUID(), startedAt: new Date().toISOString() };
     if (!reserveShareRequest(req, publicAttempt.id, { model: publicPayload.model, route: '/v1/responses' })) {
       failActiveTurn(
-        'share_quota_in_flight',
-        'No shared quota is currently available for this request',
+        'share_session_exhausted',
+        'The share session quota is exhausted',
         { class: 'neutral', retryable: false }
       );
       return true;

@@ -393,6 +393,12 @@ test('Claude model-scoped cooldown blocks only the rejected model', () => {
     assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5(8192)', now }).map(({ id }) => id), []);
     assert.deepEqual(store.candidatePlan({ model: 'claude-opus-5', now }).map(({ id }) => id), [upstream.id]);
     assert.equal(store.candidatePlanDetails({ model: 'claude-fable-5', now }).diagnostics.exclusions[0].code, 'upstream_model_cooldown');
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5', ignoreQuotaCooldown: true, now }).map(({ id }) => id), [upstream.id]);
+    const retry = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5', ignoreQuotaCooldown: true }, now);
+    store.settleUpstreamAttempt(upstream.id, retry, {
+      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5', retryAfter: '120'
+    }, now);
+    assert.equal(store.get(upstream.id).modelHealth, undefined);
 
     const sonnet = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-sonnet-5' }, now);
     store.settleUpstreamAttempt(upstream.id, sonnet, {
