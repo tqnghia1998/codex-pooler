@@ -91,7 +91,7 @@ When a provider's Codex credentials need reauthentication, its quota card shows
 the affected state and offers both sign-in and `auth.json` import actions.
 Offers, pending tickets, and share sessions show a sanitized provider issue to
 both providers and consumers when the provider needs reauthentication, has a
-token-refresh failure, is in cooldown, or has exhausted its provider quota.
+token-refresh failure, or has exhausted its provider quota.
 
 After signing in, a user can also add an AISwitch project by entering its
 project ID and project key. AISwitch does not expose a quota query to this
@@ -114,7 +114,9 @@ AISwitch project** guide to retrieve `project_id` and `api_key` from Compass.
 4. Approval atomically creates a share session and a `cp_share_...` key.
 5. The consumer can instead reveal one `cp_personal_...` key that routes each
    request across their active share sessions.
-6. Successful priced usage is settled against the grant.
+6. Successful priced usage is settled against the grant. Codex Share does not pace
+requests, serialize active requests for a share session, or locally cool down a
+provider after a quota response; the provider and settled grant remain authoritative.
 
 Every new Codex Share account receives a `Default` personal key automatically.
 Its secret is encrypted at rest and can be revealed or rotated from the

@@ -680,7 +680,7 @@ export class Store {
     };
   }
 
-  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
+  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
     const db = this.load();
     const selectedStrategy = normalizeRoutingStrategy(strategy ?? db.routingPolicy?.strategy);
     const upstreams = scoped(db.upstreams, scopeId);
@@ -693,7 +693,7 @@ export class Store {
       for (const upstream of upstreams) exclude(upstream, 'scope_model_not_allowed');
       return routingPlanResult([], selectedStrategy, exclusions, now);
     }
-    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now);
+    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now, ignoreQuotaCooldown);
     for (const item of eligibility.exclusions) {
       exclude(upstreams.find((upstream) => upstream.id === item.id), item.code);
     }
@@ -704,7 +704,7 @@ export class Store {
     else if (pinnedId) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id === pinnedId, exclude, 'not_affinity_selected');
     if (requiredType) candidates = filterRoutingCandidates(candidates, (upstream) => upstream.type === requiredType, exclude, 'required_type_mismatch');
     candidates = candidates.filter((upstream) => {
-      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now, claudeConfig: this.claudeRuntimeConfig });
+      const code = candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig: this.claudeRuntimeConfig });
       if (code) exclude(upstream, code);
       return !code;
     });
@@ -733,6 +733,11 @@ export class Store {
     const upstream = findOrThrow(db, id);
     let health = upstream.health || {};
     let generation = Math.max(0, Number(health.generation ?? upstream.healthGeneration) || 0);
+    if (scope?.ignoreQuotaCooldown && health.status === 'cooldown') {
+      upstream.healthGeneration = ++generation;
+      delete upstream.health;
+      health = {};
+    }
     const nextEligibleAt = Date.parse(health.nextEligibleAt);
     let accountProbe = false;
     if (health.status === 'reauth_required') return null;
@@ -752,13 +757,15 @@ export class Store {
       accountProbe = true;
       upstream.health = { ...health, probeInFlight: true, lastProbeAt: new Date(now).toISOString() };
     }
-    if (upstream.type === 'claude' && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig) && modelCooldownBlocks(upstream, scope?.model, now)) return null;
+    if (scope?.ignoreQuotaCooldown) deleteModelCooldown(upstream, scope.model);
+    if (upstream.type === 'claude' && !scope?.ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig) && modelCooldownBlocks(upstream, scope?.model, now)) return null;
     const circuitLease = beginCircuitLease(upstream, scope, now);
     if (!circuitLease) return null;
     this.save(db);
     return {
       accountGeneration: generation,
       accountProbe,
+      ignoreQuotaCooldown: Boolean(scope?.ignoreQuotaCooldown),
       circuitGeneration: circuitLease.generation,
       scope: { ...scope }
     };
@@ -773,12 +780,12 @@ export class Store {
     const accountCurrent = admission.accountGeneration === accountGeneration;
     const model = normalizeModelKey(outcome.model || admission.scope?.model);
     if (outcome.modelScoped && upstream.type === 'claude' && model) {
-      if (claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) deleteModelCooldown(upstream, model);
+      if (admission.ignoreQuotaCooldown || claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) deleteModelCooldown(upstream, model);
       else setModelCooldown(upstream, model, quotaCooldown(outcome, now), now);
       if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
       releaseCircuitLease(upstream, admission, now);
     } else if (outcome.class === 'quota') {
-      if (accountCurrent && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) {
+      if (accountCurrent && !admission.ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig)) {
         const cooldown = quotaCooldown(outcome, now);
         upstream.health = {
           status: 'cooldown',
@@ -1191,11 +1198,11 @@ function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
 }
 
-function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now()) {
+function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false) {
   for (const upstream of upstreams) ensureSpending(upstream);
   const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
     || upstream.health?.status === 'reauth_required'
-    || accountCooldownBlocks(upstream.health, now));
+    || !ignoreQuotaCooldown && accountCooldownBlocks(upstream.health, now));
   const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId });
   return {
     ...result,
@@ -1414,9 +1421,9 @@ function filterRoutingCandidates(candidates, predicate, exclude, code) {
   return kept;
 }
 
-function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, modelSupport, routeClass, now, claudeConfig = null }) {
+function candidateExclusionCode(upstream, model, requirements, { ignoreModelRestrictions, ignoreQuotaCooldown, modelSupport, routeClass, now, claudeConfig = null }) {
   if (upstream.type === 'claude' && !ignoreModelRestrictions && claudeModelPrefixMismatch(upstream, model)) return 'upstream_model_prefix_mismatch';
-  if (!claudeCoolingDisabled(upstream, claudeConfig) && modelCooldownBlocks(upstream, model, now)) return 'upstream_model_cooldown';
+  if (!ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, claudeConfig) && modelCooldownBlocks(upstream, model, now)) return 'upstream_model_cooldown';
   if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions, claudeConfig })) {
     const routing = normalizeRouting(upstream.routing);
     const modelNotAllowed = routing.models.length && !(upstream.type === 'claude'
