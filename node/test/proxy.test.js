@@ -1623,6 +1623,50 @@ test('fails over only an initial retryable SSE terminal event', async () => {
   }
 });
 
+test('fails over Codex overloads delivered after the SSE handshake when bootstrap buffering is enabled', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-bootstrap-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-bootstrap@example.com', accountId: 'first-bootstrap' }));
+  const second = store.create(codexInput({ email: 'second-bootstrap@example.com', accountId: 'second-bootstrap' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"overloaded","status":"in_progress"}}',
+        'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"overloaded","status":"in_progress"}}',
+        'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}', ''
+      ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"bootstrap-fallback","status":"completed","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    ingress: { streamBootstrapBuffering: true, streamBootstrapTimeoutMs: 500 }
+  });
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'bootstrap', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(text, /bootstrap-fallback/);
+    assert.doesNotMatch(text, /server_is_overloaded/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sanitizes committed public SSE failures without replaying another upstream', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-sanitized-failure-'));
   const store = new Store(dir);

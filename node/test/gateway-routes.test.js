@@ -1835,8 +1835,9 @@ test('recovers a reusable public WebSocket after a post-output interruption', as
 test('closes oversized public WebSocket frames with code 1009', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-frame-limit-'));
   const { store } = configuredStore(dir);
-  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
-  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') });
+  const ingress = { websocketFrameBytes: 2 * 1024 * 1024 };
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}'), ingress }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl: async () => new Response('{}'), ingress });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   try {
     const code = await new Promise((resolve, reject) => {
@@ -1849,6 +1850,83 @@ test('closes oversized public WebSocket frames with code 1009', async () => {
   } finally {
     relay.close();
     await close(gateway);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sends configured WebSocket keepalive pings to the Codex upstream', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-keepalive-'));
+  const { store } = configuredStore(dir);
+  let pings = 0;
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => socket.on('ping', () => { pings += 1; }));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const ingress = { websocketKeepAliveMs: 20, websocketIdleMs: 1_000 };
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, ingress, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    ingress,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: `Bearer ${API_KEY}` } });
+      client.once('open', () => {
+        client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'keepalive' }));
+        setTimeout(() => client.close(), 90);
+      });
+      client.once('close', resolve);
+      client.once('error', reject);
+    });
+    assert.ok(pings >= 2, `expected at least two upstream pings, got ${pings}`);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns upstream WebSocket message-too-large as a request error without failover', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-upstream-1009-'));
+  const { store } = configuredStore(dir);
+  let connections = 0;
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => {
+    connections += 1;
+    socket.once('message', () => socket.close(1009, 'message too big'));
+  });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const error = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: `Bearer ${API_KEY}` } });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'too-big' })));
+      client.on('message', (data) => {
+        const message = JSON.parse(data);
+        if (message.type !== 'error') return;
+        client.close();
+        resolve(message);
+      });
+      client.once('error', reject);
+    });
+    assert.equal(error.error.code, 'request_too_large');
+    assert.equal(error.status, 413);
+    assert.equal(connections, 1);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
     rmSync(dir, { recursive: true, force: true });
   }
 });
