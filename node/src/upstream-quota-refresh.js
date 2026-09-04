@@ -9,12 +9,14 @@ export async function refreshUpstreamQuota(store, id, { notify = true, ...option
     ...options,
     saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
   });
+  if (quota === upstream.quota) return store.getPublic(id);
   return store.setQuota(id, quota, { notify });
 }
 
 export async function refreshAllUpstreamQuotas(store, {
   shouldRefresh = () => true,
   skippedResult = () => null,
+  beforeRefresh = null,
   ...options
 } = {}) {
   const upstreams = store.list();
@@ -24,6 +26,7 @@ export async function refreshAllUpstreamQuotas(store, {
       const upstream = store.get(id);
       if (!upstream) return null;
       if (!shouldRefresh(upstream)) return skippedResult(upstream);
+      await beforeRefresh?.(upstream);
       await refreshUpstreamQuota(store, id, { ...options, notify: false });
       return { status: 'refreshed', id };
     })));

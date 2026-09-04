@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { codexRefreshFailureCode, codexRefreshFailureDetail, ensureProviderCredentials, refreshQuota } from '../src/providers.js';
+import { CLAUDE_OAUTH_USAGE_URL, codexRefreshFailureCode, codexRefreshFailureDetail, ensureProviderCredentials, refreshQuota } from '../src/providers.js';
 
 test('classifies invalidated Codex refresh tokens as requiring reauthentication', () => {
   assert.equal(codexRefreshFailureCode({ providerBody: { error: { code: 'refresh_token_invalidated' } } }), 'reauth_required');
@@ -130,6 +130,31 @@ test('blocks repeated Claude OAuth refresh attempts after a 429', async () => {
   await assert.rejects(ensureProviderCredentials(upstream, first, { fetchImpl }), (error) => error.statusCode === 429);
   await assert.rejects(ensureProviderCredentials(upstream, second, { fetchImpl }), (error) => error.statusCode === 429);
   assert.equal(refreshCalls, 1);
+});
+
+test('keeps the last known Claude quota when the header probe is rate limited', async () => {
+  const quota = { remainingPercent: 70, source: 'claude_oauth_headers', observedAt: new Date(0).toISOString() };
+  const upstream = {
+    id: 'claude-quota-rate-limited',
+    type: 'claude',
+    baseUrl: 'https://api.anthropic.com',
+    metadata: { auth_kind: 'oauth' },
+    quota
+  };
+  let messagesCalls = 0;
+  const options = {
+    force: false,
+    fetchImpl: async (url) => {
+      if (url === CLAUDE_OAUTH_USAGE_URL) return new Response(JSON.stringify({ error: { details: { required_scopes: ['user:profile'], error_code: 'oauth_scope_insufficient' } } }), { status: 403 });
+      messagesCalls += 1;
+      return new Response(JSON.stringify({ error: { type: 'rate_limit_error', message: 'Rate limited' } }), { status: 429, headers: { 'retry-after': '600' } });
+    }
+  };
+  const result = await refreshQuota(upstream, { accessToken: 'sk-ant-oat-quota-rate-limited' }, options);
+  const repeated = await refreshQuota(upstream, { accessToken: 'sk-ant-oat-quota-rate-limited' }, options);
+  assert.equal(result, quota);
+  assert.equal(repeated, quota);
+  assert.equal(messagesCalls, 1);
 });
 
 test('does not attempt AISwitch quota refresh without its SSO session', async () => {
