@@ -703,7 +703,7 @@ test('a provider can test only its own linked Codex connection', async () => {
         }
         if (path === '/backend-api/codex/responses') {
           return new Response(
-            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"pool-response-test","status":"completed","model":"gpt-5.6-luna","output":[]}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"pool-response-test","status":"completed","model":"gpt-5.6-luna","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The current time is now."}]}]}}\n\n',
             { headers: { 'content-type': 'text/event-stream' } }
           );
         }
@@ -720,6 +720,7 @@ test('a provider can test only its own linked Codex connection', async () => {
       assert.equal(result.response.status, 200);
       assert.equal(result.body.connection.endpoint, '/v1/responses');
       assert.equal(result.body.connection.model, 'gpt-5.6-luna');
+      assert.equal(result.body.connection.answer, 'The current time is now.');
 
       const providerRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
       const body = JSON.parse(providerRequest.options.body);
@@ -795,7 +796,7 @@ test('a consumer can test a My Access session through its shared quota', async (
         }
         if (path === '/backend-api/codex/responses') {
           return new Response(
-            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"shared-session-test","status":"completed","model":"gpt-5.6-luna","output":[],"usage":{"input_tokens":5,"output_tokens":1,"price_cost_usd":"0.25"}}}\n\n',
+            'event: response.completed\ndata: {"type":"response.completed","response":{"id":"shared-session-test","status":"completed","model":"gpt-5.6-luna","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"The current time is now."}]}],"usage":{"input_tokens":5,"output_tokens":1,"price_cost_usd":"0.25"}}}\n\n',
             { headers: { 'content-type': 'text/event-stream' } }
           );
         }
@@ -812,6 +813,7 @@ test('a consumer can test a My Access session through its shared quota', async (
       assert.equal(result.response.status, 200);
       assert.equal(result.body.connection.endpoint, '/v1/responses');
       assert.equal(result.body.connection.model, 'gpt-5.6-luna');
+      assert.equal(result.body.connection.answer, 'The current time is now.');
 
       const providerRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
       const body = JSON.parse(providerRequest.options.body);
