@@ -3,7 +3,7 @@ import {
   CLAUDE_OAUTH_AUTH_URL,
   CLAUDE_OAUTH_CLIENT_ID,
   CLAUDE_OAUTH_PROFILE_URL,
-  CLAUDE_OAUTH_USAGE_URL,
+  CLAUDE_OAUTH_ROLES_URL,
   CLAUDE_OAUTH_REDIRECT_URI,
   CLAUDE_OAUTH_SCOPE,
   CLAUDE_OAUTH_TOKEN_URL
@@ -15,11 +15,6 @@ import { claudeProxyDispatcher } from './claude-transport.js';
 const PENDING_LOGIN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_LOGINS = 1_024;
 const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_CLAUDE_CODE_VERSION = '2.1.260';
-const configuredClaudeCodeVersion = process.env.CODEX_POOLER_CLAUDE_CODE_VERSION;
-const CLAUDE_CODE_VERSION = /^\d+\.\d+\.\d+$/.test(configuredClaudeCodeVersion || '')
-  ? configuredClaudeCodeVersion
-  : DEFAULT_CLAUDE_CODE_VERSION;
 
 export class ClaudeOAuthBroker {
   constructor({ store, fetchImpl = globalThis.fetch, proxyUrl = '' } = {}) {
@@ -66,10 +61,14 @@ export class ClaudeOAuthBroker {
     if (token.accessToken) {
       try {
         profile = await fetchProfile(token.accessToken, this.fetchImpl, { proxyUrl: this.proxyUrl });
-      } catch (error) {
-        if (!isAdvisoryLookupError(error)) throw error;
+      } catch {
         // The token exchange is authoritative. Profile lookup is advisory and
         // can fail independently when the control-plane endpoint is degraded.
+      }
+      try {
+        await fetchRoles(token.accessToken, this.fetchImpl, { proxyUrl: this.proxyUrl });
+      } catch {
+        // Roles are advisory login metadata, just like the profile lookup.
       }
     }
     const upstream = this.store.create({
@@ -114,7 +113,7 @@ export async function exchangeCode({ code, state, verifier, fetchImpl = globalTh
       state: clean(state)
     })
   }, fetchImpl, proxyUrl);
-  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth code exchange failed', response.headers);
+  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth code exchange failed');
   return parseClaudeAuthJson(body);
 }
 
@@ -129,23 +128,22 @@ export async function fetchProfile(accessToken, fetchImpl = globalThis.fetch, { 
       connection: 'close'
     }
   }, fetchImpl, proxyUrl);
-  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth profile lookup failed', response.headers);
+  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth profile lookup failed');
   return body;
 }
 
-export async function fetchClaudeUsage(accessToken, fetchImpl = globalThis.fetch, { proxyUrl = '' } = {}) {
-  const { response, body } = await fetchClaudeOAuth(CLAUDE_OAUTH_USAGE_URL, {
+export async function fetchRoles(accessToken, fetchImpl = globalThis.fetch, { proxyUrl = '' } = {}) {
+  const { response, body } = await fetchClaudeOAuth(CLAUDE_OAUTH_ROLES_URL, {
     headers: {
       accept: 'application/json, text/plain, */*',
       authorization: `Bearer ${clean(accessToken)}`,
-      'content-type': 'application/json',
-      'user-agent': `claude-code/${CLAUDE_CODE_VERSION}`,
-      'anthropic-beta': 'oauth-2025-04-20',
+      'user-agent': 'axios/1.15.2',
+      'accept-encoding': 'gzip, compress, deflate, br',
       'cache-control': 'no-cache',
       connection: 'close'
     }
   }, fetchImpl, proxyUrl);
-  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth usage lookup failed', response.headers);
+  if (!response.ok) throw providerError(response.status, body, 'Claude OAuth roles lookup failed');
   return body;
 }
 
@@ -181,12 +179,10 @@ async function responseJson(response) {
   }
 }
 
-function providerError(status, body, message, headers = null) {
+function providerError(status, body, message) {
   const error = new Error(message);
   error.statusCode = status;
   error.providerBody = body;
-  const retryAfter = headers?.get?.('retry-after');
-  if (typeof retryAfter === 'string' && retryAfter.trim()) error.retryAfter = retryAfter.trim();
   return error;
 }
 
@@ -198,8 +194,4 @@ function oauthError(statusCode, message) {
 
 function clean(value) {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function isAdvisoryLookupError(error) {
-  return Number.isInteger(error?.statusCode) || error?.name === 'AbortError' || error instanceof TypeError;
 }

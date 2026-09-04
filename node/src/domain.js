@@ -3,12 +3,13 @@ import { OPENAI_MODEL_IDS } from './openai-pricing-snapshot.js';
 
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com';
 export const DEFAULT_COMPASS_BASE_URL = 'https://compass.llm.shopee.io/compass-api/v1';
+export const DEFAULT_CLAUDE_BASE_URL = 'https://api.anthropic.com';
 export const STATIC_MODEL_CATALOG = Object.freeze([
   ...OPENAI_MODEL_IDS,
   'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5',
   'glm-5.3-flash', 'kimi-k3'
 ].map((id) => Object.freeze({ id, object: 'model', owned_by: id.startsWith('claude-') ? 'compass' : 'codex' })));
-export const SUPPORTED_TYPES = new Set(['codex', 'compass']);
+export const SUPPORTED_TYPES = new Set(['codex', 'compass', 'claude']);
 export const CREDITS_PER_DOLLAR = 25;
 export const MICROS_PER_CREDIT = 40_000;
 const MONTH_SECONDS = 27 * 24 * 60 * 60;
@@ -54,8 +55,135 @@ export function normalizeBaseUrl(value, fallback) {
   return text(value || fallback).replace(/\/+$/, '').replace(/\/backend-api$/, '');
 }
 
+// Claude/CPA credentials may target an Anthropic-compatible gateway. Keep the
+// URL operator-controlled, but do not let malformed values turn into an
+// accidental fetch target. The Claude executor appends /v1/messages itself.
+export function normalizeClaudeBaseUrl(value, fallback = DEFAULT_CLAUDE_BASE_URL) {
+  const normalized = normalizeBaseUrl(value, fallback);
+  try {
+    const parsed = new URL(normalized);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error('invalid Claude base URL');
+    }
+    return normalized;
+  } catch {
+    return normalizeBaseUrl(fallback, DEFAULT_CLAUDE_BASE_URL);
+  }
+}
+
+export function claudeMetadataModelExcluded(upstream, model, claudeConfig = null) {
+  if (upstream?.type !== 'claude') return false;
+  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  const raw = metadata.excluded_models ?? metadata['excluded-models'];
+  const excluded = Array.isArray(raw)
+    ? raw
+    : typeof raw === 'string' ? raw.split(',') : [];
+  const requested = text(model).toLowerCase();
+  if (!requested) return false;
+  const requestedVariants = claudeModelNameVariants(requested);
+  if (excluded.some((value) => intersectsClaudeModelVariants(requestedVariants, value))) return true;
+  const aliasesRaw = metadata.model_aliases ?? metadata['model-aliases'];
+  let aliases = aliasesRaw;
+  if (typeof aliasesRaw === 'string') {
+    try { aliases = JSON.parse(aliasesRaw); } catch { aliases = []; }
+  }
+  if (Array.isArray(aliases)) {
+    const target = aliases.find((entry) => entry && intersectsClaudeModelVariants(requestedVariants, entry.alias));
+    if (target && excluded.some((value) => intersectsClaudeModelVariants(claudeModelNameVariants(target.name), value))) return true;
+  }
+  if (!isClaudeOAuthUpstream(upstream)) return false;
+  const globalExcluded = claudeConfig?.oauthExcludedModels ?? claudeConfig?.['oauth-excluded-models'];
+  const values = globalExcluded && typeof globalExcluded === 'object' && !Array.isArray(globalExcluded)
+    ? globalExcluded.claude ?? globalExcluded.anthropic ?? []
+    : [];
+  const globalList = Array.isArray(values) ? values : typeof values === 'string' ? values.split(',') : [];
+  return globalList.some((value) => intersectsClaudeModelVariants(requestedVariants, value));
+}
+
+export function isClaudeOAuthUpstream(upstream) {
+  if (upstream?.type !== 'claude') return false;
+  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  const kind = String(metadata.auth_kind || metadata['auth-kind'] || metadata.auth_mode || '').toLowerCase();
+  return upstream.accessTokenExpiresAt !== null && upstream.accessTokenExpiresAt !== undefined
+    || ['oauth', 'claude_oauth', 'oauth_token'].includes(kind);
+}
+
+export function claudeModelNameVariants(value) {
+  const normalized = text(value).toLowerCase();
+  if (!normalized) return [];
+  const match = /^(.*)\(([^()]*)\)$/.exec(normalized);
+  return match && match[1] ? [normalized, match[1]] : [normalized];
+}
+
+function intersectsClaudeModelVariants(variants, value) {
+  const candidate = claudeModelNameVariants(value);
+  return candidate.some((item) => variants.some((variant) => matchClaudeWildcard(item, variant) || matchClaudeWildcard(variant, item)));
+}
+
+// CPA treats excluded-model entries as case-insensitive patterns where '*'
+// matches any substring. Keep matching local and bounded; these values are
+// operator configuration, not regular expressions.
+function matchClaudeWildcard(pattern, value) {
+  if (!pattern || !value) return false;
+  if (!pattern.includes('*')) return pattern === value;
+  const parts = pattern.split('*');
+  if (parts[0] && !value.startsWith(parts[0])) return false;
+  if (parts.at(-1) && !value.endsWith(parts.at(-1))) return false;
+  let offset = parts[0].length;
+  const end = parts.length - 1;
+  for (let index = 1; index < end; index += 1) {
+    const segment = parts[index];
+    if (!segment) continue;
+    const found = value.indexOf(segment, offset);
+    if (found < 0) return false;
+    offset = found + segment.length;
+  }
+  return offset <= value.length;
+}
+
+export function claudeMetadataModelPrefix(upstream) {
+  if (upstream?.type !== 'claude') return '';
+  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  const value = text(metadata.prefix);
+  if (!value || value.includes('/') || value.length > 64) return '';
+  return value;
+}
+
+// CLIProxyAPI's ClaudeKey models are richer than the routing.models allowlist:
+// they describe the provider name, client alias, display name, and a few
+// response/capability flags. Keep the imported shape intact, but expose only
+// bounded, useful entries to the request/catalog paths.
+export function claudeMetadataModelConfigs(upstream) {
+  if (upstream?.type !== 'claude') return [];
+  const metadata = upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {};
+  let raw = metadata.models ?? metadata['model-configs'] ?? metadata.model_configs;
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw); } catch { raw = []; }
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.slice(0, 256).map((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const name = text(entry.name);
+    const alias = text(entry.alias);
+    if (!name || name.length > 128 || alias.length > 128) return null;
+    const displayName = text(entry.displayName || entry['display-name'] || entry.display_name);
+    const maxContextLength = Number(entry.maxContextLength ?? entry['max-context-length'] ?? entry.max_context_length);
+    return {
+      name,
+      ...(alias ? { alias } : {}),
+      ...(displayName ? { displayName } : {}),
+      ...(Number.isInteger(maxContextLength) && maxContextLength > 0 ? { maxContextLength } : {}),
+      forceMapping: entry.forceMapping === true || entry['force-mapping'] === true || entry.force_mapping === true,
+      isCompat: entry.isCompat === true || entry['is-compat'] === true || entry.is_compat === true,
+      ...(entry.thinking && typeof entry.thinking === 'object' && !Array.isArray(entry.thinking) ? { thinking: entry.thinking } : {})
+    };
+  }).filter(Boolean);
+}
+
 export function defaultBaseUrl(type) {
-  return type === 'compass' ? DEFAULT_COMPASS_BASE_URL : DEFAULT_CODEX_BASE_URL;
+  if (type === 'compass') return DEFAULT_COMPASS_BASE_URL;
+  if (type === 'claude') return DEFAULT_CLAUDE_BASE_URL;
+  return DEFAULT_CODEX_BASE_URL;
 }
 
 export function maskEmail(value) {
@@ -72,6 +200,7 @@ export function maskEmail(value) {
 
 export function deriveUpstreamName(type, { projectId = '', email = '', accountId = '' } = {}) {
   if (type === 'compass') return text(projectId) || 'Compass project';
+  if (type === 'claude') return maskEmail(email) || text(accountId) || 'Claude account';
   return maskEmail(email) || text(accountId) || 'Codex account';
 }
 
@@ -134,9 +263,137 @@ export function parseCodexAuthJson(raw) {
   };
 }
 
+export function parseClaudeAuthJson(raw) {
+  let payload;
+  try {
+    payload = typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch {
+    throw new Error('Claude auth JSON is malformed');
+  }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    throw new Error('Claude auth JSON must be an object');
+  }
+  const source = payload.claudeAiOauth && typeof payload.claudeAiOauth === 'object'
+    ? payload.claudeAiOauth
+    : payload.tokens && typeof payload.tokens === 'object' ? payload.tokens : payload;
+  const accessToken = text(source.access_token || source.accessToken || payload.access_token || payload.accessToken);
+  const projectKey = text(source.project_key || source.projectKey || source.api_key || source.apiKey || payload.project_key || payload.projectKey || payload.api_key || payload.apiKey);
+  if (!accessToken && !projectKey) throw new Error('Claude auth JSON is missing access_token or project_key');
+  const refreshToken = text(source.refresh_token || source.refreshToken || payload.refresh_token || payload.refreshToken);
+  const expiresIn = source.expires_in || source.expiresIn || payload.expires_in || payload.expiresIn;
+  const expiresAt = normalizeClaudeExpiresAt(source.expires_at || source.expiresAt || payload.expires_at || payload.expiresAt)
+    || (accessToken ? accessTokenExpiresAt(accessToken, expiresIn) : null);
+  const email = text(source.email || payload.email);
+  const accountId = text(source.account_uuid || source.accountUuid || source.account_id || source.accountId || payload.account_uuid || payload.accountId);
+  const organizationId = text(source.organization_uuid || source.organizationUuid || source.organization_id || source.organizationId || payload.organization_uuid || payload.organizationId);
+  const organizationName = text(source.organization_name || source.organizationName || payload.organization_name || payload.organizationName);
+  const baseUrl = text(source.base_url || source.baseUrl || payload.base_url || payload.baseUrl);
+  return {
+    accessToken,
+    projectKey,
+    refreshToken,
+    accessTokenExpiresAt: expiresAt || null,
+    email,
+    accountId,
+    organizationId,
+    organizationName,
+    baseUrl,
+    metadata: claudeAuthMetadata(payload, source),
+    name: deriveUpstreamName('claude', { email, accountId })
+  };
+}
+
+function claudeAuthMetadata(payload, source) {
+  const metadata = {};
+  const sources = [payload?.metadata, source?.metadata, payload, source].filter((value) => value && typeof value === 'object' && !Array.isArray(value));
+  const keys = [
+    'cloak_mode', 'cloak_strict_mode', 'cloak_sensitive_words', 'cloak_cache_user_id',
+    'timezone', 'claude_timezone', 'fingerprint_profile', 'claude_device_ids',
+    'skip_account_profile', 'is_setup_token', 'setup_token', 'auth_kind',
+    'scopes', 'scope', 'rebuild_mid_system_message', 'rebuild-mid-system-message',
+    'cache_user_id', 'cache-user-id', 'cloak_cache_user_id', 'cloak-cache-user-id',
+    'model_aliases', 'model-aliases', 'excluded_models', 'excluded-models',
+    'models', 'model_configs', 'model-configs',
+    'proxy_url', 'proxy-url', 'prefix',
+    'disable_cooling', 'disable-cooling', 'request_retry', 'request-retry',
+    'request_scoped_errors', 'request-scoped-errors', 'tool_prefix_disabled',
+    'tool-prefix-disabled', 'experimental_cch_signing', 'experimental-cch-signing'
+  ];
+  for (const current of sources) {
+    for (const key of keys) if (current[key] !== undefined && current[key] !== null) metadata[key] = current[key];
+    for (const [key, value] of Object.entries(current)) {
+      if (key.startsWith('header:') && typeof value === 'string') metadata[key] = value;
+    }
+    for (const [key, value] of Object.entries(current.headers || {})) {
+      if (typeof key === 'string' && key.trim() && typeof value === 'string' && value.trim()) {
+        metadata[`header:${key.trim()}`] = value.trim();
+      }
+    }
+    if (current.cloak && typeof current.cloak === 'object' && !Array.isArray(current.cloak)) {
+      metadata.cloak = { ...(metadata.cloak || {}), ...current.cloak };
+    }
+  }
+  return metadata;
+}
+
+function claudeInputMetadata(input) {
+  const metadata = {};
+  const aliases = {
+    modelAliases: 'model_aliases',
+    'model-aliases': 'model_aliases',
+    excludedModels: 'excluded_models',
+    'excluded-models': 'excluded_models',
+    proxyUrl: 'proxy_url',
+    'proxy-url': 'proxy_url',
+    rebuildMidSystemMessage: 'rebuild_mid_system_message',
+    'rebuild-mid-system-message': 'rebuild_mid_system_message',
+    disableCooling: 'disable_cooling',
+    'disable-cooling': 'disable_cooling',
+    requestRetry: 'request_retry',
+    'request-retry': 'request_retry',
+    requestScopedErrors: 'request_scoped_errors',
+    'request-scoped-errors': 'request_scoped_errors',
+    fingerprintProfile: 'fingerprint_profile',
+    'fingerprint-profile': 'fingerprint_profile',
+    experimentalCCHSigning: 'experimental_cch_signing',
+    'experimental-cch-signing': 'experimental_cch_signing'
+  };
+  for (const [source, target] of Object.entries(aliases)) {
+    if (input?.[source] !== undefined && input?.[source] !== null) metadata[target] = input[source];
+  }
+  if (input?.prefix !== undefined && input?.prefix !== null) metadata.prefix = input.prefix;
+  if (input?.models !== undefined && input?.models !== null) metadata.models = input.models;
+  if (input?.headers && typeof input.headers === 'object' && !Array.isArray(input.headers)) {
+    for (const [name, value] of Object.entries(input.headers)) {
+      const normalizedName = text(name);
+      if (normalizedName && typeof value === 'string' && value.trim()) metadata[`header:${normalizedName}`] = value.trim();
+    }
+  }
+  if (input?.cloak && typeof input.cloak === 'object' && !Array.isArray(input.cloak)) metadata.cloak = input.cloak;
+  return metadata;
+}
+
+function mergeClaudeInputMetadata(metadata, input) {
+  const extra = claudeInputMetadata(input);
+  return Object.keys(extra).length ? { ...(metadata || {}), ...extra } : (metadata || {});
+}
+
+function normalizeClaudeExpiresAt(value) {
+  if (value === undefined || value === null || value === '') return '';
+  const raw = typeof value === 'number' ? String(value) : text(value);
+  const numeric = Number(raw);
+  if (raw && Number.isFinite(numeric) && numeric > 0) {
+    const milliseconds = numeric < 10_000_000_000 ? numeric * 1_000 : numeric;
+    const date = new Date(milliseconds);
+    if (Number.isFinite(date.getTime())) return date.toISOString();
+  }
+  const parsed = Date.parse(raw);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : '';
+}
+
 export function createUpstream(input) {
   const type = text(input.type).toLowerCase();
-  if (!SUPPORTED_TYPES.has(type)) throw new Error('type must be codex or compass');
+  if (!SUPPORTED_TYPES.has(type)) throw new Error('type must be codex, compass, or claude');
   const quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
   const upstream = {
     id: randomUUID(),
@@ -172,7 +429,7 @@ export function createUpstream(input) {
     upstream.accessTokenExpiresAt = auth.accessTokenExpiresAt;
     upstream.credentials = { accessToken: auth.accessToken, refreshToken: auth.refreshToken, idToken: auth.idToken };
     if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
-  } else {
+  } else if (type === 'compass') {
     upstream.projectId = text(input.projectId);
     if (!upstream.projectId) throw new Error('projectId is required');
     const projectKey = text(input.projectKey);
@@ -180,13 +437,43 @@ export function createUpstream(input) {
     upstream.name = deriveUpstreamName(type, upstream);
     upstream.credentials = { projectKey };
     if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
+  } else {
+    const auth = input.projectKey ? parseClaudeAuthJson({ project_key: input.projectKey }) : input.authJson ? parseClaudeAuthJson(input.authJson) : parseClaudeAuthJson({
+      access_token: input.accessToken,
+      project_key: input.projectKey,
+      refresh_token: input.refreshToken,
+      expires_at: input.accessTokenExpiresAt,
+      email: input.email,
+      account_id: input.accountId,
+      organization_id: input.organizationId,
+      organization_name: input.organizationName
+    });
+    upstream.accountId = auth.accountId;
+    upstream.email = auth.email;
+    upstream.baseUrl = normalizeClaudeBaseUrl(input.baseUrl || input.base_url || auth.baseUrl, DEFAULT_CLAUDE_BASE_URL);
+    upstream.name = deriveUpstreamName(type, upstream);
+    upstream.accessTokenExpiresAt = auth.projectKey ? null : auth.accessTokenExpiresAt;
+    upstream.credentials = auth.projectKey
+      ? { projectKey: auth.projectKey }
+      : {
+        accessToken: auth.accessToken,
+        refreshToken: auth.refreshToken,
+        ...(auth.organizationId ? { organizationId: auth.organizationId } : {}),
+        ...(auth.organizationName ? { organizationName: auth.organizationName } : {})
+      };
+    if (Object.keys(auth.metadata || {}).length || input.metadata && typeof input.metadata === 'object' || Object.keys(claudeInputMetadata(input)).length || auth.accessToken) {
+      const metadata = mergeClaudeInputMetadata({ ...(auth.metadata || {}), ...(input.metadata || {}) }, input);
+      if (!metadata.auth_kind && !metadata['auth-kind']) metadata.auth_kind = auth.projectKey ? 'claude_api_key' : 'oauth';
+      upstream.metadata = metadata;
+    }
   }
 
   return upstream;
 }
 
 export function updateUpstream(upstream, input) {
-  upstream.baseUrl = defaultBaseUrl(upstream.type);
+  if (upstream.type !== 'claude') upstream.baseUrl = defaultBaseUrl(upstream.type);
+  else upstream.baseUrl = normalizeClaudeBaseUrl(upstream.baseUrl, DEFAULT_CLAUDE_BASE_URL);
 
   if (upstream.type === 'codex') {
     if (input.authJson || input.accessToken) {
@@ -205,14 +492,59 @@ export function updateUpstream(upstream, input) {
         idToken: auth.idToken || upstream.credentials.idToken
       };
     }
-  } else {
+  } else if (upstream.type === 'compass') {
     if (input.projectId !== undefined) {
       upstream.projectId = text(input.projectId);
       if (!upstream.projectId) throw new Error('projectId cannot be empty');
     }
     if (input.projectKey !== undefined && text(input.projectKey)) upstream.credentials.projectKey = text(input.projectKey);
+  } else {
+    if (input.baseUrl !== undefined || input.base_url !== undefined) {
+      upstream.baseUrl = normalizeClaudeBaseUrl(input.baseUrl ?? input.base_url, DEFAULT_CLAUDE_BASE_URL);
+    }
+    if (input.projectKey !== undefined) {
+      const projectKey = text(input.projectKey);
+      if (!projectKey) throw new Error('projectKey cannot be empty');
+      upstream.credentials = { projectKey };
+      upstream.accessTokenExpiresAt = null;
+      delete upstream.tokenRefresh;
+      upstream.metadata = { ...(upstream.metadata || {}), auth_kind: 'claude_api_key' };
+    } else if (input.authJson || input.accessToken) {
+      const auth = input.authJson ? parseClaudeAuthJson(input.authJson) : parseClaudeAuthJson({
+        access_token: input.accessToken,
+        refresh_token: input.refreshToken || upstream.credentials.refreshToken,
+        expires_at: input.accessTokenExpiresAt,
+        email: input.email || upstream.email,
+        account_id: input.accountId || upstream.accountId,
+        organization_id: input.organizationId || upstream.credentials.organizationId,
+        organization_name: input.organizationName || upstream.credentials.organizationName
+      });
+      if (auth.baseUrl) upstream.baseUrl = normalizeClaudeBaseUrl(auth.baseUrl, upstream.baseUrl);
+      upstream.accountId = auth.accountId || upstream.accountId;
+      upstream.email = auth.email || upstream.email;
+      upstream.accessTokenExpiresAt = auth.accessTokenExpiresAt;
+      upstream.credentials = {
+        accessToken: auth.accessToken,
+        refreshToken: auth.refreshToken || upstream.credentials.refreshToken,
+        ...(auth.organizationId || upstream.credentials.organizationId ? { organizationId: auth.organizationId || upstream.credentials.organizationId } : {}),
+        ...(auth.organizationName || upstream.credentials.organizationName ? { organizationName: auth.organizationName || upstream.credentials.organizationName } : {})
+      };
+      if (Object.keys(auth.metadata || {}).length) upstream.metadata = { ...(upstream.metadata || {}), ...auth.metadata };
+      if (auth.projectKey) {
+        upstream.credentials = { projectKey: auth.projectKey };
+        upstream.accessTokenExpiresAt = null;
+        upstream.metadata = { ...(upstream.metadata || {}), auth_kind: 'claude_api_key' };
+      } else if (!auth.metadata?.auth_kind && !auth.metadata?.['auth-kind']) {
+        upstream.metadata = { ...(upstream.metadata || {}), auth_kind: 'oauth' };
+      }
+    }
   }
-  if (input.metadata !== undefined && typeof input.metadata === 'object') upstream.metadata = input.metadata;
+  if (input.metadata !== undefined && typeof input.metadata === 'object') {
+    upstream.metadata = upstream.type === 'claude'
+      ? { ...(upstream.metadata || {}), ...input.metadata }
+      : input.metadata;
+  }
+  if (upstream.type === 'claude') upstream.metadata = mergeClaudeInputMetadata(upstream.metadata, input);
   if (input.quotaSource !== undefined || input.metadata?.quota_type !== undefined || input.metadata?.quotaType !== undefined) {
     upstream.quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
   }
@@ -516,6 +848,7 @@ export function publicUpstream(upstream) {
     id: upstream.id,
     priority: Number.isInteger(upstream.priority) ? upstream.priority : null,
     type: upstream.type,
+    ...(upstream.type === 'claude' ? { baseUrl: normalizeClaudeBaseUrl(upstream.baseUrl) } : {}),
     name: deriveUpstreamName(upstream.type, upstream),
     accountId: upstream.accountId || null,
     email: text(upstream.email) || null,
@@ -552,6 +885,27 @@ export function exportUpstreamCredentials(upstream, credentials) {
         refresh_token: credentials.refreshToken || null,
         account_id: upstream.accountId || null
       }
+    };
+  }
+  if (upstream.type === 'claude') {
+    if (credentials.projectKey) return {
+      auth_mode: 'claude_api_key',
+      project_key: credentials.projectKey,
+      base_url: normalizeClaudeBaseUrl(upstream.baseUrl),
+      email: upstream.email || null,
+      account_uuid: upstream.accountId || null
+    };
+    return {
+      ...(upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : {}),
+      auth_mode: 'claude_oauth',
+      base_url: normalizeClaudeBaseUrl(upstream.baseUrl),
+      access_token: credentials.accessToken || null,
+      refresh_token: credentials.refreshToken || null,
+      expires_at: upstream.accessTokenExpiresAt || null,
+      account_uuid: upstream.accountId || null,
+      organization_uuid: credentials.organizationId || null,
+      organization_name: credentials.organizationName || null,
+      email: upstream.email || null
     };
   }
   return {

@@ -6,7 +6,9 @@ import { Store, notFound } from './store.js';
 import { dollarsToMicros, exportUpstreamCredentials, isAiswitchUpstream } from './domain.js';
 import {
   createTokenRefreshScheduler,
+  refreshClaudeToken,
   refreshCodexToken,
+  refreshDueClaudeTokens,
   refreshDueCodexTokens,
   TOKEN_REFRESH_INTERVAL_MS
 } from './codex-token-refresh.js';
@@ -18,8 +20,10 @@ import { admissionPolicy, firewallAllowed, hostAllowed, localHost, originAllowed
 import { modelCatalogForStore } from './codex-model-catalog.js';
 import { CodexHostHealth, codexHostHealthForStore, codexHostHealthOptionsFromEnv } from './codex-host-health.js';
 import { upstreamPacerForStore } from './upstream-pacer.js';
+import { ClaudeOAuthBroker } from './claude-oauth.js';
 import { Readiness, readyReadiness } from './readiness.js';
 import { compatibilityLearningForStore } from './compatibility-learning.js';
+import { claudeConfigFromEnv, normalizeClaudeConfig } from './claude-config.js';
 import {
   attachWebSocketProxy,
   authenticateProxyRequest,
@@ -30,14 +34,21 @@ import {
 const publicDir = join(fileURLToPath(new URL('../public/', import.meta.url)));
 const MIME_TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' };
 export const AUTO_REFRESH_INTERVAL_MS = 60_000;
-export { createTokenRefreshScheduler, refreshCodexToken, refreshDueCodexTokens, TOKEN_REFRESH_INTERVAL_MS };
+export { createTokenRefreshScheduler, refreshClaudeToken, refreshCodexToken, refreshDueClaudeTokens, refreshDueCodexTokens, TOKEN_REFRESH_INTERVAL_MS };
 
-export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness() } = {}) {
+export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness(), claudeConfig = claudeConfigFromEnv() } = {}) {
+  claudeConfig = normalizeClaudeConfig(claudeConfig);
+  store.configureClaudeRuntime?.(claudeConfig);
   store.configureApiKey(apiKey);
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
   const upstreamPacer = upstreamPacerForStore(store);
   const compatibilityLearning = compatibilityLearningForStore(store);
+  const claudeOAuth = new ClaudeOAuthBroker({
+    store,
+    fetchImpl,
+    proxyUrl: claudeConfig.oauthProxyUrl ?? claudeConfig['oauth-proxy-url'] ?? ''
+  });
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -64,7 +75,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 403, { error: { type: 'invalid_request_error', code: 'access_denied', message: 'client IP is not allowed', param: null } });
           return;
         }
-        const auth = authenticateProxyRequest(req, store, apiKey, { allowXApiKey: req.method === 'POST' && url.pathname === '/v1/messages' });
+        const auth = authenticateProxyRequest(req, store, apiKey, { allowXApiKey: req.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(url.pathname) });
         if (!auth) {
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;
@@ -85,6 +96,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           logger,
           codexHostHealth,
           modelCatalog,
+          claudeConfig,
           sendJson,
           handleUsage: () => {
             const parameter = url.searchParams.keys().next().value;
@@ -102,7 +114,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
-        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning });
+        await api(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning, claudeOAuth });
         return;
       }
       await staticFile(res, url.pathname, req, admission);
@@ -130,7 +142,8 @@ export function start(port = Number(process.env.PORT) || 3000, {
   pollIntervalMs = AUTO_REFRESH_INTERVAL_MS,
   tokenRefreshIntervalMs = TOKEN_REFRESH_INTERVAL_MS,
   host = process.env.CODEX_POOLER_BIND_HOST || '127.0.0.1',
-  ingress = {}
+  ingress = {},
+  claudeConfig = claudeConfigFromEnv()
 } = {}) {
   if (!apiKey) throw new Error('CODEX_POOLER_API_KEY is required');
   let scheduleTokenRetry = () => {};
@@ -138,7 +151,7 @@ export function start(port = Number(process.env.PORT) || 3000, {
   const codexHostHealth = new CodexHostHealth(codexHostHealthOptionsFromEnv());
   const upstreamPacer = upstreamPacerForStore(store);
   const modelCatalog = modelCatalogForStore(store);
-  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress, codexHostHealth, readiness }));
+  const server = createHttpServer(createApp({ store, apiKey, fetchImpl, compassGatewayToken, onTokenRefreshFailure: (...args) => scheduleTokenRetry(...args), ingress, codexHostHealth, readiness, claudeConfig }));
   attachWebSocketProxy(server, { store, apiKey, fetchImpl, ingress, codexHostHealth });
   let polling = false;
   const poll = async () => {
@@ -184,8 +197,8 @@ export function start(port = Number(process.env.PORT) || 3000, {
 export async function refreshAllQuotas(store, options = {}) {
   return refreshAllUpstreamQuotas(store, {
     ...options,
-    shouldRefresh: (upstream) => !isAiswitchUpstream(upstream),
-    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: 'aiswitch' })
+    shouldRefresh: (upstream) => !isAiswitchUpstream(upstream) && upstream.type !== 'claude',
+    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: upstream.type === 'claude' ? 'claude_oauth' : 'aiswitch' })
   });
 }
 
@@ -198,7 +211,16 @@ async function api(req, res, url, store, options) {
   }
 }
 
-async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning }) {
+async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken, onTokenRefreshFailure, modelCatalog, codexHostHealth, upstreamPacer, readiness, compatibilityLearning, claudeOAuth }) {
+  if (req.method === 'POST' && url.pathname === '/api/claude/oauth/start') {
+    sendJson(res, 200, claudeOAuth.start());
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/claude/oauth/exchange') {
+    const payload = await body(req);
+    sendJson(res, 201, { ...await claudeOAuth.exchange(payload) });
+    return;
+  }
   if (req.method === 'GET' && url.pathname === '/api/upstreams/events') {
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
     res.write('event: ready\ndata: {"type":"upstreams"}\n\n');
@@ -340,11 +362,16 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     return;
   }
   if (req.method === 'POST' && action === 'refresh-token' && parts.length === 4) {
-    const result = await refreshCodexToken(store, id, { fetchImpl, compassGatewayToken });
+    const oauthUpstream = store.get(id);
+    if (!oauthUpstream || !['codex', 'claude'].includes(oauthUpstream.type)) throw new HttpError(400, 'invalid_request', 'Token refresh is only available for OAuth upstreams');
+    const result = oauthUpstream.type === 'claude'
+      ? await refreshClaudeToken(store, id, { fetchImpl, compassGatewayToken })
+      : await refreshCodexToken(store, id, { fetchImpl, compassGatewayToken });
     if (result.errorCode === 'failed') onTokenRefreshFailure(id, 'manual');
     if (result.errorCode) {
       const status = result.errorCode === 'failed' ? 502 : 409;
-      const message = result.errorCode === 'reauth_required' ? result.upstream.tokenRefresh?.errorDetail || 'Codex reauthentication is required' : result.errorCode === 'refresh_in_progress' ? 'Codex token refresh is already in progress' : 'Codex token refresh failed';
+      const label = oauthUpstream.type === 'claude' ? 'Claude' : 'Codex';
+      const message = result.errorCode === 'reauth_required' ? result.upstream.tokenRefresh?.errorDetail || `${label} reauthentication is required` : result.errorCode === 'refresh_in_progress' ? `${label} token refresh is already in progress` : `${label} token refresh failed`;
       throw new HttpError(status, `token_refresh_${result.errorCode}`, message);
     }
     sendJson(res, 200, result);
@@ -396,7 +423,7 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
 
 async function refreshSavedUpstreamQuota(store, id, options) {
   const upstream = store.get(id);
-  if (!upstream || isAiswitchUpstream(upstream)) return store.getPublic(id);
+  if (!upstream || isAiswitchUpstream(upstream) || upstream.type === 'claude') return store.getPublic(id);
   try {
     return await refreshUpstreamQuota(store, id, options);
   } catch {
@@ -405,7 +432,7 @@ async function refreshSavedUpstreamQuota(store, id, options) {
 }
 
 function quotaCredentialsChanged(upstream, input) {
-  if (upstream.type === 'codex') return input.authJson !== undefined || input.accessToken !== undefined;
+  if (['codex', 'claude'].includes(upstream.type)) return input.authJson !== undefined || input.accessToken !== undefined || input.projectKey !== undefined;
   return input.projectId !== undefined
     || input.projectKey !== undefined
     || input.quotaSource !== undefined
@@ -458,7 +485,7 @@ function routingDryRunInput(input = {}) {
   const preferredType = string('preferredType', 20);
   const requiredType = string('requiredType', 20);
   for (const [name, value] of Object.entries({ requestedType, preferredType, requiredType })) {
-    if (value && !['codex', 'compass'].includes(value)) throw new Error(`${name} must be codex or compass`);
+    if (value && !['codex', 'compass', 'claude'].includes(value)) throw new Error(`${name} must be codex or compass or claude`);
   }
   const now = input.now === undefined ? Date.now() : Number(input.now);
   if (!Number.isFinite(now) || now < 0) throw new Error('now must be a non-negative timestamp');
