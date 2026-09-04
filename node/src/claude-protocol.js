@@ -3,7 +3,7 @@ import { DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { CLAUDE_BIP39_WORDS } from './claude-bip39.js';
 import { fetchProfile } from './claude-oauth.js';
 import { HttpError } from './http-ingress.js';
-import { claudeCredentialKind, claudeMetadataModelConfigs, claudeMetadataModelPrefix, deriveClaudeAccountId, isClaudeOAuthToken, isClaudeOAuthUpstream } from './domain.js';
+import { claudeMetadataModelConfigs, claudeMetadataModelPrefix, isClaudeOAuthUpstream } from './domain.js';
 import { applyClaudePayloadConfig } from './claude-payload.js';
 import { cacheClaudeThinkingReplay, clearClaudeThinkingReplay, getClaudeThinkingReplay, restoreClaudeThinkingReplay } from './claude-thinking-replay.js';
 
@@ -81,7 +81,7 @@ export function forgetClaudeThinkingReplay(scope) {
 // Claude Code OAuth requests carry a credential identity in metadata.user_id.
 // This is not account authentication; it is the stable device/account/session
 // envelope that Anthropic expects from the Claude Code entrypoint.
-export function prepareClaudeRequestBody({ req, body, credentials, upstream, countTokens = false, sessionId = claudeSessionIdForRequest(req, body, countTokens), claudeConfig = null, requestPath = '', skipDiagnostics = false }) {
+export function prepareClaudeRequestBody({ req, body, credentials, upstream, countTokens = false, sessionId = claudeSessionIdForRequest(req, body, countTokens), claudeConfig = null, requestPath = '' }) {
   const oauth = isClaudeOAuthCredential(credentials, upstream);
   const originalBody = plainObject(body) || Array.isArray(body) ? structuredClone(body) : body;
   const routedModel = stripClaudeModelPrefix(body?.model, upstream);
@@ -217,7 +217,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
   }
   const workload = safeHeader(req, 'x-cpa-claude-workload');
   if (workload) prepared.__claudeWorkload = workload;
-  const diagnosticsState = skipDiagnostics ? null : beginClaudeDiagnostics(upstream, credentials, sessionId);
+  const diagnosticsState = beginClaudeDiagnostics(upstream, credentials, sessionId);
   sanitizeClaudeMessageHistory(prepared, { preserveEmptyThinking: modelAlias?.isCompat === true });
   if (diagnosticsState) prepared.diagnostics = { previous_message_id: diagnosticsState.previousMessageId || null };
   let shaped = shapeClaudeOAuthBody(prepared, upstream, oauth || directAnthropic && cliProfile, claudeConfig, false);
@@ -248,14 +248,14 @@ export function prepareClaudeLocalCountTokensBody({ body, upstream = null, claud
 }
 
 // CPA prepares one stable device/account identity before the first OAuth call.
-// Keep the same behavior in Node: profile lookup is single-flight, and callers
-// may explicitly refresh it for management/API lifecycle operations.
-export async function ensureClaudeCredentialIdentity({ upstream, credentials, store = null, fetchImpl = globalThis.fetch, refreshProfile = false } = {}) {
+// Keep the same behavior in Node: profile lookup is only needed when imported
+// credentials lack a canonical account UUID, and the lookup is single-flight.
+export async function ensureClaudeCredentialIdentity({ upstream, credentials, store = null, fetchImpl = globalThis.fetch } = {}) {
   if (upstream?.type !== 'claude' || !isClaudeOAuthToken(credentials?.accessToken)) return upstream;
   const key = upstream.id || credentials.accessToken;
   let pending = claudeIdentityPrepares.get(key);
   if (!pending) {
-    pending = prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile });
+    pending = prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
     claudeIdentityPrepares.set(key, pending);
     void pending.finally(() => {
       if (claudeIdentityPrepares.get(key) === pending) claudeIdentityPrepares.delete(key);
@@ -264,7 +264,7 @@ export async function ensureClaudeCredentialIdentity({ upstream, credentials, st
   return pending;
 }
 
-async function prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile = false }) {
+async function prepareClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl }) {
   const expectedEpoch = Number(credentials?.credentialEpoch) || 0;
   const expectedAccessToken = String(credentials?.accessToken || '');
   const metadata = plainObject(upstream.metadata) ? upstream.metadata : {};
@@ -279,13 +279,10 @@ async function prepareClaudeCredentialIdentity({ upstream, credentials, store, f
   let email = upstream.email || '';
   let organizationId = credentials.organizationId || '';
   let organizationName = credentials.organizationName || '';
-  const generatedAccountId = deriveClaudeAccountId(credentials);
-  const accountIdIsLocal = Boolean(accountId && generatedAccountId && accountId === generatedAccountId);
-  if ((refreshProfile || !accountId || accountIdIsLocal) && !isClaudeSetupToken({ upstream, credentials })) {
+  if (!accountId && !isClaudeSetupToken({ upstream, credentials })) {
     try {
       const profile = await fetchProfile(credentials.accessToken, fetchImpl, { proxyUrl: claudeProxyUrl(upstream) });
-      const profileAccountId = String(profile?.account?.uuid || '').trim();
-      if (profileAccountId) accountId = profileAccountId;
+      accountId = String(profile?.account?.uuid || '').trim();
       email ||= String(profile?.account?.email || profile?.account?.email_address || '').trim();
       organizationId ||= String(profile?.organization?.uuid || '').trim();
       organizationName ||= String(profile?.organization?.name || '').trim();
@@ -772,12 +769,25 @@ function incomingClaudeHeader(req, name) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+function isClaudeOAuthToken(token) {
+  return typeof token === 'string' && token.startsWith('sk-ant-oat');
+}
+
 function isClaudeOAuthCredential(credentials, upstream = null) {
-  return ['oauth', 'legacy_oauth'].includes(claudeCredentialKind(upstream, credentials));
+  if (isClaudeOAuthToken(credentials?.accessToken)) return true;
+  if (credentials?.projectKey) return false;
+  const metadata = plainObject(upstream?.metadata) ? upstream.metadata : {};
+  const kind = String(credentials?.authKind || credentials?.auth_kind || metadata.auth_kind || metadata['auth-kind'] || '').trim().toLowerCase();
+  if (['api_key', 'apikey', 'claude_api_key', 'claude-api-key'].includes(kind)) return false;
+  return typeof credentials?.accessToken === 'string' && credentials.accessToken.length > 0;
 }
 
 function isClaudeApiKeyCredential(credentials, upstream = null) {
-  return claudeCredentialKind(upstream, credentials) === 'api_key';
+  if (credentials?.projectKey) return true;
+  if (isClaudeOAuthToken(credentials?.accessToken)) return false;
+  const metadata = plainObject(upstream?.metadata) ? upstream.metadata : {};
+  const kind = String(credentials?.authKind || credentials?.auth_kind || metadata.auth_kind || metadata['auth-kind'] || '').trim().toLowerCase();
+  return ['api_key', 'apikey', 'claude_api_key', 'claude-api-key'].includes(kind);
 }
 
 function isClaudeCliProfileCredential(credentials, upstream) {
