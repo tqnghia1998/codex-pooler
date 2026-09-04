@@ -1,6 +1,6 @@
 import { notFound } from './store.js';
 import { HttpError } from './http-ingress.js';
-import { codexRefreshFailureCode, codexRefreshFailureDetail, refreshProviderCredentials } from './providers.js';
+import { providerRefreshFailureCode, providerRefreshFailureDetail, refreshProviderCredentials } from './providers.js';
 
 export const TOKEN_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
 
@@ -12,8 +12,16 @@ const TOKEN_REFRESH_MAX_ATTEMPTS = 8;
 const TOKEN_REFRESH_BATCH_SIZE = 100;
 
 export async function refreshDueCodexTokens(store, { now = Date.now(), ...options } = {}) {
+  return refreshDueProviderTokens(store, { now, providerTypes: ['codex'], ...options });
+}
+
+export async function refreshDueClaudeTokens(store, { now = Date.now(), ...options } = {}) {
+  return refreshDueProviderTokens(store, { now, providerTypes: ['claude'], ...options });
+}
+
+async function refreshDueProviderTokens(store, { now = Date.now(), providerTypes, ...options } = {}) {
   const candidates = store.list()
-    .map(({ id }) => ({ id, eligibleAt: tokenRefreshEligibleAt(store.get(id), now) }))
+    .map(({ id }) => ({ id, eligibleAt: tokenRefreshEligibleAt(store.get(id), now, providerTypes) }))
     .filter(({ eligibleAt }) => eligibleAt !== null)
     .sort((left, right) => left.eligibleAt - right.eligibleAt || left.id.localeCompare(right.id))
     .slice(0, TOKEN_REFRESH_BATCH_SIZE);
@@ -21,14 +29,22 @@ export async function refreshDueCodexTokens(store, { now = Date.now(), ...option
     const upstream = store.get(id);
     const credentials = store.credentials(id);
     if (!credentials.refreshToken) return store.setTokenRefresh(id, tokenRefreshState('reauth_required', 'scheduled', now));
-    return refreshCodexToken(store, id, { trigger: 'scheduled', now, ...options });
+    return refreshProviderToken(store, id, { trigger: 'scheduled', now, ...options });
   });
 }
 
 export async function refreshCodexToken(store, id, { trigger = 'manual', now = Date.now(), retryAttempt = null, ...options } = {}) {
+  return refreshProviderToken(store, id, { trigger, now, retryAttempt, expectedType: 'codex', ...options });
+}
+
+export async function refreshClaudeToken(store, id, { trigger = 'manual', now = Date.now(), retryAttempt = null, ...options } = {}) {
+  return refreshProviderToken(store, id, { trigger, now, retryAttempt, expectedType: 'claude', ...options });
+}
+
+async function refreshProviderToken(store, id, { trigger = 'manual', now = Date.now(), retryAttempt = null, expectedType = null, ...options } = {}) {
   const upstream = store.get(id);
   if (!upstream) throw notFound();
-  if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Token refresh is only available for Codex upstreams');
+  if (!['codex', 'claude'].includes(upstream.type) || expectedType && upstream.type !== expectedType) throw new HttpError(400, 'invalid_request', 'Token refresh is only available for OAuth upstreams');
   const refreshing = upstream.tokenRefresh;
   if (refreshing?.status === 'reauth_required') return { upstream: store.getPublic(id), errorCode: 'reauth_required' };
   if (refreshing?.status === 'refreshing' && Date.parse(refreshing.startedAt) > now - TOKEN_REFRESH_STALE_MS) return { upstream: store.getPublic(id), errorCode: 'refresh_in_progress' };
@@ -45,8 +61,8 @@ export async function refreshCodexToken(store, id, { trigger = 'manual', now = D
     return refreshed ? { upstream: store.setTokenRefresh(id, tokenRefreshState('succeeded', trigger, now)) } : { upstream: store.getPublic(id) };
   } catch (error) {
     if ((Number(store.get(id)?.credentialEpoch) || 0) !== (Number(upstream.credentialEpoch) || 0)) return { upstream: store.getPublic(id) };
-    const errorCode = codexRefreshFailureCode(error);
-    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt, codexRefreshFailureDetail(error))), errorCode };
+    const errorCode = providerRefreshFailureCode(upstream.type, error);
+    return { upstream: store.setTokenRefresh(id, tokenRefreshState(errorCode, trigger, now, retryAttempt, providerRefreshFailureDetail(upstream.type, error))), errorCode };
   }
 }
 
@@ -64,7 +80,7 @@ export function createTokenRefreshScheduler(store, options) {
       timers.delete(id);
       if (store.get(id)?.tokenRefresh?.status !== 'failed') return;
       try {
-        const result = await refreshCodexToken(store, id, { ...options, trigger, retryAttempt: attempt + 1 });
+        const result = await refreshProviderToken(store, id, { ...options, trigger, retryAttempt: attempt + 1 });
         if (result.errorCode === 'failed') schedule(id, trigger, attempt + 1);
       } catch {}
     }, delay);
@@ -80,7 +96,10 @@ export function createTokenRefreshScheduler(store, options) {
         const refresh = store.get(upstream.id)?.tokenRefresh;
         if (refresh?.status === 'failed' && refresh.retryAttempt && refresh.retryAt) schedule(upstream.id, refresh.trigger, refresh.retryAttempt, refresh.retryAt);
       }
-      const results = await refreshDueCodexTokens(store, options);
+      const results = [
+        ...(await refreshDueCodexTokens(store, options)),
+        ...(await refreshDueClaudeTokens(store, options))
+      ];
       for (const result of results) {
         const value = result.status === 'fulfilled' && result.value;
         if (value?.errorCode === 'failed') schedule(value.upstream.id, value.upstream.tokenRefresh.trigger, value.upstream.tokenRefresh.retryAttempt || 1);
@@ -93,8 +112,8 @@ export function createTokenRefreshScheduler(store, options) {
   return { run, schedule, close: () => timers.forEach(clearTimeout) };
 }
 
-function tokenRefreshEligibleAt(upstream, now) {
-  if (!upstream || upstream.type !== 'codex') return null;
+function tokenRefreshEligibleAt(upstream, now, providerTypes = ['codex', 'claude']) {
+  if (!upstream || !providerTypes.includes(upstream.type)) return null;
   const refresh = upstream.tokenRefresh;
   if (refresh?.status === 'reauth_required') return null;
   if (refresh?.status === 'refreshing') {
