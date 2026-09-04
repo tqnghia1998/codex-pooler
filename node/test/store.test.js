@@ -7,13 +7,13 @@ import { join } from 'node:path';
 import { Store } from '../src/store.js';
 import { claudeRequestHeaders } from '../src/claude-protocol.js';
 
-function tempStore() {
+function tempStore(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-'));
-  return { dir, store: new Store(dir) };
+  return { dir, store: new Store(dir, options) };
 }
 
 test('persists stabilized Claude device profiles without exposing them publicly', () => {
-  const { dir, store } = tempStore();
+  const { dir, store } = tempStore({ allowLegacyClaudeApiKey: true });
   try {
     const created = store.create({ type: 'claude', projectKey: 'sk-ant-api-device-profile-test', metadata: { fingerprint_profile: 'claude-code-cli' } });
     const upstream = store.get(created.id);
@@ -34,7 +34,7 @@ test('persists stabilized Claude device profiles without exposing them publicly'
     assert.equal(store.persistClaudeDeviceProfiles(created.id, upstream.claudeDeviceProfiles), true);
     assert.equal(store.getPublic(created.id).claudeDeviceProfiles, undefined);
     store.sqlite.close();
-    const reopened = new Store(dir);
+    const reopened = new Store(dir, { allowLegacyClaudeApiKey: true });
     assert.equal(reopened.get(created.id).claudeDeviceProfiles.vscode.userAgent, req.headers['user-agent']);
     reopened.sqlite.close();
   } finally {
@@ -60,6 +60,25 @@ test('persists CRUD while keeping credentials out of public records', () => {
     assert.equal(store.getPublic(created.id).accessTokenExpiresAt, '2030-01-01T00:00:00.000Z');
     store.remove(created.id);
     assert.equal(store.list().length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('routes legacy Claude OAuth records without auth metadata', () => {
+  const { dir, store } = tempStore({ allowLegacyClaudeApiKey: true });
+  try {
+    const created = store.create({ type: 'claude', accessToken: 'legacy-oauth-token', accountId: 'legacy-account' });
+    const saved = store.load().upstreams.find((upstream) => upstream.id === created.id);
+    delete saved.metadata.auth_kind;
+    saved.accessTokenExpiresAt = null;
+    store.save(store.load());
+    store.sqlite.close();
+
+    const reopened = new Store(dir);
+    reopened.setCap(created.id, { capDollars: 100 });
+    assert.deepEqual(reopened.candidatePlan({ model: 'claude-sonnet-5' }).map(({ id }) => id), [created.id]);
+    reopened.sqlite.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -363,7 +382,7 @@ test('Claude disable_cooling prevents account quota cooldowns', () => {
   try {
     const upstream = store.create({
       type: 'claude',
-      authJson: JSON.stringify({ access_token: 'oauth-token', disable_cooling: true })
+      authJson: JSON.stringify({ access_token: 'sk-ant-oat-store-test', disable_cooling: true })
     });
     const admission = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-sonnet-4-6' });
     store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: true }, Date.now());
@@ -379,7 +398,7 @@ test('Claude model-scoped cooldown blocks only the rejected model', () => {
   try {
     const upstream = store.create({
       type: 'claude',
-      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'claude@example.com' })
+      authJson: JSON.stringify({ access_token: 'sk-ant-oat-store-test', email: 'claude@example.com' })
     });
     store.setCap(upstream.id, { capDollars: 100 });
     const fable = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5' }, now);
@@ -416,7 +435,7 @@ test('Claude model prefixes namespace credential routing', () => {
   try {
     const upstream = store.create({
       type: 'claude',
-      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'prefixed@example.com', prefix: 'team-a' })
+      authJson: JSON.stringify({ access_token: 'sk-ant-oat-store-test', email: 'prefixed@example.com', prefix: 'team-a' })
     });
     store.setCap(upstream.id, { capDollars: 100 });
     assert.deepEqual(store.candidatePlan({ model: 'team-a/claude-sonnet-5' }).map(({ id }) => id), [upstream.id]);
@@ -432,7 +451,7 @@ test('Claude routing model restrictions accept thinking suffixes', () => {
   try {
     const upstream = store.create({
       type: 'claude',
-      authJson: JSON.stringify({ access_token: 'oauth-token', email: 'suffix-routing@example.com' }),
+      authJson: JSON.stringify({ access_token: 'sk-ant-oat-store-test', email: 'suffix-routing@example.com' }),
       routing: { models: ['claude-sonnet-5'] }
     });
     store.setCap(upstream.id, { capDollars: 100 });
