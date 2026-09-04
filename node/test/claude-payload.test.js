@@ -150,6 +150,8 @@ test('ports global OAuth aliases, exclusions, and request-scoped error rules', (
   assert.equal(claudeMetadataModelExcluded(parsedOAuth, 'claude-haiku-4', config), true);
   const parsedApiKey = createUpstream({ type: 'claude', projectKey: 'sk-ant-api-test' });
   assert.equal(isClaudeOAuthUpstream(parsedApiKey), false);
+  assert.equal(isClaudeOAuthUpstream({ type: 'claude', accessTokenExpiresAt: null, credentials: { accessToken: 'legacy-token' } }), true);
+  assert.equal(isClaudeOAuthUpstream({ type: 'claude', accessTokenExpiresAt: null, credentials: { projectKey: 'legacy-key' } }), false);
 });
 
 test('applies CPA-compatible Claude payload defaults, raw values, overrides, and filters', () => {
