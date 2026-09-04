@@ -476,7 +476,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
   }
   if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
     requireAdmin(auth.account);
-    sendJson(res, 200, { analytics: productStore.adminAnalytics() });
+    sendJson(res, 200, { analytics: productStore.adminAnalytics({ eventCursor: adminEventCursor(url) }) });
     return;
   }
   if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
@@ -755,6 +755,17 @@ function isMutation(method) {
 function envBoolean(value, fallback) {
   if (value === undefined) return fallback;
   return String(value).toLowerCase() === 'true';
+}
+
+function adminEventCursor(url) {
+  const value = url.searchParams.get('eventCursor');
+  if (!value || value.length > 512) return null;
+  try {
+    const cursor = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'));
+    return typeof cursor?.createdAt === 'string' && typeof cursor?.id === 'string' ? cursor : null;
+  } catch {
+    return null;
+  }
 }
 
 function sharingListQuery(url) {

@@ -252,7 +252,7 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS sharing_offers_retention_idx ON sharing_offers(status, updated_at);
       CREATE INDEX IF NOT EXISTS quota_requests_retention_idx ON quota_requests(status, updated_at);
       CREATE INDEX IF NOT EXISTS email_outbox_retention_idx ON email_outbox(status, sent_at, created_at);
-      CREATE INDEX IF NOT EXISTS sharing_events_created_idx ON sharing_events(created_at);
+      CREATE INDEX IF NOT EXISTS sharing_events_cursor_idx ON sharing_events(created_at DESC, id DESC);
     `);
     this.migrateIdentitySchema();
     this.migrateSharingSchema();
@@ -397,7 +397,8 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS sharing_offers_retention_idx ON sharing_offers(status, updated_at);
       CREATE INDEX IF NOT EXISTS quota_requests_retention_idx ON quota_requests(status, updated_at);
       CREATE INDEX IF NOT EXISTS email_outbox_retention_idx ON email_outbox(status, sent_at, created_at);
-      CREATE INDEX IF NOT EXISTS sharing_events_created_idx ON sharing_events(created_at);
+      DROP INDEX IF EXISTS sharing_events_created_idx;
+      CREATE INDEX IF NOT EXISTS sharing_events_cursor_idx ON sharing_events(created_at DESC, id DESC);
     `);
   }
 
@@ -501,10 +502,10 @@ export class ProductStore {
         VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(upstream_id) DO UPDATE SET scope_id = excluded.scope_id
       `).run(accountId, upstreamId, scopeId, linkOrder, now);
-      return { accountId, upstreamId, scopeId, createdAt: now };
+      return { created: !existing, link: { accountId, upstreamId, scopeId, createdAt: now } };
     })();
-    this.event(accountId, 'upstream', upstreamId, 'linked', { scopeId });
-    return link;
+    if (link.created) this.event(accountId, 'upstream', upstreamId, 'linked', { scopeId });
+    return link.link;
   }
 
   accountOwnsUpstream(accountId, upstreamId) {
@@ -1096,8 +1097,9 @@ export class ProductStore {
     };
   }
 
-  adminAnalytics() {
+  adminAnalytics({ eventCursor = null } = {}) {
     this.expireDue();
+    if (eventCursor) return this.adminEventPage(eventCursor);
     const row = (sql, ...args) => this.sqlite.prepare(sql).get(...args);
     const count = (sql, ...args) => row(sql, ...args).count;
     const usage = row(`
@@ -1142,20 +1144,42 @@ export class ProductStore {
       },
       topProviders: this.adminUsageLeaders('provider'),
       topConsumers: this.adminUsageLeaders('consumer'),
-      recentEvents: this.sqlite.prepare(`
-        SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
-          accounts.email AS actor_email
-        FROM sharing_events
-        LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
-        ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
-        LIMIT 12
-      `).all().map((event) => ({
-        id: event.id,
-        entityType: event.entity_type,
-        action: event.action,
-        createdAt: event.created_at,
-        actorEmail: event.actor_email || 'System'
-      }))
+      ...this.adminEventPage(eventCursor)
+    };
+  }
+
+  adminEventPage(cursor) {
+    const events = cursor
+      ? this.sqlite.prepare(`
+          SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
+            accounts.email AS actor_email
+          FROM sharing_events
+          LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
+          WHERE (sharing_events.created_at, sharing_events.id) < (?, ?)
+          ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
+          LIMIT 13
+        `).all(cursor.createdAt, cursor.id)
+      : this.sqlite.prepare(`
+          SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
+            accounts.email AS actor_email
+          FROM sharing_events
+          LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
+          ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
+          LIMIT 13
+        `).all();
+    const page = events.slice(0, 12).map((event) => ({
+      id: event.id,
+      entityType: event.entity_type,
+      action: event.action,
+      createdAt: event.created_at,
+      actorEmail: event.actor_email || 'System'
+    }));
+    const last = page.at(-1);
+    return {
+      recentEvents: page,
+      nextEventCursor: events.length > page.length && last
+        ? Buffer.from(JSON.stringify({ createdAt: last.createdAt, id: last.id })).toString('base64url')
+        : null
     };
   }
 
