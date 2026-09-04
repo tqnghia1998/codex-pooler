@@ -205,6 +205,9 @@ async function copySharedSource(targetRoot, sharedFiles) {
     source = source
       .replaceAll('relaydeckAdmission', 'gatewayAdmission')
       .replaceAll('relaydeckSettleAfterBody', 'gatewaySettleAfterBody')
+      .replaceAll('codex-pooler-claude', 'codex-share-claude')
+      .replaceAll("'codex-pooler'", "'codex-share'")
+      .replaceAll('codex-pooler-node/0.1.0', 'codex-share/0.1.0')
       .replace(/export const OPENAI_PRICING_SOURCE_URL = "[^"]+";/, "export const OPENAI_PRICING_SOURCE_URL = 'local snapshot';");
     await writeText(destination, source);
   }
@@ -253,12 +256,41 @@ async function writeProjectFiles(targetRoot, overlay) {
   await writeFile(join(targetRoot, '.gitignore'), overlay.get('.gitignore'));
   await writeFile(join(targetRoot, '.env.example'), overlay.get('.env.example'));
   await writeFile(join(targetRoot, 'README.md'), overlay.get('README.md'));
+  const adminEventCursor = await productAdminEventCursor();
   for (const relativePath of standaloneOverlayFiles) {
     if (['.env.example', '.gitignore', 'README.md', 'package.json', 'package-lock.json'].includes(relativePath)) continue;
     const destination = join(targetRoot, relativePath);
-    await writeFile(destination, overlay.get(relativePath));
+    const source = relativePath === 'src/server.js'
+      ? standaloneServerSource(overlay.get(relativePath).toString('utf8'), adminEventCursor)
+      : overlay.get(relativePath);
+    await writeFile(destination, source);
   }
   await cp(join(workspaceRoot, 'LICENSE.md'), join(targetRoot, 'LICENSE.md'));
+}
+
+async function productAdminEventCursor() {
+  const source = await readFile(join(productRoot, 'src/server.js'), 'utf8');
+  const start = source.indexOf('function adminEventCursor(url) {');
+  const end = source.indexOf('\nfunction sharingListQuery(url) {', start);
+  if (start < 0 || end < 0) throw new Error('Could not read admin event cursor from the product server');
+  return source.slice(start, end);
+}
+
+function standaloneServerSource(source, adminEventCursor) {
+  const helper = 'function adminEventCursor(url) {';
+  const anchor = '\nfunction sharingListQuery(url) {';
+  const start = source.indexOf(helper);
+  const end = start < 0 ? -1 : source.indexOf(anchor, start);
+  if (start >= 0 && end < 0) throw new Error('Could not replace admin event cursor in the standalone server');
+  if (start >= 0) source = `${source.slice(0, start)}${adminEventCursor}${source.slice(end)}`;
+  else if (source.includes(anchor)) source = source.replace(anchor, `\n${adminEventCursor}${anchor}`);
+  else throw new Error('Could not add admin event cursor to the standalone server');
+
+  const legacyCall = 'productStore.adminAnalytics()';
+  const cursorCall = 'productStore.adminAnalytics({ eventCursor: adminEventCursor(url) })';
+  if (source.includes(legacyCall)) return source.replace(legacyCall, cursorCall);
+  if (source.includes(cursorCall)) return source;
+  throw new Error('Could not add event cursor to standalone admin analytics');
 }
 
 function mergePackageEntries(standalone, source) {
