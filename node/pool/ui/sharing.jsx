@@ -38,10 +38,17 @@ const SHARING_VIEWS = new Set([
   'my-access',
   'shared-by-me'
 ]);
+const PROVIDER_SECTIONS = new Set(['my-offers', 'approvals', 'shared-by-me']);
+const CONSUMER_SECTIONS = new Set(['community-offers', 'quota-requests', 'sent-requests', 'my-access']);
 const SHARING_VIEW_STORAGE_KEY = 'codex_pool_sharing_view';
+const SHARING_SECTION_STORAGE_KEY = 'codex_pool_sharing_section';
 const SHARING_CARD_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
 const LOGIN_CARD_GRID_COLUMNS = { minWidth: 280, max: 2, repeat: 'fill' };
 const PROVIDER_CARD_GRID_COLUMNS = { minWidth: 220, max: 2, repeat: 'fill' };
+const PROVIDER_RANK = { codex: 0, ais: 1, aiswitch: 1, claude: 2 };
+function upstreamProviderRank(u) {
+  return PROVIDER_RANK[u?.type] ?? PROVIDER_RANK[u?.quotaSource] ?? 3;
+}
 const SHARING_LIST_CONFIG = {
   'community-offers': { resource: 'offers', key: 'offers', role: 'community' },
   'my-offers': { resource: 'offers', key: 'offers', role: 'mine' },
@@ -59,6 +66,14 @@ function initialSharingView() {
   } catch {
     return 'community-offers';
   }
+}
+
+function initialSharingSection(initialView) {
+  try {
+    const stored = window.localStorage.getItem(SHARING_SECTION_STORAGE_KEY);
+    if (stored === 'provider' || stored === 'consumer') return stored;
+  } catch {}
+  return PROVIDER_SECTIONS.has(initialView) ? 'provider' : 'consumer';
 }
 
 function csrfToken() {
@@ -112,6 +127,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const api = useSharingApi();
   const [account, setAccount] = useState(null);
   const [view, setView] = useState(initialSharingView);
+  const [section, setSection] = useState(() => initialSharingSection(initialSharingView()));
   const [tablePage, setTablePage] = useState({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
   const [tableTotals, setTableTotals] = useState({});
   const [tableOffset, setTableOffset] = useState(0);
@@ -119,6 +135,10 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [showPastData, setShowPastData] = useState(false);
   const [upstreams, setUpstreams] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [smartSession, setSmartSession] = useState(() => {
+    try { return window.localStorage.getItem('session'); } catch { return null; }
+  });
+  const [smartAuthenticating, setSmartAuthenticating] = useState(false);
   const [offerDialog, setOfferDialog] = useState(null);
   const [ticketDialog, setTicketDialog] = useState(null);
   const [sessionDialog, setSessionDialog] = useState(null);
@@ -137,6 +157,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [authJson, setAuthJson] = useState('');
   const [authJsonLoading, setAuthJsonLoading] = useState(false);
   const [aisDialog, setAisDialog] = useState(null);
+  const [claudeDialog, setClaudeDialog] = useState(null);
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const [testingUpstreamId, setTestingUpstreamId] = useState(null);
   const [testingSessionId, setTestingSessionId] = useState(null);
@@ -191,7 +212,56 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     }
   }, [api, onNotice]);
 
-  useEffect(() => { void load(); }, [load]);
+  const syncSmartSession = useCallback(async (sessionVal) => {
+    if (!sessionVal) return;
+    setSmartAuthenticating(true);
+    try {
+      await api('/auth/session', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session: sessionVal })
+      });
+      await load();
+    } catch (err) {
+      onNotice(err.message || 'Failed to authenticate Smart session', true);
+    } finally {
+      setSmartAuthenticating(false);
+    }
+  }, [api, load, onNotice]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useEffect(() => {
+    const handleFocusOrVisible = () => {
+      let currentSession = null;
+      try {
+        currentSession = window.localStorage.getItem('session');
+      } catch {}
+      setSmartSession(currentSession);
+      if (currentSession && !account && !smartAuthenticating) {
+        void syncSmartSession(currentSession);
+      }
+    };
+
+    window.addEventListener('focus', handleFocusOrVisible);
+    document.addEventListener('visibilitychange', handleFocusOrVisible);
+    window.addEventListener('storage', handleFocusOrVisible);
+
+    // Initial check on mount if localStorage already has session
+    let initialSession = null;
+    try { initialSession = window.localStorage.getItem('session'); } catch {}
+    if (initialSession && !account) {
+      void syncSmartSession(initialSession);
+    }
+
+    return () => {
+      window.removeEventListener('focus', handleFocusOrVisible);
+      document.removeEventListener('visibilitychange', handleFocusOrVisible);
+      window.removeEventListener('storage', handleFocusOrVisible);
+    };
+  }, [account, smartAuthenticating, syncSmartSession]);
 
   useEffect(() => {
     onLoadingChange(loading);
@@ -236,11 +306,41 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     return () => window.clearTimeout(timer);
   }, [account, emailQuery, loadTable]);
 
-  useEffect(() => {
+  const handleSectionChange = useCallback((nextSection) => {
+    setSection(nextSection);
     try {
-      window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, view);
+      window.localStorage.setItem(SHARING_SECTION_STORAGE_KEY, nextSection);
     } catch {}
-  }, [view]);
+    if (nextSection === 'provider') {
+      if (!PROVIDER_SECTIONS.has(view)) {
+        setView('my-offers');
+        try { window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, 'my-offers'); } catch {}
+      }
+    } else {
+      if (!CONSUMER_SECTIONS.has(view)) {
+        setView('community-offers');
+        try { window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, 'community-offers'); } catch {}
+      }
+    }
+    setTableOffset(0);
+    resetTablePage();
+  }, [resetTablePage, view]);
+
+  const handleViewChange = useCallback((nextView) => {
+    setView(nextView);
+    try {
+      window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, nextView);
+    } catch {}
+    if (PROVIDER_SECTIONS.has(nextView)) {
+      setSection('provider');
+      try { window.localStorage.setItem(SHARING_SECTION_STORAGE_KEY, 'provider'); } catch {}
+    } else if (CONSUMER_SECTIONS.has(nextView)) {
+      setSection('consumer');
+      try { window.localStorage.setItem(SHARING_SECTION_STORAGE_KEY, 'consumer'); } catch {}
+    }
+    setTableOffset(0);
+    resetTablePage();
+  }, [resetTablePage]);
 
   useEffect(() => {
     if (!account) return undefined;
@@ -454,6 +554,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   }, [account, load, loadTable, refreshQuota]);
 
   if (!account) {
+    const hasSmartSession = !!smartSession;
     return (
       <VStack gap={2}>
         <Grid columns={LOGIN_CARD_GRID_COLUMNS} gap={2} minHeight={120}>
@@ -461,22 +562,41 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             <VStack height="100%" justify="between" gap={2}>
               <VStack gap={1}>
                 <Heading level={2} maxLines={1}>Quota sharing</Heading>
-                <Text type="supporting" color="secondary" maxLines={1}>Sign in with Codex to publish quota, request access, and manage share sessions.</Text>
+                <Text type="supporting" color="secondary" maxLines={1}>
+                  {!hasSmartSession
+                    ? 'Login with Smart to access Codex Share.'
+                    : 'Authenticating with Smart session...'}
+                </Text>
               </VStack>
-              {!login && (
+              {!hasSmartSession ? (
                 <HStack justify="end" gap={1} wrap="wrap">
-                  <Button label="Login with Codex" variant="primary" isLoading={loginLoading} onClick={() => void startCodexLogin()} />
                   <Button
-                    label="Login with auth.json"
-                    variant="secondary"
-                    onClick={openAuthJsonDialog}
+                    label="Login with Smart"
+                    variant="primary"
+                    onClick={() => {
+                      window.open('https://smart.test.shopee.io/login', '_blank', 'noopener,noreferrer');
+                    }}
+                  />
+                </HStack>
+              ) : (
+                <HStack justify="end" gap={1} wrap="wrap">
+                  <Button
+                    label="Authenticating..."
+                    variant="primary"
+                    isLoading={true}
+                    disabled={true}
                   />
                 </HStack>
               )}
             </VStack>
           </Card>
-          {login && <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />}
         </Grid>
+        <CodexLoginDialog
+          login={login}
+          onClose={() => setLogin(null)}
+          onRetry={() => void startCodexLogin()}
+          onCancel={() => void cancelCodexLogin()}
+        />
         <AuthJsonLoginDialog
           isOpen={authJsonDialog}
           value={authJson}
@@ -551,6 +671,12 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               projectId: upstream.projectId || '',
               projectKey: ''
             })}
+            onAddClaude={() => setClaudeDialog({ oauthToken: '', authJson: '' })}
+            onEditClaude={(upstream) => setClaudeDialog({
+              upstream,
+              oauthToken: '',
+              authJson: ''
+            })}
             onRevealCredentials={() => void revealCredentials()}
             onTestConnection={(upstream) => void testConnection(upstream)}
             testingUpstreamId={testingUpstreamId}
@@ -581,27 +707,44 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           isActionLoading={isActionLoading}
         />
       </Grid>
-      {login && (
-        <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
-          <CodexLoginCard login={login} onRetry={() => void startCodexLogin()} onCancel={() => void cancelCodexLogin()} />
-        </Grid>
-      )}
+      <CodexLoginDialog
+        login={login}
+        onClose={() => setLogin(null)}
+        onRetry={() => void startCodexLogin()}
+        onCancel={() => void cancelCodexLogin()}
+      />
       <VStack gap={2}>
+        <VStack paddingBlock={1}>
+          <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+            <SegmentedControl
+              label="Dashboard section"
+              value={section}
+              onChange={handleSectionChange}
+              size="lg"
+              layout="hug"
+            >
+              <SegmentedControlItem value="provider" label="For Providers" />
+              <SegmentedControlItem value="consumer" label="For Consumers" />
+            </SegmentedControl>
+          </HStack>
+        </VStack>
+
         <VStack paddingBlock={2}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-          <SegmentedControl label="Sharing workspace" value={view} onChange={(nextView) => {
-            setView(nextView);
-            setTableOffset(0);
-            resetTablePage();
-          }} size="md" layout="hug">
-            <SegmentedControlItem value="community-offers" label={tabLabel('Community offers', 'community-offers')} />
-            <SegmentedControlItem value="my-offers" label={tabLabel('My offers', 'my-offers')} />
-            <SegmentedControlItem value="quota-requests" label={tabLabel('Friends seeking quota', 'quota-requests')} />
-            <SegmentedControlItem value="sent-requests" label={tabLabel('Sent requests', 'sent-requests')} />
-            <SegmentedControlItem value="approvals" label={tabLabel('Approvals', 'approvals')} />
-            <SegmentedControlItem value="my-access" label={tabLabel('My access', 'my-access')} />
-            <SegmentedControlItem value="shared-by-me" label={tabLabel('Shared by me', 'shared-by-me')} />
-          </SegmentedControl>
+          {section === 'provider' ? (
+            <SegmentedControl label="Provider tabs" value={view} onChange={handleViewChange} size="md" layout="hug">
+              <SegmentedControlItem value="my-offers" label={tabLabel('My published offers', 'my-offers')} />
+              <SegmentedControlItem value="approvals" label={tabLabel('Incoming requests (Approvals)', 'approvals')} />
+              <SegmentedControlItem value="shared-by-me" label={tabLabel('Active shares granted', 'shared-by-me')} />
+            </SegmentedControl>
+          ) : (
+            <SegmentedControl label="Consumer tabs" value={view} onChange={handleViewChange} size="md" layout="hug">
+              <SegmentedControlItem value="community-offers" label={tabLabel('Community offers', 'community-offers')} />
+              <SegmentedControlItem value="my-access" label={tabLabel('My access (Granted sessions)', 'my-access')} />
+              <SegmentedControlItem value="sent-requests" label={tabLabel('Sent requests', 'sent-requests')} />
+              <SegmentedControlItem value="quota-requests" label={tabLabel('Friends seeking quota', 'quota-requests')} />
+            </SegmentedControl>
+          )}
           <HStack gap={2} vAlign="center" wrap="wrap">
             <Switch
               label="See past data"
@@ -824,6 +967,19 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           setAisDialog(null);
         }, aisDialog?.upstream ? 'AIS project updated' : 'AIS project added')}
       />
+      <ClaudeUpstreamDialog
+        value={claudeDialog}
+        onClose={() => setClaudeDialog(null)}
+        onChange={setClaudeDialog}
+        onSave={(value) => mutate(async () => {
+          const editing = Boolean(value.upstream);
+          await api(editing ? `/api/pool/upstreams/${value.upstream.id}` : '/api/pool/upstreams/claude', {
+            method: editing ? 'PATCH' : 'POST',
+            body: JSON.stringify(value)
+          });
+          setClaudeDialog(null);
+        }, claudeDialog?.upstream ? 'Claude account updated' : 'Claude account linked')}
+      />
       <PersonalKeyDialog
         value={personalKeyDialog}
         onClose={() => setPersonalKeyDialog(null)}
@@ -963,6 +1119,8 @@ function QuotaOverview({
   onImportAuthJson,
   onAddAis,
   onEditAis,
+  onAddClaude,
+  onEditClaude,
   onRevealCredentials,
   onTestConnection,
   testingUpstreamId,
@@ -970,22 +1128,21 @@ function QuotaOverview({
   onRevokeAll,
   isActionLoading = () => false
 }) {
-  const hasAis = upstreams.some((upstream) => upstream.quotaSource === 'ais');
-  const orderedUpstreams = [...upstreams].sort((left, right) =>
-    Number(left.quotaSource === 'ais') - Number(right.quotaSource === 'ais')
-  );
+  const orderedUpstreams = useMemo(() => (
+    [...upstreams].sort((left, right) => upstreamProviderRank(left) - upstreamProviderRank(right))
+  ), [upstreams]);
   if (!upstreams.length) {
     return (
       <Card variant="muted" padding={3}>
         <VStack gap={2} hAlign="center">
           <VStack gap={1} hAlign="center">
             <Heading level={3} maxLines={1}>No share provider linked</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Link Codex quota or add an AIS project to publish an offer.</Text>
+            <Text type="supporting" color="secondary" maxLines={1}>Link Codex, Claude, or an AIS project to start sharing quota.</Text>
           </VStack>
           <HStack justify="center" gap={1} wrap="wrap">
-            <Button label="Login with Codex" size="sm" variant="primary" onClick={onLinkCodex} />
-            <Button label="Login with auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
-            <Button label="Add AIS project" size="sm" variant="dashed" onClick={onAddAis} />
+            <Button label="Link Codex" size="sm" variant="secondary" onClick={onLinkCodex} />
+            <Button label="Link Claude" size="sm" variant="secondary" onClick={onAddClaude} />
+            <Button label="Link AIS" size="sm" variant="secondary" onClick={onAddAis} />
           </HStack>
         </VStack>
       </Card>
@@ -997,11 +1154,14 @@ function QuotaOverview({
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
             <Heading level={3} maxLines={1}>Your share providers</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Codex quota refreshes automatically; AIS quota is managed externally.</Text>
+            <Text type="supporting" color="secondary" maxLines={1}>Codex & Claude quota refresh automatically; AIS is managed externally.</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
-            <Button label="View credentials" size="sm" variant="secondary" onClick={onRevealCredentials} />
-            <Button label="Refresh quota" size="sm" variant="secondary" isLoading={isRefreshing} onClick={onRefresh} />
+            <Button label="Link Codex" size="sm" variant="secondary" onClick={onLinkCodex} />
+            <Button label="Link Claude" size="sm" variant="secondary" onClick={onAddClaude} />
+            <Button label="Link AIS" size="sm" variant="secondary" onClick={onAddAis} />
+            <Button label="Credentials" size="sm" variant="ghost" onClick={onRevealCredentials} />
+            <Button label="Refresh quota" size="sm" variant="ghost" isLoading={isRefreshing} onClick={onRefresh} />
           </HStack>
         </HStack>
         <Grid columns={PROVIDER_CARD_GRID_COLUMNS} gap={2}>
@@ -1016,14 +1176,10 @@ function QuotaOverview({
               onToggleSharing={onToggleSharing}
               onRevokeAll={onRevokeAll}
               onEditAis={onEditAis}
+              onEditClaude={onEditClaude}
               isActionLoading={isActionLoading}
             />
           ))}
-          {!hasAis && (
-            <VStack hAlign="center" vAlign="center" height="100%">
-              <Button label="Add AIS project" size="sm" variant="dashed" onClick={onAddAis} />
-            </VStack>
-          )}
         </Grid>
       </VStack>
     </Card>
@@ -1082,13 +1238,15 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, isActionLoading = () => false }) {
+function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, isActionLoading = () => false }) {
   const quota = upstream.quota;
   const isAis = upstream.quotaSource === 'ais';
+  const isClaude = upstream.type === 'claude';
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
+  const providerTypeLabel = isAis ? 'AIS · quota managed externally' : isClaude ? 'Claude OAuth' : (quota?.label || 'Waiting for provider quota');
   return (
     <Card variant={issue ? 'red' : 'default'} height="100%" padding={3}>
       <VStack gap={2} height="100%" vAlign="between">
@@ -1096,10 +1254,11 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           <HStack justify="between" vAlign="start" gap={2}>
             <VStack gap={1}>
               <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
-              <Text type="supporting" color="secondary" maxLines={1}>{isAis ? 'AIS · quota managed externally' : quota?.label || 'Waiting for provider quota'}</Text>
+              <Text type="supporting" color="secondary" maxLines={1}>{providerTypeLabel}</Text>
             </VStack>
             <HStack gap={1} vAlign="center">
               {isAis && <Button label="Edit" size="sm" variant="secondary" onClick={() => onEditAis(upstream)} />}
+              {isClaude && <Button label="Edit" size="sm" variant="secondary" onClick={() => onEditClaude(upstream)} />}
               {issue && <ProviderIssueBadge issue={issue} />}
             </HStack>
           </HStack>
@@ -1140,8 +1299,14 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           />
           {issue?.code === 'provider_reauth_required' && (
             <>
-              <Button label="Reconnect" size="sm" variant="primary" onClick={onLinkCodex} />
-              <Button label="Use auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
+              {isClaude ? (
+                <Button label="Update token" size="sm" variant="primary" onClick={() => onEditClaude(upstream)} />
+              ) : (
+                <>
+                  <Button label="Reconnect" size="sm" variant="primary" onClick={onLinkCodex} />
+                  <Button label="Use auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
+                </>
+              )}
             </>
           )}
           <Button
@@ -1437,11 +1602,15 @@ function ProviderIssueBadge({ issue }) {
 }
 
 function UpstreamSourceBadge({ upstream }) {
+  if (upstream?.type === 'claude') {
+    return <Badge label="claude" variant="blue" />;
+  }
   const isAis = upstream?.quotaSource === 'ais';
   return <Badge label={isAis ? 'ais' : 'codex'} variant={isAis ? 'teal' : 'purple'} />;
 }
 
-function CodexLoginCard({ login, onCancel, onRetry }) {
+function CodexLoginDialog({ login, onClose, onCancel, onRetry }) {
+  if (!login) return null;
   const waiting = ['starting', 'waiting'].includes(login.status);
   const retryable = ['failed', 'cancelled'].includes(login.status);
   const [isOpeningSignIn, setIsOpeningSignIn] = useState(false);
@@ -1452,32 +1621,93 @@ function CodexLoginCard({ login, onCancel, onRetry }) {
 
   const openSignIn = () => {
     setIsOpeningSignIn(true);
-    window.open(login.verificationUrl, '_blank', 'noopener,noreferrer');
+    if (login.verificationUrl) {
+      window.open(login.verificationUrl, '_blank', 'noopener,noreferrer');
+    }
   };
 
   return (
-    <Card variant="muted" height="100%" padding={3}>
-      <VStack height="100%" justify="between" gap={2}>
-        <VStack gap={1}>
-          <HStack gap={2} vAlign="center">
-            <Text weight="bold" maxLines={1}>Codex sign-in</Text>
-            <Badge label={login.status} variant={login.status === 'completed' ? 'green' : login.status === 'failed' ? 'error' : 'warning'} />
-          </HStack>
-          {login.userCode
-            ? <HStack gap={1} vAlign="center" wrap="wrap">
-              <Text>{`Open ${login.verificationUrl} and enter code`}</Text>
-              <Text type="large" weight="bold" hasTabularNumbers>{login.userCode}</Text>
+    <Dialog isOpen={Boolean(login)} onOpenChange={onClose} purpose="form" width={540}>
+      <Layout
+        header={(
+          <DialogHeader
+            title="Link Codex"
+            subtitle="Connect OpenAI Codex via device authorization"
+            onOpenChange={onClose}
+            hasDivider
+          />
+        )}
+        content={(
+          <LayoutContent>
+            <VStack gap={3}>
+              <HStack justify="between" vAlign="center">
+                <Text type="supporting" color="secondary">Connection status</Text>
+                <Badge
+                  label={login.status}
+                  variant={login.status === 'completed' ? 'green' : login.status === 'failed' ? 'error' : 'warning'}
+                />
+              </HStack>
+
+              {login.userCode ? (
+                <VStack gap={3}>
+                  <VStack gap={1}>
+                    <Text weight="bold">1. Open verification page</Text>
+                    <Text type="supporting" color="secondary">
+                      Open OpenAI&apos;s device authorization page in your browser:
+                    </Text>
+                    <HStack gap={2} vAlign="center">
+                      <Button
+                        label="Open verification page"
+                        variant="primary"
+                        isLoading={isOpeningSignIn}
+                        onClick={openSignIn}
+                      />
+                      <Text type="supporting" color="secondary">
+                        (opens in new tab)
+                      </Text>
+                    </HStack>
+                  </VStack>
+
+                  <VStack gap={1}>
+                    <Text weight="bold">2. Enter one-time user code</Text>
+                    <Text type="supporting" color="secondary">
+                      Paste this code into the OpenAI authorization page to complete sign-in:
+                    </Text>
+                    <CodeBlock
+                      code={login.userCode}
+                      language="text"
+                      hasCopyButton
+                      width="100%"
+                    />
+                  </VStack>
+                </VStack>
+              ) : (
+                <VStack gap={2} vAlign="center" justify="center" style={{ padding: '24px 0' }}>
+                  <Text color="secondary">Generating device authorization code...</Text>
+                </VStack>
+              )}
+
+              {login.errorCode && (
+                <Banner title="Authorization error" description={login.errorCode} status="error" />
+              )}
+            </VStack>
+          </LayoutContent>
+        )}
+        footer={(
+          <LayoutFooter hasDivider>
+            <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+              <HStack gap={2}>
+                {waiting && <Button label="Cancel sign-in" variant="ghost" onClick={onCancel} />}
+              </HStack>
+              <HStack gap={2}>
+                {retryable && <Button label="Try again" variant="primary" onClick={onRetry} />}
+                <Button label="Close" variant="secondary" onClick={onClose} />
+              </HStack>
             </HStack>
-            : <Text type="supporting" color="secondary" maxLines={1}>Starting the OpenAI device sign-in flow...</Text>}
-          {login.errorCode && <Text type="supporting" color="secondary" maxLines={1}>{login.errorCode}</Text>}
-        </VStack>
-        <HStack justify="end" gap={1} wrap="wrap">
-          {login.verificationUrl && <Button label="Open OpenAI sign-in" variant="primary" isLoading={isOpeningSignIn} onClick={openSignIn} />}
-          {retryable && <Button label="Try again" variant="primary" onClick={onRetry} />}
-          {waiting && <Button label="Cancel" variant="secondary" onClick={onCancel} />}
-        </HStack>
-      </VStack>
-    </Card>
+          </LayoutFooter>
+        )}
+      />
+    </Dialog>
   );
 }
 
@@ -1536,7 +1766,7 @@ function AisProjectDialog({ value, onClose, onSave, onChange }) {
     <>
       <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={520}>
         <Layout
-          header={<DialogHeader title={editing ? 'Edit AIS project' : 'Add AIS project'} subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
+          header={<DialogHeader title={editing ? 'Update AIS project' : 'Link AIS project'} subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
           content={(
             <LayoutContent>
               {value && <VStack gap={3}>
@@ -1576,7 +1806,7 @@ function AisProjectDialog({ value, onClose, onSave, onChange }) {
               )}
               onClose={onClose}
               onSave={() => onSave(value)}
-              saveLabel={editing ? 'Save changes' : 'Add project'}
+              saveLabel={editing ? 'Update project' : 'Link AIS'}
               isSaveDisabled={!String(value?.projectId || '').trim()
                 || (!editing && !String(value?.projectKey || '').trim())}
             />
@@ -1619,6 +1849,72 @@ function AisProjectGuide({ isOpen, onClose }) {
   );
 }
 
+function ClaudeUpstreamDialog({ value, onClose, onSave, onChange }) {
+  const editing = Boolean(value?.upstream);
+  const token = String(value?.token || '').trim();
+  const isValid = token.startsWith('sk-ant-oat') || token.startsWith('{');
+  const isSaveDisabled = !isValid;
+
+  return (
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={540}>
+      <Layout
+        header={(
+          <DialogHeader
+            title={editing ? 'Update Claude' : 'Link Claude'}
+            subtitle="Connect Claude via CLI setup-token"
+            onOpenChange={onClose}
+            hasDivider
+          />
+        )}
+        content={(
+          <LayoutContent>
+            {value && (
+              <VStack gap={3}>
+                <VStack gap={1}>
+                  <Text weight="bold">1. Run command in your terminal</Text>
+                  <Text type="supporting" color="secondary">
+                    Run the following command in your terminal to generate a setup-token:
+                  </Text>
+                  <CodeBlock
+                    code="claude setup-token"
+                    language="bash"
+                    hasCopyButton
+                    width="100%"
+                  />
+                </VStack>
+
+                <VStack gap={1}>
+                  <Text weight="bold">2. Paste your setup-token below</Text>
+                  <Text type="supporting" color="secondary">
+                    The token starts with <Code>sk-ant-oat...</Code> (typically <Code>sk-ant-oat01-</Code>)
+                  </Text>
+                  <TextInput
+                    label="Claude setup-token"
+                    value={value.token || ''}
+                    onChange={(tokenVal) => onChange({ ...value, token: tokenVal })}
+                    placeholder="sk-ant-oat..."
+                    hasAutoFocus
+                    isRequired
+                    width="100%"
+                  />
+                </VStack>
+              </VStack>
+            )}
+          </LayoutContent>
+        )}
+        footer={(
+          <DialogFooter
+            onClose={onClose}
+            onSave={() => onSave(value)}
+            saveLabel={editing ? 'Update token' : 'Link Claude'}
+            isSaveDisabled={isSaveDisabled}
+          />
+        )}
+      />
+    </Dialog>
+  );
+}
+
 function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, onChange }) {
   const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
   return (
@@ -1635,7 +1931,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   label="Share source"
                   options={offerableUpstreams.map((upstream) => ({
                     value: upstream.id,
-                    label: `${upstream.name} · ${upstream.quotaSource === 'ais' ? 'AIS' : 'Codex'}`
+                    label: `${upstream.name} · ${upstream.type === 'claude' ? 'Claude' : (upstream.quotaSource === 'ais' ? 'AIS' : 'Codex')}`
                   }))}
                   value={value.upstreamId}
                   onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
