@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../../src/store.js';
-import { exportUpstreamCredentials } from '../../src/domain.js';
+import { exportUpstreamCredentials, parseClaudeAuthJson, claudeOAuthInputError, isSupportedClaudeOAuthUpstream } from '../../src/domain.js';
+import { ensureClaudeCredentialIdentity } from '../../src/claude-protocol.js';
 import { createTokenRefreshScheduler, TOKEN_REFRESH_INTERVAL_MS } from '../../src/codex-token-refresh.js';
 import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from '../../src/upstream-quota-refresh.js';
 import { shareSessionDenial } from '../../src/share-authorization.js';
@@ -343,6 +344,66 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     sendJson(res, 204, null);
     return;
   }
+  if (req.method === 'POST' && url.pathname === '/auth/session') {
+    const input = await body(req);
+    let sessionData = input?.session;
+    if (typeof sessionData === 'string') {
+      try {
+        sessionData = JSON.parse(sessionData);
+      } catch {
+        sessionData = { sub: sessionData };
+      }
+    }
+    if (!sessionData || typeof sessionData !== 'object') {
+      throw new HttpError(400, 'invalid_request', 'session data is required');
+    }
+    const userObj = (sessionData.user && typeof sessionData.user === 'object') ? sessionData.user : {};
+    const email = String(
+      sessionData.email ||
+      sessionData.login_email ||
+      userObj.email ||
+      userObj.login_email ||
+      sessionData.mail ||
+      ''
+    ).trim();
+    const username = String(
+      userObj.username ||
+      (typeof sessionData.username === 'string' ? sessionData.username : '') ||
+      (typeof sessionData.user === 'string' ? sessionData.user : '') ||
+      email.split('@')[0] ||
+      ''
+    ).trim();
+    const name = String(
+      userObj.full_name ||
+      userObj.family_name ||
+      userObj.given_name ||
+      sessionData.displayName ||
+      (typeof sessionData.name === 'string' ? sessionData.name : '') ||
+      username ||
+      email ||
+      'Smart User'
+    ).trim();
+    const sub = String(
+      sessionData.identity_uuid ||
+      userObj.sub ||
+      sessionData.sub ||
+      sessionData.id ||
+      sessionData.userId ||
+      username ||
+      email
+    ).trim();
+    if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
+    const finalEmail = email || (username ? `${username}@shopee.com` : '');
+    const account = productStore.upsertSmartAccount({ username, email: finalEmail, name, sub });
+    const session = productStore.createAccountSession(account.id);
+    setCookies(res, [
+      cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
+      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
+      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
+    ]);
+    sendJson(res, 200, { account, csrfToken: session.csrfToken });
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/auth/logout') {
     const auth = accountSession(req, productStore, true);
     productStore.revokeAccountSession(requestCookies(req)[COOKIE_NAMES.session]);
@@ -397,6 +458,68 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 201, productStore.createNamedPersonalKey(accountId, await body(req), store));
     return;
   }
+  if (req.method === 'POST' && resource === 'upstreams' && id === 'claude' && parts.length === 4) {
+    const input = await body(req);
+    const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
+    if (!rawToken) throw new HttpError(400, 'invalid_request', 'Claude setup token is required');
+
+    let authJson = '';
+    if (rawToken.startsWith('{')) {
+      authJson = rawToken;
+    } else {
+      authJson = JSON.stringify({
+        claudeAiOauth: {
+          accessToken: rawToken,
+          refreshToken: '',
+          expiresAt: 0
+        }
+      });
+    }
+
+    const policyError = claudeOAuthInputError({ authJson }, { creating: true });
+    if (policyError) throw new HttpError(400, 'invalid_request', policyError);
+    let parsedAuth;
+    try {
+      parsedAuth = parseClaudeAuthJson(authJson);
+    } catch (error) {
+      throw new HttpError(400, 'invalid_request', String(error?.message || 'Invalid Claude OAuth token'));
+    }
+    const upstream = store.create({
+      type: 'claude',
+      authJson,
+      name: input.name || parsedAuth.account?.displayName || parsedAuth.account?.emailAddress || 'Claude OAuth'
+    });
+    try {
+      const credentials = store.credentials(upstream.id);
+      if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
+        try {
+          await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile: true });
+        } catch (error) {
+          if (error?.statusCode === 401 || error?.statusCode === 403) {
+            throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
+          }
+          // Profile lookup is advisory; log warning for transient upstream connectivity issues
+          console.warn(`[pool] Advisory Claude identity lookup failed for ${upstream.id}:`, error?.message || error);
+        }
+      }
+      productStore.linkUpstream(accountId, upstream.id);
+      const provider = productStore.providerSummary(accountId, upstream.id, store);
+      const latest = store.get(upstream.id) || upstream;
+      sendJson(res, 201, {
+        upstream: {
+          ...latest,
+          providerIssue: providerIssue(latest),
+          sharing: provider.sharing,
+          commitment: provider.commitment
+        }
+      });
+    } catch (error) {
+      productStore.cleanupUpstream(upstream.id);
+      store.remove(upstream.id);
+      throw error;
+    }
+    return;
+  }
   if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
     const input = await body(req);
     const upstream = store.create({
@@ -426,13 +549,56 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
   if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {
     const input = await body(req);
     const upstream = store.get(id);
-    if (!upstream || !productStore.accountOwnsUpstream(accountId, id) || (upstream.quotaSource !== 'ais' && upstream.quotaSource !== 'aiswitch')) {
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
-    const updated = store.update(id, {
-      ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
-      ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
-    });
+    const isAis = upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch';
+    const isClaude = upstream.type === 'claude';
+    if (!isAis && !isClaude) {
+      throw new HttpError(400, 'invalid_request', 'Only AIS or Claude upstreams can be updated');
+    }
+
+    let updateFields = {};
+    if (isAis) {
+      updateFields = {
+        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
+      };
+    } else if (isClaude) {
+      const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
+      if (rawToken) {
+        let authJson = '';
+        if (rawToken.startsWith('{')) {
+          authJson = rawToken;
+        } else {
+          authJson = JSON.stringify({
+            claudeAiOauth: {
+              accessToken: rawToken,
+              refreshToken: '',
+              expiresAt: 0
+            }
+          });
+        }
+        const policyError = claudeOAuthInputError({ authJson });
+        if (policyError) throw new HttpError(400, 'invalid_request', policyError);
+        updateFields = { authJson };
+      }
+    }
+
+    const updated = store.update(id, updateFields);
+    if (isClaude && updateFields.authJson) {
+      try {
+        const credentials = store.credentials(id);
+        if (isSupportedClaudeOAuthUpstream({ ...updated, credentials })) {
+          await ensureClaudeCredentialIdentity({ upstream: updated, credentials, store, fetchImpl, refreshProfile: true });
+        }
+      } catch (error) {
+        if (error?.statusCode === 401 || error?.statusCode === 403) {
+          throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
+        }
+        console.warn(`[pool] Advisory Claude identity lookup failed on update for ${id}:`, error?.message || error);
+      }
+    }
     const provider = productStore.providerSummary(accountId, id, store);
     sendJson(res, 200, {
       upstream: {
@@ -504,7 +670,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
       sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
       return;
     }
-    if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
+    if (upstream.type !== 'codex' && upstream.type !== 'claude') throw new HttpError(400, 'invalid_request', 'Only Codex and Claude accounts can refresh quota');
     sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
     return;
   }
