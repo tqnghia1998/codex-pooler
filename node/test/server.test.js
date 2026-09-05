@@ -136,6 +136,13 @@ test('falls back to Claude Messages quota headers when OAuth usage scope is insu
         }), { status: 403 });
       }
       if (url === messagesUrl) {
+        const probeBody = JSON.parse(options.body);
+        if (probeBody.diagnostics) {
+          return new Response(JSON.stringify({
+            type: 'error',
+            error: { type: 'invalid_request_error', message: 'diagnostics: Extra inputs are not permitted.' }
+          }), { status: 400 });
+        }
         return new Response(JSON.stringify({ type: 'error', error: { type: 'rate_limit_error', message: 'Rate limited' } }), {
           status: 429,
           headers: {
@@ -170,6 +177,7 @@ test('falls back to Claude Messages quota headers when OAuth usage scope is insu
     assert.equal(probeBody.max_tokens, 1);
     assert.equal(probeBody.messages[0].role, 'user');
     assert.equal(probeBody.messages[0].content.at(-1).text, '.');
+    assert.equal(probeBody.diagnostics, undefined);
     assert.match(probeBody.metadata.user_id, /"device_id":"[a-f0-9]{64}"/);
     assert.match(probeBody.system[0].text, /^x-anthropic-billing-header:/);
   } finally {
