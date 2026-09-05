@@ -616,6 +616,7 @@ test('sets caps in dollars, records priced usage, and applies bulk quota rules',
     const first = store.create({ type: 'compass', name: 'First', projectId: 'p1', projectKey: 'k1' });
     const second = store.create({ type: 'compass', name: 'Second', projectId: 'p2', projectKey: 'k2' });
     const ais = store.create({ type: 'compass', name: 'AIS', projectId: 'p3', projectKey: 'k3', quotaSource: 'ais' });
+    const unknown = store.create({ type: 'compass', name: 'Unknown', projectId: 'p4', projectKey: 'k4' });
     store.setCap(first.id, { capDollars: 100 });
     const usage = store.addUsage(first.id, {
       attemptId: 'attempt-1',
@@ -635,6 +636,12 @@ test('sets caps in dollars, records priced usage, and applies bulk quota rules',
     assert.equal(store.getPublic(first.id).spending.spentDollars, 0);
     assert.equal(store.getPublic(first.id).spending.settlementCount, 0);
     assert.equal(store.getPublic(second.id).spending.capDollars, 10);
+    assert.equal(bulk.updated.some((item) => item.id === unknown.id), false);
+    store.bulkCaps({ rules: [{ minQuotaLeft: 1_000, capDollars: 30 }, { minQuotaLeft: 0, capDollars: 10 }], unknownQuotaDollars: 5 });
+    assert.equal(store.getPublic(unknown.id).spending.capDollars, 5);
+    assert.equal(store.get(ais.id).spending.capCredits, 0);
+    store.bulkCaps({ rules: [{ minQuotaLeft: 1_000, capDollars: 30 }, { minQuotaLeft: 0, capDollars: 10 }], unknownQuotaDollars: null });
+    assert.equal(store.getPublic(unknown.id).spending.capDollars, 5);
     const all = store.bulkCaps({ target: 'all', capDollars: 999 });
     assert.equal(all.updated.some((item) => item.id === ais.id), false);
     assert.equal(store.get(ais.id).spending.capCredits, 0);
