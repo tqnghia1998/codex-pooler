@@ -66,7 +66,6 @@ export class ProductStore {
         scope_id TEXT NOT NULL,
         sharing_status TEXT NOT NULL DEFAULT 'active',
         sharing_updated_at TEXT,
-        manual_share_budget_micros INTEGER,
         link_order INTEGER,
         created_at TEXT NOT NULL,
         PRIMARY KEY (account_id, upstream_id)
@@ -320,7 +319,6 @@ export class ProductStore {
   migrateSharingSchema() {
     addColumn(this.sqlite, 'account_upstreams', 'sharing_status', "TEXT NOT NULL DEFAULT 'active'");
     addColumn(this.sqlite, 'account_upstreams', 'sharing_updated_at', 'TEXT');
-    addColumn(this.sqlite, 'account_upstreams', 'manual_share_budget_micros', 'INTEGER');
     addColumn(this.sqlite, 'account_upstreams', 'link_order', 'INTEGER');
     this.sqlite.exec('UPDATE account_upstreams SET link_order = rowid WHERE link_order IS NULL');
     addColumn(this.sqlite, 'sharing_offers', 'expires_at', 'TEXT');
@@ -516,7 +514,6 @@ export class ProductStore {
     return this.sqlite.prepare(`
       SELECT upstream_id AS upstreamId, scope_id AS scopeId, sharing_status AS sharingStatus,
         sharing_updated_at AS sharingUpdatedAt,
-        manual_share_budget_micros AS manualShareBudgetMicros,
         link_order AS linkOrder,
         created_at AS createdAt
       FROM account_upstreams
@@ -568,30 +565,6 @@ export class ProductStore {
       activeOffers: Number(offers?.active) || 0,
       activityCount: (Number(offers?.total) || 0) + (Number(sessions?.total) || 0) + (Number(tickets?.total) || 0)
     };
-  }
-
-  manualShareBudgetMicros(upstreamId) {
-    const value = this.sqlite.prepare(`
-      SELECT manual_share_budget_micros AS manualShareBudgetMicros
-      FROM account_upstreams WHERE upstream_id = ?
-    `).get(upstreamId)?.manualShareBudgetMicros;
-    return Number.isSafeInteger(value) && value >= 0 ? value : null;
-  }
-
-  setManualShareBudget(accountId, upstreamId, { quotaDollars }, upstreamStore) {
-    const upstream = upstreamStore.getPublic(upstreamId);
-    if (!upstream || !this.accountOwnsUpstream(accountId, upstreamId)) throw notFound();
-    if (upstream.type !== 'compass' || upstream.quotaSource !== 'aiswitch') {
-      throw new Error('manual share budgets are available only for AISwitch projects');
-    }
-    const manualShareBudgetMicros = manualBudgetMicros(quotaDollars);
-    this.sqlite.prepare(`
-      UPDATE account_upstreams
-      SET manual_share_budget_micros = ?
-      WHERE account_id = ? AND upstream_id = ?
-    `).run(manualShareBudgetMicros, accountId, upstreamId);
-    this.event(accountId, 'upstream', upstreamId, 'manual_share_budget_set', { manualShareBudgetMicros });
-    return this.providerSummary(accountId, upstreamId, upstreamStore);
   }
 
   accountIdForUpstream(upstreamId) {
@@ -688,25 +661,22 @@ export class ProductStore {
     return this.providerSummary(accountId, upstreamId, upstreamStore);
   }
 
-  providerSummary(accountId, upstreamId, upstreamStore, { manualShareBudgetMicros = undefined } = {}) {
+  providerSummary(accountId, upstreamId, upstreamStore) {
     if (!this.accountOwnsUpstream(accountId, upstreamId)) throw notFound();
     const upstream = upstreamStore.getPublic(upstreamId);
     if (!upstream) throw notFound();
     return {
       upstreamId,
       sharing: this.providerSharingState(upstreamId),
-      commitment: publicProviderCommitment(this.providerCommitment(upstreamId, upstreamStore, null, { manualShareBudgetMicros }))
+      commitment: publicProviderCommitment(this.providerCommitment(upstreamId, upstreamStore))
     };
   }
 
-  providerCommitment(upstreamId, upstreamStore, cache = null, { manualShareBudgetMicros = undefined } = {}) {
+  providerCommitment(upstreamId, upstreamStore, cache = null) {
     if (cache?.has(upstreamId)) return cache.get(upstreamId);
     this.expireDue();
     const upstream = upstreamStore?.getPublic(upstreamId) || upstreamStore?.get(upstreamId) || null;
-    const manualBudgetMicros = manualShareBudgetMicros === undefined
-      ? this.manualShareBudgetMicros(upstreamId)
-      : manualShareBudgetMicros;
-    const actualMicros = manualBudgetMicros ?? (upstream?.quotaSource === 'aiswitch' ? 0 : providerRemainingMicros(upstream));
+    const actualMicros = (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') ? null : providerRemainingMicros(upstream);
     const sessions = this.sqlite.prepare(`
       SELECT id, granted_micros, consumed_micros, created_at
       FROM sharing_sessions
@@ -2011,11 +1981,6 @@ export class ProductStore {
           : row.status;
       this.sqlite.prepare('UPDATE sharing_sessions SET consumed_micros = ?, status = ?, updated_at = ? WHERE id = ?')
         .run(consumedMicros, status, new Date().toISOString(), sessionId);
-      this.sqlite.prepare(`
-        UPDATE account_upstreams
-        SET manual_share_budget_micros = MAX(0, manual_share_budget_micros - ?)
-        WHERE upstream_id = ? AND manual_share_budget_micros IS NOT NULL
-      `).run(settledMicros, row.upstream_id);
       const reservation = this.sqlite.prepare('SELECT * FROM sharing_reservations WHERE id = ?').get(attemptId);
       this.sqlite.prepare(`
         UPDATE sharing_reservations
@@ -2820,17 +2785,6 @@ function dollarsToMicros(value) {
   return micros;
 }
 
-function manualBudgetMicros(value) {
-  if (typeof value !== 'number' && (typeof value !== 'string' || !value.trim())) {
-    throw new Error('quotaDollars must be a number');
-  }
-  const amount = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(amount) || amount < 0 || amount > 1_000_000) throw new Error('quotaDollars must be zero or greater');
-  const micros = Math.round(amount * 1_000_000);
-  if (!Number.isSafeInteger(micros)) throw new Error('quotaDollars is invalid');
-  return micros;
-}
-
 function requireProviderQuota(upstream) {
   const issue = providerIssue(upstream);
   if (issue) throw new Error(issue.message);
@@ -3108,9 +3062,9 @@ function upstreamIdentityKey(upstream) {
     const identity = accountId && email ? `${accountId}:${email}` : accountId || email;
     return identity ? `codex:${identity}` : null;
   }
-  if (upstream?.quotaSource === 'aiswitch') {
+  if (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') {
     const projectId = String(upstream.projectId || '').trim();
-    return projectId ? `aiswitch:${projectId}` : null;
+    return projectId ? `ais:${projectId}` : null;
   }
   return null;
 }
