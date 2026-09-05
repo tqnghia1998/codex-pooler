@@ -504,7 +504,6 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     }});
     upstream.accountId = auth.accountId;
     upstream.email = auth.email;
-    upstream.name = deriveUpstreamName(type, upstream);
     upstream.accessTokenExpiresAt = auth.accessTokenExpiresAt;
     upstream.credentials = { accessToken: auth.accessToken, refreshToken: auth.refreshToken, idToken: auth.idToken };
     if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
@@ -513,7 +512,6 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     if (!upstream.projectId) throw new Error('projectId is required');
     const projectKey = text(input.projectKey);
     if (!projectKey) throw new Error('projectKey is required');
-    upstream.name = deriveUpstreamName(type, upstream);
     upstream.credentials = { projectKey };
     if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
   } else {
@@ -530,7 +528,6 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     upstream.accountId = auth.accountId || (auth.projectKey ? '' : deriveClaudeAccountId(auth));
     upstream.email = auth.email;
     upstream.baseUrl = normalizeClaudeBaseUrl(input.baseUrl || input.base_url || auth.baseUrl, DEFAULT_CLAUDE_BASE_URL);
-    upstream.name = deriveUpstreamName(type, upstream);
     upstream.accessTokenExpiresAt = auth.projectKey ? null : auth.accessTokenExpiresAt;
     upstream.credentials = auth.projectKey
       ? { projectKey: auth.projectKey }
@@ -547,6 +544,7 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     }
   }
 
+  upstream.name = text(input.name) || deriveUpstreamName(type, upstream);
   return upstream;
 }
 
@@ -632,7 +630,13 @@ export function updateUpstream(upstream, input, { allowLegacyClaudeApiKey = fals
     upstream.quotaSource = normalizeQuotaSource(input.quotaSource || input.metadata?.quota_type || input.metadata?.quotaType);
   }
 
-  upstream.name = deriveUpstreamName(upstream.type, upstream);
+  if (input.name !== undefined) {
+    upstream.name = text(input.name) || deriveUpstreamName(upstream.type, upstream);
+  } else if (text(input.projectId) || input.authJson || input.accessToken) {
+    upstream.name = deriveUpstreamName(upstream.type, upstream);
+  } else {
+    upstream.name = text(upstream.name) || deriveUpstreamName(upstream.type, upstream);
+  }
   upstream.updatedAt = new Date().toISOString();
   return upstream;
 }
@@ -1086,7 +1090,7 @@ export function publicUpstream(upstream) {
     priority: Number.isInteger(upstream.priority) ? upstream.priority : null,
     type: upstream.type,
     ...(upstream.type === 'claude' ? { baseUrl: normalizeClaudeBaseUrl(upstream.baseUrl) } : {}),
-    name: deriveUpstreamName(upstream.type, upstream),
+    name: text(upstream.name) || deriveUpstreamName(upstream.type, upstream),
     accountId: upstream.accountId || null,
     email: text(upstream.email) || null,
     accessTokenExpiresAt: upstream.accessTokenExpiresAt || null,
