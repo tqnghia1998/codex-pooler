@@ -206,6 +206,7 @@ async function copySharedSource(targetRoot, sharedFiles) {
       .replaceAll('relaydeckAdmission', 'gatewayAdmission')
       .replaceAll('relaydeckSettleAfterBody', 'gatewaySettleAfterBody')
       .replaceAll('codex-pooler-claude', 'codex-share-claude')
+      .replaceAll('codex-pooler:claude-account-id', 'codex-share:claude-account-id')
       .replaceAll("'codex-pooler'", "'codex-share'")
       .replaceAll('codex-pooler-node/0.1.0', 'codex-share/0.1.0')
       .replace(/export const OPENAI_PRICING_SOURCE_URL = "[^"]+";/, "export const OPENAI_PRICING_SOURCE_URL = 'local snapshot';");
@@ -277,6 +278,267 @@ async function productAdminEventCursor() {
 }
 
 function standaloneServerSource(source, adminEventCursor) {
+  // Add missing imports
+  if (!source.includes('isSupportedClaudeOAuthUpstream')) {
+    source = source.replace(
+      "import { exportUpstreamCredentials } from '../shared/domain.js';",
+      "import { exportUpstreamCredentials, claudeOAuthInputError, isSupportedClaudeOAuthUpstream } from '../shared/domain.js';\nimport { ensureClaudeCredentialIdentity } from '../shared/claude-protocol.js';"
+    );
+  }
+
+  // Update POST /auth/session if missing
+  if (!source.includes("url.pathname === '/auth/session'")) {
+    const logoutAnchor = "  if (req.method === 'POST' && url.pathname === '/auth/logout') {";
+    const authSessionBlock = `  if (req.method === 'POST' && url.pathname === '/auth/session') {
+    const input = await body(req);
+    let sessionData = input?.session;
+    if (typeof sessionData === 'string') {
+      try {
+        sessionData = JSON.parse(sessionData);
+      } catch {
+        sessionData = { sub: sessionData };
+      }
+    }
+    if (!sessionData || typeof sessionData !== 'object') {
+      throw new HttpError(400, 'invalid_request', 'session data is required');
+    }
+    const userObj = (sessionData.user && typeof sessionData.user === 'object') ? sessionData.user : {};
+    const email = String(
+      sessionData.email ||
+      sessionData.login_email ||
+      userObj.email ||
+      userObj.login_email ||
+      sessionData.mail ||
+      ''
+    ).trim();
+    const username = String(
+      userObj.username ||
+      (typeof sessionData.username === 'string' ? sessionData.username : '') ||
+      (typeof sessionData.user === 'string' ? sessionData.user : '') ||
+      email.split('@')[0] ||
+      ''
+    ).trim();
+    const name = String(
+      userObj.full_name ||
+      userObj.family_name ||
+      userObj.given_name ||
+      sessionData.displayName ||
+      (typeof sessionData.name === 'string' ? sessionData.name : '') ||
+      username ||
+      email ||
+      'Smart User'
+    ).trim();
+    const sub = String(
+      sessionData.identity_uuid ||
+      userObj.sub ||
+      sessionData.sub ||
+      sessionData.id ||
+      sessionData.userId ||
+      username ||
+      email
+    ).trim();
+    if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
+    const finalEmail = email || (username ? \`\${username}@shopee.com\` : '');
+    const account = productStore.upsertSmartAccount({ username, email: finalEmail, name, sub });
+    const session = productStore.createAccountSession(account.id);
+    setCookies(res, [
+      cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
+      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
+      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
+    ]);
+    sendJson(res, 200, { account, csrfToken: session.csrfToken });
+    return;
+  }
+`;
+    source = source.replace(logoutAnchor, `${authSessionBlock}${logoutAnchor}`);
+  }
+
+  // Update Claude upstream linking and updating
+  if (!source.includes("resource === 'upstreams' && id === 'claude'")) {
+    const aisPostAnchor = "  if (req.method === 'POST' && resource === 'upstreams' && id === 'aiswitch' && parts.length === 4) {";
+    const claudePostBlock = `  if (req.method === 'POST' && resource === 'upstreams' && id === 'claude' && parts.length === 4) {
+    const input = await body(req);
+    const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
+    let authJson = '';
+    if (rawToken.startsWith('{')) {
+      authJson = rawToken;
+    } else {
+      authJson = JSON.stringify({
+        claudeAiOauth: {
+          accessToken: rawToken,
+          refreshToken: '',
+          expiresAt: 0
+        }
+      });
+    }
+
+    const policyError = claudeOAuthInputError({ authJson });
+    if (policyError) throw new HttpError(400, 'invalid_request', policyError);
+
+    const upstream = store.create({
+      type: 'claude',
+      authJson
+    });
+
+    try {
+      try {
+        const credentials = store.credentials(upstream.id);
+        if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
+          await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile: true });
+        }
+      } catch (error) {
+        if (error?.statusCode === 401 || error?.statusCode === 403) {
+          throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
+        }
+        console.warn(\`[pool] Advisory Claude identity lookup failed on link for \${upstream.id}:\`, error?.message || error);
+      }
+
+      productStore.linkUpstream(accountId, upstream.id);
+      const provider = productStore.providerSummary(accountId, upstream.id, store);
+      sendJson(res, 201, {
+        upstream: {
+          ...upstream,
+          providerIssue: providerIssue(upstream),
+          sharing: provider.sharing,
+          commitment: provider.commitment
+        }
+      });
+    } catch (error) {
+      productStore.cleanupUpstream(upstream.id);
+      store.remove(upstream.id);
+      throw error;
+    }
+    return;
+  }
+  if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
+    const input = await body(req);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: input.projectId,
+      projectKey: input.projectKey
+    });
+    try {
+      productStore.linkUpstream(accountId, upstream.id);
+      const provider = productStore.providerSummary(accountId, upstream.id, store);
+      sendJson(res, 201, {
+        upstream: {
+          ...upstream,
+          providerIssue: providerIssue(upstream),
+          sharing: provider.sharing,
+          commitment: provider.commitment
+        }
+      });
+    } catch (error) {
+      productStore.cleanupUpstream(upstream.id);
+      store.remove(upstream.id);
+      throw error;
+    }
+    return;
+  }
+`;
+    // Also replace the old PATCH and refresh-quota to support Claude
+    const patchStart = source.indexOf("  if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {");
+    const patchEnd = source.indexOf("  if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'reveal') {", patchStart);
+    if (patchStart >= 0 && patchEnd >= 0) {
+      const newPatchBlock = `  if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {
+    const input = await body(req);
+    const upstream = store.get(id);
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
+      throw new HttpError(404, 'not_found', 'Not found');
+    }
+    const isAis = upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch';
+    const isClaude = upstream.type === 'claude';
+    if (!isAis && !isClaude) {
+      throw new HttpError(400, 'invalid_request', 'Only AIS or Claude upstreams can be updated');
+    }
+
+    let updateFields = {};
+    if (isAis) {
+      updateFields = {
+        ...(input.projectId !== undefined ? { projectId: input.projectId } : {}),
+        ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
+      };
+    } else if (isClaude) {
+      const rawToken = String(input.token || input.accessToken || input.authJson || '').trim();
+      if (rawToken) {
+        let authJson = '';
+        if (rawToken.startsWith('{')) {
+          authJson = rawToken;
+        } else {
+          authJson = JSON.stringify({
+            claudeAiOauth: {
+              accessToken: rawToken,
+              refreshToken: '',
+              expiresAt: 0
+            }
+          });
+        }
+        const policyError = claudeOAuthInputError({ authJson });
+        if (policyError) throw new HttpError(400, 'invalid_request', policyError);
+        updateFields = { authJson };
+      }
+    }
+
+    const updated = store.update(id, updateFields);
+    if (isClaude && updateFields.authJson) {
+      try {
+        const credentials = store.credentials(id);
+        if (isSupportedClaudeOAuthUpstream({ ...updated, credentials })) {
+          await ensureClaudeCredentialIdentity({ upstream: updated, credentials, store, fetchImpl, refreshProfile: true });
+        }
+      } catch (error) {
+        if (error?.statusCode === 401 || error?.statusCode === 403) {
+          throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
+        }
+        console.warn(\`[pool] Advisory Claude identity lookup failed on update for \${id}:\`, error?.message || error);
+      }
+    }
+    const provider = productStore.providerSummary(accountId, id, store);
+    sendJson(res, 200, {
+      upstream: {
+        ...updated,
+        providerIssue: providerIssue(updated),
+        sharing: provider.sharing,
+        commitment: provider.commitment
+      }
+    });
+    return;
+  }
+`;
+      source = source.slice(0, patchStart) + newPatchBlock + source.slice(patchEnd);
+    }
+
+    // Replace the aiswitch POST handler with claudePostBlock
+    const aisPostIndex = source.indexOf(aisPostAnchor);
+    const aisPostEnd = source.indexOf("  if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {", aisPostIndex);
+    if (aisPostIndex >= 0 && aisPostEnd >= 0) {
+      source = source.slice(0, aisPostIndex) + claudePostBlock + source.slice(aisPostEnd);
+    }
+  }
+
+  // Quota refresh Claude support
+  if (source.includes("if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');")) {
+    source = source.replace(
+      "if (upstream.quotaSource === 'aiswitch') {\n      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'manual_share_budget' });\n      return;\n    }\n    if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');",
+      "if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch') {\n      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });\n      return;\n    }\n    if (upstream.type !== 'codex' && upstream.type !== 'claude') throw new HttpError(400, 'invalid_request', 'Only Codex and Claude accounts can refresh quota');"
+    );
+  }
+
+  // Remove manual-budget route from standalone server
+  const manualBudgetRoute = "  if (req.method === 'PUT' && resource === 'upstreams' && id && action === 'manual-budget') {\n    sendJson(res, 200, { provider: productStore.setManualShareBudget(accountId, id, await body(req), store) });\n    return;\n  }\n";
+  if (source.includes(manualBudgetRoute)) {
+    source = source.replace(manualBudgetRoute, '');
+  }
+
+  // Upstreams listing manualShareBudgetMicros removal
+  if (source.includes('.flatMap(({ upstreamId, manualShareBudgetMicros }) => {')) {
+    source = source.replace(
+      ".flatMap(({ upstreamId, manualShareBudgetMicros }) => {\n        const upstream = store.getPublic(upstreamId);\n        if (!upstream) return [];\n        const provider = productStore.providerSummary(accountId, upstreamId, store, { manualShareBudgetMicros });",
+      ".flatMap(({ upstreamId }) => {\n        const upstream = store.getPublic(upstreamId);\n        if (!upstream) return [];\n        const provider = productStore.providerSummary(accountId, upstreamId, store);"
+    );
+  }
+
   const helper = 'function adminEventCursor(url) {';
   const anchor = '\nfunction sharingListQuery(url) {';
   const start = source.indexOf(helper);
