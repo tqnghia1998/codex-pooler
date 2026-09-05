@@ -13,7 +13,7 @@ import {
   dollarsToCredits,
   ensureSpending,
   filterSpendCapEligible,
-  isAiswitchUpstream,
+  isAisUpstream,
   isClaudeOAuthUpstream,
   isSupportedClaudeOAuthUpstream,
   number,
@@ -475,6 +475,25 @@ export class Store {
     return publicUpstream(upstream);
   }
 
+  clearAisSpendingCaps() {
+    const db = this.load();
+    let changed = false;
+    for (const upstream of db.upstreams) {
+      if (!isAisUpstream(upstream)) continue;
+      const spending = ensureSpending(upstream);
+      if (spending.capCredits === 0 && spending.capStartedAt === null) continue;
+      spending.capCredits = 0;
+      spending.capStartedAt = null;
+      upstream.updatedAt = new Date().toISOString();
+      changed = true;
+    }
+    if (changed) {
+      this.save(db);
+      this.notifyUpstreamsChange();
+    }
+    return changed;
+  }
+
   addUsage(id, input) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
@@ -682,7 +701,7 @@ export class Store {
     };
   }
 
-  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
+  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, allowUnknownQuota = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
     const db = this.load();
     const selectedStrategy = normalizeRoutingStrategy(strategy ?? db.routingPolicy?.strategy);
     const upstreams = scoped(db.upstreams, scopeId);
@@ -695,7 +714,7 @@ export class Store {
       for (const upstream of upstreams) exclude(upstream, 'scope_model_not_allowed');
       return routingPlanResult([], selectedStrategy, exclusions, now);
     }
-    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now, ignoreQuotaCooldown);
+    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now, ignoreQuotaCooldown, allowUnknownQuota);
     for (const item of eligibility.exclusions) {
       exclude(upstreams.find((upstream) => upstream.id === item.id), item.code);
     }
@@ -1200,12 +1219,12 @@ function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
 }
 
-function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false) {
+function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false, allowUnknownQuota = false) {
   for (const upstream of upstreams) ensureSpending(upstream);
   const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
     || upstream.health?.status === 'reauth_required'
     || !ignoreQuotaCooldown && accountCooldownBlocks(upstream.health, now));
-  const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId });
+  const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId, allowUnknownQuota });
   return {
     ...result,
     exclusions: [...result.exclusions, ...blocked.map((upstream) => ({
@@ -1433,7 +1452,7 @@ function candidateExclusionCode(upstream, model, requirements, { ignoreModelRest
       ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig)
       : routing.models.includes(String(model || '').toLowerCase()));
     if (!ignoreModelRestrictions && (modelNotAllowed || claudeMetadataModelExcluded(upstream, model, claudeConfig))) return 'upstream_model_not_allowed';
-    if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return 'quota_exhausted';
+    if (!isAisUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return 'quota_exhausted';
     return 'capability_not_supported';
   }
   if (!dynamicallySupportsModel(upstream, model, modelSupport)) return 'model_not_supported';
@@ -1485,7 +1504,7 @@ function candidateEligible(upstream, model, requirements, { ignoreModelRestricti
   const routing = normalizeRouting(upstream.routing);
   if (!ignoreModelRestrictions && routing.models.length && !(upstream.type === 'claude' ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig) : routing.models.includes(String(model || '').toLowerCase()))) return false;
   if (!ignoreModelRestrictions && claudeMetadataModelExcluded(upstream, model, claudeConfig)) return false;
-  if (!isAiswitchUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
+  if (!isAisUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
 }
@@ -1831,7 +1850,7 @@ function capCreditsFromInput(input = {}) {
 
 function selectBulkTargets(upstreams, input = {}) {
   const target = input.target;
-  const eligible = (upstream) => !isAiswitchUpstream(upstream);
+  const eligible = (upstream) => !isAisUpstream(upstream);
   if (target) {
     if (!['all', 'cap_reached', 'uncapped'].includes(target)) throw new Error('target must be all, cap_reached, or uncapped');
     return upstreams

@@ -143,7 +143,7 @@ function ProductShell() {
               <Icon icon={Share2} size="lg" color="accent" />
               <Heading level={1}>Codex Share</Heading>
             </HStack>
-            <Text type="supporting" color="secondary">Share delegated Codex quota or AISwitch project budget without sharing provider credentials.</Text>
+            <Text type="supporting" color="secondary">Share delegated Codex quota or an AIS project without sharing provider credentials.</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
             <GuideButton />

@@ -870,77 +870,62 @@ test('Pool upstreams expose server-authoritative provider availability', async (
   }
 });
 
-test('an owner can add an AISwitch project with a manual share budget that settlement decrements', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-aiswitch-manual-budget-api-'));
+test('an owner can add an AIS project without a local quota estimate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-unknown-quota-api-'));
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'aiswitch-provider');
-    const consumer = account(sharingStore, 'aiswitch-consumer');
+    const provider = account(sharingStore, 'ais-provider');
+    const consumer = account(sharingStore, 'ais-consumer');
     const providerSession = sharingStore.createAccountSession(provider.id);
     const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
-      const added = await request(base, '/api/pool/upstreams/aiswitch', providerSession, {
+      const added = await request(base, '/api/pool/upstreams/ais', providerSession, {
         method: 'POST',
-        body: JSON.stringify({ projectId: 'aiswitch-project', projectKey: 'aiswitch-key', quotaDollars: 10 })
+        body: JSON.stringify({ projectId: 'ais-project', projectKey: 'ais-key' })
       });
       assert.equal(added.response.status, 201);
       assert.equal(added.body.upstream.type, 'compass');
-      assert.equal(added.body.upstream.quotaSource, 'aiswitch');
-      assert.equal(added.body.upstream.spending.capDollars, 1_000_000);
-      assert.equal(added.body.upstream.commitment.actualQuotaDollars, 10);
+      assert.equal(added.body.upstream.quotaSource, 'ais');
+      assert.equal(added.body.upstream.commitment.actualQuotaDollars, null);
+      assert.equal(added.body.upstream.commitment.offerableQuotaDollars, null);
       const upstream = store.get(added.body.upstream.id);
-      assert.equal(store.credentials(upstream.id).projectKey, 'aiswitch-key');
+      assert.equal(store.credentials(upstream.id).projectKey, 'ais-key');
 
       const projectUpdated = await request(base, `/api/pool/upstreams/${upstream.id}`, providerSession, {
         method: 'PATCH',
-        body: JSON.stringify({ projectId: 'updated-aiswitch-project', projectKey: 'updated-aiswitch-key' })
+        body: JSON.stringify({ projectId: 'updated-ais-project', projectKey: 'updated-ais-key' })
       });
       assert.equal(projectUpdated.response.status, 200);
-      assert.equal(projectUpdated.body.upstream.projectId, 'updated-aiswitch-project');
-      assert.equal(store.get(upstream.id).projectId, 'updated-aiswitch-project');
-      assert.equal(store.credentials(upstream.id).projectKey, 'updated-aiswitch-key');
+      assert.equal(projectUpdated.body.upstream.projectId, 'updated-ais-project');
+      assert.equal(store.get(upstream.id).projectId, 'updated-ais-project');
+      assert.equal(store.credentials(upstream.id).projectKey, 'updated-ais-key');
 
       const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 6 }, store);
       const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
       const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
-      assert.equal(session.upstream.quotaSource, 'aiswitch');
-      sharingStore.settleSession(session.id, 'aiswitch-settlement', 2_000_000);
+      assert.equal(session.upstream.quotaSource, 'ais');
+      sharingStore.settleSession(session.id, 'ais-settlement', 2_000_000);
 
       const listed = await request(base, '/api/pool/upstreams', providerSession);
       assert.equal(listed.response.status, 200);
-      assert.equal(listed.body.upstreams[0].commitment.actualQuotaDollars, 8);
-      assert.equal(listed.body.upstreams[0].commitment.offerableQuotaDollars, 4);
-      assert.throws(
-        () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store),
-        /truly offerable quota/
-      );
+      assert.equal(listed.body.upstreams[0].commitment.actualQuotaDollars, null);
+      assert.equal(listed.body.upstreams[0].commitment.offerableQuotaDollars, null);
+      assert.equal(listed.body.upstreams[0].commitment.totalCommitmentDollars, 4);
+      const nextOffer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store);
+      assert.equal(nextOffer.isUnderfunded, false);
 
-      const updated = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
+      const removedBudgetEndpoint = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
         method: 'PUT',
         body: JSON.stringify({ quotaDollars: 20 })
       });
-      assert.equal(updated.response.status, 200);
-      assert.equal(updated.body.provider.commitment.actualQuotaDollars, 20);
+      assert.equal(removedBudgetEndpoint.response.status, 404);
 
-      const exhausted = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
-        method: 'PUT',
-        body: JSON.stringify({ quotaDollars: 0 })
-      });
-      assert.equal(exhausted.response.status, 200);
-      assert.equal(exhausted.body.provider.commitment.actualQuotaDollars, 0);
-
-      const invalidBudget = await request(base, `/api/pool/upstreams/${upstream.id}/manual-budget`, providerSession, {
-        method: 'PUT',
-        body: JSON.stringify({ quotaDollars: null })
-      });
-      assert.equal(invalidBudget.response.status, 400);
-
-      const rejected = await request(base, '/api/pool/upstreams/aiswitch', providerSession, {
+      const rejected = await request(base, '/api/pool/upstreams/ais', providerSession, {
         method: 'POST',
-        body: JSON.stringify({ projectId: 'invalid-aiswitch-project', projectKey: 'invalid-aiswitch-key', quotaDollars: -1 })
+        body: JSON.stringify({ projectId: 'invalid-ais-project' })
       });
       assert.equal(rejected.response.status, 400);
       assert.deepEqual(sharingStore.listAccountUpstreamLinks(provider.id).map((link) => link.upstreamId), [upstream.id]);
@@ -948,6 +933,28 @@ test('an owner can add an AISwitch project with a manual share budget that settl
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Pool clears legacy AIS spending caps when it starts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-legacy-cap-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: 'legacy-ais-project',
+      projectKey: 'legacy-ais-key'
+    });
+    store.setCap(upstream.id, { capDollars: 1_000_000 });
+    assert.equal(store.getPublic(upstream.id).spending.capDollars, 1_000_000);
+
+    createApp({ store, productStore: new ProductStore(dir) });
+
+    assert.equal(store.getPublic(upstream.id).spending.capDollars, 0);
+    assert.equal(store.get(upstream.id).spending.capStartedAt, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

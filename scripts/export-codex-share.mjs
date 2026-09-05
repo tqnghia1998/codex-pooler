@@ -222,7 +222,7 @@ async function writeProjectFiles(targetRoot, overlay) {
     dependencies: mergePackageEntries(standalonePackage.dependencies, sourcePackage.dependencies),
     devDependencies: mergePackageEntries(standalonePackage.devDependencies, sourcePackage.devDependencies),
     name: 'codex-share',
-    description: 'Share delegated Codex quota or AISwitch project budget without sharing provider credentials.',
+    description: 'Share delegated Codex quota or AIS project budget without sharing provider credentials.',
     private: true,
     scripts: {
       build: 'vite build',
