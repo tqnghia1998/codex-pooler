@@ -20,22 +20,36 @@ test('imports the useful fields from Codex auth.json', () => {
   assert.equal(auth.name, 'p5dymc');
 });
 
-test('derives names and provider URLs instead of accepting operator labels', () => {
+test('derives names when not provided and provider URLs instead of accepting operator labels', () => {
   const codex = createUpstream({
     type: 'codex',
-    name: 'ignored',
     baseUrl: 'https://custom.invalid',
     authJson: JSON.stringify({ tokens: {
       access_token: jwt({ email: 'person@example.com' }),
       id_token: jwt({ email: 'person@example.com' })
     }})
   });
-  const compass = createUpstream({ type: 'compass', name: 'ignored', baseUrl: 'https://custom.invalid', projectId: 'project-1', projectKey: 'key' });
+  const compass = createUpstream({ type: 'compass', baseUrl: 'https://custom.invalid', projectId: 'project-1', projectKey: 'key' });
   assert.equal(codex.name, 'p5dymc');
   assert.equal(publicUpstream(codex).email, 'person@example.com');
   assert.equal(codex.baseUrl, 'https://chatgpt.com');
   assert.equal(compass.name, 'project-1');
   assert.equal(compass.baseUrl, 'https://compass.llm.shopee.io/compass-api/v1');
+
+  const customCodex = createUpstream({
+    type: 'codex',
+    name: 'Custom Codex Name',
+    authJson: JSON.stringify({ tokens: {
+      access_token: jwt({ email: 'person@example.com' }),
+      id_token: jwt({ email: 'person@example.com' })
+    }})
+  });
+  assert.equal(customCodex.name, 'Custom Codex Name');
+  assert.equal(publicUpstream(customCodex).name, 'Custom Codex Name');
+
+  const customCompass = createUpstream({ type: 'compass', name: 'Custom Compass Name', projectId: 'project-1', projectKey: 'key' });
+  assert.equal(customCompass.name, 'Custom Compass Name');
+  assert.equal(publicUpstream(customCompass).name, 'Custom Compass Name');
 });
 
 test('preserves CPA-compatible Claude base URLs while rejecting malformed targets', () => {
@@ -293,14 +307,14 @@ test('bounds the settlement idempotency ledger', () => {
 });
 
 test('spending eligibility keeps an upstream available until its cap is reached', () => {
-  const nearlyCapped = createUpstream({ type: 'compass', name: 'nearly capped', projectId: 'p1', projectKey: 'k' });
-  const fresh = createUpstream({ type: 'compass', name: 'fresh', projectId: 'p2', projectKey: 'k' });
+  const nearlyCapped = createUpstream({ type: 'compass', projectId: 'p1', projectKey: 'k' });
+  const fresh = createUpstream({ type: 'compass', projectId: 'p2', projectKey: 'k' });
   setSpendingCap(nearlyCapped, 100);
   setSpendingCap(fresh, 100);
   recordUsage(nearlyCapped, { attemptId: 'a', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 3_600_000, costSource: 'pricing_snapshot' });
   assert.deepEqual(filterSpendCapEligible([nearlyCapped, fresh]).eligible.map((item) => item.name), ['p1', 'p2']);
 
-  const capped = createUpstream({ type: 'compass', name: 'capped', projectId: 'p3', projectKey: 'k' });
+  const capped = createUpstream({ type: 'compass', projectId: 'p3', projectKey: 'k' });
   setSpendingCap(capped, 100);
   recordUsage(capped, { attemptId: 'b', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 5_000_000, costSource: 'upstream_reported' });
   assert.equal(filterSpendCapEligible([capped, fresh], { continuationId: capped.id }).error.code, 'pinned_continuation_spend_cap_reached');

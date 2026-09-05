@@ -758,7 +758,7 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
       body: JSON.stringify({ type: 'compass', name: 'HTTP test', projectId: 'p', projectKey: 'secret' })
     });
     assert.equal(created.response.status, 201);
-    assert.equal(created.data.upstream.name, 'p');
+    assert.equal(created.data.upstream.name, 'HTTP test');
     assert.equal(created.data.upstream.baseUrl, undefined);
     assert.equal(created.data.upstream.quota.remainingPercent, 75);
     const id = created.data.upstream.id;
@@ -771,8 +771,8 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
     assert.equal(list.data.upstreams.length, 1);
     const show = await request(base, `/api/upstreams/${id}`);
     assert.equal(show.data.upstream.id, id);
-    const patched = await request(base, `/api/upstreams/${id}`, { method: 'PATCH', body: JSON.stringify({ projectId: 'project-patched' }) });
-    assert.equal(patched.data.upstream.name, 'project-patched');
+    const patched = await request(base, `/api/upstreams/${id}`, { method: 'PATCH', body: JSON.stringify({ name: 'HTTP test patched', projectId: 'project-patched' }) });
+    assert.equal(patched.data.upstream.name, 'HTTP test patched');
     assert.equal(patched.data.upstream.quota.remainingPercent, 75);
     const refreshed = await request(base, `/api/upstreams/${id}/refresh-quota`, { method: 'POST', body: '{}' });
     assert.equal(refreshed.data.upstream.quota.remainingPercent, 75);
