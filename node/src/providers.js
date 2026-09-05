@@ -201,7 +201,8 @@ async function fetchClaudeQuotaFromMessages(upstream, accessToken, fetchImpl) {
     credentials: { accessToken },
     upstream,
     sessionId,
-    requestPath: '/v1/messages'
+    requestPath: '/v1/messages',
+    skipDiagnostics: true
   });
   const headers = claudeRequestHeaders({
     req: probeRequest,

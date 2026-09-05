@@ -81,7 +81,7 @@ export function forgetClaudeThinkingReplay(scope) {
 // Claude Code OAuth requests carry a credential identity in metadata.user_id.
 // This is not account authentication; it is the stable device/account/session
 // envelope that Anthropic expects from the Claude Code entrypoint.
-export function prepareClaudeRequestBody({ req, body, credentials, upstream, countTokens = false, sessionId = claudeSessionIdForRequest(req, body, countTokens), claudeConfig = null, requestPath = '' }) {
+export function prepareClaudeRequestBody({ req, body, credentials, upstream, countTokens = false, sessionId = claudeSessionIdForRequest(req, body, countTokens), claudeConfig = null, requestPath = '', skipDiagnostics = false }) {
   const oauth = isClaudeOAuthCredential(credentials, upstream);
   const originalBody = plainObject(body) || Array.isArray(body) ? structuredClone(body) : body;
   const routedModel = stripClaudeModelPrefix(body?.model, upstream);
@@ -217,7 +217,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
   }
   const workload = safeHeader(req, 'x-cpa-claude-workload');
   if (workload) prepared.__claudeWorkload = workload;
-  const diagnosticsState = beginClaudeDiagnostics(upstream, credentials, sessionId);
+  const diagnosticsState = skipDiagnostics ? null : beginClaudeDiagnostics(upstream, credentials, sessionId);
   sanitizeClaudeMessageHistory(prepared, { preserveEmptyThinking: modelAlias?.isCompat === true });
   if (diagnosticsState) prepared.diagnostics = { previous_message_id: diagnosticsState.previousMessageId || null };
   let shaped = shapeClaudeOAuthBody(prepared, upstream, oauth || directAnthropic && cliProfile, claudeConfig, false);
