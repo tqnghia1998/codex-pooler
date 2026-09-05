@@ -120,7 +120,7 @@ function useApi() {
 
 const VIRTUAL_MIN_ITEMS = 24;
 const VIRTUAL_OVERSCAN_ROWS = 2;
-const METRIC_GRID_COLUMNS = { minWidth: 132, max: 9, repeat: 'fill' };
+const METRIC_GRID_COLUMNS = { minWidth: 132, max: 10, repeat: 'fill' };
 const UPSTREAM_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
 const relayTheme = defineTheme({
   name: 'relaydeck',
@@ -452,6 +452,8 @@ function Dashboard({ themeMode, setThemeMode }) {
     let activeCodex = 0;
     let totalCompass = 0;
     let activeCompass = 0;
+    let totalClaude = 0;
+    let activeClaude = 0;
     filteredUpstreams.forEach((upstream) => {
       const active = isUpstreamActive(upstream);
       if (upstream.type === 'codex') {
@@ -461,6 +463,10 @@ function Dashboard({ themeMode, setThemeMode }) {
       if (upstream.type === 'compass') {
         totalCompass += 1;
         if (active) activeCompass += 1;
+      }
+      if (upstream.type === 'claude') {
+        totalClaude += 1;
+        if (active) activeClaude += 1;
       }
       if (isReauthRequired(upstream)) reauth += 1;
       if (hasActiveCooldown(upstream)) coolingDown += 1;
@@ -475,7 +481,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         capSpent += spending.spentDollars || 0;
       }
     });
-    return { totalCodex, activeCodex, totalCompass, activeCompass, reauth, coolingDown, lowQuota, uncapped, exhausted, capLeft, capSpent };
+    return { totalCodex, activeCodex, totalCompass, activeCompass, totalClaude, activeClaude, reauth, coolingDown, lowQuota, uncapped, exhausted, capLeft, capSpent };
   }, [filteredUpstreams]);
 
   const updateForm = (field, value) => setFormValues((current) => ({ ...current, [field]: value }));
@@ -853,6 +859,7 @@ function Dashboard({ themeMode, setThemeMode }) {
               <Grid columns={METRIC_GRID_COLUMNS} gap={2}>
                 {filterType !== 'compass' && filterType !== 'claude' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
                 {filterType !== 'codex' && filterType !== 'claude' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
+                {filterType !== 'codex' && filterType !== 'compass' && <Metric label="Claude active / total" value={`${stats.activeClaude}/${stats.totalClaude}`} />}
                 <Metric label="Cooling down" value={stats.coolingDown} />
                 <Metric label="Reauth required" value={stats.reauth} />
                 <Metric label="Low quota (<30%)" value={stats.lowQuota} />
