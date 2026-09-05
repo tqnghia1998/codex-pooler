@@ -423,7 +423,7 @@ export class Store {
       }
     }
     if (!changed) return upstream;
-    upstream.name = deriveUpstreamName(upstream.type, upstream);
+    upstream.name = upstream.name?.trim() || deriveUpstreamName(upstream.type, upstream);
     upstream.credentials = encryptCredentials(credentials, this.key);
     upstream.updatedAt = new Date().toISOString();
     this.save(db);
@@ -1193,7 +1193,7 @@ function normalizeDatabase(parsed) {
     upstream.baseUrl = upstream.type === 'claude'
       ? normalizeClaudeBaseUrl(upstream.baseUrl)
       : defaultBaseUrl(upstream.type);
-    upstream.name = deriveUpstreamName(upstream.type, upstream);
+    upstream.name = upstream.name?.trim() || deriveUpstreamName(upstream.type, upstream);
   }
   for (const file of parsed.files) file.scopeId ||= DEFAULT_SCOPE_ID;
   return parsed;
