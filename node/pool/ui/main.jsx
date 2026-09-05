@@ -8,6 +8,7 @@ import { Button } from '@astryxdesign/core/Button';
 import { Icon } from '@astryxdesign/core/Icon';
 import { Overlay } from '@astryxdesign/core/Overlay';
 import { Spinner } from '@astryxdesign/core/Spinner';
+import { Switch } from '@astryxdesign/core/Switch';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { defineTheme, Theme } from '@astryxdesign/core/theme';
 import { ToastViewport, useToast } from '@astryxdesign/core/Toast';
@@ -16,6 +17,7 @@ import { neutralTheme } from '@astryxdesign/theme-neutral';
 import { BookOpen, Share2 } from 'lucide-react';
 import { AdminAnalytics } from './admin.jsx';
 import { SharingWorkspace } from './sharing.jsx';
+import { LanguageProvider, useLanguage } from './i18n.jsx';
 
 const poolTheme = defineTheme({
   name: 'codex-share',
@@ -70,6 +72,7 @@ const poolTheme = defineTheme({
 });
 
 function GuideButton() {
+  const { t } = useLanguage();
   const buttonRef = useRef(null);
 
   useEffect(() => {
@@ -96,7 +99,7 @@ function GuideButton() {
   return (
     <Button
       ref={buttonRef}
-      label="User Guide"
+      label={t('userGuide')}
       icon={<Icon icon={BookOpen} size="sm" />}
       variant="secondary"
       href="https://confluence.shopee.io/x/y6Vyx"
@@ -106,13 +109,38 @@ function GuideButton() {
   );
 }
 
+function LanguageToggle() {
+  const { language, setLanguage, t } = useLanguage();
+  const isZh = language === 'zh';
+
+  return (
+    <HStack gap={1} vAlign="center">
+      <Text size="sm" weight={!isZh ? 'bold' : 'normal'} color={!isZh ? 'primary' : 'secondary'}>
+        EN
+      </Text>
+      <Switch
+        label={t('languageSwitchLabel')}
+        isLabelHidden
+        value={isZh}
+        onChange={(checked) => setLanguage(checked ? 'zh' : 'en')}
+        size="sm"
+      />
+      <Text size="sm" weight={isZh ? 'bold' : 'normal'} color={isZh ? 'primary' : 'secondary'}>
+        中文
+      </Text>
+    </HStack>
+  );
+}
+
 function Product() {
   return (
-    <Theme theme={poolTheme} mode="dark">
-      <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
-        {window.location.pathname.endsWith('/admin') ? <AdminShell /> : <ProductShell />}
-      </ToastViewport>
-    </Theme>
+    <LanguageProvider>
+      <Theme theme={poolTheme} mode="dark">
+        <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
+          {window.location.pathname.endsWith('/admin') ? <AdminShell /> : <ProductShell />}
+        </ToastViewport>
+      </Theme>
+    </LanguageProvider>
   );
 }
 
@@ -127,6 +155,7 @@ function AdminShell() {
 }
 
 function ProductShell() {
+  const { t } = useLanguage();
   const [workspaceLoading, setWorkspaceLoading] = useState(true);
   const toast = useToast();
   const show = useCallback((text, error = false) => {
@@ -141,11 +170,12 @@ function ProductShell() {
           <VStack gap={1}>
             <HStack gap={2} vAlign="center">
               <Icon icon={Share2} size="lg" color="accent" />
-              <Heading level={1}>Codex Share</Heading>
+              <Heading level={1}>{t('appTitle')}</Heading>
             </HStack>
-            <Text type="supporting" color="secondary">Share delegated Codex quota or an AIS project without sharing provider credentials.</Text>
+            <Text type="supporting" color="secondary">{t('appSubtitle')}</Text>
           </VStack>
-          <HStack gap={2} wrap="wrap">
+          <HStack gap={3} vAlign="center" wrap="wrap">
+            <LanguageToggle />
             <GuideButton />
           </HStack>
         </HStack>
