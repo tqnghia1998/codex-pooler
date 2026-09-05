@@ -265,7 +265,9 @@ export class ProductStore {
     this.sqlite.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS accounts_codex_subject_idx
       ON accounts(codex_subject)
-      WHERE codex_subject IS NOT NULL
+      WHERE codex_subject IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS accounts_email_idx
+      ON accounts(email);
     `);
 
     const attemptColumns = this.sqlite.pragma('table_info(codex_login_attempts)');
@@ -398,6 +400,47 @@ export class ProductStore {
       DROP INDEX IF EXISTS sharing_events_created_idx;
       CREATE INDEX IF NOT EXISTS sharing_events_cursor_idx ON sharing_events(created_at DESC, id DESC);
     `);
+  }
+
+  upsertSmartAccount({ username = '', email = '', name = '', sub = '' } = {}) {
+    const cleanSub = String(sub || username || email || '').trim();
+    if (!cleanSub) throw new Error('Smart account identifier is required');
+    const smartSubject = `smart:${cleanSub}`;
+    const normalizedEmail = cleanEmail(email, username ? `${username}@shopee.com` : 'user@smart.shopee.io');
+    const normalizedName = cleanName(name || username, normalizedEmail);
+    const now = new Date().toISOString();
+    if (!this._smartAccountStmts) {
+      this._smartAccountStmts = {
+        findBySubject: this.sqlite.prepare('SELECT * FROM accounts WHERE codex_subject = ? OR codex_subject = ?'),
+        findByEmail: this.sqlite.prepare('SELECT * FROM accounts WHERE email = ?'),
+        update: this.sqlite.prepare(`
+          UPDATE accounts
+          SET codex_subject = COALESCE(NULLIF(?, ''), codex_subject), email = ?, display_name = ?, updated_at = ?
+          WHERE id = ?
+        `),
+        insert: this.sqlite.prepare(`
+          INSERT INTO accounts (id, google_sub, codex_subject, email, display_name, avatar_url, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+        `)
+      };
+    }
+    const stmts = this._smartAccountStmts;
+    const apply = this.sqlite.transaction(() => {
+      let existing = stmts.findBySubject.get(smartSubject, `space:${cleanSub}`);
+      if (!existing && normalizedEmail && normalizedEmail !== 'user@smart.shopee.io') {
+        existing = stmts.findByEmail.get(normalizedEmail);
+      }
+      if (existing) {
+        stmts.update.run(smartSubject, normalizedEmail, normalizedName, now, existing.id);
+        this.ensureDefaultPersonalKey(existing.id);
+        return existing.id;
+      }
+      const id = randomUUID();
+      stmts.insert.run(id, `smart:${hash(smartSubject)}`, smartSubject, normalizedEmail, normalizedName, now, now);
+      this.ensureDefaultPersonalKey(id);
+      return id;
+    });
+    return this.account(apply());
   }
 
   upsertCodexAccount({ subject, issuer = '', email = '', name = '' }, preferredAccountId = null, { allowIdentityRotation = false } = {}) {
@@ -3042,12 +3085,13 @@ function codexIdentity(subject, issuer) {
 
 function cleanEmail(value, fallback = '') {
   const email = typeof value === 'string' ? value.trim().slice(0, 320) : '';
-  return email || fallback || 'Codex user';
+  const fallbackEmail = typeof fallback === 'string' ? fallback.trim().slice(0, 320) : '';
+  return email || fallbackEmail || 'Codex user';
 }
 
 function cleanName(value, email) {
   const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
-  return name || String(email).split('@')[0].slice(0, 120) || 'Codex Share user';
+  return name || (typeof email === 'string' ? email.split('@')[0].slice(0, 120) : '') || 'Codex Share user';
 }
 
 function poolDisplayName(email, fallback = '') {
@@ -3061,6 +3105,12 @@ function upstreamIdentityKey(upstream) {
     const email = String(upstream.email || '').trim().toLowerCase();
     const identity = accountId && email ? `${accountId}:${email}` : accountId || email;
     return identity ? `codex:${identity}` : null;
+  }
+  if (upstream?.type === 'claude') {
+    const accountId = String(upstream.accountId || '').trim().toLowerCase();
+    const email = String(upstream.email || '').trim().toLowerCase();
+    const identity = accountId && email ? `${accountId}:${email}` : accountId || email || upstream.name;
+    return identity ? `claude:${identity}` : `claude:${upstream.id}`;
   }
   if (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') {
     const projectId = String(upstream.projectId || '').trim();
