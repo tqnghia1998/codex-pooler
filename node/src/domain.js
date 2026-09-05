@@ -779,10 +779,14 @@ export function spendingEligibility(upstream, continuation = false) {
   return { eligible: true, reason: null, status: 'normal' };
 }
 
-export function filterSpendCapEligible(upstreams, { continuationId = null } = {}) {
+export function filterSpendCapEligible(upstreams, { continuationId = null, allowUnknownQuota = false } = {}) {
   const eligible = [];
   const exclusions = [];
   for (const upstream of upstreams) {
+    if (allowUnknownQuota && isAisUpstream(upstream)) {
+      eligible.push(upstream);
+      continue;
+    }
     const decision = spendingEligibility(upstream, upstream.id === continuationId);
     if (decision.eligible) eligible.push(upstream);
     else exclusions.push({ id: upstream.id, name: upstream.name, code: decision.reason, capCredits: spendingSummary(upstream.spending).capCredits });
@@ -1063,13 +1067,13 @@ function claudeRemainingPercent(usedPercent) {
   return Number(Math.max(0, 100 - usedPercent).toFixed(6));
 }
 
-export function isAiswitchUpstream(upstream) {
-  return upstream?.type === 'compass' && normalizeQuotaSource(upstream.quotaSource || upstream.metadata?.quota_type || upstream.metadata?.quotaType) === 'aiswitch';
+export function isAisUpstream(upstream) {
+  return upstream?.type === 'compass' && normalizeQuotaSource(upstream.quotaSource || upstream.metadata?.quota_type || upstream.metadata?.quotaType) === 'ais';
 }
 
 function normalizeQuotaSource(value) {
   const source = text(value).toLowerCase();
-  if (source === 'aiswitch' || source === 'cqp') return 'aiswitch';
+  if (source === 'ais' || source === 'aiswitch' || source === 'cqp') return 'ais';
   if (source === 'compass') return 'compass';
   return null;
 }
@@ -1091,7 +1095,7 @@ export function publicUpstream(upstream) {
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
     metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
-    quotaSource: isAiswitchUpstream(upstream) ? 'aiswitch' : upstream.quotaSource || null,
+    quotaSource: isAisUpstream(upstream) ? 'ais' : upstream.quotaSource || null,
     pacing: upstream.pacing,
     spending,
     updatedAt: upstream.updatedAt || null,

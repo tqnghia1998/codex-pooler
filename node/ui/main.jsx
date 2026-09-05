@@ -516,6 +516,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       }
     };
     if (!data.authJson) delete data.authJson;
+    if (!data.accessToken) delete data.accessToken;
     if (!data.projectKey) delete data.projectKey;
     try {
       await api(mode === 'edit' ? `/api/upstreams/${id}` : '/api/upstreams', {
@@ -535,6 +536,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     setFormValues({
       ...upstream,
       authJson: '',
+      accessToken: '',
       projectKey: '',
       quotaSource: upstream.quotaSource || 'compass',
       pacing: { ...DEFAULT_PACING, ...(upstream.pacing || {}), modelIntervals: [...(upstream.pacing?.modelIntervals || [])] }
@@ -574,7 +576,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         body: JSON.stringify(credentialTarget.type === 'codex'
           ? { authJson: credentialValue }
           : credentialTarget.type === 'claude'
-            ? { authJson: credentialValue }
+            ? (credentialValue.trim().startsWith('{') ? { authJson: credentialValue } : { accessToken: credentialValue.trim() })
           : { projectKey: credentialValue })
       });
       setCredentialTarget(null);
@@ -1073,29 +1075,30 @@ function Dashboard({ themeMode, setThemeMode }) {
                           value={formValues.authJson || ''}
                           onChange={(value) => updateForm('authJson', value)}
                           placeholder="Paste auth.json here (tokens.access_token, refresh_token, id_token)"
-                          rows={20}
+                          rows={6}
                           htmlName="authJson"
                         />
                       ) : formValues.type === 'claude' ? (
                         <VStack gap={2}>
-                          <TextArea
-                            label="Claude Enterprise OAuth credentials"
-                            description="Paste the Claude Code OAuth token export. The access_token is required; refresh_token enables automatic renewal."
-                            value={formValues.authJson || ''}
-                            onChange={(value) => updateForm('authJson', value)}
-                            placeholder={'{"access_token":"sk-ant-oat...","refresh_token":"...","expires_at":"..."}'}
-                            rows={12}
-                            htmlName="authJson"
-                          />
+                          {formDialog.mode === 'add' ? (
+                            <TextInput
+                              label="Claude OAuth Token"
+                              description="Enter OAuth token (e.g. sk-ant-oat...)"
+                              value={formValues.accessToken || ''}
+                              onChange={(value) => updateForm('accessToken', value)}
+                              placeholder="sk-ant-oat..."
+                              htmlName="accessToken"
+                            />
+                          ) : null}
                           <Text type="supporting" color="secondary">Claude Enterprise OAuth uses Claude Code-compatible shaping, profile lookup, and quota refresh.</Text>
                         </VStack>
                       ) : formValues.type === 'compass' ? (
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
                           <TextInput label="Project ID" value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
                           {formDialog.mode === 'add' && <TextInput label="Project key" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />}
-                          <Selector label="Quota source" options={[{ value: 'compass', label: 'Compass' }, { value: 'aiswitch', label: 'AISwitch' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
+                          <Selector label="Quota source" options={[{ value: 'compass', label: 'Compass' }, { value: 'ais', label: 'AIS' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
                           <GridSpan columns="full">
-                            <Text type="supporting" color="secondary">The account name is derived from the project ID. AISwitch quota is managed outside this gateway.</Text>
+                            <Text type="supporting" color="secondary">The account name is derived from the project ID. AIS quota is managed outside this gateway.</Text>
                           </GridSpan>
                         </Grid>
                       ) : null}
@@ -1315,7 +1318,7 @@ function UpstreamCard({
   const coolingDown = hasActiveCooldown(upstream);
   const pacingEnabled = Boolean(upstream.pacing?.enabled);
   const queuedRequests = pacing?.queueDepth || 0;
-  const quotaVariant = !quota || upstream.quotaSource === 'aiswitch' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
+  const quotaVariant = !quota || upstream.quotaSource === 'ais' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'success';
   const progressStyleMap = {
     success: { '--color-success': 'light-dark(#9fe59b, #0c5700)' },
@@ -1340,11 +1343,11 @@ function UpstreamCard({
           </StackItem>
           <HStack gap={1} vAlign="center">
             {Number.isInteger(upstream.priority) && <Badge label={`${ordinal(upstream.priority + 1)} priority`} variant="blue" />}
-            <Badge label={upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : upstream.type === 'claude' ? 'orange' : 'purple'} />
+            <Badge label={upstream.quotaSource === 'ais' ? 'ais' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : upstream.type === 'claude' ? 'orange' : 'purple'} />
           </HStack>
         </HStack>
         <VStack gap={1} height={56}>
-          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'aiswitch' ? 'aiswitch' : upstream.type === 'claude' ? 'Quota unavailable' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'aiswitch' ? 'Quota managed by AISwitch' : upstream.type === 'claude' ? 'Click refresh to read Claude usage' : 'Click refresh to read provider quota'}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'ais' ? 'ais' : upstream.type === 'claude' ? 'Quota unavailable' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'ais' ? 'Quota managed by AIS' : upstream.type === 'claude' ? 'Click refresh to read Claude usage' : 'Click refresh to read provider quota'}</Text></HStack>
           <ProgressBar
             label="Quota remaining"
             value={!quota ? 0 : quotaRemaining}
@@ -1493,17 +1496,16 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
                     value={value}
                     onChange={onValueChange}
                     placeholder="Paste auth.json here"
-                    rows={20}
+                    rows={6}
                     htmlName="authJson"
                   />
                 ) : upstream?.type === 'claude' ? (
-                  <TextArea
-                    label="Claude Enterprise OAuth credentials"
+                  <TextInput
+                    label="Claude OAuth Token"
                     value={value}
                     onChange={onValueChange}
-                    placeholder="Paste Claude OAuth JSON"
-                    rows={12}
-                    htmlName="authJson"
+                    placeholder="Enter replacement OAuth token (sk-ant-oat...)"
+                    htmlName="accessToken"
                   />
                 ) : (
                   <TextInput
@@ -1547,7 +1549,7 @@ function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueCh
           <LayoutContent>
             <form id="bulk-cap-form" onSubmit={onSubmit}>
               <VStack gap={4}>
-                <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled. AISwitch upstreams are excluded.</Text>
+                <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled. AIS upstreams are excluded.</Text>
                 <Selector
                   label="Strategy"
                   options={[{ value: 'rules', label: 'Original quota presets' }, { value: 'all', label: 'Set one cap for all upstreams' }, { value: 'cap_reached', label: 'Replace caps already reached' }, { value: 'uncapped', label: 'Set caps on uncapped upstreams' }]}

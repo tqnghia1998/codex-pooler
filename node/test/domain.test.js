@@ -134,12 +134,17 @@ test('uses Codex spend control as the monthly usage quota', () => {
   assert.equal(quota.resetAt, '2026-09-01T00:00:00.000Z');
 });
 
-test('marks CQP upstreams as AISwitch and keeps them eligible despite zero quota', () => {
-  const upstream = createUpstream({ type: 'compass', projectId: 'aiswitch-project', projectKey: 'key', quotaSource: 'CQP' });
+test('marks CQP upstreams as AIS and keeps them eligible despite zero quota', () => {
+  const upstream = createUpstream({ type: 'compass', projectId: 'ais-project', projectKey: 'key', quotaSource: 'CQP' });
   setSpendingCap(upstream, 100);
   upstream.quota = { remainingPercent: 0 };
-  assert.equal(publicUpstream(upstream).quotaSource, 'aiswitch');
+  assert.equal(publicUpstream(upstream).quotaSource, 'ais');
   assert.equal(filterSpendCapEligible([upstream]).eligible.length, 1);
+});
+
+test('normalizes legacy AISwitch upstreams to AIS', () => {
+  const upstream = createUpstream({ type: 'compass', projectId: 'legacy-ais-project', projectKey: 'key', quotaSource: 'aiswitch' });
+  assert.equal(publicUpstream(upstream).quotaSource, 'ais');
 });
 
 test('converts recurring Compass balance to monthly remaining percent', () => {

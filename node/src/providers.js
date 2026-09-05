@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { accessTokenExpiresAt, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, isAiswitchUpstream, isSupportedClaudeOAuthUpstream, normalizeBaseUrl, normalizeClaudeBaseUrl, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexQuota, parseCompassQuota, retryAfterSeconds } from './domain.js';
+import { accessTokenExpiresAt, DEFAULT_CLAUDE_BASE_URL, DEFAULT_CODEX_BASE_URL, DEFAULT_COMPASS_BASE_URL, isAisUpstream, isSupportedClaudeOAuthUpstream, normalizeBaseUrl, normalizeClaudeBaseUrl, parseClaudeQuota, parseClaudeQuotaHeaders, parseCodexQuota, parseCompassQuota, retryAfterSeconds } from './domain.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { fetchClaudeUsage } from './claude-oauth.js';
 import { claudeRequestHeaders, prepareClaudeRequestBody } from './claude-protocol.js';
@@ -45,7 +45,7 @@ export async function refreshQuota(upstream, credentials, {
   saveCredentials = () => {},
   force = false
 } = {}) {
-  if (isAiswitchUpstream(upstream)) throw new Error('AISwitch quota requires a Compass SSO session');
+  if (isAisUpstream(upstream)) throw new Error('AIS quota requires a Compass SSO session');
   if (upstream.type === 'claude') {
     if (!isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) return upstream.quota || null;
     return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force);

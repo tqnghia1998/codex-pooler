@@ -105,22 +105,20 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
   }
 });
 
-test('a manually budgeted AISwitch project serves a pinned Compass Messages share session', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-aiswitch-share-proxy-'));
+test('an AIS project with unknown quota serves a pinned Compass Messages share session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-share-proxy-'));
   try {
     const store = new Store(dir);
     const upstream = store.create({
       type: 'compass',
-      quotaSource: 'aiswitch',
-      projectId: 'shared-aiswitch-project',
-      projectKey: 'shared-aiswitch-key'
+      quotaSource: 'ais',
+      projectId: 'shared-ais-project',
+      projectKey: 'shared-ais-key'
     });
-    store.setCap(upstream.id, { capDollars: 100 });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'aiswitch-share-provider');
-    const consumer = account(sharingStore, 'aiswitch-share-consumer');
+    const provider = account(sharingStore, 'ais-share-provider');
+    const consumer = account(sharingStore, 'ais-share-consumer');
     sharingStore.linkUpstream(provider.id, upstream.id);
-    sharingStore.setManualShareBudget(provider.id, upstream.id, { quotaDollars: 3 }, store);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 3 }, store);
     const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
     const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
@@ -129,7 +127,7 @@ test('a manually budgeted AISwitch project serves a pinned Compass Messages shar
     const app = await running(store, sharingStore, async (url, options) => {
       calls.push({ path: new URL(url).pathname, authorization: options.headers.authorization });
       return new Response(JSON.stringify({
-        id: 'aiswitch-share-message',
+        id: 'ais-share-message',
         model: 'claude-sonnet-5',
         content: [{ type: 'text', text: 'shared' }],
         usage: { price_cost_usd: 1 }
@@ -146,9 +144,10 @@ test('a manually budgeted AISwitch project serves a pinned Compass Messages shar
         body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
       });
       assert.equal(response.status, 200);
-      assert.deepEqual(calls, [{ path: '/compass-api/v1/messages', authorization: 'Bearer shared-aiswitch-key' }]);
+      assert.deepEqual(calls, [{ path: '/compass-api/v1/messages', authorization: 'Bearer shared-ais-key' }]);
       assert.equal(sharingStore.session(session.id, consumer.id, store).remainingQuotaDollars, 2);
-      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, 2);
+      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, null);
+      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.offerableQuotaDollars, null);
     } finally {
       await app.close();
     }

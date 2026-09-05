@@ -157,10 +157,10 @@ test('keeps the last known Claude quota when the header probe is rate limited', 
   assert.equal(messagesCalls, 1);
 });
 
-test('does not attempt AISwitch quota refresh without its SSO session', async () => {
+test('does not attempt AIS quota refresh without its SSO session', async () => {
   await assert.rejects(
-    refreshQuota({ type: 'compass', projectId: 'aiswitch', projectKey: 'key', quotaSource: 'aiswitch' }, {}, { fetchImpl: async () => { throw new Error('must not fetch'); } }),
-    /AISwitch quota requires a Compass SSO session/
+    refreshQuota({ type: 'compass', projectId: 'ais', projectKey: 'key', quotaSource: 'ais' }, {}, { fetchImpl: async () => { throw new Error('must not fetch'); } }),
+    /AIS quota requires a Compass SSO session/
   );
 });
 
