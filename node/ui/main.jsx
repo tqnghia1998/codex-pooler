@@ -80,7 +80,7 @@ const DEFAULT_PACING = {
   maxQueueDepth: 20,
   maxQueueAgeMs: 30000
 };
-const FORM_DEFAULTS = { type: 'codex', authJson: '', projectId: '', projectKey: '', accessToken: '', refreshToken: '', email: '', accountId: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
+const FORM_DEFAULTS = { name: '', type: 'codex', authJson: '', projectId: '', projectKey: '', accessToken: '', refreshToken: '', email: '', accountId: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
 
 function useStoredValue(key, fallback = '') {
   const [value, setValue] = useState(() => localStorage.getItem(key) ?? fallback);
@@ -535,6 +535,7 @@ function Dashboard({ themeMode, setThemeMode }) {
   const edit = (upstream) => {
     setFormValues({
       ...upstream,
+      name: upstream.name || '',
       authJson: '',
       accessToken: '',
       projectKey: '',
@@ -1060,6 +1061,12 @@ function Dashboard({ themeMode, setThemeMode }) {
                     setFormDialog((s) => ({ ...s, isOpen: false }));
                   }}>
                     <VStack gap={3}>
+                      <TextInput
+                        label="Name"
+                        value={formValues.name || ''}
+                        onChange={(value) => updateForm('name', value)}
+                        placeholder="Optional custom name"
+                      />
                       <Selector
                         label="Type"
                         options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: 'Claude Enterprise OAuth' }]}
