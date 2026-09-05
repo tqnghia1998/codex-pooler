@@ -1242,11 +1242,18 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
   const quota = upstream.quota;
   const isAis = upstream.quotaSource === 'ais';
   const isClaude = upstream.type === 'claude';
+  const hasUnknownQuota = isAis || isClaude;
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
-  const providerTypeLabel = isAis ? 'AIS · quota managed externally' : isClaude ? 'Claude OAuth' : (quota?.label || 'Waiting for provider quota');
+  const providerTypeLabel = isAis
+    ? 'AIS · external quota'
+    : isClaude
+      ? 'Claude · external quota'
+      : (quota?.label || 'Waiting for provider quota');
+  const dedicatedAppName = isClaude ? 'Claude Desktop or Anthropic Console' : 'AIS Switch';
+  const unknownQuotaExplanation = `Codex Share cannot retrieve your real remaining quota for this account. Check your actual quota in ${dedicatedAppName} and allocate offers accordingly. Note: Shared quota figures here are nominal; downstream usage is strictly bound by your provider's actual available quota.`;
   return (
     <Card variant={issue ? 'red' : 'default'} height="100%" padding={3}>
       <VStack gap={2} height="100%" vAlign="between">
@@ -1262,8 +1269,33 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
               {issue && <ProviderIssueBadge issue={issue} />}
             </HStack>
           </HStack>
-          <Text weight="bold" maxLines={1}>{isAis ? 'Quota unavailable' : quotaRemaining(quota)}</Text>
-          {percentage !== null && (
+          {hasUnknownQuota ? (
+            <HStack gap={1.5} vAlign="center">
+              <Text weight="bold" maxLines={1}>Unknown Quota</Text>
+              <Tooltip
+                content={(
+                  <VStack gap={0} maxWidth={320}>
+                    <Text color="inherit" display="block" textWrap="wrap">
+                      {unknownQuotaExplanation}
+                    </Text>
+                  </VStack>
+                )}
+                hasHoverIndication={false}
+              >
+                <span
+                  tabIndex={0}
+                  role="button"
+                  aria-label="Unknown quota information"
+                  style={{ display: 'inline-flex', cursor: 'help', verticalAlign: 'middle' }}
+                >
+                  <Icon icon={CircleHelp} size="sm" color="info" />
+                </span>
+              </Tooltip>
+            </HStack>
+          ) : (
+            <Text weight="bold" maxLines={1}>{quotaRemaining(quota)}</Text>
+          )}
+          {!hasUnknownQuota && percentage !== null && (
             <ProgressBar
               label="Provider quota remaining"
               isLabelHidden
@@ -1272,10 +1304,14 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
               variant={quotaProgressVariant(percentage)}
             />
           )}
-          <Text type="supporting" color="secondary" maxLines={1}>{isAis ? 'External usage is not visible here; the project may stop when its quota is exhausted.' : quotaTiming(quota)}</Text>
+          <Text type="supporting" color="secondary" maxLines={1}>
+            {hasUnknownQuota
+              ? `Check remaining balance in ${dedicatedAppName}.`
+              : quotaTiming(quota)}
+          </Text>
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
-              {isAis
+              {hasUnknownQuota
                 ? `$${money(commitment.totalCommitmentDollars)} committed · provider quota unknown`
                 : `$${money(commitment.totalCommitmentDollars)} committed · ${Number.isFinite(commitment.offerableQuotaDollars)
                   ? `$${money(commitment.offerableQuotaDollars)} available to offer`
@@ -1602,11 +1638,42 @@ function ProviderIssueBadge({ issue }) {
 }
 
 function UpstreamSourceBadge({ upstream }) {
-  if (upstream?.type === 'claude') {
-    return <Badge label="claude" variant="blue" />;
-  }
+  const isClaude = upstream?.type === 'claude';
   const isAis = upstream?.quotaSource === 'ais';
-  return <Badge label={isAis ? 'ais' : 'codex'} variant={isAis ? 'teal' : 'purple'} />;
+  const hasUnknownQuota = isAis || isClaude;
+  const dedicatedAppName = isClaude ? 'Claude Desktop' : 'AIS Switch';
+  const badge = isClaude
+    ? <Badge label="claude" variant="blue" />
+    : <Badge label={isAis ? 'ais' : 'codex'} variant={isAis ? 'teal' : 'purple'} />;
+
+  if (!hasUnknownQuota) {
+    return badge;
+  }
+
+  return (
+    <HStack gap={1} vAlign="center">
+      {badge}
+      <Tooltip
+        content={(
+          <VStack gap={0} maxWidth={280}>
+            <Text color="inherit" display="block" textWrap="wrap">
+              {`Provider quota is managed in ${dedicatedAppName}. The nominal shared quota is strictly bound by your provider's actual available quota.`}
+            </Text>
+          </VStack>
+        )}
+        hasHoverIndication={false}
+      >
+        <span
+          tabIndex={0}
+          role="button"
+          aria-label="External quota notice"
+          style={{ display: 'inline-flex', cursor: 'help', verticalAlign: 'middle' }}
+        >
+          <Icon icon={CircleHelp} size="sm" color="info" />
+        </span>
+      </Tooltip>
+    </HStack>
+  );
 }
 
 function CodexLoginDialog({ login, onClose, onCancel, onRetry }) {
@@ -1917,6 +1984,10 @@ function ClaudeUpstreamDialog({ value, onClose, onSave, onChange }) {
 
 function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, onChange }) {
   const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
+  const isAis = selectedUpstream?.quotaSource === 'ais';
+  const isClaude = selectedUpstream?.type === 'claude';
+  const hasUnknownQuota = isAis || isClaude;
+  const dedicatedAppName = isClaude ? 'Claude Desktop or Anthropic Console' : 'AIS Switch';
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
       <Layout
@@ -1936,6 +2007,13 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   value={value.upstreamId}
                   onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
                   width="100%"
+                />
+              )}
+              {hasUnknownQuota && (
+                <Banner
+                  title="External quota notice"
+                  description={`Provider remaining quota cannot be verified directly. Check your real balance in ${dedicatedAppName} before allocating. The shared quota here is nominal; downstream requests are always constrained by your provider's actual quota.`}
+                  status="info"
                 />
               )}
               <NumberInput

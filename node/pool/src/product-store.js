@@ -719,7 +719,7 @@ export class ProductStore {
     if (cache?.has(upstreamId)) return cache.get(upstreamId);
     this.expireDue();
     const upstream = upstreamStore?.getPublic(upstreamId) || upstreamStore?.get(upstreamId) || null;
-    const actualMicros = (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') ? null : providerRemainingMicros(upstream);
+    const actualMicros = (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch' || upstream?.type === 'claude') ? null : providerRemainingMicros(upstream);
     const sessions = this.sqlite.prepare(`
       SELECT id, granted_micros, consumed_micros, created_at
       FROM sharing_sessions
