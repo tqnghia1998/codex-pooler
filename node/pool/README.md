@@ -93,21 +93,22 @@ Offers, pending tickets, and share sessions show a sanitized provider issue to
 both providers and consumers when the provider needs reauthentication, has a
 token-refresh failure, or has exhausted its provider quota.
 
-After signing in, a user can also add an AISwitch project by entering its
-project ID and project key. AISwitch does not expose a quota query to this
-product, so its owner sets the current **manual share budget** in USD. Codex
-Share reserves offers against that amount and decrements it only for settled
-usage through share sessions. Updating the budget replaces the pool-side
-remaining amount; it does not query or change AISwitch, and outside use of the
-project is not visible here. Use **Add AISwitch project** and its **How to get
-AISwitch project** guide to retrieve `project_id` and `api_key` from Compass.
+After signing in, a user can also add an AIS project by entering its
+project ID and project key. AIS does not expose a quota query to this
+product, so its quota is shown as **unknown**. The owner publishes an offer
+based on their own knowledge. Codex Share keeps the offer and session amounts
+as local sharing limits, but does not estimate or reserve against the real
+AIS quota. External use of the project is not visible here and may cause
+the project to stop working when its provider quota is exhausted. Use **Add
+AIS project** and its **How to get AIS project** guide to retrieve
+`project_id` and `api_key` from Compass.
 
 ## Sharing Flow
 
-1. A provider publishes an offer for one imported Codex account or manually
-   added AISwitch project and a dollar
-   quota. The offer reserves that amount from the provider's currently
-   offerable quota.
+1. A provider publishes an offer for one imported Codex account or added
+   AIS project and a dollar amount they are willing to share. Codex
+   offers are checked against the provider's currently offerable quota;
+   AIS quota is unknown and offers are best effort.
 2. A consumer requests a dollar quota through a ticket.
 3. The provider approves the request, changes the approved amount, or rejects
    it.
@@ -136,10 +137,12 @@ If every active provider session needs Codex reauthentication, requests return
 Offers, sessions, personal keys, and public quota requests expire. Pending
 tickets remain open until the source offer is closed or expires.
 Offer and session expiry is bounded by the provider quota reset when that reset
-is known. Creating or resizing a grant is rejected atomically when it would
-overcommit the provider's current quota. If provider quota later falls below
-existing commitments, affected offers and sessions remain visible as
+is known. For Codex, creating or resizing a grant is rejected atomically when
+it would overcommit the provider's current quota. If Codex quota later falls
+below existing commitments, affected offers and sessions remain visible as
 underfunded but cannot accept or route new work beyond their backed amount.
+AIS quota is not checked or reserved; external use can make an AIS
+offer stop working before its local share grant is consumed.
 Providers can extend an active session's expiry from **Resize share session**;
 the new expiry cannot shorten the session or exceed the provider quota reset
 or the 30-day session limit.
@@ -203,11 +206,10 @@ POST   /api/pool/personal-keys/:id/reveal
 POST   /api/pool/personal-keys/:id/rotate
 POST   /api/pool/personal-keys/:id/revoke
 GET    /api/pool/upstreams
-POST   /api/pool/upstreams/aiswitch                 { projectId, projectKey, quotaDollars }
-PATCH  /api/pool/upstreams/:id                      { projectId, projectKey? } (AISwitch only)
+POST   /api/pool/upstreams/ais                      { projectId, projectKey }
+PATCH  /api/pool/upstreams/:id                      { projectId, projectKey? } (AIS only)
 GET    /api/pool/upstreams/credentials
 POST   /api/pool/upstreams/:id/refresh-quota
-PUT    /api/pool/upstreams/:id/manual-budget        { quotaDollars }
 POST   /api/pool/upstreams/:id/test-connection
 GET    /api/pool/providers/:id
 POST   /api/pool/providers/:id/pause
@@ -236,7 +238,7 @@ GET    /v1/models
 POST   /v1/responses
 GET    /v1/responses                 # WebSocket upgrade
 POST   /v1/chat/completions
-POST   /v1/messages                  # AISwitch only
+POST   /v1/messages                  # AIS only
 GET    /v1/files
 POST   /v1/files
 GET    /v1/files/:id
@@ -278,7 +280,7 @@ tool-call, compaction, model-catalog, public file/audio/image, and native
 WebSocket implementations as Relaydeck. A share key limits candidate accounts
 and accounting; it does not create a second protocol adapter. Public file
 metadata is isolated per share session. Codex Share accepts `/v1/messages`
-for manually added AISwitch projects. Codex-native backend API and
+for manually added AIS projects. Codex-native backend API and
 WebSocket routes remain Codex-only.
 
 Client-facing gateway route classification and dispatch live in
