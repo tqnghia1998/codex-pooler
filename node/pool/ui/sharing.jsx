@@ -28,6 +28,7 @@ import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
 import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
+import { useLanguage } from './i18n.jsx';
 
 const SHARING_VIEWS = new Set([
   'community-offers',
