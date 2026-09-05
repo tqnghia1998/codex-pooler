@@ -1863,10 +1863,11 @@ function selectBulkTargets(upstreams, input = {}) {
     minQuotaLeft: number(rule.minQuotaLeft, 'minQuotaLeft'),
     capDollars: number(rule.capDollars, 'capDollars')
   }));
+  const unknownCap = input.unknownQuotaDollars == null ? null : number(input.unknownQuotaDollars, 'unknownQuotaDollars');
   return upstreams.flatMap((upstream) => {
     if (!eligible(upstream)) return [];
     const quotaLeft = Number(upstream.quota?.remainingDollars ?? upstream.quota?.remainingUnits);
-    if (!Number.isFinite(quotaLeft)) return [];
+    if (!Number.isFinite(quotaLeft)) return unknownCap == null ? [] : [{ upstream, capDollars: unknownCap }];
     const matching = rules.filter((rule) => quotaLeft > rule.minQuotaLeft).sort((a, b) => b.minQuotaLeft - a.minQuotaLeft)[0];
     return matching ? [{ upstream, capDollars: matching.capDollars }] : [];
   });

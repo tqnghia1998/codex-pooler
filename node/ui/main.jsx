@@ -247,6 +247,7 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [bulkMode, setBulkMode] = useState('rules');
   const [bulkCapValue, setBulkCapValue] = useState(100);
   const [bulkRules, setBulkRules] = useState(DEFAULT_BULK_RULES);
+  const [bulkUnknownValue, setBulkUnknownValue] = useState(5);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [refreshTarget, setRefreshTarget] = useState(null);
@@ -778,13 +779,14 @@ function Dashboard({ themeMode, setThemeMode }) {
     setBulkMode('rules');
     setBulkCapValue(100);
     setBulkRules(DEFAULT_BULK_RULES);
+    setBulkUnknownValue(5);
     setBulkOpen(true);
   };
 
   const saveBulkCaps = async (event) => {
     event.preventDefault();
     const payload = bulkMode === 'rules'
-      ? { rules: bulkRules.map(({ minQuotaLeft, capDollars }) => ({ minQuotaLeft, capDollars })) }
+      ? { rules: bulkRules.map(({ minQuotaLeft, capDollars }) => ({ minQuotaLeft, capDollars })), unknownQuotaDollars: bulkUnknownValue }
       : { target: bulkMode, capDollars: bulkCapValue };
     if (bulkMode === 'rules' && (!payload.rules.length || payload.rules.some((rule) => rule.minQuotaLeft == null || rule.capDollars == null))) {
       show('Enter non-negative numbers for every quota and cap', true);
@@ -965,9 +967,11 @@ function Dashboard({ themeMode, setThemeMode }) {
             mode={bulkMode}
             capValue={bulkCapValue}
             rules={bulkRules}
+            unknownValue={bulkUnknownValue}
             onModeChange={setBulkMode}
             onCapValueChange={setBulkCapValue}
             onRulesChange={setBulkRules}
+            onUnknownValueChange={setBulkUnknownValue}
             onClose={() => setBulkOpen(false)}
             onSubmit={saveBulkCaps}
           />
@@ -1553,7 +1557,7 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
   );
 }
 
-function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueChange, onRulesChange, onClose, onSubmit }) {
+function BulkCapDialog({ open, mode, capValue, rules, unknownValue, onModeChange, onCapValueChange, onRulesChange, onUnknownValueChange, onClose, onSubmit }) {
   const updateRule = (index, field, value) => onRulesChange(rules.map((rule, current) => current === index ? { ...rule, [field]: value } : rule));
   return (
     <Dialog isOpen={open} onOpenChange={onClose} purpose="form" width={560}>
@@ -1586,6 +1590,15 @@ function BulkCapDialog({ open, mode, capValue, rules, onModeChange, onCapValueCh
                       ))}
                     </ScrollList>
                     <Button label="Add rule" variant="secondary" onClick={() => onRulesChange([...rules, { minQuotaLeft: null, capDollars: null }])} />
+                    <NumberInput
+                      label="Unknown quota cap (USD)"
+                      description="Applied to upstreams whose remaining quota is unknown, such as Claude accounts without extra-usage data. Leave empty to skip them."
+                      value={unknownValue}
+                      onChange={onUnknownValueChange}
+                      min={0}
+                      step={0.01}
+                      hasClear
+                    />
                   </VStack>
                 ) : (
                   <NumberInput label="Cap (USD)" value={capValue} onChange={onCapValueChange} min={0} step={0.01} hasClear />
