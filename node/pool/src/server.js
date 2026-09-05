@@ -55,6 +55,7 @@ export function createApp({
   onCodexCredentialsImported = () => {},
   publicBasePath = process.env.POOL_PUBLIC_BASE_PATH
 } = {}) {
+  store.clearAisSpendingCaps();
   const modelCatalog = modelCatalogForStore(store);
   const basePath = normalizePublicBasePath(publicBasePath);
   return async function app(req, res) {
@@ -124,6 +125,7 @@ export function createApp({
       if (gatewayKind) {
         req.disablePacing = true;
         req.ignoreQuotaCooldown = true;
+        req.allowUnknownQuota = true;
         await dispatchGatewayRequest({
           kind: gatewayKind,
           req,
@@ -395,22 +397,21 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 201, productStore.createNamedPersonalKey(accountId, await body(req), store));
     return;
   }
-  if (req.method === 'POST' && resource === 'upstreams' && id === 'aiswitch' && parts.length === 4) {
+  if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
     const input = await body(req);
     const upstream = store.create({
       type: 'compass',
-      quotaSource: 'aiswitch',
+      quotaSource: 'ais',
       projectId: input.projectId,
       projectKey: input.projectKey
     });
     try {
-      const cappedUpstream = store.setCap(upstream.id, { capDollars: 1_000_000 });
       productStore.linkUpstream(accountId, upstream.id);
-      const provider = productStore.setManualShareBudget(accountId, upstream.id, input, store);
+      const provider = productStore.providerSummary(accountId, upstream.id, store);
       sendJson(res, 201, {
         upstream: {
-          ...cappedUpstream,
-          providerIssue: providerIssue(cappedUpstream),
+          ...upstream,
+          providerIssue: providerIssue(upstream),
           sharing: provider.sharing,
           commitment: provider.commitment
         }
@@ -425,7 +426,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
   if (req.method === 'PATCH' && resource === 'upstreams' && id && parts.length === 4) {
     const input = await body(req);
     const upstream = store.get(id);
-    if (!upstream || !productStore.accountOwnsUpstream(accountId, id) || upstream.quotaSource !== 'aiswitch') {
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id) || (upstream.quotaSource !== 'ais' && upstream.quotaSource !== 'aiswitch')) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
     const updated = store.update(id, {
@@ -457,10 +458,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
   }
   if (req.method === 'GET' && resource === 'upstreams' && parts.length === 3) {
     const upstreams = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-      .flatMap(({ upstreamId, manualShareBudgetMicros }) => {
+      .flatMap(({ upstreamId }) => {
         const upstream = store.getPublic(upstreamId);
         if (!upstream) return [];
-        const provider = productStore.providerSummary(accountId, upstreamId, store, { manualShareBudgetMicros });
+        const provider = productStore.providerSummary(accountId, upstreamId, store);
         return [{
           ...upstream,
           name: upstream.email || upstream.name,
@@ -499,16 +500,12 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
-    if (upstream.quotaSource === 'aiswitch') {
-      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'manual_share_budget' });
+    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch') {
+      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
       return;
     }
     if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
     sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
-    return;
-  }
-  if (req.method === 'PUT' && resource === 'upstreams' && id && action === 'manual-budget') {
-    sendJson(res, 200, { provider: productStore.setManualShareBudget(accountId, id, await body(req), store) });
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'test-connection') {
