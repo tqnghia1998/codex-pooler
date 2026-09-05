@@ -136,8 +136,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [authJsonDialog, setAuthJsonDialog] = useState(false);
   const [authJson, setAuthJson] = useState('');
   const [authJsonLoading, setAuthJsonLoading] = useState(false);
-  const [aiswitchDialog, setAiswitchDialog] = useState(null);
-  const [manualBudgetDialog, setManualBudgetDialog] = useState(null);
+  const [aisDialog, setAisDialog] = useState(null);
   const [quotaRefreshing, setQuotaRefreshing] = useState(false);
   const [testingUpstreamId, setTestingUpstreamId] = useState(null);
   const [testingSessionId, setTestingSessionId] = useState(null);
@@ -369,7 +368,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const refreshQuota = async ({ silent = false } = {}) => {
     const refreshable = upstreams.filter((upstream) => upstream.type === 'codex');
     if (!refreshable.length) {
-      if (!silent) onNotice('AISwitch share budgets are set manually');
+      if (!silent) onNotice('AIS quota is managed externally');
       return;
     }
     setQuotaRefreshing(true);
@@ -546,8 +545,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             onRefresh={() => void refreshQuota()}
             onLinkCodex={() => void startCodexLogin()}
             onImportAuthJson={openAuthJsonDialog}
-            onAddAiswitch={() => setAiswitchDialog({ projectId: '', projectKey: '', quotaDollars: 10 })}
-            onEditAiswitch={(upstream) => setAiswitchDialog({
+            onAddAis={() => setAisDialog({ projectId: '', projectKey: '' })}
+            onEditAis={(upstream) => setAisDialog({
               upstream,
               projectId: upstream.projectId || '',
               projectKey: ''
@@ -565,10 +564,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             )}
             isActionLoading={isActionLoading}
             onRevokeAll={setProviderRevokeTarget}
-            onSetManualBudget={(upstream) => setManualBudgetDialog({
-              upstream,
-              quotaDollars: upstream.commitment?.actualQuotaDollars ?? 0
-            })}
           />
         </GridSpan>
         <PersonalKeyCard
@@ -811,13 +806,13 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         }, value.offer ? 'Offer updated' : 'Offer published')}
         onChange={setOfferDialog}
       />
-      <AiswitchProjectDialog
-        value={aiswitchDialog}
-        onClose={() => setAiswitchDialog(null)}
-        onChange={setAiswitchDialog}
+      <AisProjectDialog
+        value={aisDialog}
+        onClose={() => setAisDialog(null)}
+        onChange={setAisDialog}
         onSave={(value) => mutate(async () => {
           const editing = Boolean(value.upstream);
-          await api(editing ? `/api/pool/upstreams/${value.upstream.id}` : '/api/pool/upstreams/aiswitch', {
+          await api(editing ? `/api/pool/upstreams/${value.upstream.id}` : '/api/pool/upstreams/ais', {
             method: editing ? 'PATCH' : 'POST',
             body: JSON.stringify(editing
               ? {
@@ -826,20 +821,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
                 }
               : value)
           });
-          setAiswitchDialog(null);
-        }, aiswitchDialog?.upstream ? 'AISwitch project updated' : 'AISwitch project added with a manual share budget')}
-      />
-      <ManualBudgetDialog
-        value={manualBudgetDialog}
-        onClose={() => setManualBudgetDialog(null)}
-        onChange={setManualBudgetDialog}
-        onSave={(value) => mutate(async () => {
-          await api(`/api/pool/upstreams/${value.upstream.id}/manual-budget`, {
-            method: 'PUT',
-            body: JSON.stringify({ quotaDollars: value.quotaDollars })
-          });
-          setManualBudgetDialog(null);
-        }, 'AISwitch manual share budget updated')}
+          setAisDialog(null);
+        }, aisDialog?.upstream ? 'AIS project updated' : 'AIS project added')}
       />
       <PersonalKeyDialog
         value={personalKeyDialog}
@@ -978,19 +961,18 @@ function QuotaOverview({
   onRefresh,
   onLinkCodex,
   onImportAuthJson,
-  onAddAiswitch,
-  onEditAiswitch,
+  onAddAis,
+  onEditAis,
   onRevealCredentials,
   onTestConnection,
   testingUpstreamId,
   onToggleSharing,
   onRevokeAll,
-  onSetManualBudget,
   isActionLoading = () => false
 }) {
-  const hasAiswitch = upstreams.some((upstream) => upstream.quotaSource === 'aiswitch');
+  const hasAis = upstreams.some((upstream) => upstream.quotaSource === 'ais');
   const orderedUpstreams = [...upstreams].sort((left, right) =>
-    Number(left.quotaSource === 'aiswitch') - Number(right.quotaSource === 'aiswitch')
+    Number(left.quotaSource === 'ais') - Number(right.quotaSource === 'ais')
   );
   if (!upstreams.length) {
     return (
@@ -998,12 +980,12 @@ function QuotaOverview({
         <VStack gap={2} hAlign="center">
           <VStack gap={1} hAlign="center">
             <Heading level={3} maxLines={1}>No share provider linked</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Link Codex quota or add an AISwitch project to publish an offer.</Text>
+            <Text type="supporting" color="secondary" maxLines={1}>Link Codex quota or add an AIS project to publish an offer.</Text>
           </VStack>
           <HStack justify="center" gap={1} wrap="wrap">
             <Button label="Login with Codex" size="sm" variant="primary" onClick={onLinkCodex} />
             <Button label="Login with auth.json" size="sm" variant="secondary" onClick={onImportAuthJson} />
-            <Button label="Add AISwitch project" size="sm" variant="dashed" onClick={onAddAiswitch} />
+            <Button label="Add AIS project" size="sm" variant="dashed" onClick={onAddAis} />
           </HStack>
         </VStack>
       </Card>
@@ -1015,7 +997,7 @@ function QuotaOverview({
         <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           <VStack gap={1}>
             <Heading level={3} maxLines={1}>Your share providers</Heading>
-            <Text type="supporting" color="secondary" maxLines={1}>Codex quota refreshes automatically; AISwitch share budgets are owner-managed.</Text>
+            <Text type="supporting" color="secondary" maxLines={1}>Codex quota refreshes automatically; AIS quota is managed externally.</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
             <Button label="View credentials" size="sm" variant="secondary" onClick={onRevealCredentials} />
@@ -1033,14 +1015,13 @@ function QuotaOverview({
               isTestingConnection={testingUpstreamId === upstream.id}
               onToggleSharing={onToggleSharing}
               onRevokeAll={onRevokeAll}
-              onSetManualBudget={onSetManualBudget}
-              onEditAiswitch={onEditAiswitch}
+              onEditAis={onEditAis}
               isActionLoading={isActionLoading}
             />
           ))}
-          {!hasAiswitch && (
+          {!hasAis && (
             <VStack hAlign="center" vAlign="center" height="100%">
-              <Button label="Add AISwitch project" size="sm" variant="dashed" onClick={onAddAiswitch} />
+              <Button label="Add AIS project" size="sm" variant="dashed" onClick={onAddAis} />
             </VStack>
           )}
         </Grid>
@@ -1101,9 +1082,9 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onSetManualBudget, onEditAiswitch, isActionLoading = () => false }) {
+function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, isActionLoading = () => false }) {
   const quota = upstream.quota;
-  const isAiswitch = upstream.quotaSource === 'aiswitch';
+  const isAis = upstream.quotaSource === 'ais';
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
@@ -1115,14 +1096,14 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           <HStack justify="between" vAlign="start" gap={2}>
             <VStack gap={1}>
               <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
-              <Text type="supporting" color="secondary" maxLines={1}>{isAiswitch ? 'AISwitch · manual share budget' : quota?.label || 'Waiting for provider quota'}</Text>
+              <Text type="supporting" color="secondary" maxLines={1}>{isAis ? 'AIS · quota managed externally' : quota?.label || 'Waiting for provider quota'}</Text>
             </VStack>
             <HStack gap={1} vAlign="center">
-              {isAiswitch && <Button label="Edit" size="sm" variant="secondary" onClick={() => onEditAiswitch(upstream)} />}
+              {isAis && <Button label="Edit" size="sm" variant="secondary" onClick={() => onEditAis(upstream)} />}
               {issue && <ProviderIssueBadge issue={issue} />}
             </HStack>
           </HStack>
-          <Text weight="bold" maxLines={1}>{isAiswitch ? `$${money(commitment?.actualQuotaDollars)} manual budget left` : quotaRemaining(quota)}</Text>
+          <Text weight="bold" maxLines={1}>{isAis ? 'Quota unavailable' : quotaRemaining(quota)}</Text>
           {percentage !== null && (
             <ProgressBar
               label="Provider quota remaining"
@@ -1132,12 +1113,14 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
               variant={quotaProgressVariant(percentage)}
             />
           )}
-          <Text type="supporting" color="secondary" maxLines={1}>{isAiswitch ? 'Decreases only from Codex Share session usage.' : quotaTiming(quota)}</Text>
+          <Text type="supporting" color="secondary" maxLines={1}>{isAis ? 'External usage is not visible here; the project may stop when its quota is exhausted.' : quotaTiming(quota)}</Text>
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
-              ${money(commitment.totalCommitmentDollars)} committed · {Number.isFinite(commitment.offerableQuotaDollars)
-                ? `$${money(commitment.offerableQuotaDollars)} available to offer`
-                : 'offerable quota unavailable'}
+              {isAis
+                ? `$${money(commitment.totalCommitmentDollars)} committed · provider quota unknown`
+                : `$${money(commitment.totalCommitmentDollars)} committed · ${Number.isFinite(commitment.offerableQuotaDollars)
+                  ? `$${money(commitment.offerableQuotaDollars)} available to offer`
+                  : 'offerable quota unavailable'}`}
             </Text>
           )}
           {commitment?.underfundedQuotaDollars > 0 && (
@@ -1155,7 +1138,6 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
             isDisabled={isTestingConnection}
             onClick={() => onTestConnection(upstream)}
           />
-          {isAiswitch && <Button label="Set budget" size="sm" variant="secondary" onClick={() => onSetManualBudget(upstream)} />}
           {issue?.code === 'provider_reauth_required' && (
             <>
               <Button label="Reconnect" size="sm" variant="primary" onClick={onLinkCodex} />
@@ -1455,8 +1437,8 @@ function ProviderIssueBadge({ issue }) {
 }
 
 function UpstreamSourceBadge({ upstream }) {
-  const isAiswitch = upstream?.quotaSource === 'aiswitch';
-  return <Badge label={isAiswitch ? 'aiswitch' : 'codex'} variant={isAiswitch ? 'teal' : 'purple'} />;
+  const isAis = upstream?.quotaSource === 'ais';
+  return <Badge label={isAis ? 'ais' : 'codex'} variant={isAis ? 'teal' : 'purple'} />;
 }
 
 function CodexLoginCard({ login, onCancel, onRetry }) {
@@ -1518,7 +1500,7 @@ function AuthJsonLoginDialog({ isOpen, value, isLoading, onChange, onClose, onSu
                   value={value}
                   onChange={onChange}
                   placeholder="Paste auth.json here (tokens.access_token, refresh_token, id_token)"
-                  rows={20}
+                  rows={6}
                   htmlName="authJson"
                   hasSpellCheck={false}
                   hasAutoFocus
@@ -1547,58 +1529,48 @@ function AuthJsonLoginDialog({ isOpen, value, isLoading, onChange, onClose, onSu
   );
 }
 
-function AiswitchProjectDialog({ value, onClose, onSave, onChange }) {
+function AisProjectDialog({ value, onClose, onSave, onChange }) {
   const [guideOpen, setGuideOpen] = useState(false);
   const editing = Boolean(value?.upstream);
   return (
     <>
       <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={520}>
         <Layout
-          header={<DialogHeader title={editing ? 'Edit AISwitch project' : 'Add AISwitch project'} subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
+          header={<DialogHeader title={editing ? 'Edit AIS project' : 'Add AIS project'} subtitle="Share it through the same offer and session flow as Codex quota" onOpenChange={onClose} hasDivider />}
           content={(
             <LayoutContent>
               {value && <VStack gap={3}>
                 <Banner
-                  title={editing ? 'Update project details' : 'Manual share budget'}
+                  title={editing ? 'Update project details' : 'AIS quota unavailable'}
                   description={editing
                     ? 'Update the project ID or replace the project key. Leave the key blank to keep the current key.'
-                    : 'AISwitch quota cannot be queried here. Set the amount currently available for sharing; Codex Share will decrement it only as shared sessions spend.'}
+                    : 'AIS quota cannot be queried here. Publish an offer based on your own knowledge; external usage may cause the project to stop working when its quota is exhausted.'}
                   status="info"
                 />
                 <TextInput
-                  label="AISwitch project ID"
+                  label="AIS project ID"
                   value={value.projectId || ''}
                   onChange={(projectId) => onChange({ ...value, projectId })}
                   hasAutoFocus
                   isRequired
                 />
                 <TextInput
-                  label={editing ? 'New AISwitch project key (optional)' : 'AISwitch project key'}
+                  label={editing ? 'New AIS project key (optional)' : 'AIS project key'}
                   value={value.projectKey || ''}
                   onChange={(projectKey) => onChange({ ...value, projectKey })}
                   placeholder={editing ? 'Leave blank to keep the current key' : undefined}
                   isRequired={!editing}
                 />
-                {!editing && (
-                  <NumberInput
-                    label="Manual share budget (USD)"
-                    value={value.quotaDollars}
-                    onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
-                    min={0.01}
-                    step={0.01}
-                    isRequired
-                  />
-                )}
               </VStack>}
             </LayoutContent>
           )}
           footer={(
             <DialogFooter
               startContent={(
-                <Link label="How to get AISwitch project" onClick={() => setGuideOpen(true)}>
+                <Link label="How to get AIS project" onClick={() => setGuideOpen(true)}>
                   <HStack gap={1} vAlign="center">
                     <Icon icon={CircleHelp} size="sm" />
-                    <Text>How to get AISwitch project</Text>
+                    <Text>How to get AIS project</Text>
                   </HStack>
                 </Link>
               )}
@@ -1606,25 +1578,24 @@ function AiswitchProjectDialog({ value, onClose, onSave, onChange }) {
               onSave={() => onSave(value)}
               saveLabel={editing ? 'Save changes' : 'Add project'}
               isSaveDisabled={!String(value?.projectId || '').trim()
-                || (!editing && !String(value?.projectKey || '').trim())
-                || (!editing && Number(value?.quotaDollars) <= 0)}
+                || (!editing && !String(value?.projectKey || '').trim())}
             />
           )}
         />
       </Dialog>
-      <AiswitchProjectGuide isOpen={guideOpen} onClose={() => setGuideOpen(false)} />
+      <AisProjectGuide isOpen={guideOpen} onClose={() => setGuideOpen(false)} />
     </>
   );
 }
 
-const AISWITCH_PROJECT_SCRIPT = "fetch('/api/v1/cqp/ccswitch/api_key/get_or_generate',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json()).then(r=>console.log(r.data))";
+const AIS_PROJECT_SCRIPT = "fetch('/api/v1/cqp/ccswitch/api_key/get_or_generate',{method:'POST',credentials:'include',headers:{'content-type':'application/json'},body:'{}'}).then(r=>r.json()).then(r=>console.log(r.data))";
 
-function AiswitchProjectGuide({ isOpen, onClose }) {
+function AisProjectGuide({ isOpen, onClose }) {
   return (
     <UserGuideDialog
       isOpen={isOpen}
       onClose={onClose}
-      title="How to get an AISwitch project"
+      title="How to get an AIS project"
       subtitle="Retrieve your project ID and API key from Compass"
     >
       <VStack gap={2}>
@@ -1636,46 +1607,15 @@ function AiswitchProjectGuide({ isOpen, onClose }) {
       <VStack gap={2}>
         <Text weight="bold">2. Generate or retrieve the project key</Text>
         <Text type="supporting" color="secondary">Open your browser DevTools console, paste this script, and run it.</Text>
-        <CodeBlock code={AISWITCH_PROJECT_SCRIPT} language="javascript" hasCopyButton isWrapped width="100%" />
+        <CodeBlock code={AIS_PROJECT_SCRIPT} language="javascript" hasCopyButton isWrapped width="100%" />
       </VStack>
       <VStack gap={2}>
         <Text weight="bold">3. Enter the returned values</Text>
         <Text type="supporting" color="secondary">
-          Copy <Code>project_id</Code> into AISwitch project ID and <Code>api_key</Code> into AISwitch project key in the form.
+          Copy <Code>project_id</Code> into AIS project ID and <Code>api_key</Code> into AIS project key in the form.
         </Text>
       </VStack>
     </UserGuideDialog>
-  );
-}
-
-function ManualBudgetDialog({ value, onClose, onSave, onChange }) {
-  return (
-    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
-      <Layout
-        header={<DialogHeader title="Set AISwitch share budget" subtitle={value?.upstream?.name} onOpenChange={onClose} hasDivider />}
-        content={(
-          <LayoutContent>
-            {value && <VStack gap={3}>
-              <Banner
-                title="Enter the current available amount"
-                description="This replaces the pool-side remaining budget. It does not query or change AISwitch itself."
-                status="info"
-              />
-              <NumberInput
-                label="Manual share budget (USD)"
-                value={value.quotaDollars}
-                onChange={(quotaDollars) => onChange({ ...value, quotaDollars })}
-                min={0}
-                step={0.01}
-                isRequired
-                hasAutoFocus
-              />
-            </VStack>}
-          </LayoutContent>
-        )}
-        footer={<DialogFooter onClose={onClose} onSave={() => onSave(value)} saveLabel="Set budget" isSaveDisabled={!Number.isFinite(Number(value?.quotaDollars)) || Number(value?.quotaDollars) < 0} />}
-      />
-    </Dialog>
   );
 }
 
@@ -1695,7 +1635,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   label="Share source"
                   options={offerableUpstreams.map((upstream) => ({
                     value: upstream.id,
-                    label: `${upstream.name} · ${upstream.quotaSource === 'aiswitch' ? 'AISwitch' : 'Codex'}`
+                    label: `${upstream.name} · ${upstream.quotaSource === 'ais' ? 'AIS' : 'Codex'}`
                   }))}
                   value={value.upstreamId}
                   onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
