@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store, notFound } from './store.js';
-import { claudeOAuthInputError, dollarsToMicros, exportUpstreamCredentials, isAiswitchUpstream, isSupportedClaudeOAuthUpstream, retryAfterSeconds } from './domain.js';
+import { claudeOAuthInputError, dollarsToMicros, exportUpstreamCredentials, isAisUpstream, isSupportedClaudeOAuthUpstream, retryAfterSeconds } from './domain.js';
 import {
   createTokenRefreshScheduler,
   refreshClaudeToken,
@@ -201,8 +201,8 @@ export function start(port = Number(process.env.PORT) || 3000, {
 export async function refreshAllQuotas(store, options = {}) {
   return refreshAllUpstreamQuotas(store, {
     ...options,
-    shouldRefresh: (upstream) => !isAiswitchUpstream(upstream) && (upstream.type !== 'claude' || hasClaudeOAuthQuota(store, upstream)),
-    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: upstream.type === 'claude' ? 'claude_api_key' : 'aiswitch' })
+    shouldRefresh: (upstream) => !isAisUpstream(upstream) && (upstream.type !== 'claude' || hasClaudeOAuthQuota(store, upstream)),
+    skippedResult: (upstream) => ({ status: 'skipped', id: upstream.id, source: upstream.type === 'claude' ? 'claude_api_key' : 'ais' })
   });
 }
 
@@ -405,8 +405,8 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
   if (req.method === 'POST' && action === 'refresh-quota' && parts.length === 4) {
     const upstream = store.get(id);
     if (!upstream) throw notFound();
-    if (isAiswitchUpstream(upstream)) {
-      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'aiswitch' });
+    if (isAisUpstream(upstream)) {
+      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'ais' });
       return;
     }
     try {
@@ -460,7 +460,7 @@ function assertClaudeOAuthInput(input, creating) {
 
 async function refreshSavedUpstreamQuota(store, id, options) {
   const upstream = store.get(id);
-  if (!upstream || isAiswitchUpstream(upstream) || (upstream.type === 'claude' && !hasClaudeOAuthQuota(store, upstream))) return store.getPublic(id);
+  if (!upstream || isAisUpstream(upstream) || (upstream.type === 'claude' && !hasClaudeOAuthQuota(store, upstream))) return store.getPublic(id);
   try {
     return await refreshUpstreamQuota(store, id, options);
   } catch {
