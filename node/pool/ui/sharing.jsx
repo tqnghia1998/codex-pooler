@@ -1115,6 +1115,7 @@ function QuotaOverview({
   onRevokeAll,
   isActionLoading = () => false
 }) {
+  const { t } = useLanguage();
   const orderedUpstreams = useMemo(() => (
     [...upstreams].sort((left, right) => upstreamProviderRank(left) - upstreamProviderRank(right))
   ), [upstreams]);
@@ -2399,7 +2400,7 @@ function quotaTiming(t, quota) {
 function activitySummary(t, activity) {
   if (!activity || activity.requestCount === 0) return t('noApiActivity');
   const lastUsed = activity.lastUsedAt ? ` · ${t('lastUsed', { date: dateTime(t, activity.lastUsedAt) })}` : '';
-  return `${t('activitySummaryText', { success: activity.successCount, total: activity.requestCount, today: money(activity.spendTodayDollars), total: money(activity.totalSpendDollars) })}${lastUsed}`;
+  return `${t('activitySummaryText', { success: activity.successCount, total: activity.requestCount, today: money(activity.spendTodayDollars), spent: money(activity.totalSpendDollars) })}${lastUsed}`;
 }
 
 function todayDate() {
