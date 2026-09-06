@@ -10,7 +10,7 @@ import { Spinner } from '@astryxdesign/core/Spinner';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { HStack, VStack } from '@astryxdesign/core/Layout';
-import { ArrowLeft, ChartNoAxesCombined, RefreshCw } from 'lucide-react';
+import { ArrowLeft, ChartNoAxesCombined, Download, RefreshCw, Upload } from 'lucide-react';
 import { useLanguage } from './i18n.jsx';
 
 export function AdminAnalytics() {
@@ -137,7 +137,108 @@ export function AdminAnalytics() {
           </HStack>
         )}
       />
+      <DataPortabilityCard />
     </VStack>
+  );
+}
+
+function exportRecordCount(data) {
+  return (data.gateway?.records?.length || 0)
+    + Object.values(data.product || {}).reduce((total, rows) => total + (Array.isArray(rows) ? rows.length : 0), 0);
+}
+
+function DataPortabilityCard() {
+  const { t } = useLanguage();
+  const fileRef = useRef(null);
+  const [pending, setPending] = useState(null);
+  const [notice, setNotice] = useState('');
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const exportData = async () => {
+    setBusy(true);
+    setError('');
+    setNotice('');
+    try {
+      const response = await fetch(appUrl('/api/pool/admin/export'));
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error?.message || t('adminExportFailed'));
+      const filename = response.headers.get('content-disposition')?.match(/filename="([^"]+)"/)?.[1] || 'quotahub-export.json';
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(new Blob([JSON.stringify(body)], { type: 'application/json' }));
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onFile = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    setError('');
+    setNotice('');
+    try {
+      const data = JSON.parse(await file.text());
+      if (data?.format !== 'quotahub-export') throw new Error('format');
+      setPending({ data, records: exportRecordCount(data) });
+    } catch {
+      setError(t('adminImportFileError'));
+    }
+  };
+
+  const confirmImport = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const response = await fetch(appUrl('/api/pool/admin/import'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-csrf-token': csrfToken() },
+        body: JSON.stringify(pending.data)
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error?.message || t('adminImportFailed'));
+      const records = exportRecordCount(pending.data);
+      setPending(null);
+      setNotice(t('adminImportSuccess', { records }));
+    } catch (nextError) {
+      setError(nextError.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card padding={3}>
+      <VStack gap={2}>
+        <HStack gap={2} vAlign="center">
+          <Icon icon={Download} size="lg" color="accent" />
+          <Heading level={3}>{t('adminDataTitle')}</Heading>
+        </HStack>
+        <Text type="supporting" color="secondary">{t('adminDataDesc')}</Text>
+        {notice && <Banner title={notice} status="success" />}
+        {error && <Banner title={error} status="warning" />}
+        {pending
+          ? (
+            <HStack gap={2} wrap="wrap" vAlign="center">
+              <Text weight="bold">{t('adminImportConfirmDesc', { records: pending.records })}</Text>
+              <Button label={t('adminImportConfirm')} variant="primary" isLoading={busy} isDisabled={busy} onClick={() => void confirmImport()} />
+              <Button label={t('adminImportCancel')} variant="secondary" isDisabled={busy} onClick={() => setPending(null)} />
+            </HStack>
+          )
+          : (
+            <HStack gap={2} wrap="wrap">
+              <Button label={t('adminExport')} icon={<Icon icon={Download} size="sm" />} variant="secondary" isLoading={busy} isDisabled={busy} onClick={() => void exportData()} />
+              <Button label={t('adminImport')} icon={<Icon icon={Upload} size="sm" />} variant="secondary" isDisabled={busy} onClick={() => fileRef.current?.click()} />
+              <input ref={fileRef} type="file" accept="application/json,.json" hidden onChange={(event) => void onFile(event)} />
+            </HStack>
+          )}
+      </VStack>
+    </Card>
   );
 }
 
@@ -188,6 +289,15 @@ function AnalyticsTable({ title, items, columns, emptyTitle, emptyDescription, f
 
 function appUrl(path) {
   return new URL(String(path).replace(/^\//, ''), document.baseURI).toString();
+}
+
+function csrfToken() {
+  for (const item of document.cookie.split(';')) {
+    const [name, ...parts] = item.trim().split('=');
+    if (name !== 'codex_pool_csrf') continue;
+    try { return decodeURIComponent(parts.join('=')); } catch { return ''; }
+  }
+  return '';
 }
 
 function money(micros) {
