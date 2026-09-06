@@ -511,6 +511,68 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
   }
 });
 
+test('admin export and import restore QuotaHub data', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-portability-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'compass', projectId: 'portable-project', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const admin = sharingStore.upsertCodexAccount({
+      subject: 'admin-user', issuer: 'https://auth.openai.com', email: 'quangnghia.trinh@shopee.com', name: 'Admin'
+    });
+    const member = account(sharingStore, 'member');
+    sharingStore.linkUpstream(admin.id, upstream.id);
+    const adminSession = sharingStore.createAccountSession(admin.id);
+    const memberSession = sharingStore.createAccountSession(member.id);
+    const now = new Date().toISOString();
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
+      VALUES ('portable-offer', ?, ?, 5000000, 'active', NULL, ?, ?)
+    `).run(admin.id, upstream.id, now, now);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      assert.equal((await request(base, '/api/pool/admin/export', memberSession)).response.status, 403);
+      const first = await request(base, '/api/pool/admin/export', adminSession);
+      assert.equal(first.response.status, 200);
+      assert.equal(first.body.format, 'quotahub-export');
+      assert.equal(first.body.version, 1);
+      assert.ok(first.body.gateway.records.length > 0);
+      assert.equal(first.body.product.accounts.length, 2);
+      assert.equal(first.body.product.sharing_offers.length, 1);
+      assert.ok(first.body.product.account_upstreams.some((row) => row.upstream_id === upstream.id));
+
+      sharingStore.sqlite.prepare('DELETE FROM sharing_offers').run();
+      sharingStore.sqlite.prepare('DELETE FROM account_upstreams').run();
+      const restored = await request(base, '/api/pool/admin/import', adminSession, { method: 'POST', body: JSON.stringify(first.body) });
+      assert.equal(restored.response.status, 200);
+      assert.equal(restored.body.imported.product.sharing_offers, 1);
+      assert.equal(restored.body.imported.product.account_upstreams, 1);
+      const second = await request(base, '/api/pool/admin/export', adminSession);
+      assert.equal(second.response.status, 200);
+      const sortRows = (product) => Object.fromEntries(
+        Object.entries(product).map(([table, rows]) => [table, [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])
+      );
+      assert.deepEqual(sortRows(second.body.product), sortRows(first.body.product));
+      assert.deepEqual(second.body.gateway, first.body.gateway);
+
+      const unknownTable = await request(base, '/api/pool/admin/import', adminSession, {
+        method: 'POST', body: JSON.stringify({ ...first.body, product: { ...first.body.product, bogus_table: [] } })
+      });
+      assert.equal(unknownTable.response.status, 400);
+      const wrongFormat = await request(base, '/api/pool/admin/import', adminSession, {
+        method: 'POST', body: JSON.stringify({ format: 'other', version: 1 })
+      });
+      assert.equal(wrongFormat.response.status, 400);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sharing API requires account sessions and CSRF while offers stay public to signed-in accounts', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-api-'));
   try {
