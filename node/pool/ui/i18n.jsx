@@ -392,7 +392,18 @@ const DICTIONARY = {
     'adminTopProvidersEmpty': 'Settled provider usage will appear here.',
     'adminTopConsumersEmpty': 'Settled consumer usage will appear here.',
     'adminRecentActivityEmpty': 'Sharing lifecycle events will appear here.',
-    'adminUnknownTime': 'at an unknown time'
+    'adminUnknownTime': 'at an unknown time',
+    'adminDataTitle': 'Data management',
+    'adminDataDesc': 'Download a full JSON snapshot of QuotaHub data, or restore from a previous export. Import replaces the data of every collection present in the file.',
+    'adminExport': 'Export data',
+    'adminExportFailed': 'Export failed',
+    'adminImport': 'Import data',
+    'adminImportFileError': 'Could not read the selected file as a QuotaHub export.',
+    'adminImportConfirmDesc': 'Replace existing data with the {records} records in this file?',
+    'adminImportConfirm': 'Import now',
+    'adminImportCancel': 'Cancel',
+    'adminImportSuccess': 'Imported {records} records.',
+    'adminImportFailed': 'Import failed'
   },
   zh: {
     // Top Bar & Navigation
@@ -783,7 +794,18 @@ const DICTIONARY = {
     'adminTopProvidersEmpty': '提供方的已结算使用量将显示在此处。',
     'adminTopConsumersEmpty': '使用方的已结算使用量将显示在此处。',
     'adminRecentActivityEmpty': '共享生命周期事件将显示在此处。',
-    'adminUnknownTime': '未知时间'
+    'adminUnknownTime': '未知时间',
+    'adminDataTitle': '数据管理',
+    'adminDataDesc': '下载 QuotaHub 数据的完整 JSON 快照，或从历史导出文件恢复。导入会替换文件中包含的每类数据。',
+    'adminExport': '导出数据',
+    'adminExportFailed': '导出失败',
+    'adminImport': '导入数据',
+    'adminImportFileError': '无法将所选文件读取为 QuotaHub 导出文件。',
+    'adminImportConfirmDesc': '用文件中的 {records} 条记录替换现有数据？',
+    'adminImportConfirm': '立即导入',
+    'adminImportCancel': '取消',
+    'adminImportSuccess': '已导入 {records} 条记录。',
+    'adminImportFailed': '导入失败'
   }
 };
 
