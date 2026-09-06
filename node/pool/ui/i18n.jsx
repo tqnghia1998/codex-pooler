@@ -7,8 +7,8 @@ const DICTIONARY = {
     // Top Bar & Navigation
     'userGuide': 'User Guide',
     'languageSwitchLabel': 'Switch language',
-    'appTitle': 'Codex Share',
-    'appSubtitle': 'Share delegated Codex quota securely across members.',
+    'appTitle': 'QuotaHub',
+    'appSubtitle': 'Share delegated AI quota securely across members.',
     'adminAnalytics': 'Admin analytics',
     'backToDashboard': 'Back to dashboard',
     'signOut': 'Sign out',
@@ -27,7 +27,7 @@ const DICTIONARY = {
     // Hero / Auth
     'quotaSharing': 'Quota sharing',
     'loginWithSmart': 'Login with Smart',
-    'loginSmartPrompt': 'Login with Smart to access Codex Share.',
+    'loginSmartPrompt': 'Login with Smart to access QuotaHub.',
     'authenticatingSmart': 'Authenticating with Smart session...',
     'authenticating': 'Authenticating...',
 
@@ -76,7 +76,7 @@ const DICTIONARY = {
     'waitingProviderQuota': 'Waiting for provider quota',
     'unknownQuota': 'Unknown Quota',
     'unknownQuotaInfo': 'Unknown quota information',
-    'unknownQuotaCardExplanation': 'Codex Share cannot read this account\'s real balance — check it in {app}. Shared quota is a cap only; real usage is limited by the provider\'s actual quota.',
+    'unknownQuotaCardExplanation': 'QuotaHub cannot read this account\'s real balance — check it in {app}. Shared quota is a cap only; real usage is limited by the provider\'s actual quota.',
     'unknownQuotaSourceExplanation': 'Provider quota is managed in {app}. The nominal shared quota is strictly bound by your provider\'s actual available quota.',
     'unknownQuotaDialogExplanation': 'Provider remaining quota cannot be verified directly. Check your real balance in {app} before allocating. The shared quota here is nominal; downstream requests are always constrained by your provider\'s actual quota.',
     'checkBalanceIn': 'Check remaining balance in {app}.',
@@ -196,7 +196,7 @@ const DICTIONARY = {
 
     // Table Empty States
     'emptyCommunityOffersTitle': 'No community offers',
-    'emptyCommunityOffersDesc': 'Offers from other Codex Share members will appear here.',
+    'emptyCommunityOffersDesc': 'Offers from other QuotaHub members will appear here.',
     'emptyMyOffersTitle': 'No offers yet',
     'emptyMyOffersDesc': 'Publish an offer to share quota with the community.',
     'noUpstreamForOffers': 'Your Codex account has no available upstream.',
@@ -221,7 +221,7 @@ const DICTIONARY = {
     // Auth dialogs
     'loginWithAuthJson': 'Login with auth.json',
     'credentialImport': 'Credential import',
-    'credentialImportDesc': 'Pasted credentials are encrypted in Codex Share and are not saved in browser storage.',
+    'credentialImportDesc': 'Pasted credentials are encrypted in QuotaHub and are not saved in browser storage.',
     'codexAuthJson': 'Codex auth.json',
     'authJsonPlaceholder': 'Paste auth.json here (tokens.access_token, refresh_token, id_token)',
     'loginBtn': 'Login',
@@ -398,8 +398,8 @@ const DICTIONARY = {
     // Top Bar & Navigation
     'userGuide': '使用指南',
     'languageSwitchLabel': '切换语言',
-    'appTitle': 'Codex 额度共享',
-    'appSubtitle': '在成员之间安全共享托管的 Codex 额度。',
+    'appTitle': 'QuotaHub',
+    'appSubtitle': '在成员之间安全共享托管的 AI 额度。',
     'adminAnalytics': '管理分析',
     'backToDashboard': '返回控制面板',
     'signOut': '退出登录',
@@ -418,7 +418,7 @@ const DICTIONARY = {
     // Hero / Auth
     'quotaSharing': '额度共享',
     'loginWithSmart': '使用 Smart 登录',
-    'loginSmartPrompt': '使用 Smart 登录即可访问 Codex Share。',
+    'loginSmartPrompt': '使用 Smart 登录即可访问 QuotaHub。',
     'authenticatingSmart': '正在验证 Smart 会话...',
     'authenticating': '正在验证...',
 
@@ -467,7 +467,7 @@ const DICTIONARY = {
     'waitingProviderQuota': '等待提供方额度数据',
     'unknownQuota': '未知额度',
     'unknownQuotaInfo': '未知额度说明',
-    'unknownQuotaCardExplanation': 'Codex Share 无法查询此账户的真实余额，请在 {app} 中查看。共享额度仅为上限，实际用量受提供方真实额度限制。',
+    'unknownQuotaCardExplanation': 'QuotaHub 无法查询此账户的真实余额，请在 {app} 中查看。共享额度仅为上限，实际用量受提供方真实额度限制。',
     'unknownQuotaSourceExplanation': '该提供方的额度在 {app} 中管理。此处显示的共享数值仅作为上限限制，实际调用严格受限于提供方的真实可用额度。',
     'unknownQuotaDialogExplanation': '系统无法直接验证提供方的剩余额度。请在分配前先在 {app} 中确认真实余额。此处填写的共享数值仅为额度上限，下游请求始终受限于提供方的真实可用额度。',
     'checkBalanceIn': '请在 {app} 中查看实际可用余额。',
@@ -587,7 +587,7 @@ const DICTIONARY = {
 
     // Table Empty States
     'emptyCommunityOffersTitle': '暂无可用的社区共享',
-    'emptyCommunityOffersDesc': '来自其他 Codex Share 成员的共享额度将显示在此处。',
+    'emptyCommunityOffersDesc': '来自其他 QuotaHub 成员的共享额度将显示在此处。',
     'emptyMyOffersTitle': '尚未发布任何共享',
     'emptyMyOffersDesc': '发布一个共享额度，与社区分享您的额度。',
     'noUpstreamForOffers': '您的 Codex 账户暂无可用渠道。',
@@ -612,7 +612,7 @@ const DICTIONARY = {
     // Auth dialogs
     'loginWithAuthJson': '使用 auth.json 登录',
     'credentialImport': '凭证导入',
-    'credentialImportDesc': '粘贴的凭证将在 Codex Share 中加密存储，不会保存在浏览器中。',
+    'credentialImportDesc': '粘贴的凭证将在 QuotaHub 中加密存储，不会保存在浏览器中。',
     'codexAuthJson': 'Codex auth.json',
     'authJsonPlaceholder': '在此粘贴 auth.json（tokens.access_token、refresh_token、id_token）',
     'loginBtn': '登录',

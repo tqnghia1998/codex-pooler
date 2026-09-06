@@ -455,10 +455,10 @@ export class ProductStore {
       const bySubject = this.sqlite.prepare('SELECT * FROM accounts WHERE codex_subject = ?').get(codexSubject);
       const preferred = preferredAccountId ? this.requireAccount(preferredAccountId) : null;
       if (bySubject && preferred && bySubject.id !== preferred.id) {
-        throw Object.assign(new Error('Codex identity is already linked to another Codex Share account'), { statusCode: 409 });
+        throw Object.assign(new Error('Codex identity is already linked to another QuotaHub account'), { statusCode: 409 });
       }
       if (preferred?.codex_subject && preferred.codex_subject !== codexSubject && !allowIdentityRotation) {
-        throw Object.assign(new Error('Codex account is already linked to another Codex Share identity'), { statusCode: 409 });
+        throw Object.assign(new Error('Codex account is already linked to another QuotaHub identity'), { statusCode: 409 });
       }
       const existing = preferred || bySubject;
       const normalizedEmail = cleanEmail(email, existing?.email);
@@ -538,7 +538,7 @@ export class ProductStore {
       this.requireAccount(accountId);
       const existing = this.sqlite.prepare('SELECT account_id, link_order FROM account_upstreams WHERE upstream_id = ?').get(upstreamId);
       if (existing && existing.account_id !== accountId) {
-        throw Object.assign(new Error('Codex account is already linked to another Codex Share account'), { statusCode: 409 });
+        throw Object.assign(new Error('Codex account is already linked to another QuotaHub account'), { statusCode: 409 });
       }
       const now = new Date().toISOString();
       const linkOrder = existing?.link_order || this.sqlite.prepare('SELECT COALESCE(MAX(link_order), 0) + 1 AS value FROM account_upstreams WHERE account_id = ?').get(accountId).value;
@@ -916,13 +916,13 @@ export class ProductStore {
     const expired = expire();
     this.lastExpiryCheckAt = timestampMs;
     for (const row of expired.offers) {
-      this.notifyOfferParticipants(row.id, 'Quota offer expired', 'A Codex Share offer expired without being approved.', `offer:${row.id}:expired`);
+      this.notifyOfferParticipants(row.id, 'Quota offer expired', 'A QuotaHub offer expired without being approved.', `offer:${row.id}:expired`);
     }
     for (const row of expired.tickets) {
-      this.notifyTicketParticipants(row.id, 'Quota request expired', 'A pending Codex Share request expired.', `ticket:${row.id}:expired`);
+      this.notifyTicketParticipants(row.id, 'Quota request expired', 'A pending QuotaHub request expired.', `ticket:${row.id}:expired`);
     }
     for (const row of expired.sessions) {
-      this.notifySessionParticipants(row.id, 'Share session expired', 'A Codex Share session reached its expiration time.', `session:${row.id}:expired`);
+      this.notifySessionParticipants(row.id, 'Share session expired', 'A QuotaHub session reached its expiration time.', `session:${row.id}:expired`);
     }
     return expired;
   }
@@ -1357,8 +1357,8 @@ export class ProductStore {
     this.event(accountId, 'ticket', id, 'created', { requestedMicros, expiresAt: expiry });
     this.notifyAccount(
       offer.provider_account_id,
-      'New Codex Share request',
-      'A friend requested your offered Codex quota. Open Codex Share to approve or reject it.',
+      'New QuotaHub request',
+      'A friend requested your offered Codex quota. Open QuotaHub to approve or reject it.',
       `ticket:${id}:created`
     );
     return this.ticket(id, accountId, upstreamStore);
@@ -1445,7 +1445,7 @@ export class ProductStore {
     if (row.status !== 'pending') throw new Error('only pending tickets can be cancelled');
     this.resolveTicket(row, 'cancelled');
     this.event(accountId, 'ticket', id, 'cancelled', {});
-    this.notifyTicketParticipants(id, 'Codex Share request cancelled', 'A pending Codex Share request was cancelled.', `ticket:${id}:cancelled`);
+    this.notifyTicketParticipants(id, 'QuotaHub request cancelled', 'A pending QuotaHub request was cancelled.', `ticket:${id}:cancelled`);
     return this.ticket(id, accountId, upstreamStore);
   }
 
@@ -1456,7 +1456,7 @@ export class ProductStore {
     if (row.status !== 'pending') throw new Error('only pending tickets can be rejected');
     this.resolveTicket(row, 'rejected');
     this.event(accountId, 'ticket', id, 'rejected', {});
-    this.notifyTicketParticipants(id, 'Codex Share request rejected', 'A Codex Share request was rejected. The offer is available to request again if it remains active.', `ticket:${id}:rejected`);
+    this.notifyTicketParticipants(id, 'QuotaHub request rejected', 'A QuotaHub request was rejected. The offer is available to request again if it remains active.', `ticket:${id}:rejected`);
     return this.ticket(id, accountId, upstreamStore);
   }
 
@@ -1527,7 +1527,7 @@ export class ProductStore {
       return sessionId;
     });
     const sessionId = approve();
-    this.notifyTicketParticipants(id, 'Codex Share request approved', 'Your Codex Share request was approved. A share session is ready to use.', `ticket:${id}:approved`);
+    this.notifyTicketParticipants(id, 'QuotaHub request approved', 'Your QuotaHub request was approved. A share session is ready to use.', `ticket:${id}:approved`);
     return this.session(sessionId, accountId, upstreamStore);
   }
 
@@ -1667,8 +1667,8 @@ export class ProductStore {
     update();
     this.notifySessionParticipants(
       id,
-      'Codex Share session updated',
-      'A share session was paused, resumed, resized, or had its expiry extended. Open Codex Share for the current state.',
+      'QuotaHub session updated',
+      'A share session was paused, resumed, resized, or had its expiry extended. Open QuotaHub for the current state.',
       `session:${id}:updated:${this.sessionRow(id).updated_at}`
     );
     return this.session(id, accountId, upstreamStore);
@@ -1690,7 +1690,7 @@ export class ProductStore {
         `).run(now, id);
         this.event(accountId, 'session', id, 'revoked', {});
       })();
-      this.notifySessionParticipants(id, 'Codex Share session revoked', 'A Codex Share session was revoked and its API key is no longer usable.', `session:${id}:revoked`);
+      this.notifySessionParticipants(id, 'QuotaHub session revoked', 'A QuotaHub session was revoked and its API key is no longer usable.', `session:${id}:revoked`);
     }
     return this.session(id, accountId, upstreamStore);
   }
@@ -1723,7 +1723,7 @@ export class ProductStore {
       return apiKey;
     });
     const apiKey = rotate();
-    this.notifySessionParticipants(id, 'Share session key replaced', 'A new API key was generated for a Codex Share session. The previous key no longer works.', `session:${id}:key-rotated:${this.sessionRow(id).updated_at}`);
+    this.notifySessionParticipants(id, 'Share session key replaced', 'A new API key was generated for a QuotaHub session. The previous key no longer works.', `session:${id}:key-rotated:${this.sessionRow(id).updated_at}`);
     return { apiKey };
   }
 
@@ -1819,7 +1819,7 @@ export class ProductStore {
     this.event(accountId, 'personal_key', row.id, 'rotated', {});
     this.notifyAccount(
       accountId,
-      'Personal Codex Share key rotated',
+      'Personal QuotaHub key rotated',
       `The personal key "${row.name}" was rotated. Its previous value no longer works.`,
       `personal-key:${row.id}:rotated:${now}`
     );
@@ -1836,7 +1836,7 @@ export class ProductStore {
       this.event(accountId, 'personal_key', row.id, 'revoked', {});
       this.notifyAccount(
         accountId,
-        'Personal Codex Share key revoked',
+        'Personal QuotaHub key revoked',
         `The personal key "${row.name}" was revoked.`,
         `personal-key:${row.id}:revoked`
       );
@@ -2411,14 +2411,14 @@ export class ProductStore {
         this.notifyProviderParticipants(
           link.upstream_id,
           'Shared Codex account unavailable',
-          'A provider account backing your Codex Share offer or session became unavailable.',
+          'A provider account backing your QuotaHub offer or session became unavailable.',
           `provider:${link.upstream_id}:issue:${issueCode}:${now}`
         );
       } else if (previous.issue_code && !issueCode) {
         this.notifyProviderParticipants(
           link.upstream_id,
           'Shared Codex account recovered',
-          'A provider account backing Codex Share is available again.',
+          'A provider account backing QuotaHub is available again.',
           `provider:${link.upstream_id}:recovered:${now}`
         );
       }
@@ -2427,7 +2427,7 @@ export class ProductStore {
         this.notifyProviderParticipants(
           link.upstream_id,
           'Provider Codex quota reset',
-          'The provider quota window reset. Codex Share recalculated the quota backing current offers and sessions.',
+          'The provider quota window reset. QuotaHub recalculated the quota backing current offers and sessions.',
           `provider:${link.upstream_id}:reset:${resetAt}`
         );
       }
@@ -2574,10 +2574,10 @@ export class ProductStore {
         const percent = Math.round(threshold * 100);
         this.notifySessionParticipants(
           row.id,
-          `Codex Share session ${percent}% used`,
+          `QuotaHub session ${percent}% used`,
           threshold === 1
-            ? 'A Codex Share session exhausted its granted quota.'
-            : `A Codex Share session has used ${percent}% of its granted quota.`,
+            ? 'A QuotaHub session exhausted its granted quota.'
+            : `A QuotaHub session has used ${percent}% of its granted quota.`,
           `session:${row.id}:threshold:${percent}`
         );
       }
@@ -2639,7 +2639,7 @@ export class ProductStore {
   loadKey() {
     if (existsSync(this.keyPath)) {
       const key = readFileSync(this.keyPath);
-      if (key.length !== 32) throw new Error('Stored Codex Share key is invalid');
+      if (key.length !== 32) throw new Error('Stored QuotaHub key is invalid');
       return key;
     }
     const key = randomBytes(32);
@@ -3075,7 +3075,7 @@ function validRecipient(value) {
 }
 
 function cleanMailSubject(value) {
-  return String(value || 'Codex Share update').replace(/[\r\n]+/g, ' ').trim().slice(0, 180);
+  return String(value || 'QuotaHub update').replace(/[\r\n]+/g, ' ').trim().slice(0, 180);
 }
 
 function cleanMailBody(value) {
@@ -3162,7 +3162,7 @@ function parseAllowedEmails(value) {
 
 function cleanName(value, email) {
   const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, 120) : '';
-  return name || (typeof email === 'string' ? email.split('@')[0].slice(0, 120) : '') || 'Codex Share user';
+  return name || (typeof email === 'string' ? email.split('@')[0].slice(0, 120) : '') || 'QuotaHub user';
 }
 
 function poolDisplayName(email, fallback = '') {
