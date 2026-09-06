@@ -11,6 +11,7 @@ import { shareSessionDenial } from '../../src/share-authorization.js';
 import { HttpError, readJsonObjectBody } from '../../src/http-ingress.js';
 import { dispatchGatewayRequest, gatewayRequestKind } from '../../src/gateway-dispatch.js';
 import { errorEnvelope, openaiError } from '../../src/public-errors.js';
+import { exportAllData, importAllData } from '../../src/data-portability.js';
 import { firewallAllowed, hostAllowed, originAllowed } from '../../src/admission.js';
 import { codexHostHealthForStore } from '../../src/codex-host-health.js';
 import { modelCatalogForStore } from '../../src/codex-model-catalog.js';
@@ -648,6 +649,25 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
     sendJson(res, 200, { analytics: productStore.adminAnalytics({ eventCursor: adminEventCursor(url) }) });
     return;
   }
+  if (req.method === 'GET' && resource === 'admin' && id === 'export' && parts.length === 4) {
+    requireAdmin(auth.account);
+    sendJson(res, 200, exportAllData({ store, productStore }), {
+      'content-disposition': `attachment; filename="quotahub-export-${new Date().toISOString().slice(0, 10)}.json"`
+    });
+    return;
+  }
+  if (req.method === 'POST' && resource === 'admin' && id === 'import' && parts.length === 4) {
+    requireAdmin(auth.account);
+    const data = await importBody(req);
+    let imported;
+    try {
+      imported = importAllData({ store, productStore, data });
+    } catch (error) {
+      throw new HttpError(400, 'invalid_request', `Import failed: ${error.message}`);
+    }
+    sendJson(res, 200, { imported });
+    return;
+  }
   if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
     const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
       .flatMap(({ upstreamId }) => {
@@ -825,6 +845,13 @@ function requireAdmin(account) {
 
 async function jsonBody(req, ingress) {
   return readJsonObjectBody(req, ingress, { message: 'Request body must be a JSON object' });
+}
+
+async function importBody(req) {
+  return jsonBody(req, {
+    maxCompressedBodyBytes: 32 * 1024 * 1024,
+    maxDecompressedBodyBytes: 32 * 1024 * 1024
+  });
 }
 
 async function body(req) {

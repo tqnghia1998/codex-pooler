@@ -197,6 +197,8 @@ POST   /auth/logout
 
 GET    /api/pool/me
 GET    /api/pool/admin/analytics                 # quangnghia.trinh@shopee.com only; recent events use eventCursor
+GET    /api/pool/admin/export                    # admin only; full JSON snapshot (gateway records + all product tables)
+POST   /api/pool/admin/import                    # admin only; restore from an export file, replacing the collections it contains
 GET    /api/pool/personal-key
 POST   /api/pool/personal-key/reveal
 POST   /api/pool/personal-key/rotate
