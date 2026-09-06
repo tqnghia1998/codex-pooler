@@ -7,6 +7,9 @@ const DICTIONARY = {
     // Top Bar & Navigation
     'userGuide': 'User Guide',
     'languageLabel': 'Switch language',
+    'languageSwitchLabel': 'Switch language',
+    'appTitle': 'Codex Share',
+    'appSubtitle': 'Share delegated Codex quota securely across members.',
     'adminAnalytics': 'Admin analytics',
     'backToDashboard': 'Back to dashboard',
     'signOut': 'Sign out',
@@ -38,7 +41,7 @@ const DICTIONARY = {
     // Tabs
     'tabCommunityOffers': 'Community offers',
     'tabMyOffers': 'My published offers',
-    'tabQuotaRequests': 'Friends seeking quota',
+
     'tabSentRequests': 'Sent requests',
     'tabApprovals': 'Incoming requests (Approvals)',
     'tabMyAccess': 'My access (Granted sessions)',
@@ -46,7 +49,7 @@ const DICTIONARY = {
 
     // Actions & Search
     'publishOffer': 'Publish offer',
-    'askFriends': 'Ask friends',
+
     'searchByEmail': 'Search by email...',
 
     // Provider Card / Overview
@@ -140,16 +143,13 @@ const DICTIONARY = {
     'optional': 'Optional',
     'publishOfferBtn': 'Publish offer',
     'updateOfferBtn': 'Update offer',
-
-    'askFriendsDialogTitle': 'Ask friends for quota',
-    'askFriendsDialogSub': 'Post a request visible to all capacity providers in the workspace.',
-    'requestedQuotaDollars': 'Requested quota ($)',
-    'neededByDate': 'Needed until date',
-    'postRequestBtn': 'Post request',
-
-    'approveRequestDialogTitle': 'Approve quota request',
-    'approvedQuotaDollars': 'Approved quota ($)',
-    'approveRequestBtn': 'Approve request',
+    'offerVisibility': 'Visibility',
+    'visibilityPublic': 'Public (Visible to everyone)',
+    'visibilityRestricted': 'Whitelist only (Specific emails)',
+    'visibilityWhitelistPlaceholder': 'alice@shopee.com, bob@shopee.com',
+    'visibilityWhitelistHelp': 'Comma- or line-separated list of emails who can view and request this offer.',
+    'visibilityBadgePublic': 'Public',
+    'visibilityBadgeRestricted': 'Whitelist ({count})',
 
     'addSessionQuotaDialogTitle': 'Add session quota',
     'resizeSessionDialogTitle': 'Resize share session',
@@ -235,12 +235,24 @@ const DICTIONARY = {
     'adminTopProviders': 'Top providers by settled usage',
     'adminTopConsumers': 'Top consumers by settled usage',
     'adminRecentActivity': 'Recent sharing activity',
-    'adminLoadMore': 'Load more events'
+    'adminLoadMore': 'Load more events',
+    'adminLoadingAnalytics': 'Loading analytics',
+    'adminUnavailableTitle': 'Analytics unavailable',
+    'adminUnavailableDesc': 'Unable to load administrator analytics.',
+    'adminRefreshFailed': 'Latest refresh failed',
+    'adminNoDataYet': 'No data yet',
+    'adminTopProvidersEmpty': 'Settled provider usage will appear here.',
+    'adminTopConsumersEmpty': 'Settled consumer usage will appear here.',
+    'adminRecentActivityEmpty': 'Sharing lifecycle events will appear here.',
+    'adminUnknownTime': 'at an unknown time'
   },
   zh: {
     // Top Bar & Navigation
     'userGuide': '使用指南',
     'languageLabel': '切换语言',
+    'languageSwitchLabel': '切换语言',
+    'appTitle': 'Codex 额度共享',
+    'appSubtitle': '在成员之间安全共享托管的 Codex 额度。',
     'adminAnalytics': '管理分析',
     'backToDashboard': '返回控制面板',
     'signOut': '退出登录',
@@ -272,7 +284,7 @@ const DICTIONARY = {
     // Tabs
     'tabCommunityOffers': '社区共享额度',
     'tabMyOffers': '我发布的共享',
-    'tabQuotaRequests': '求额度广场',
+
     'tabSentRequests': '我的申请记录',
     'tabApprovals': '待我审批的申请',
     'tabMyAccess': '我的可用额度',
@@ -280,7 +292,7 @@ const DICTIONARY = {
 
     // Actions & Search
     'publishOffer': '发布共享额度',
-    'askFriends': '向好友求额度',
+
     'searchByEmail': '按邮箱搜索...',
 
     // Provider Card / Overview
@@ -374,16 +386,13 @@ const DICTIONARY = {
     'optional': '选填',
     'publishOfferBtn': '确认发布',
     'updateOfferBtn': '保存修改',
-
-    'askFriendsDialogTitle': '向好友求额度',
-    'askFriendsDialogSub': '在工作区发布一条额度需求，所有算力提供方均可看到。',
-    'requestedQuotaDollars': '期望申请额度 ($)',
-    'neededByDate': '需要使用至',
-    'postRequestBtn': '发布需求',
-
-    'approveRequestDialogTitle': '审批额度申请',
-    'approvedQuotaDollars': '批准额度 ($)',
-    'approveRequestBtn': '确认批准',
+    'offerVisibility': '可见范围',
+    'visibilityPublic': '所有人可见（全社区）',
+    'visibilityRestricted': '白名单可见（指定邮箱）',
+    'visibilityWhitelistPlaceholder': 'alice@shopee.com, bob@shopee.com',
+    'visibilityWhitelistHelp': '以逗号或换行分隔的邮箱列表，仅名单中的用户可见并可申请该额度。',
+    'visibilityBadgePublic': '公开',
+    'visibilityBadgeRestricted': '白名单 ({count}人)',
 
     'addSessionQuotaDialogTitle': '追加会话额度',
     'resizeSessionDialogTitle': '调整共享会话额度',
@@ -469,7 +478,16 @@ const DICTIONARY = {
     'adminTopProviders': '结算用量最高的提供方',
     'adminTopConsumers': '结算用量最高的使用方',
     'adminRecentActivity': '近期共享动态',
-    'adminLoadMore': '加载更多事件'
+    'adminLoadMore': '加载更多事件',
+    'adminLoadingAnalytics': '正在加载分析数据',
+    'adminUnavailableTitle': '分析数据不可用',
+    'adminUnavailableDesc': '无法加载管理员分析数据。',
+    'adminRefreshFailed': '最新刷新失败',
+    'adminNoDataYet': '暂无数据',
+    'adminTopProvidersEmpty': '提供方的已结算使用量将显示在此处。',
+    'adminTopConsumersEmpty': '使用方的已结算使用量将显示在此处。',
+    'adminRecentActivityEmpty': '共享生命周期事件将显示在此处。',
+    'adminUnknownTime': '未知时间'
   }
 };
 
