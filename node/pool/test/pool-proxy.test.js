@@ -199,7 +199,7 @@ test('share keys expose only the granted provider model catalog', async () => {
   }
 });
 
-test('Codex Share exposes Relaydeck compatibility routes with share-session file isolation', async () => {
+test('QuotaHub exposes Relaydeck compatibility routes with share-session file isolation', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-share-compatibility-routes-'));
   try {
     const store = new Store(dir);
@@ -290,7 +290,7 @@ test('Codex Share exposes Relaydeck compatibility routes with share-session file
   }
 });
 
-test('Codex Share reuses streamed tool calls and public compaction', async () => {
+test('QuotaHub reuses streamed tool calls and public compaction', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-share-tools-compaction-'));
   const calls = [];
   try {
@@ -328,7 +328,7 @@ test('Codex Share reuses streamed tool calls and public compaction', async () =>
             type: 'function_call',
             call_id: 'call-1',
             name: 'lookup',
-            arguments: '{"query":"Codex Share"}'
+            arguments: '{"query":"QuotaHub"}'
           }
         })}`,
         '',
