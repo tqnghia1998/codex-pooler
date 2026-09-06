@@ -2677,7 +2677,7 @@ function deferWebSocketSends(client, beforeSend) {
       () => {
         if (client.readyState === WebSocket.OPEN) send(...args);
       },
-      () => client.close(1011, 'Codex Share persistence is unavailable')
+      () => client.close(1011, 'QuotaHub persistence is unavailable')
     );
   };
 }
