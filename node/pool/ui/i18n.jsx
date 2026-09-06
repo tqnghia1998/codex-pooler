@@ -215,7 +215,7 @@ const DICTIONARY = {
     'noApiActivity': 'No API activity yet',
     'modelsLabel': 'Models: {models}',
     'recentErrors': 'Recent errors: {errors}',
-    'activitySummaryText': '{success}/{total} succeeded · ${today} today · ${total} total',
+    'activitySummaryText': '{success}/{total} succeeded · ${today} today · ${spent} total',
     'lastUsed': 'Last used {date}',
 
     // Auth dialogs
@@ -606,7 +606,7 @@ const DICTIONARY = {
     'noApiActivity': '暂无 API 调用记录',
     'modelsLabel': '模型: {models}',
     'recentErrors': '近期错误: {errors}',
-    'activitySummaryText': '成功 {success}/{total} · 今日 ${today} · 累计 ${total}',
+    'activitySummaryText': '成功 {success}/{total} · 今日 ${today} · 累计 ${spent}',
     'lastUsed': '最后使用于 {date}',
 
     // Auth dialogs
