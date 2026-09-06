@@ -1122,6 +1122,56 @@ test('provider controls, named keys, and friend quota requests are available thr
       assert.equal(result.response.status, 200);
       assert.equal(result.body.provider.sharing.status, 'paused');
       assert.equal((await request(base, '/api/pool/offers', providerSession)).body.offers[0].status, 'closed');
+
+      const otherAccount = account(sharingStore, 'other-account');
+      const otherSession = sharingStore.createAccountSession(otherAccount.id);
+
+      await request(base, `/api/pool/providers/${upstream.id}/resume`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      result = await request(base, '/api/pool/offers', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({
+          upstreamId: upstream.id,
+          quotaDollars: 5,
+          visibility: 'restricted',
+          allowedEmails: ['reliability-consumer@example.com', 'friend@example.com']
+        })
+      });
+      assert.equal(result.response.status, 201);
+      assert.equal(result.body.offer.visibility, 'restricted');
+      assert.deepEqual(result.body.offer.allowedEmails, ['reliability-consumer@example.com', 'friend@example.com']);
+      const restrictedOfferId = result.body.offer.id;
+
+      result = await request(base, '/api/pool/offers', consumerSession);
+      const consumerOffers = result.body.offers.filter((o) => o.id === restrictedOfferId);
+      assert.equal(consumerOffers.length, 1);
+      assert.equal(consumerOffers[0].visibility, 'restricted');
+
+      result = await request(base, '/api/pool/offers', otherSession);
+      const otherOffers = result.body.offers.filter((o) => o.id === restrictedOfferId);
+      assert.equal(otherOffers.length, 0);
+
+      result = await request(base, '/api/pool/tickets', otherSession, {
+        method: 'POST',
+        body: JSON.stringify({ offerId: restrictedOfferId })
+      });
+      assert.equal(result.response.status, 403);
+
+      result = await request(base, '/api/pool/tickets', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({ offerId: restrictedOfferId })
+      });
+      assert.equal(result.response.status, 201);
+
+      result = await request(base, `/api/pool/offers/${restrictedOfferId}`, providerSession, {
+        method: 'PATCH',
+        body: JSON.stringify({ visibility: 'public', allowedEmails: [] })
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.offer.visibility, 'public');
+      assert.equal(result.body.offer.allowedEmails, null);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
