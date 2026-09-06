@@ -319,10 +319,10 @@ executable, refresh quota every 60 seconds, check due tokens every hour, and
 store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
 a 15-second outbox delivery interval are the defaults.
 
-Set `POOL_PUBLIC_BASE_PATH=/codex-share` when a reverse proxy or API Gateway
+Set `POOL_PUBLIC_BASE_PATH=/quotahub` when a reverse proxy or API Gateway
 publishes QuotaHub below that path and strips the prefix before forwarding.
-The dashboard then loads its assets and management APIs from `/codex-share/`,
-and displays `https://host/codex-share/v1` as the API base URL. Leave it unset
+The dashboard then loads its assets and management APIs from `/quotahub/`,
+and displays `https://host/quotahub/v1` as the API base URL. Leave it unset
 when the product is served from `/`.
 
 ## Validation
