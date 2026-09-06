@@ -13,11 +13,11 @@ This is the primary implementation for new development. It is a small single-pro
 
 Quota sharing is a separate product under `pool/`. It has its own server, UI,
 cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
-not initialize or expose Codex Share accounts, routes, sessions, or storage.
+not initialize or expose QuotaHub accounts, routes, sessions, or storage.
 Both products route their client-facing gateway surface through
 `src/gateway-dispatch.js`. Add proxy routes or compatibility behavior in the
-shared gateway modules, never as a Relaydeck-only or Codex Share-only route.
-Codex Share is an informal, free friend-sharing tool. It intentionally has no
+shared gateway modules, never as a Relaydeck-only or QuotaHub-only route.
+QuotaHub is an informal, free friend-sharing tool. It intentionally has no
 payments, marketplace pricing, reputation system, ratings, or availability
 guarantees. Durable operational notifications are delivered by email when its
 optional SMTP settings are configured; see `pool/README.md`.

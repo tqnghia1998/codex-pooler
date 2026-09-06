@@ -105,7 +105,7 @@ test('keeps product data in pool.sqlite without changing the private gateway dat
   }
 });
 
-test('new Codex Share accounts receive one default personal key', () => {
+test('new QuotaHub accounts receive one default personal key', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-default-personal-key-'));
   try {
     const sharingStore = new ProductStore(dir);

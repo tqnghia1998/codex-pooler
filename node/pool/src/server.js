@@ -111,7 +111,7 @@ export function createApp({
           shareKeysOnly: true
         });
         if (!auth) {
-          sendJson(res, 401, { error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid Codex Share key' } }, { 'www-authenticate': 'Bearer' });
+          sendJson(res, 401, { error: { type: 'authentication_error', code: 'invalid_api_key', message: 'Invalid QuotaHub key' } }, { 'www-authenticate': 'Bearer' });
           return;
         }
         req.proxyAuth = auth;
@@ -151,7 +151,7 @@ export function createApp({
         return;
       }
       if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/') || url.pathname.startsWith('/backend-api/')) {
-        sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported Codex Share endpoint' } });
+        sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported QuotaHub endpoint' } });
         return;
       }
       await staticFile(req, res, url.pathname, ingress, basePath);
@@ -422,7 +422,7 @@ async function refreshImportedCredentials(refresh, upstreamId, logger) {
   try {
     await refresh(upstreamId);
   } catch (error) {
-    logger?.warn?.(`Codex Share quota refresh failed for upstream ${upstreamId}: ${error?.code || error?.name || 'Error'}`);
+    logger?.warn?.(`QuotaHub quota refresh failed for upstream ${upstreamId}: ${error?.code || error?.name || 'Error'}`);
   }
 }
 

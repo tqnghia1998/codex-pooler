@@ -363,7 +363,7 @@ test('separate browser sessions keep different Codex Pool identities after anoth
   }
 });
 
-test('multiple browser sessions for one Codex Share account remain valid after another sign-in', async () => {
+test('multiple browser sessions for one QuotaHub account remain valid after another sign-in', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-same-account-sessions-'));
   try {
     const store = new Store(dir);
@@ -407,7 +407,7 @@ test('multiple browser sessions for one Codex Share account remain valid after a
   }
 });
 
-test('serves the Codex Share favicon', async () => {
+test('serves the QuotaHub favicon', async () => {
   const server = createServer(createApp());
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -434,7 +434,7 @@ test('renders the configured public base path into the dashboard', async () => {
   }
 });
 
-test('restricts Codex Share analytics to the whitelisted administrator', async () => {
+test('restricts QuotaHub analytics to the whitelisted administrator', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-admin-api-'));
   try {
     const store = new Store(dir);

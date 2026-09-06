@@ -1,11 +1,11 @@
-# Codex Share
+# QuotaHub
 
-Codex Share is a standalone quota-sharing product. It has its own server, UI,
+QuotaHub is a standalone quota-sharing product. It has its own server, UI,
 cookies, environment, and runtime data. It reuses the Node gateway's provider
 adapters and proxy compatibility code, but it does not run inside Relaydeck and
 never opens Relaydeck's `node/.data`.
 
-Codex Share is for informal sharing between friends. Offers and requests are
+QuotaHub is for informal sharing between friends. Offers and requests are
 free: the product has no payments, pricing marketplace, ratings, reputation
 score, or service guarantee. Providers can pause or revoke access at any time,
 and consumers should treat shared quota as best-effort.
@@ -50,7 +50,7 @@ for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone
 
 Relaydeck uses `node/.data`, port `3000`, and its own operator authentication.
 Starting either product does not start, configure, migrate, or mutate the
-other. `POOL_DATA_DIR` must not point to `node/.data`; Codex Share startup
+other. `POOL_DATA_DIR` must not point to `node/.data`; QuotaHub startup
 rejects that configuration.
 
 ## Authentication
@@ -63,7 +63,7 @@ gateway store, and create or find the same product account. Pasted credentials
 are used only for the import request and are not saved in browser storage.
 The paste dialog accepts raw JSON and JSON surrounded by standalone Markdown
 code-fence lines. When Codex rotates an enterprise SSO subject, an import with
-the same issuer and subject refreshes that same Codex Share account. A ChatGPT
+the same issuer and subject refreshes that same QuotaHub account. A ChatGPT
 account ID or email is not used to merge Pool identities because Business
 workspaces can share those values across different people.
 
@@ -73,17 +73,17 @@ explicitly reveal the current credential export from a linked provider card.
 Browser sessions use opaque cookies and mutating management requests
 require a session-bound CSRF token.
 
-Codex Share account sessions are permanent until logout or revocation. The
+QuotaHub account sessions are permanent until logout or revocation. The
 browser cookies are issued with a ten-year lifetime; clearing cookies still
 requires signing in again in that browser.
 
-After sign-in, Codex Share waits for an immediate best-effort Codex quota
+After sign-in, QuotaHub waits for an immediate best-effort Codex quota
 refresh before completing the browser login, then
 refreshes every linked Codex account automatically every minute in batches of
 ten. The dashboard polls this stored quota state and can also refresh it
 manually. Some Codex plans expose only a percentage or provider units; Codex
 Share shows that reported value rather than estimating a dollar balance.
-At startup and once per hour, Codex Share also refreshes any refreshable Codex token
+At startup and once per hour, QuotaHub also refreshes any refreshable Codex token
 that expires within 12 hours. Transient refresh failures retry with bounded
 exponential backoff; revoked or missing refresh tokens require the provider to
 sign in again.
@@ -96,7 +96,7 @@ token-refresh failure, or has exhausted its provider quota.
 After signing in, a user can also add an AIS project by entering its
 project ID and project key. AIS does not expose a quota query to this
 product, so its quota is shown as **unknown**. The owner publishes an offer
-based on their own knowledge. Codex Share keeps the offer and session amounts
+based on their own knowledge. QuotaHub keeps the offer and session amounts
 as local sharing limits, but does not estimate or reserve against the real
 AIS quota. External use of the project is not visible here and may cause
 the project to stop working when its provider quota is exhausted. Use **Add
@@ -115,11 +115,11 @@ AIS project** and its **How to get AIS project** guide to retrieve
 4. Approval atomically creates a share session and a `cp_share_...` key.
 5. The consumer can instead reveal one `cp_personal_...` key that routes each
    request across their active share sessions.
-6. Successful priced usage is settled against the grant. Codex Share does not pace
+6. Successful priced usage is settled against the grant. QuotaHub does not pace
 requests, serialize active requests for a share session, or locally cool down a
 provider after a quota response; the provider and settled grant remain authoritative.
 
-Every new Codex Share account receives a `Default` personal key automatically.
+Every new QuotaHub account receives a `Default` personal key automatically.
 Its secret is encrypted at rest and can be revealed or rotated from the
 dashboard.
 
@@ -166,7 +166,7 @@ message, rating, or guarantee fields.
 
 ## Email
 
-Codex Share writes notification events to a durable email outbox. With SMTP
+QuotaHub writes notification events to a durable email outbox. With SMTP
 configured, it sends them in the background and retries failures with bounded
 backoff. Without SMTP, email notifications are skipped and pending outbox
 entries are removed. There is no in-app notification inbox.
@@ -275,18 +275,18 @@ Bearer token; `POST /v1/messages` also accepts that key in `x-api-key`.
 Personal-key model lists are the union of active-session catalogs. Ordinary
 Relaydeck API keys are rejected.
 
-Codex Share dispatches the same Codex Responses, Chat Completions, streaming,
+QuotaHub dispatches the same Codex Responses, Chat Completions, streaming,
 tool-call, compaction, model-catalog, public file/audio/image, and native
 WebSocket implementations as Relaydeck. A share key limits candidate accounts
 and accounting; it does not create a second protocol adapter. Public file
-metadata is isolated per share session. Codex Share accepts `/v1/messages`
+metadata is isolated per share session. QuotaHub accepts `/v1/messages`
 for manually added AIS projects. Codex-native backend API and
 WebSocket routes remain Codex-only.
 
 Client-facing gateway route classification and dispatch live in
 `../src/gateway-dispatch.js`, shared with Relaydeck. Future proxy or
 compatibility functionality must be added to that shared layer so it reaches
-both products automatically; Codex Share-specific code is limited to share-key
+both products automatically; QuotaHub-specific code is limited to share-key
 authorization, session selection, and settlement.
 
 ## Configuration
@@ -320,7 +320,7 @@ store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
 a 15-second outbox delivery interval are the defaults.
 
 Set `POOL_PUBLIC_BASE_PATH=/codex-share` when a reverse proxy or API Gateway
-publishes Codex Share below that path and strips the prefix before forwarding.
+publishes QuotaHub below that path and strips the prefix before forwarding.
 The dashboard then loads its assets and management APIs from `/codex-share/`,
 and displays `https://host/codex-share/v1` as the API base URL. Leave it unset
 when the product is served from `/`.
