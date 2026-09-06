@@ -163,7 +163,7 @@ function ProductShell() {
     if (error) raiseToastViewport();
   }, [toast]);
   return (
-    <Overlay isOpen={workspaceLoading} position="fill" align="center" content={<Spinner size="lg" shade="onMedia" aria-label="Loading sharing workspace" />}>
+    <Overlay isOpen={workspaceLoading} position="fill" align="center" content={<Spinner size="lg" shade="onMedia" aria-label={t('loadingWorkspace')} />}>
       <AppShell variant="surface" height="fill" contentPadding={3} mobileNav={false}>
       <VStack gap={4} width="max(1280px, 100%)">
         <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
