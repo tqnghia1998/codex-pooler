@@ -42,7 +42,7 @@ export function createEmailScheduler(productStore, {
           results.push({ id: email.id, status: 'sent' });
         } catch (error) {
           productStore.markEmailFailed(email.id, error);
-          logger?.warn?.(`Codex Share email delivery failed: ${error?.code || error?.name || 'Error'}`);
+          logger?.warn?.(`QuotaHub email delivery failed: ${error?.code || error?.name || 'Error'}`);
           results.push({ id: email.id, status: 'failed' });
         }
       }
