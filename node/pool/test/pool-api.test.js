@@ -422,13 +422,13 @@ test('serves the QuotaHub favicon', async () => {
 });
 
 test('renders the configured public base path into the dashboard', async () => {
-  const server = createServer(createApp({ publicBasePath: '/codex-share' }));
+  const server = createServer(createApp({ publicBasePath: '/quotahub' }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     const response = await fetch(`${base}/`);
     assert.equal(response.status, 200);
-    assert.match(await response.text(), /<base href="\/codex-share\/">/);
+    assert.match(await response.text(), /<base href="\/quotahub\/">/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
