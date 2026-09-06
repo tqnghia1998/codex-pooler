@@ -25,7 +25,7 @@ import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
-import { HStack, Layout, LayoutContent, LayoutFooter, VStack } from '@astryxdesign/core/Layout';
+import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
 import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { useLanguage } from './i18n.jsx';
@@ -1249,10 +1249,12 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
       <VStack gap={2} height="100%" vAlign="between">
         <VStack gap={2}>
           <HStack justify="between" vAlign="start" gap={2}>
-            <VStack gap={1}>
-              <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
-              <Text type="supporting" color="secondary" maxLines={1}>{providerTypeLabel}</Text>
-            </VStack>
+            <StackItem size="fill">
+              <VStack gap={1}>
+                <Text weight="bold" maxLines={1}>{upstream.email || upstream.name}</Text>
+                <Text type="supporting" color="secondary" maxLines={1}>{providerTypeLabel}</Text>
+              </VStack>
+            </StackItem>
             <HStack gap={1} vAlign="center">
               {isAis && <Button label={t('edit')} size="sm" variant="secondary" onClick={() => onEditAis(upstream)} />}
               {isClaude && <Button label={t('edit')} size="sm" variant="secondary" onClick={() => onEditClaude(upstream)} />}
