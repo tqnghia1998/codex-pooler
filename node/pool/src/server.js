@@ -395,7 +395,8 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     ).trim();
     if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
     const finalEmail = email || (username ? `${username}@shopee.com` : '');
-    const account = productStore.upsertSmartAccount({ username, email: finalEmail, name, sub });
+    if (!finalEmail) throw new HttpError(400, 'invalid_request', 'Smart session email is required');
+    const account = productStore.upsertAccount({ email: finalEmail, name });
     const session = productStore.createAccountSession(account.id);
     setCookies(res, [
       cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),

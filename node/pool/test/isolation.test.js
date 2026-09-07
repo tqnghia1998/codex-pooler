@@ -38,12 +38,7 @@ test('Codex Pool routes, cookies, and data stay isolated from Relaydeck', async 
 
     const poolStore = new Store(poolDir);
     const productStore = new ProductStore(poolDir);
-    const account = productStore.upsertCodexAccount({
-      subject: 'pool-user',
-      issuer: 'https://auth.openai.com',
-      email: 'pool@example.com',
-      name: 'Pool User'
-    });
+    const account = productStore.upsertAccount({ email: 'pool@example.com', name: 'Pool User' });
     const manager = {
       start() {
         const attempt = productStore.createCodexLoginAttempt();
