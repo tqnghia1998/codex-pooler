@@ -2211,30 +2211,37 @@ function KeyDialog({ value, onClose, onNotice }) {
     let active = true;
     setModelState({ status: 'loading', ids: [] });
     void fetch(appUrl('/v1/models'), {
-      headers: { authorization: `Bearer ${value.apiKey}` },
+      headers: {
+        authorization: `Bearer ${value.apiKey}`,
+        ...(value?.session?.upstream?.type === 'claude' ? { 'anthropic-version': '2023-06-01' } : {})
+      },
       signal: controller.signal
     })
       .then(async (response) => {
         const body = await response.json().catch(() => ({}));
-        if (!response.ok) throw new Error(t('unableToLoadModels'));
+        if (!response.ok) throw body.error || new Error(t('unableToLoadModels'));
         return [...new Set((body.data || []).map((model) => model.id).filter(Boolean))];
       })
       .then((ids) => {
         if (active) setModelState({ status: 'loaded', ids });
       })
       .catch((error) => {
-        if (active && error.name !== 'AbortError') setModelState({ status: 'error', ids: [] });
+        if (active && error.name !== 'AbortError') {
+          setModelState({ status: error.code === 'share_session_paused' ? 'paused' : 'error', ids: [] });
+        }
       });
     return () => {
       active = false;
       controller.abort();
     };
-  }, [value?.apiKey]);
+  }, [value?.apiKey, value?.session?.upstream?.type]);
   const models = modelState.status === 'loading'
     ? t('loadingModels')
-    : modelState.status === 'error'
-      ? t('unableToLoadModels')
-      : modelState.ids.join(', ') || t('noModelsAvailable');
+    : modelState.status === 'paused'
+      ? t('sessionPaused')
+      : modelState.status === 'error'
+        ? t('unableToLoadModels')
+        : modelState.ids.join(', ') || t('noModelsAvailable');
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} width={600}>
       <Layout
@@ -2250,7 +2257,14 @@ function KeyDialog({ value, onClose, onNotice }) {
                 />
               )}
               <TextInput label={t('apiKey')} value={value?.apiKey || ''} isReadOnly />
-              <TextInput label={t('apiBaseUrl')} value={apiBaseUrl()} isReadOnly />
+              {personal ? (
+                <>
+                  <TextInput label={t('openAiApiBaseUrl')} value={apiBaseUrl()} isReadOnly />
+                  <TextInput label={t('anthropicApiBaseUrl')} value={appUrl('/')} isReadOnly />
+                </>
+              ) : (
+                <TextInput label={t('apiBaseUrl')} value={apiBaseUrl(value?.session?.upstream?.type)} isReadOnly />
+              )}
               <VStack gap={1}>
                 <FieldLabel label={t('availableModels')} inputID="available-models" isGroupLabel />
                 <Text type="supporting">{models}</Text>
@@ -2347,8 +2361,8 @@ function quotaProgressVariant(value, isAvailable = true) {
   return 'success';
 }
 
-function apiBaseUrl() {
-  return appUrl('/v1');
+function apiBaseUrl(upstreamType) {
+  return upstreamType === 'claude' ? appUrl('/') : appUrl('/v1');
 }
 
 function appUrl(path) {
