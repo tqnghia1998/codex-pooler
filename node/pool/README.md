@@ -152,9 +152,9 @@ account.
 
 Consumers can create multiple named personal keys, optionally with an expiry,
 so each device or client can be rotated or revoked independently. The dashboard
-shows privacy-safe activity totals: request and success counts, spend, recent
-models, last use, and sanitized failure codes. It never stores prompts or
-responses in this activity history.
+stores only privacy-safe activity totals: request and success counts, spend, and
+last use. It never stores prompts, responses, models, failure history, or a row
+per request.
 
 ## Friend Requests
 
@@ -179,12 +179,14 @@ sign-in.
 
 The product database runs cleanup at startup and every six hours. Expired login
 attempts are retained for 24 hours, personal-key routing pins for 24 hours,
-completed email records for 30 days, terminal reservations and settlement
-dedupe records for 30 days, audit events for 90 days, and terminal offers,
-tickets, sessions, and quota requests for 180 days. Active account sessions are
-permanent and never expire; records for sessions explicitly revoked by logout
-are retained for 180 days. SQLite reuses pages freed by cleanup; it does not run
-a full `VACUUM` during normal operation.
+completed email records for 30 days, audit events for 90 days, and terminal
+offers, tickets, sessions, and quota requests for 180 days. Request reservations
+and settlement deduplication exist only in process memory and are lost on
+restart; completed requests leave only aggregate activity and session-spend
+counters in SQLite. Active account sessions are permanent and never expire;
+records for sessions explicitly revoked by logout are retained for 180 days.
+SQLite reuses pages freed by cleanup; it does not run a full `VACUUM` during
+normal operation.
 
 ## API
 
