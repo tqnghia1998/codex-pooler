@@ -61,15 +61,12 @@ Users can sign in through Smart SSO, or link a provider by running
 isolated `CODEX_HOME`. Accounts are keyed by email; Codex, Claude, and other
 provider credentials are only links attached to the account, never separate
 identities. Both paths validate the stable token issuer and subject, import or
-refresh the credentials in the private encrypted
-gateway store, and attach them
-to the account with the matching email. Pasted credentials
+refresh the credentials in the private encrypted gateway store, and attach
+them to the account with the matching email. Pasted credentials
 are used only for the import request and are not saved in browser storage.
 The paste dialog accepts raw JSON and JSON surrounded by standalone Markdown
 code-fence lines. When Codex rotates an enterprise SSO subject, an import with
-the same issuer and subject refreshes that same QuotaHub account. A ChatGPT
-account ID or email is not used to merge Pool identities because Business
-workspaces can share those values across different people.
+the same email lands on the same account and refreshes the linked credential.
 
 Provider tokens are never included in ordinary browser account or upstream
 responses and are never placed in `localStorage`. The signed-in owner can

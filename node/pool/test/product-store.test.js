@@ -12,7 +12,7 @@ function digest(path) {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }
 
-function account(store, sub, email) {
+function account(store, email) {
   return store.upsertAccount({ email, name: email.split('@')[0] });
 }
 
@@ -90,7 +90,7 @@ test('keeps product data in pool.sqlite without changing the private gateway dat
     const upstream = upstreamStore.create({ type: 'compass', projectId: 'isolated', projectKey: 'secret' });
     const before = digest(upstreamStore.dbPath);
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 20 }, upstreamStore);
     assert.equal(digest(upstreamStore.dbPath), before);
@@ -104,7 +104,7 @@ test('new QuotaHub accounts receive one default personal key', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-default-personal-key-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const user = account(sharingStore, 'default-key-user', 'default-key@example.com');
+    const user = account(sharingStore, 'default-key@example.com');
 
     let keys = sharingStore.listPersonalKeys(user.id);
     assert.equal(keys.length, 1);
@@ -124,8 +124,8 @@ test('does not transfer a linked upstream between product accounts', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ownership-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const first = account(sharingStore, 'first-owner', 'first@example.com');
-    const second = account(sharingStore, 'second-owner', 'second@example.com');
+    const first = account(sharingStore, 'first@example.com');
+    const second = account(sharingStore, 'second@example.com');
     sharingStore.linkUpstream(first.id, 'upstream-1');
 
     assert.throws(
@@ -148,8 +148,8 @@ test('canonicalizes duplicate provider identities using current sharing activity
     upstreamStore.update(active.id, { projectId: 'project-older' });
 
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'canonical-provider', 'canonical-provider@example.com');
-    const consumer = account(sharingStore, 'canonical-consumer', 'canonical-consumer@example.com');
+    const provider = account(sharingStore, 'canonical-provider@example.com');
+    const consumer = account(sharingStore, 'canonical-consumer@example.com');
     sharingStore.linkUpstream(provider.id, older.id);
     sharingStore.linkUpstream(provider.id, active.id);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: active.id, quotaDollars: 5 }, upstreamStore);
@@ -172,8 +172,8 @@ test('shows provider availability issues on offers, tickets, and share sessions'
     const upstream = upstreamStore.create({ type: 'codex', accessToken: 'provider-access-token' });
     upstreamStore.setCap(upstream.id, { capDollars: 100 });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'issue-provider', 'issue-provider@example.com');
-    const consumer = account(sharingStore, 'issue-consumer', 'issue-consumer@example.com');
+    const provider = account(sharingStore, 'issue-provider@example.com');
+    const consumer = account(sharingStore, 'issue-consumer@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
     const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
@@ -217,8 +217,8 @@ test('keeps pending tickets open until their source offer expires', () => {
     const upstreamStore = new Store(dir);
     const upstream = upstreamStore.create({ type: 'compass', projectId: 'ticket-expiry', projectKey: 'secret' });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'ticket-expiry-provider', 'ticket-expiry-provider@example.com');
-    const consumer = account(sharingStore, 'ticket-expiry-consumer', 'ticket-expiry-consumer@example.com');
+    const provider = account(sharingStore, 'ticket-expiry-provider@example.com');
+    const consumer = account(sharingStore, 'ticket-expiry-consumer@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     const offer = sharingStore.createOffer(provider.id, {
       upstreamId: upstream.id,
@@ -239,9 +239,9 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     const upstreamStore = new Store(dir);
     const upstream = upstreamStore.create({ type: 'compass', projectId: 'shared', projectKey: 'secret' });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
-    const first = account(sharingStore, 'first', 'first@example.com');
-    const second = account(sharingStore, 'second', 'second@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
+    const first = account(sharingStore, 'first@example.com');
+    const second = account(sharingStore, 'second@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, observedAt: new Date().toISOString() });
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore);
@@ -300,9 +300,9 @@ test('creates one personal key that selects active consumer sessions and preserv
     const firstUpstream = upstreamStore.create({ type: 'compass', projectId: 'personal-first', projectKey: 'secret' });
     const secondUpstream = upstreamStore.create({ type: 'compass', projectId: 'personal-second', projectKey: 'secret' });
     const sharingStore = new ProductStore(dir);
-    const firstProvider = account(sharingStore, 'personal-first-provider', 'personal-first@example.com');
-    const secondProvider = account(sharingStore, 'personal-second-provider', 'personal-second@example.com');
-    const consumer = account(sharingStore, 'personal-consumer', 'personal-consumer@example.com');
+    const firstProvider = account(sharingStore, 'personal-first@example.com');
+    const secondProvider = account(sharingStore, 'personal-second@example.com');
+    const consumer = account(sharingStore, 'personal-consumer@example.com');
     sharingStore.linkUpstream(firstProvider.id, firstUpstream.id);
     sharingStore.linkUpstream(secondProvider.id, secondUpstream.id);
     const firstOffer = sharingStore.createOffer(firstProvider.id, { upstreamId: firstUpstream.id, quotaDollars: 4 }, upstreamStore);
@@ -345,8 +345,8 @@ test('a provider can extend a session expiry without exceeding the provider quot
     const resetAt = new Date(Date.now() + 10 * 24 * 60 * 60 * 1_000).toISOString();
     upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, resetAt, observedAt: new Date().toISOString() });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'expiry-provider', 'expiry-provider@example.com');
-    const consumer = account(sharingStore, 'expiry-consumer', 'expiry-consumer@example.com');
+    const provider = account(sharingStore, 'expiry-provider@example.com');
+    const consumer = account(sharingStore, 'expiry-consumer@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
     const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
@@ -376,8 +376,8 @@ test('does not publish or approve sharing offers when the provider quota is know
     const available = upstreamStore.create({ type: 'compass', projectId: 'available', projectKey: 'secret' });
     upstreamStore.setQuota(exhausted.id, { remainingPercent: 0, observedAt: new Date().toISOString() });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
-    const consumer = account(sharingStore, 'consumer', 'consumer@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
+    const consumer = account(sharingStore, 'consumer@example.com');
     sharingStore.linkUpstream(provider.id, exhausted.id);
     sharingStore.linkUpstream(provider.id, available.id);
 
@@ -414,7 +414,7 @@ test('treats percentage-only provider quota as unknown dollars instead of zero d
       observedAt: new Date().toISOString()
     });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore);
     const commitment = sharingStore.providerSummary(provider.id, upstream.id, upstreamStore).commitment;
@@ -435,7 +435,7 @@ test('rejects an offer when its dollar grant exceeds provider quota', () => {
     const upstream = upstreamStore.create({ type: 'compass', projectId: 'limited', projectKey: 'secret' });
     upstreamStore.setQuota(upstream.id, { remainingDollars: 5, remainingPercent: 50, observedAt: new Date().toISOString() });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     assert.throws(
       () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore),
@@ -453,8 +453,8 @@ test('creates a ticket for an offer’s full currently available quota', () => {
     const upstreamStore = new Store(dir);
     const upstream = upstreamStore.create({ type: 'compass', projectId: 'ticket-available', projectKey: 'secret' });
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'provider', 'provider@example.com');
-    const consumer = account(sharingStore, 'consumer', 'consumer@example.com');
+    const provider = account(sharingStore, 'provider@example.com');
+    const consumer = account(sharingStore, 'consumer@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore);
 
@@ -482,7 +482,7 @@ test('keeps account sessions permanent, including sessions with an old expiry va
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-permanent-session-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const user = account(sharingStore, 'permanent-session', 'permanent@example.com');
+    const user = account(sharingStore, 'permanent@example.com');
     const session = sharingStore.createAccountSession(user.id);
     sharingStore.sqlite.prepare('UPDATE account_sessions SET expires_at = ? WHERE token_hash = ?')
       .run('2020-01-01T00:00:00.000Z', createHash('sha256').update(session.token).digest('hex'));
@@ -499,8 +499,8 @@ test('cleans stale product records while retaining current records and account s
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-retention-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'retention-provider', 'retention-provider@example.com');
-    const consumer = account(sharingStore, 'retention-consumer', 'retention-consumer@example.com');
+    const provider = account(sharingStore, 'retention-provider@example.com');
+    const consumer = account(sharingStore, 'retention-consumer@example.com');
     const permanentSession = sharingStore.createAccountSession(provider.id);
     const revokedSession = sharingStore.createAccountSession(consumer.id);
     const now = new Date('2026-09-01T00:00:00.000Z');
