@@ -40,8 +40,6 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
       access_token: jwt({ email: 'second@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'second' } }),
       id_token: jwt({ email: 'second@example.com' })
     }}) });
-    store.setCap(first.id, { capDollars: 100 });
-    store.setCap(second.id, { capDollars: 100 });
 
     const sharingStore = new ProductStore(dir);
     const provider = account(sharingStore, 'provider');
@@ -446,8 +444,6 @@ test('personal keys rotate across active sessions and pin response continuations
       access_token: jwt({ email: 'personal-second@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'personal-second' } }),
       id_token: jwt({ email: 'personal-second@example.com' })
     }}) });
-    store.setCap(first.id, { capDollars: 100 });
-    store.setCap(second.id, { capDollars: 100 });
     const sharingStore = new ProductStore(dir);
     const firstProvider = account(sharingStore, 'personal-first-provider');
     const secondProvider = account(sharingStore, 'personal-second-provider');

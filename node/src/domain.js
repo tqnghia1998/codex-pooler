@@ -783,11 +783,11 @@ export function spendingEligibility(upstream, continuation = false) {
   return { eligible: true, reason: null, status: 'normal' };
 }
 
-export function filterSpendCapEligible(upstreams, { continuationId = null, allowUnknownQuota = false } = {}) {
+export function filterSpendCapEligible(upstreams, { continuationId = null, allowUnknownQuota = false, ignoreSpendingCap = false } = {}) {
   const eligible = [];
   const exclusions = [];
   for (const upstream of upstreams) {
-    if (allowUnknownQuota && isAisUpstream(upstream)) {
+    if (ignoreSpendingCap || allowUnknownQuota && isAisUpstream(upstream)) {
       eligible.push(upstream);
       continue;
     }

@@ -701,7 +701,7 @@ export class Store {
     };
   }
 
-  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, allowUnknownQuota = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
+  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, allowUnknownQuota = false, ignoreSpendingCap = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
     const db = this.load();
     const selectedStrategy = normalizeRoutingStrategy(strategy ?? db.routingPolicy?.strategy);
     const upstreams = scoped(db.upstreams, scopeId);
@@ -714,7 +714,7 @@ export class Store {
       for (const upstream of upstreams) exclude(upstream, 'scope_model_not_allowed');
       return routingPlanResult([], selectedStrategy, exclusions, now);
     }
-    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now, ignoreQuotaCooldown, allowUnknownQuota);
+    const eligibility = eligibilityFromUpstreams(upstreams, pinnedId, now, ignoreQuotaCooldown, allowUnknownQuota, ignoreSpendingCap);
     for (const item of eligibility.exclusions) {
       exclude(upstreams.find((upstream) => upstream.id === item.id), item.code);
     }
@@ -1219,12 +1219,12 @@ function scoped(items, scopeId) {
   return scopeId ? items.filter((item) => item.scopeId === scopeId) : items;
 }
 
-function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false, allowUnknownQuota = false) {
+function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false, allowUnknownQuota = false, ignoreSpendingCap = false) {
   for (const upstream of upstreams) ensureSpending(upstream);
   const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
     || upstream.health?.status === 'reauth_required'
     || !ignoreQuotaCooldown && accountCooldownBlocks(upstream.health, now));
-  const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId, allowUnknownQuota });
+  const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId, allowUnknownQuota, ignoreSpendingCap });
   return {
     ...result,
     exclusions: [...result.exclusions, ...blocked.map((upstream) => ({

@@ -698,6 +698,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
     scopeId,
     requirements: requestRequirements(path, payload),
     allowUnknownQuota: Boolean(req.allowUnknownQuota),
+    ignoreSpendingCap: isShareCredential(req.proxyAuth),
     routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http'
   });
   // Claude OAuth is currently a native Anthropic Messages adapter. Do not
