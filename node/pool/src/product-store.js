@@ -386,8 +386,7 @@ export class ProductStore {
       let id;
       if (existing) {
         id = existing.id;
-        this.sqlite.prepare('UPDATE accounts SET display_name = ?, updated_at = ? WHERE id = ?')
-          .run(normalizedName, now, id);
+        this.sqlite.prepare('UPDATE accounts SET updated_at = ? WHERE id = ?').run(now, id);
       } else {
         id = randomUUID();
         this.sqlite.prepare(`
