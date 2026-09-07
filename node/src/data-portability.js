@@ -4,10 +4,10 @@ export const PRODUCT_TABLES = [
   ['accounts', 'id'], ['account_sessions', 'id'], ['account_upstreams', 'upstream_id'], ['codex_login_attempts', 'id'],
   ['sharing_offers', 'id'], ['sharing_tickets', 'id'], ['sharing_sessions', 'id'], ['sharing_session_keys', 'id'],
   ['personal_api_keys', 'id'], ['personal_api_key_routes', "key_id || ':' || route_key"],
-  ['sharing_session_settlements', "session_id || ':' || attempt_id"], ['sharing_reservations', 'id'],
   ['sharing_activity', "subject_type || ':' || subject_id"], ['quota_requests', 'id'], ['provider_observations', 'upstream_id'],
   ['email_outbox', 'id'], ['sharing_events', 'id']
 ];
+const LEGACY_REQUEST_TABLES = new Set(['sharing_session_settlements', 'sharing_reservations']);
 
 export function exportAllData({ store, productStore }) {
   return {
@@ -26,7 +26,7 @@ export function importAllData({ store, productStore, data }) {
   const gatewayRecords = data.gateway?.records;
   const product = data.product ?? {};
   if (gatewayRecords !== undefined && !Array.isArray(gatewayRecords)) throw new Error('gateway.records must be an array');
-  const knownTables = new Set(PRODUCT_TABLES.map(([table]) => table));
+  const knownTables = new Set([...PRODUCT_TABLES.map(([table]) => table), ...LEGACY_REQUEST_TABLES]);
   for (const [table, rows] of Object.entries(product)) {
     if (!knownTables.has(table)) throw new Error(`unknown table "${table}"`);
     if (!Array.isArray(rows)) throw new Error(`table "${table}" must be an array of records`);

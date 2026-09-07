@@ -1607,12 +1607,7 @@ function SessionsView({
 
 function ActivitySummary({ activity }) {
   const { t } = useLanguage();
-  const details = [activitySummary(t, activity)];
-  if (activity?.models?.length > 0) details.push(t('modelsLabel', { models: activity.models.join(', ') }));
-  if (activity?.recentFailures?.length > 0) {
-    details.push(t('recentErrors', { errors: activity.recentFailures.map((failure) => failure.code).join(', ') }));
-  }
-  const summary = details.join(' · ');
+  const summary = activitySummary(t, activity);
   return (
     <Tooltip
       content={(
