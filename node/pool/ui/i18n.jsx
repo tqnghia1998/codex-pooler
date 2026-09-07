@@ -213,8 +213,6 @@ const DICTIONARY = {
 
     // Activity
     'noApiActivity': 'No API activity yet',
-    'modelsLabel': 'Models: {models}',
-    'recentErrors': 'Recent errors: {errors}',
     'activitySummaryText': '{success}/{total} succeeded · ${today} today · ${spent} total',
     'lastUsed': 'Last used {date}',
 
@@ -288,8 +286,8 @@ const DICTIONARY = {
     'shareableQuotaUsd': 'Shareable quota (USD)',
     'expiresOn': 'Expires on',
     'offerVisibility': 'Visibility',
-    'visibilityPublic': 'Public (Visible to everyone)',
-    'visibilityRestricted': 'Whitelist only (Specific emails)',
+    'visibilityPublic': 'Public',
+    'visibilityRestricted': 'Whitelist only',
     'visibilityWhitelistPlaceholder': 'alice@shopee.com, bob@shopee.com',
     'visibilityWhitelistHelp': 'Comma- or line-separated list of emails who can view and request this offer.',
     'visibilityBadgePublic': 'Public',
@@ -615,8 +613,6 @@ const DICTIONARY = {
 
     // Activity
     'noApiActivity': '暂无 API 调用记录',
-    'modelsLabel': '模型: {models}',
-    'recentErrors': '近期错误: {errors}',
     'activitySummaryText': '成功 {success}/{total} · 今日 ${today} · 累计 ${spent}',
     'lastUsed': '最后使用于 {date}',
 
