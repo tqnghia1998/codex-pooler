@@ -13,7 +13,7 @@ function digest(path) {
 }
 
 function account(store, sub, email) {
-  return store.upsertCodexAccount({ subject: sub, issuer: 'https://auth.openai.com', email, name: email.split('@')[0] });
+  return store.upsertAccount({ email, name: email.split('@')[0] });
 }
 
 test('migrates legacy Google-era sharing data and lets Codex claim the existing owner', () => {
@@ -70,12 +70,7 @@ test('migrates legacy Google-era sharing data and lets Codex claim the existing 
     legacy.close();
 
     const sharingStore = new ProductStore(dir);
-    const claimed = sharingStore.upsertCodexAccount({
-      subject: 'legacy-codex-subject',
-      issuer: 'https://auth.openai.com',
-      email: 'updated@example.com',
-      name: 'Updated User'
-    }, 'legacy-account');
+    const claimed = sharingStore.upsertAccount({ email: 'legacy@example.com', name: 'Legacy User' });
 
     assert.equal(claimed.id, 'legacy-account');
     assert.equal(sharingStore.accountIdForUpstream('upstream-legacy'), 'legacy-account');
@@ -116,12 +111,7 @@ test('new QuotaHub accounts receive one default personal key', () => {
     assert.equal(keys[0].name, 'Default');
     assert.equal(keys[0].status, 'active');
 
-    sharingStore.upsertCodexAccount({
-      subject: 'default-key-user',
-      issuer: 'https://auth.openai.com',
-      email: 'default-key@example.com',
-      name: 'default-key'
-    });
+    sharingStore.upsertAccount({ email: 'default-key@example.com', name: 'default-key' });
     keys = sharingStore.listPersonalKeys(user.id);
     assert.equal(keys.length, 1);
     assert.match(sharingStore.revealPersonalKey(user.id).apiKey, /^cp_personal_/);
@@ -480,12 +470,7 @@ test('publishes the complete Codex email username as the Pool display name', () 
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-display-name-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const user = sharingStore.upsertCodexAccount({
-      subject: 'vincent-subject',
-      issuer: 'https://auth.openai.com',
-      email: 'vincent.halim@example.com',
-      name: 'v1nc3nt.h4l1m'
-    });
+    const user = sharingStore.upsertAccount({ email: 'vincent.halim@example.com', name: 'v1nc3nt.h4l1m' });
 
     assert.equal(user.displayName, 'vincent.halim');
   } finally {
@@ -638,6 +623,19 @@ test('cleans stale product records while retaining current records and account s
     assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM account_sessions').get().count, 1);
     assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM personal_api_key_routes').get().count, 2);
     assert.equal(sharingStore.sqlite.prepare("SELECT COUNT(*) AS count FROM sharing_events WHERE id = 'recent-event'").get().count, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('accounts are keyed by email; codex and Smart sign-ins land on the same account', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-email-keyed-'));
+  try {
+    const sharingStore = new ProductStore(dir);
+    const smart = sharingStore.upsertAccount({ email: 'user@shopee.com', name: 'Smart User' });
+    const codex = sharingStore.upsertAccount({ email: 'User@Shopee.com', name: 'Codex User' });
+    assert.equal(codex.id, smart.id);
+    assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM accounts').get().count, 1);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

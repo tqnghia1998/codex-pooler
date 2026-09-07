@@ -133,12 +133,7 @@ test('reuses the canonical Codex upstream when duplicate links already exist', (
       { type: 'codex', authJson: authJson({ refreshToken: 'second-refresh' }) },
       { allowDuplicateCodexIdentity: true }
     );
-    const provider = sharingStore.upsertCodexAccount({
-      subject: 'codex-user',
-      issuer: 'https://auth.openai.com',
-      email: 'codex@example.com',
-      name: 'codex'
-    });
+    const provider = sharingStore.upsertAccount({ email: 'codex@example.com', name: 'codex' });
     sharingStore.linkUpstream(provider.id, first.id);
     sharingStore.linkUpstream(provider.id, second.id);
     const manager = new CodexLoginManager({ sharingStore, upstreamStore });
@@ -176,7 +171,7 @@ test('auth.json import signs into the same account and replaces stored credentia
   }
 });
 
-test('auth.json imports keep Business workspace members separate when they share a ChatGPT account ID', () => {
+test('auth.json imports with the same email update the same linked credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-workspace-members-'));
   try {
     const upstreamStore = new Store(dir);
@@ -190,11 +185,10 @@ test('auth.json imports keep Business workspace members separate when they share
       refreshToken: 'rotated-refresh'
     }));
 
-    assert.notEqual(second.account.id, first.account.id);
-    assert.notEqual(second.upstream.id, first.upstream.id);
-    assert.equal(upstreamStore.list().length, 2);
-    assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'refresh-login');
-    assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'rotated-refresh');
+    assert.equal(second.account.id, first.account.id);
+    assert.equal(second.upstream.id, first.upstream.id);
+    assert.equal(upstreamStore.list().length, 1);
+    assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'rotated-refresh');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -233,11 +227,7 @@ test('a different Codex subject does not overwrite an upstream owned by another 
     const upstreamStore = new Store(dir);
     const sharingStore = new ProductStore(dir);
     const upstream = upstreamStore.create({ type: 'codex', authJson: authJson({ subject: 'first-subject' }) });
-    const owner = sharingStore.upsertCodexAccount({
-      subject: 'first-subject',
-      issuer: 'https://auth.openai.com',
-      email: 'codex@example.com'
-    });
+    const owner = sharingStore.upsertAccount({ email: 'owner@example.com', name: 'Owner' });
     sharingStore.linkUpstream(owner.id, upstream.id);
 
     const manager = new CodexLoginManager({
