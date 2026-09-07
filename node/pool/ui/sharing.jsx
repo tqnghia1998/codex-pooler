@@ -595,7 +595,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
                     label={t('loginWithSmart')}
                     variant="primary"
                     onClick={() => {
-                      window.open('https://smart.test.shopee.io/login', '_blank', 'noopener,noreferrer');
+                      window.open('/login', '_blank', 'noopener,noreferrer');
                     }}
                   />
                 </HStack>
