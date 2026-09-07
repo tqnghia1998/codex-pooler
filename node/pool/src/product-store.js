@@ -8,16 +8,14 @@ const LOGIN_ATTEMPT_TTL_MS = 20 * 60 * 1_000;
 const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const SHARE_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const RESERVATION_TTL_MS = 2 * 60 * 60 * 1_000;
+const SETTLED_ATTEMPT_LIMIT = 100;
 const LOGIN_ATTEMPT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const ACCOUNT_SESSION_RETENTION_MS = 180 * 24 * 60 * 60 * 1_000;
 const EXPIRY_CHECK_INTERVAL_MS = 1_000;
-const SETTLEMENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const EMAIL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const EVENT_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 const HISTORY_RETENTION_MS = 180 * 24 * 60 * 60 * 1_000;
-const ACTIVITY_FAILURE_LIMIT = 10;
-const ACTIVITY_MODEL_LIMIT = 20;
 
 export class ProductStore {
   constructor(dataDir = process.env.POOL_DATA_DIR || resolve(process.cwd(), 'pool/.data'), { encryptionKey = null, inMemory = false } = {}) {
@@ -26,6 +24,8 @@ export class ProductStore {
     this.keyPath = inMemory ? null : join(this.dataDir, '.pool-key');
     this.emailNotificationsEnabled = false;
     this.lastExpiryCheckAt = 0;
+    this.reservations = new Map();
+    this.settledAttempts = new Set();
     if (!inMemory) {
       mkdirSync(this.dataDir, { recursive: true, mode: 0o700 });
       chmodSync(this.dataDir, 0o700);
@@ -151,26 +151,6 @@ export class ProductStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (key_id, route_key)
       );
-      CREATE TABLE IF NOT EXISTS sharing_session_settlements (
-        session_id TEXT NOT NULL REFERENCES sharing_sessions(id) ON DELETE CASCADE,
-        attempt_id TEXT NOT NULL,
-        settled_micros INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (session_id, attempt_id)
-      );
-      CREATE TABLE IF NOT EXISTS sharing_reservations (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL REFERENCES sharing_sessions(id) ON DELETE CASCADE,
-        key_id TEXT,
-        reserved_micros INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        model TEXT,
-        route TEXT,
-        error_code TEXT,
-        created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        settled_at TEXT
-      );
       CREATE TABLE IF NOT EXISTS sharing_activity (
         subject_type TEXT NOT NULL,
         subject_id TEXT NOT NULL,
@@ -238,16 +218,12 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_created_idx ON sharing_sessions(consumer_account_id, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_sessions_provider_status_created_idx ON sharing_sessions(provider_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_status_created_idx ON sharing_sessions(consumer_account_id, status, created_at DESC, id DESC);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_session_idx ON sharing_reservations(session_id, status, expires_at);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_key_idx ON sharing_reservations(key_id, status);
       CREATE INDEX IF NOT EXISTS quota_requests_status_idx ON quota_requests(status, created_at);
       CREATE INDEX IF NOT EXISTS email_outbox_pending_idx ON email_outbox(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS personal_api_keys_account_idx ON personal_api_keys(account_id, created_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_session_idx ON personal_api_key_routes(session_id);
       CREATE INDEX IF NOT EXISTS codex_login_attempts_expiry_idx ON codex_login_attempts(expires_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_updated_idx ON personal_api_key_routes(updated_at);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_retention_idx ON sharing_reservations(status, settled_at, expires_at);
-      CREATE INDEX IF NOT EXISTS sharing_session_settlements_created_idx ON sharing_session_settlements(created_at);
       CREATE INDEX IF NOT EXISTS sharing_sessions_retention_idx ON sharing_sessions(status, updated_at);
       CREATE INDEX IF NOT EXISTS sharing_tickets_retention_idx ON sharing_tickets(status, resolved_at, created_at);
       CREATE INDEX IF NOT EXISTS sharing_offers_retention_idx ON sharing_offers(status, updated_at);
@@ -321,6 +297,18 @@ export class ProductStore {
   }
 
   migrateSharingSchema() {
+    const legacyRequestHistory = this.sqlite.prepare(`
+      SELECT count(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name IN ('sharing_reservations', 'sharing_session_settlements')
+    `).get().count > 0;
+    if (legacyRequestHistory) {
+      this.sqlite.exec(`
+        DROP TABLE sharing_reservations;
+        DROP TABLE sharing_session_settlements;
+        UPDATE sharing_activity SET models_json = '[]', failures_json = '[]';
+        VACUUM;
+      `);
+    }
     addColumn(this.sqlite, 'account_upstreams', 'sharing_status', "TEXT NOT NULL DEFAULT 'active'");
     addColumn(this.sqlite, 'account_upstreams', 'sharing_updated_at', 'TEXT');
     addColumn(this.sqlite, 'account_upstreams', 'link_order', 'INTEGER');
@@ -388,14 +376,10 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_created_idx ON sharing_sessions(consumer_account_id, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_sessions_provider_status_created_idx ON sharing_sessions(provider_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_status_created_idx ON sharing_sessions(consumer_account_id, status, created_at DESC, id DESC);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_session_idx ON sharing_reservations(session_id, status, expires_at);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_key_idx ON sharing_reservations(key_id, status);
       CREATE INDEX IF NOT EXISTS quota_requests_status_idx ON quota_requests(status, created_at);
       CREATE INDEX IF NOT EXISTS email_outbox_pending_idx ON email_outbox(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS codex_login_attempts_expiry_idx ON codex_login_attempts(expires_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_updated_idx ON personal_api_key_routes(updated_at);
-      CREATE INDEX IF NOT EXISTS sharing_reservations_retention_idx ON sharing_reservations(status, settled_at, expires_at);
-      CREATE INDEX IF NOT EXISTS sharing_session_settlements_created_idx ON sharing_session_settlements(created_at);
       CREATE INDEX IF NOT EXISTS sharing_sessions_retention_idx ON sharing_sessions(status, updated_at);
       CREATE INDEX IF NOT EXISTS sharing_tickets_retention_idx ON sharing_tickets(status, resolved_at, created_at);
       CREATE INDEX IF NOT EXISTS sharing_offers_retention_idx ON sharing_offers(status, updated_at);
@@ -688,11 +672,7 @@ export class ProductStore {
           SET disabled_at = ?
           WHERE session_id = ? AND disabled_at IS NULL
         `).run(now, session.id);
-        this.sqlite.prepare(`
-          UPDATE sharing_reservations
-          SET status = 'released', settled_at = ?, error_code = 'provider_revoked'
-          WHERE session_id = ? AND status = 'active'
-        `).run(now, session.id);
+        this.releaseSessionReservations(session.id);
       }
       this.event(accountId, 'upstream', upstreamId, 'sharing_revoked', {
         offerCount: offers.length,
@@ -894,18 +874,12 @@ export class ProductStore {
           SET disabled_at = ?
           WHERE session_id = ? AND disabled_at IS NULL
         `).run(timestamp, row.id);
-        this.sqlite.prepare(`
-          UPDATE sharing_reservations
-          SET status = 'released', settled_at = ?, error_code = 'session_expired'
-          WHERE session_id = ? AND status = 'active'
-        `).run(timestamp, row.id);
+        this.releaseSessionReservations(row.id);
         this.event(row.provider_account_id, 'session', row.id, 'expired', {});
       }
-      this.sqlite.prepare(`
-        UPDATE sharing_reservations
-        SET status = 'released', settled_at = ?, error_code = 'reservation_expired'
-        WHERE status = 'active' AND expires_at <= ?
-      `).run(timestamp, timestamp);
+      for (const [attemptId, reservation] of this.reservations) {
+        if (reservation.expiresAt <= timestamp) this.reservations.delete(attemptId);
+      }
       this.sqlite.prepare(`
         UPDATE quota_requests
         SET status = 'expired', updated_at = ?
@@ -932,7 +906,6 @@ export class ProductStore {
     const timestamp = new Date(now).getTime();
     const loginAttemptCutoff = new Date(timestamp - LOGIN_ATTEMPT_RETENTION_MS).toISOString();
     const routeCutoff = new Date(timestamp - ROUTE_RETENTION_MS).toISOString();
-    const settlementCutoff = new Date(timestamp - SETTLEMENT_RETENTION_MS).toISOString();
     const emailCutoff = new Date(timestamp - EMAIL_RETENTION_MS).toISOString();
     const eventCutoff = new Date(timestamp - EVENT_RETENTION_MS).toISOString();
     const historyCutoff = new Date(timestamp - HISTORY_RETENTION_MS).toISOString();
@@ -945,18 +918,6 @@ export class ProductStore {
         DELETE FROM personal_api_key_routes
         WHERE updated_at <= ?
       `).run(routeCutoff).changes,
-      reservations: this.sqlite.prepare(`
-        DELETE FROM sharing_reservations
-        WHERE status <> 'active'
-          AND COALESCE(settled_at, expires_at, created_at) <= ?
-      `).run(settlementCutoff).changes,
-      settlements: this.sqlite.prepare(`
-        DELETE FROM sharing_session_settlements
-        WHERE created_at <= ?
-          AND session_id IN (
-            SELECT id FROM sharing_sessions WHERE status NOT IN ('active', 'paused')
-          )
-      `).run(settlementCutoff).changes,
       emails: this.sqlite.prepare(`
         DELETE FROM email_outbox
         WHERE status IN ('sent', 'failed')
@@ -1683,11 +1644,7 @@ export class ProductStore {
       this.sqlite.transaction(() => {
         this.sqlite.prepare("UPDATE sharing_sessions SET status = 'revoked', pending_key_cipher = NULL, updated_at = ? WHERE id = ?").run(now, id);
         this.sqlite.prepare('UPDATE sharing_session_keys SET disabled_at = ? WHERE session_id = ? AND disabled_at IS NULL').run(now, id);
-        this.sqlite.prepare(`
-          UPDATE sharing_reservations
-          SET status = 'released', settled_at = ?, error_code = 'session_revoked'
-          WHERE session_id = ? AND status = 'active'
-        `).run(now, id);
+        this.releaseSessionReservations(id);
         this.event(accountId, 'session', id, 'revoked', {});
       })();
       this.notifySessionParticipants(id, 'QuotaHub session revoked', 'A QuotaHub session was revoked and its API key is no longer usable.', `session:${id}:revoked`);
@@ -1971,109 +1928,74 @@ export class ProductStore {
     return row ? shareSessionAccess(row, null, this.providerSharingState(row.upstream_id)?.status) : null;
   }
 
-  reserveSession(sessionId, attemptId, { keyId = null, model = '', route = '', upstreamStore = null } = {}) {
+  reserveSession(sessionId, attemptId, { keyId = null, model = '', upstreamStore = null } = {}) {
     if (!sessionId || !attemptId) return null;
     this.expireDue(new Date(), { force: true });
+    const existing = this.reservations.get(attemptId);
+    if (existing) return existing;
     const reserve = this.sqlite.transaction(() => {
-      const existing = this.sqlite.prepare('SELECT * FROM sharing_reservations WHERE id = ?').get(attemptId);
-      if (existing) return existing.status === 'active' ? existing : null;
       const row = this.sessionRow(sessionId);
-      if (row.status !== 'active') return null;
-      if (isExpired(row.expires_at)) return null;
+      if (row.status !== 'active' || isExpired(row.expires_at)) return null;
       if (this.providerSharingState(row.upstream_id)?.status === 'paused') return null;
-      const commitment = upstreamStore
-        ? this.providerCommitment(row.upstream_id, upstreamStore)
-        : null;
+      const commitment = upstreamStore ? this.providerCommitment(row.upstream_id, upstreamStore) : null;
       const sessionRemaining = Math.max(0, row.granted_micros - row.consumed_micros);
       const backedMicros = commitment?.sessionBacking.get(row.id) ?? sessionRemaining;
-      const availableMicros = Math.max(0, Math.min(sessionRemaining, backedMicros));
-      if (!availableMicros) return null;
+      if (!Math.max(0, Math.min(sessionRemaining, backedMicros))) return null;
       const now = new Date();
-      this.sqlite.prepare(`
-        INSERT INTO sharing_reservations
-          (id, session_id, key_id, reserved_micros, status, model, route, created_at, expires_at)
-        VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?)
-      `).run(
-        attemptId,
-        sessionId,
-        keyId,
-        0,
-        cleanModel(model),
-        cleanRoute(route),
-        now.toISOString(),
-        new Date(now.getTime() + RESERVATION_TTL_MS).toISOString()
-      );
-      if (keyId) {
-        this.sqlite.prepare('UPDATE personal_api_keys SET last_used_at = ?, updated_at = ? WHERE id = ?')
-          .run(now.toISOString(), now.toISOString(), keyId);
-      }
+      const reservation = { id: attemptId, sessionId, keyId, reservedMicros: 0, expiresAt: new Date(now.getTime() + RESERVATION_TTL_MS).toISOString() };
+      this.reservations.set(attemptId, reservation);
+      if (keyId) this.sqlite.prepare('UPDATE personal_api_keys SET last_used_at = ?, updated_at = ? WHERE id = ?')
+        .run(now.toISOString(), now.toISOString(), keyId);
       this.recordActivityStart('session', sessionId, { model, now });
       if (keyId) this.recordActivityStart('personal_key', keyId, { model, now });
-      return this.sqlite.prepare('SELECT * FROM sharing_reservations WHERE id = ?').get(attemptId);
+      return reservation;
     });
-    const row = reserve();
-    return row ? publicReservation(row) : null;
+    return reserve();
+  }
+
+  releaseSessionReservations(sessionId) {
+    for (const [attemptId, reservation] of this.reservations) {
+      if (reservation.sessionId === sessionId) this.reservations.delete(attemptId);
+    }
   }
 
   releaseReservation(attemptId, errorCode = 'request_failed') {
-    if (!attemptId) return false;
-    const release = this.sqlite.transaction(() => {
-      const row = this.sqlite.prepare('SELECT * FROM sharing_reservations WHERE id = ?').get(attemptId);
-      if (!row || row.status !== 'active') return null;
-      const now = new Date().toISOString();
-      this.sqlite.prepare(`
-        UPDATE sharing_reservations
-        SET status = 'released', settled_at = ?, error_code = ?
-        WHERE id = ? AND status = 'active'
-      `).run(now, errorCode === null ? null : cleanErrorCode(errorCode), attemptId);
-      if (errorCode === null) {
-        this.recordActivitySuccess('session', row.session_id, 0, now);
-        if (row.key_id) this.recordActivitySuccess('personal_key', row.key_id, 0, now);
-      } else {
-        this.recordActivityFailure('session', row.session_id, errorCode, now);
-        if (row.key_id) this.recordActivityFailure('personal_key', row.key_id, errorCode, now);
-      }
-      return row;
-    });
-    return Boolean(release());
+    const reservation = this.reservations.get(attemptId);
+    if (!reservation) return false;
+    this.reservations.delete(attemptId);
+    const now = new Date().toISOString();
+    if (errorCode === null) {
+      this.recordActivitySuccess('session', reservation.sessionId, 0, now);
+      if (reservation.keyId) this.recordActivitySuccess('personal_key', reservation.keyId, 0, now);
+    } else {
+      this.recordActivityFailure('session', reservation.sessionId, errorCode, now);
+      if (reservation.keyId) this.recordActivityFailure('personal_key', reservation.keyId, errorCode, now);
+    }
+    return true;
   }
 
   settleSession(sessionId, attemptId, settledMicros) {
     if (!sessionId || !attemptId || !Number.isSafeInteger(settledMicros) || settledMicros < 0) return null;
+    const reservation = this.reservations.get(attemptId);
+    this.reservations.delete(attemptId);
+    if (this.settledAttempts.has(attemptId)) return publicShareSession(this.sessionRow(sessionId), null, null);
+    this.settledAttempts.add(attemptId);
+    if (this.settledAttempts.size > SETTLED_ATTEMPT_LIMIT) this.settledAttempts.delete(this.settledAttempts.values().next().value);
     const settle = this.sqlite.transaction(() => {
       const row = this.sessionRow(sessionId);
-      const inserted = this.sqlite.prepare(`
-        INSERT OR IGNORE INTO sharing_session_settlements (session_id, attempt_id, settled_micros, created_at)
-        VALUES (?, ?, ?, ?)
-      `).run(sessionId, attemptId, settledMicros, new Date().toISOString());
-      if (!inserted.changes) {
-        this.sqlite.prepare(`
-          UPDATE sharing_reservations
-          SET status = 'settled', settled_at = ?
-          WHERE id = ? AND status = 'active'
-        `).run(new Date().toISOString(), attemptId);
-        return row;
-      }
       const consumedMicros = row.consumed_micros + settledMicros;
       const status = row.status === 'revoked' ? 'revoked'
         : consumedMicros >= row.granted_micros ? 'exhausted'
           : row.status;
       this.sqlite.prepare('UPDATE sharing_sessions SET consumed_micros = ?, status = ?, updated_at = ? WHERE id = ?')
         .run(consumedMicros, status, new Date().toISOString(), sessionId);
-      const reservation = this.sqlite.prepare('SELECT * FROM sharing_reservations WHERE id = ?').get(attemptId);
-      this.sqlite.prepare(`
-        UPDATE sharing_reservations
-        SET status = 'settled', settled_at = ?
-        WHERE id = ? AND status = 'active'
-      `).run(new Date().toISOString(), attemptId);
       this.recordActivitySuccess('session', sessionId, settledMicros);
-      if (reservation?.key_id) this.recordActivitySuccess('personal_key', reservation.key_id, settledMicros);
+      if (reservation?.keyId) this.recordActivitySuccess('personal_key', reservation.keyId, settledMicros);
       return { row: this.sessionRow(sessionId), previousConsumedMicros: row.consumed_micros };
     });
     const result = settle();
-    const row = result.row || result;
-    this.notifySessionThresholds(row, result.previousConsumedMicros ?? row.consumed_micros);
-    return publicShareSession(row, null, null);
+    this.notifySessionThresholds(result.row, result.previousConsumedMicros);
+    return publicShareSession(result.row, null, null);
   }
 
   cleanupUpstream(upstreamId) {
@@ -2316,22 +2238,17 @@ export class ProductStore {
     `).all(subjectType, ...subjectIds).map((row) => [row.subject_id, publicActivity(row)]));
   }
 
-  recordActivityStart(subjectType, subjectId, { model = '', now = new Date() } = {}) {
+  recordActivityStart(subjectType, subjectId, { now = new Date() } = {}) {
     const timestamp = new Date(now).toISOString();
-    const current = this.activityRow(subjectType, subjectId);
-    const models = cleanModel(model)
-      ? [cleanModel(model), ...parseJsonArray(current?.models_json).filter((item) => item !== cleanModel(model))].slice(0, ACTIVITY_MODEL_LIMIT)
-      : parseJsonArray(current?.models_json);
     this.sqlite.prepare(`
       INSERT INTO sharing_activity
         (subject_type, subject_id, request_count, success_count, total_micros, today_date,
          today_micros, last_used_at, last_success_at, models_json, failures_json)
-      VALUES (?, ?, 1, 0, 0, ?, 0, ?, NULL, ?, '[]')
+      VALUES (?, ?, 1, 0, 0, ?, 0, ?, NULL, '[]', '[]')
       ON CONFLICT(subject_type, subject_id) DO UPDATE SET
         request_count = request_count + 1,
-        last_used_at = excluded.last_used_at,
-        models_json = excluded.models_json
-    `).run(subjectType, subjectId, utcDate(now), timestamp, JSON.stringify(models));
+        last_used_at = excluded.last_used_at
+    `).run(subjectType, subjectId, utcDate(now), timestamp);
   }
 
   recordActivitySuccess(subjectType, subjectId, settledMicros, now = new Date()) {
@@ -2365,20 +2282,14 @@ export class ProductStore {
 
   recordActivityFailure(subjectType, subjectId, errorCode, now = new Date()) {
     const timestamp = new Date(now).toISOString();
-    const current = this.activityRow(subjectType, subjectId);
-    const failures = [
-      { code: cleanErrorCode(errorCode), at: timestamp },
-      ...parseJsonArray(current?.failures_json)
-    ].slice(0, ACTIVITY_FAILURE_LIMIT);
     this.sqlite.prepare(`
       INSERT INTO sharing_activity
         (subject_type, subject_id, request_count, success_count, total_micros, today_date,
          today_micros, last_used_at, last_success_at, models_json, failures_json)
-      VALUES (?, ?, 0, 0, 0, ?, 0, ?, NULL, '[]', ?)
+      VALUES (?, ?, 0, 0, 0, ?, 0, ?, NULL, '[]', '[]')
       ON CONFLICT(subject_type, subject_id) DO UPDATE SET
-        last_used_at = excluded.last_used_at,
-        failures_json = excluded.failures_json
-    `).run(subjectType, subjectId, utcDate(now), timestamp, JSON.stringify(failures));
+        last_used_at = excluded.last_used_at
+    `).run(subjectType, subjectId, utcDate(now), timestamp);
   }
 
   activityRow(subjectType, subjectId) {
@@ -2982,17 +2893,6 @@ function publicProviderCommitment(commitment) {
   };
 }
 
-function publicReservation(row) {
-  return {
-    id: row.id,
-    sessionId: row.session_id,
-    keyId: row.key_id || null,
-    reservedMicros: row.reserved_micros,
-    createdAt: row.created_at,
-    expiresAt: row.expires_at
-  };
-}
-
 function publicQuotaRequest(row, viewerAccountId) {
   return {
     id: row.id,
@@ -3017,9 +2917,7 @@ function emptyActivity() {
     totalSpendDollars: 0,
     spendTodayDollars: 0,
     lastUsedAt: null,
-    lastSuccessfulAt: null,
-    models: [],
-    recentFailures: []
+    lastSuccessfulAt: null
   };
 }
 
@@ -3032,9 +2930,7 @@ function publicActivity(row) {
     totalSpendDollars: microsToDollars(row.total_micros),
     spendTodayDollars: microsToDollars(row.today_date === today ? row.today_micros : 0),
     lastUsedAt: row.last_used_at || null,
-    lastSuccessfulAt: row.last_success_at || null,
-    models: parseJsonArray(row.models_json),
-    recentFailures: parseJsonArray(row.failures_json)
+    lastSuccessfulAt: row.last_success_at || null
   };
 }
 
@@ -3054,19 +2950,6 @@ function utcDate(now = new Date()) {
 function cleanKeyName(value) {
   const name = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, 80) : '';
   return name || 'Default';
-}
-
-function cleanModel(value) {
-  return typeof value === 'string' ? value.trim().slice(0, 120) : '';
-}
-
-function cleanRoute(value) {
-  return typeof value === 'string' ? value.trim().slice(0, 160) : '';
-}
-
-function cleanErrorCode(value) {
-  const code = typeof value === 'string' ? value.trim().toLowerCase() : '';
-  return /^[a-z0-9_.:-]{1,120}$/.test(code) ? code : 'request_failed';
 }
 
 function validRecipient(value) {
