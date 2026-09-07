@@ -2257,10 +2257,10 @@ function KeyDialog({ value, onClose, onNotice }) {
                 />
               )}
               <TextInput label={t('apiKey')} value={value?.apiKey || ''} isReadOnly />
-              {personal ? (
+              {personal || value?.session?.upstream?.quotaSource === 'ais' ? (
                 <>
                   <TextInput label={t('openAiApiBaseUrl')} value={apiBaseUrl()} isReadOnly />
-                  <TextInput label={t('anthropicApiBaseUrl')} value={appUrl('/')} isReadOnly />
+                  <TextInput label={t('anthropicApiBaseUrl')} value={anthropicBaseUrl()} isReadOnly />
                 </>
               ) : (
                 <TextInput label={t('apiBaseUrl')} value={apiBaseUrl(value?.session?.upstream?.type)} isReadOnly />
@@ -2361,8 +2361,12 @@ function quotaProgressVariant(value, isAvailable = true) {
   return 'success';
 }
 
+function anthropicBaseUrl() {
+  return appUrl('').replace(/\/+$/, '');
+}
+
 function apiBaseUrl(upstreamType) {
-  return upstreamType === 'claude' ? appUrl('/') : appUrl('/v1');
+  return upstreamType === 'claude' ? anthropicBaseUrl() : appUrl('/v1');
 }
 
 function appUrl(path) {
