@@ -1609,19 +1609,7 @@ function SessionsView({
 
 function ActivitySummary({ activity }) {
   const { t } = useLanguage();
-  const summary = activitySummary(t, activity);
-  return (
-    <Tooltip
-      content={(
-        <VStack gap={0} maxWidth={300}>
-          {details.map((detail) => <Text key={detail} color="inherit" display="block" textWrap="wrap">{detail}</Text>)}
-        </VStack>
-      )}
-      hasHoverIndication={false}
-    >
-      <Text type="supporting" color="secondary" maxLines={1} hasTruncateTooltip={false}>{summary}</Text>
-    </Tooltip>
-  );
+  return <Text type="supporting" color="secondary" maxLines={1}>{activitySummary(t, activity)}</Text>;
 }
 
 function ProviderIssueBadge({ issue }) {
