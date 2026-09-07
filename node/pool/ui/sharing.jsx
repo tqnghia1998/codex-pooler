@@ -476,6 +476,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     try {
       await api('/auth/logout', { method: 'POST', body: '{}' });
     } catch {}
+    try { window.localStorage.removeItem('session'); } catch {}
+    setSmartSession(null);
     setAccount(null);
     setTablePage({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
     setTableTotals({});
