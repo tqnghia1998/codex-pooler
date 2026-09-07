@@ -66,10 +66,9 @@ export class CodexLoginManager {
     const normalizedAuthJson = normalizePastedAuthJson(authJson);
     const parsed = parseCodexAuthJson(normalizedAuthJson);
     if (!parsed.subject) throw new Error('Codex auth JSON is missing a stable subject');
-    const existingAccount = this.sharingStore.accountForCodexIdentity(parsed);
-    let upstream = existingAccount
-      ? this.matchOwnedUpstream(existingAccount.id, parsed)
-      : null;
+    if (!parsed.email) throw new Error('Codex auth JSON is missing an email');
+    const account = this.sharingStore.upsertAccount({ email: parsed.email, name: poolDisplayName(parsed.email) });
+    let upstream = this.matchOwnedUpstream(account.id, parsed);
     if (upstream) {
       upstream = this.upstreamStore.update(upstream.id, { authJson: normalizedAuthJson });
     } else {
@@ -82,11 +81,6 @@ export class CodexLoginManager {
       this.upstreamStore.setCap(upstream.id, { capDollars: 1_000_000 });
     }
     const stored = this.upstreamStore.get(upstream.id);
-    const ownerId = this.sharingStore.accountIdForUpstream(upstream.id);
-    const account = this.sharingStore.upsertCodexAccount({
-      ...parsed,
-      name: poolDisplayName(parsed.email)
-    }, ownerId);
     this.sharingStore.linkUpstream(account.id, upstream.id, stored?.scopeId || 'default');
     return { account, upstream };
   }

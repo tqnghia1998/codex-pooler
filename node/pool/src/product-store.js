@@ -43,9 +43,7 @@ export class ProductStore {
     this.sqlite.exec(`
       CREATE TABLE IF NOT EXISTS accounts (
         id TEXT PRIMARY KEY,
-        google_sub TEXT UNIQUE,
-        codex_subject TEXT,
-        email TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
         display_name TEXT NOT NULL,
         avatar_url TEXT,
         created_at TEXT NOT NULL,
@@ -236,18 +234,6 @@ export class ProductStore {
   }
 
   migrateIdentitySchema() {
-    const accountColumns = this.sqlite.pragma('table_info(accounts)');
-    if (!accountColumns.some(({ name }) => name === 'codex_subject')) {
-      this.sqlite.exec('ALTER TABLE accounts ADD COLUMN codex_subject TEXT');
-    }
-    this.sqlite.exec(`
-      CREATE UNIQUE INDEX IF NOT EXISTS accounts_codex_subject_idx
-      ON accounts(codex_subject)
-      WHERE codex_subject IS NOT NULL;
-      CREATE INDEX IF NOT EXISTS accounts_email_idx
-      ON accounts(email);
-    `);
-
     const attemptColumns = this.sqlite.pragma('table_info(codex_login_attempts)');
     const accountColumn = attemptColumns.find(({ name }) => name === 'account_id');
     const current = attemptColumns.some(({ name }) => name === 'attempt_token_hash')
@@ -390,76 +376,25 @@ export class ProductStore {
     `);
   }
 
-  upsertSmartAccount({ username = '', email = '', name = '', sub = '' } = {}) {
-    const cleanSub = String(sub || username || email || '').trim();
-    if (!cleanSub) throw new Error('Smart account identifier is required');
-    const smartSubject = `smart:${cleanSub}`;
-    const normalizedEmail = cleanEmail(email, username ? `${username}@shopee.com` : 'user@smart.shopee.io');
-    const normalizedName = cleanName(name || username, normalizedEmail);
-    const now = new Date().toISOString();
-    if (!this._smartAccountStmts) {
-      this._smartAccountStmts = {
-        findBySubject: this.sqlite.prepare('SELECT * FROM accounts WHERE codex_subject = ? OR codex_subject = ?'),
-        findByEmail: this.sqlite.prepare('SELECT * FROM accounts WHERE email = ?'),
-        update: this.sqlite.prepare(`
-          UPDATE accounts
-          SET codex_subject = COALESCE(NULLIF(?, ''), codex_subject), email = ?, display_name = ?, updated_at = ?
-          WHERE id = ?
-        `),
-        insert: this.sqlite.prepare(`
-          INSERT INTO accounts (id, google_sub, codex_subject, email, display_name, avatar_url, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
-        `)
-      };
-    }
-    const stmts = this._smartAccountStmts;
-    const apply = this.sqlite.transaction(() => {
-      let existing = stmts.findBySubject.get(smartSubject, `space:${cleanSub}`);
-      if (!existing && normalizedEmail && normalizedEmail !== 'user@smart.shopee.io') {
-        existing = stmts.findByEmail.get(normalizedEmail);
-      }
-      if (existing) {
-        stmts.update.run(smartSubject, normalizedEmail, normalizedName, now, existing.id);
-        this.ensureDefaultPersonalKey(existing.id);
-        return existing.id;
-      }
-      const id = randomUUID();
-      stmts.insert.run(id, `smart:${hash(smartSubject)}`, smartSubject, normalizedEmail, normalizedName, now, now);
-      this.ensureDefaultPersonalKey(id);
-      return id;
-    });
-    return this.account(apply());
-  }
-
-  upsertCodexAccount({ subject, issuer = '', email = '', name = '' }, preferredAccountId = null, { allowIdentityRotation = false } = {}) {
-    const codexSubject = codexIdentity(subject, issuer);
-    if (!codexSubject) throw new Error('Codex identity is missing subject');
+  upsertAccount({ email = '', name = '' } = {}) {
+    const normalizedEmail = cleanEmail(email).toLowerCase();
+    if (!normalizedEmail) throw new Error('Account email is required');
+    const normalizedName = cleanName(name, normalizedEmail);
     const now = new Date().toISOString();
     const apply = this.sqlite.transaction(() => {
-      const bySubject = this.sqlite.prepare('SELECT * FROM accounts WHERE codex_subject = ?').get(codexSubject);
-      const preferred = preferredAccountId ? this.requireAccount(preferredAccountId) : null;
-      if (bySubject && preferred && bySubject.id !== preferred.id) {
-        throw Object.assign(new Error('Codex identity is already linked to another QuotaHub account'), { statusCode: 409 });
-      }
-      if (preferred?.codex_subject && preferred.codex_subject !== codexSubject && !allowIdentityRotation) {
-        throw Object.assign(new Error('Codex account is already linked to another QuotaHub identity'), { statusCode: 409 });
-      }
-      const existing = preferred || bySubject;
-      const normalizedEmail = cleanEmail(email, existing?.email);
+      const existing = this.sqlite.prepare('SELECT id FROM accounts WHERE email = ?').get(normalizedEmail);
+      let id;
       if (existing) {
+        id = existing.id;
+        this.sqlite.prepare('UPDATE accounts SET display_name = ?, updated_at = ? WHERE id = ?')
+          .run(normalizedName, now, id);
+      } else {
+        id = randomUUID();
         this.sqlite.prepare(`
-          UPDATE accounts
-          SET codex_subject = ?, email = ?, display_name = ?, updated_at = ?
-          WHERE id = ?
-        `).run(codexSubject, normalizedEmail, cleanName(name, normalizedEmail), now, existing.id);
-        this.ensureDefaultPersonalKey(existing.id);
-        return existing.id;
+          INSERT INTO accounts (id, email, display_name, avatar_url, created_at, updated_at)
+          VALUES (?, ?, ?, NULL, ?, ?)
+        `).run(id, normalizedEmail, normalizedName, now, now);
       }
-      const id = randomUUID();
-      this.sqlite.prepare(`
-        INSERT INTO accounts (id, google_sub, codex_subject, email, display_name, avatar_url, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
-      `).run(id, `codex:${hash(codexSubject)}`, codexSubject, normalizedEmail, cleanName(name, normalizedEmail), now, now);
       this.ensureDefaultPersonalKey(id);
       return id;
     });
@@ -507,13 +442,6 @@ export class ProductStore {
 
   account(id) {
     const row = this.sqlite.prepare('SELECT * FROM accounts WHERE id = ?').get(id);
-    return row ? publicAccount(row) : null;
-  }
-
-  accountForCodexIdentity({ subject, issuer = '' }) {
-    const identity = codexIdentity(subject, issuer);
-    if (!identity) return null;
-    const row = this.sqlite.prepare('SELECT * FROM accounts WHERE codex_subject = ?').get(identity);
     return row ? publicAccount(row) : null;
   }
 
@@ -3012,13 +2940,6 @@ function decrypt(value, key) {
   const decipher = createDecipheriv('aes-256-gcm', key, packed.subarray(0, 12));
   decipher.setAuthTag(packed.subarray(12, 28));
   return Buffer.concat([decipher.update(packed.subarray(28)), decipher.final()]).toString('utf8');
-}
-
-function codexIdentity(subject, issuer) {
-  const normalizedSubject = typeof subject === 'string' ? subject.trim() : '';
-  if (!normalizedSubject) return '';
-  const normalizedIssuer = typeof issuer === 'string' ? issuer.trim().replace(/\/+$/, '') : '';
-  return `${normalizedIssuer || 'openai'}:${normalizedSubject}`;
 }
 
 function cleanEmail(value, fallback = '') {

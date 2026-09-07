@@ -28,7 +28,7 @@ function authJson({ subject = 'import-user', email = 'import@example.com', accou
 }
 
 function account(store, sub) {
-  return store.upsertCodexAccount({ subject: sub, issuer: 'https://auth.openai.com', email: `${sub}@example.com`, name: sub });
+  return store.upsertAccount({ email: `${sub}@example.com`, name: sub });
 }
 
 function authHeaders(session, csrf = true) {
@@ -63,12 +63,7 @@ test('Codex device sign-in creates an opaque browser session and enforces origin
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const account = sharingStore.upsertCodexAccount({
-      subject: 'browser-user',
-      issuer: 'https://auth.openai.com',
-      email: 'browser@example.com',
-      name: 'Browser User'
-    });
+    const account = sharingStore.upsertAccount({ email: 'browser@example.com', name: 'Browser User' });
     const manager = {
       start() {
         const attempt = sharingStore.createCodexLoginAttempt();
@@ -439,9 +434,7 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const admin = sharingStore.upsertCodexAccount({
-      subject: 'admin-user', issuer: 'https://auth.openai.com', email: 'quangnghia.trinh@shopee.com', name: 'Admin'
-    });
+    const admin = sharingStore.upsertAccount({ email: 'quangnghia.trinh@shopee.com', name: 'Admin' });
     const member = account(sharingStore, 'member');
     const adminSession = sharingStore.createAccountSession(admin.id);
     const memberSession = sharingStore.createAccountSession(member.id);
@@ -517,9 +510,7 @@ test('admin export and import restore QuotaHub data', async () => {
     const store = new Store(dir);
     const upstream = store.create({ type: 'compass', projectId: 'portable-project', projectKey: 'secret' });
     const sharingStore = new ProductStore(dir);
-    const admin = sharingStore.upsertCodexAccount({
-      subject: 'admin-user', issuer: 'https://auth.openai.com', email: 'quangnghia.trinh@shopee.com', name: 'Admin'
-    });
+    const admin = sharingStore.upsertAccount({ email: 'quangnghia.trinh@shopee.com', name: 'Admin' });
     const member = account(sharingStore, 'member');
     sharingStore.linkUpstream(admin.id, upstream.id);
     const adminSession = sharingStore.createAccountSession(admin.id);

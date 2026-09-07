@@ -7,12 +7,7 @@ import { createEmailScheduler } from '../src/email.js';
 import { ProductStore } from '../src/product-store.js';
 
 function account(store, subject = 'mail-user') {
-  return store.upsertCodexAccount({
-    subject,
-    issuer: 'https://auth.openai.com',
-    email: `${subject}@example.com`,
-    name: subject
-  });
+  return store.upsertAccount({ email: `${subject}@example.com`, name: subject });
 }
 
 test('email outbox deduplicates events and marks delivered mail as sent', async () => {
