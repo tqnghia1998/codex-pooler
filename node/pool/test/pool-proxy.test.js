@@ -15,7 +15,7 @@ function jwt(payload) {
 }
 
 function account(store, sub) {
-  return store.upsertCodexAccount({ subject: sub, issuer: 'https://auth.openai.com', email: `${sub}@example.com`, name: sub });
+  return store.upsertAccount({ email: `${sub}@example.com`, name: sub });
 }
 
 async function running(store, sharingStore, fetchImpl) {

@@ -55,11 +55,15 @@ rejects that configuration.
 
 ## Authentication
 
-Users can sign in through `codex login --device-auth` or paste the contents of
-an existing Codex `auth.json` into the login dialog. Device login runs the CLI
-with a temporary isolated `CODEX_HOME`. Both paths validate the stable token
-issuer and subject, import or refresh the credentials in the private encrypted
-gateway store, and create or find the same product account. Pasted credentials
+Users can sign in through Smart SSO, or link a provider by running
+`codex login --device-auth` or pasting the contents of an existing Codex
+`auth.json` into the login dialog. Device login runs the CLI with a temporary
+isolated `CODEX_HOME`. Accounts are keyed by email; Codex, Claude, and other
+provider credentials are only links attached to the account, never separate
+identities. Both paths validate the stable token issuer and subject, import or
+refresh the credentials in the private encrypted
+gateway store, and attach them
+to the account with the matching email. Pasted credentials
 are used only for the import request and are not saved in browser storage.
 The paste dialog accepts raw JSON and JSON surrounded by standalone Markdown
 code-fence lines. When Codex rotates an enterprise SSO subject, an import with
