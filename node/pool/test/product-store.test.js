@@ -285,6 +285,12 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     sharingStore.settleSession(session.id, 'attempt-1', 2_000_000);
     sharingStore.settleSession(session.id, 'attempt-1', 2_000_000);
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).consumedQuotaDollars, 2);
+    for (let index = 0; index < 1_000; index += 1) {
+      sharingStore.reserveSession(session.id, `attempt-${index + 3}`, { upstreamStore });
+      sharingStore.releaseReservation(`attempt-${index + 3}`, null);
+    }
+    assert.equal(sharingStore.session(session.id, first.id, upstreamStore).activity.requestCount, 1_002);
+    assert.equal(sharingStore.sqlite.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN ('sharing_reservations', 'sharing_session_settlements')").get().count, 0);
     sharingStore.updateSession(provider.id, session.id, { quotaDollars: 2 }, upstreamStore);
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).status, 'exhausted');
     sharingStore.updateSession(provider.id, session.id, { additionalQuotaDollars: 2 }, upstreamStore);
@@ -547,15 +553,6 @@ test('cleans stale product records while retaining current records and account s
       VALUES ('old-session-key', 'old-session', 'old-session-key-hash', ?, ?)
     `).run(old, old);
     sharingStore.sqlite.prepare(`
-      INSERT INTO sharing_session_settlements (session_id, attempt_id, settled_micros, created_at)
-      VALUES ('old-session', 'old-attempt', 1000000, ?)
-    `).run(old);
-    sharingStore.sqlite.prepare(`
-      INSERT INTO sharing_reservations
-        (id, session_id, reserved_micros, status, created_at, expires_at, settled_at)
-      VALUES ('old-attempt', 'old-session', 1000000, 'settled', ?, ?, ?)
-    `).run(old, old, old);
-    sharingStore.sqlite.prepare(`
       INSERT INTO personal_api_keys
         (id, account_id, name, key_hash, key_cipher, last_session_id, created_at, updated_at)
       VALUES ('retention-key', ?, 'Retention', 'retention-key-hash', 'cipher', 'old-session', ?, ?)
@@ -628,8 +625,6 @@ test('cleans stale product records while retaining current records and account s
 
     assert.equal(removed.loginAttempts, 1);
     assert.equal(removed.routes, 1);
-    assert.equal(removed.reservations, 1);
-    assert.equal(removed.settlements, 1);
     assert.equal(removed.emails, 1);
     assert.equal(removed.accountSessions, 1);
     assert.equal(removed.sessions, 1);

@@ -425,7 +425,6 @@ test('successful unpriced native streams release share reservations as successfu
       const activity = sharingStore.session(session.id, consumer.id, store).activity;
       assert.equal(activity.requestCount, 1);
       assert.equal(activity.successCount, 1);
-      assert.deepEqual(activity.recentFailures, []);
     } finally {
       await app.close();
     }
