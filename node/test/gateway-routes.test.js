@@ -815,6 +815,26 @@ test('translates public image generations and edits through Responses SSE', asyn
     assert.equal(invalid.status, 400);
     assert.equal((await invalid.json()).error.param, 'size');
     assert.equal(responseBodies.length, 2);
+
+    for (const model of ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']) {
+      const image25 = await gatewayFetch(base, '/v1/images/generations', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model, prompt: 'a cat', quality: 'xhigh', size: '1536x864' })
+      });
+      assert.equal(image25.status, 200);
+      assert.deepEqual(responseBodies.at(-1).tools, [{ type: 'image_generation', model, size: '1536x864', quality: 'xhigh' }]);
+    }
+
+    for (const payload of [
+      { model: 'gpt-image-2.5-flare', prompt: 'bad', quality: 'ultra' },
+      { model: 'gpt-image-2.5-flare', prompt: 'bad', size: '1537x864' },
+      { model: 'gpt-image-2.5-flare', prompt: 'bad', size: '3856x2048' }
+    ]) {
+      const rejected = await gatewayFetch(base, '/v1/images/generations', {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload)
+      });
+      assert.equal(rejected.status, 400);
+    }
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });

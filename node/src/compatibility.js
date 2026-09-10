@@ -20,7 +20,8 @@ import {
   selectPersonalShareSession
 } from './share-authorization.js';
 
-const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2']);
+const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
+const IMAGE_25_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
 const IMAGE_ENUMS = {
@@ -226,10 +227,25 @@ function validateImage(payload, edit) {
   if (!IMAGE_MODELS.has(text(payload.model))) return { message: payload.model ? 'image model is not supported' : 'model is required', param: 'model' };
   if (!text(payload.prompt)) return { message: 'prompt is required', param: 'prompt' };
   for (const [field, allowed] of Object.entries(IMAGE_ENUMS)) {
-    if (payload[field] !== undefined && !allowed.has(text(payload[field]))) return { message: `${field} is not supported`, param: field };
+    const value = text(payload[field]);
+    if (payload[field] === undefined) continue;
+    if (field === 'quality' && IMAGE_25_MODELS.has(payload.model) && ['xhigh', 'max'].includes(value)) continue;
+    if (field === 'size' && IMAGE_25_MODELS.has(payload.model) && validImage25Size(value)) continue;
+    if (!allowed.has(value)) return { message: `${field} is not supported`, param: field };
   }
   if (payload.n !== undefined && Number(payload.n) !== 1) return { message: 'n must be 1', param: 'n' };
   return null;
+}
+
+function validImage25Size(value) {
+  const dimensions = /^(\d{1,4})x(\d{1,4})$/.exec(value);
+  if (!dimensions) return false;
+  const [width, height] = dimensions.slice(1).map(Number);
+  return width % 16 === 0 && height % 16 === 0
+    && Math.max(width, height) <= 3840
+    && Math.max(width, height) <= 3 * Math.min(width, height)
+    && width * height >= 655_360
+    && width * height <= 8_294_400;
 }
 
 function imageResponsesPayload(payload, hostModel) {
