@@ -9,6 +9,8 @@ const DEFAULT_BOOTSTRAP_BYTES = 512 * 1024;
 const DEFAULT_BOOTSTRAP_EVENTS = 32;
 const DEFAULT_BOOTSTRAP_TIMEOUT_MS = 1_000;
 const MAX_INPUT_ITEM_ID_LENGTH = 64;
+const PROMPT_CACHE_SESSION_NAMESPACE = Buffer.from('0aac30b0031152bd8fb7258f9c6f0278', 'hex');
+const PROMPT_CACHE_KEY_MAX_BYTES = 512;
 const ID_PREFIXES = {
   message: 'msg',
   reasoning: 'rs',
@@ -16,6 +18,16 @@ const ID_PREFIXES = {
   custom_tool_call: 'ctc',
   custom_tool_call_output: 'ctco'
 };
+
+export function promptCacheSessionId({ scopeId, apiKeyId } = {}, key) {
+  if (typeof scopeId !== 'string' || !scopeId || typeof apiKeyId !== 'string' || !apiKeyId || typeof key !== 'string') return '';
+  if (!Buffer.byteLength(key) || Buffer.byteLength(key) > PROMPT_CACHE_KEY_MAX_BYTES) return '';
+  const name = `${Buffer.byteLength(scopeId)}:${scopeId},${Buffer.byteLength(apiKeyId)}:${apiKeyId},${key}`;
+  const bytes = createHash('sha1').update(PROMPT_CACHE_SESSION_NAMESPACE).update(name).digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  return `${bytes.toString('hex', 0, 4)}-${bytes.toString('hex', 4, 6)}-${bytes.toString('hex', 6, 8)}-${bytes.toString('hex', 8, 10)}-${bytes.toString('hex', 10, 16)}`;
+}
 
 export function codexGatewayOptions(input = {}, env = process.env) {
   return {
