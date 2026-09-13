@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   codexGatewayOptions,
   prepareCodexMultiAgentRequest,
+  promptCacheSessionId,
   restoreCodexMultiAgentResponse,
   sanitizeCodexInputItemIds
 } from '../src/codex-compatibility.js';
@@ -14,6 +15,13 @@ const officialCodexRequest = {
     'x-openai-subagent': 'collab_spawn'
   }
 };
+
+test('derives bounded tenant-scoped UUIDv5 prompt-cache session IDs', () => {
+  assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'cache-key'), '85f2fffb-3108-5039-be08-60f5b2d93928');
+  assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-2' }, 'cache-key'), 'af207d10-ce5d-5d42-b886-c30e5e961c5c');
+  assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, ''), '');
+  assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'x'.repeat(513)), '');
+});
 
 test('Codex gateway options keep transport defaults bounded and protocol rewrites opt-in', () => {
   const options = codexGatewayOptions({ websocketFrameBytes: 128 * 1024, websocketPendingBytes: 128 * 1024, streamBootstrapBytes: 128 * 1024 });

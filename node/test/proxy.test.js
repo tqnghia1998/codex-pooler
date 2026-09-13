@@ -983,7 +983,10 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
         'x-codex-installation-id': 'install-1',
         'x-codex-turn-state': 'turn-1',
         'x-openai-subagent': 'subagent-1',
-        'x-codex-session-id': 'must-not-forward'
+        'x-codex-session-id': 'must-not-forward',
+        'session-id': 'native-session',
+        'thread-id': 'native-thread',
+        'x-client-request-id': 'native-request'
       },
       body: JSON.stringify({
         model: 'gpt-5.6-sol', input: 'hello', stream: true, service_tier: ' fast ',
@@ -1006,6 +1009,9 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     assert.equal(backendCall.options.headers['x-codex-window-id'], 'window-1');
     assert.deepEqual(JSON.parse(backendCall.options.headers['x-codex-turn-metadata']), { safe: true });
     assert.equal('x-codex-session-id' in backendCall.options.headers, false);
+    assert.equal(backendCall.options.headers['session-id'], 'native-session');
+    assert.equal(backendCall.options.headers['thread-id'], 'native-thread');
+    assert.equal(backendCall.options.headers['x-client-request-id'], 'native-request');
 
     calls.length = 0;
     const publicResponse = await fetch(base + '/v1/responses', {
@@ -1016,7 +1022,7 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
         'x-codex-turn-state': 'must-not-forward'
       },
       body: JSON.stringify({
-        model: 'gpt-5.6-sol', input: 'hello', stream: true, service_tier: 'auto',
+        model: 'gpt-5.6-sol', input: 'hello', stream: true, service_tier: 'auto', prompt_cache_key: 'public-cache-key',
         reasoning: { effort: 'ultra', summary: 'detailed' }
       })
     });
@@ -1027,6 +1033,7 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     assert.equal('service_tier' in calls[0].body, false);
     assert.deepEqual(calls[0].body.include, ['reasoning.encrypted_content']);
     assert.equal('x-codex-turn-state' in calls[0].options.headers, false);
+    assert.match(calls[0].options.headers['session-id'], /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
@@ -1388,6 +1395,30 @@ test('caps candidate failover and finalizes exhausted gateway diagnostics', asyn
     assert.equal(diagnostics.failures[0].retryCount, 8);
     assert.equal(diagnostics.failures[0].attemptCount, 8);
     assert.equal(diagnostics.failures[0].errorCode, 'upstream_transport_failed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays safe public Codex parameter validation without provider text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-validation-relay-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'unsupported_value', param: 'reasoning.effort', message: "Rejected 'private-value'. Supported values are: 'low', 'high'." }
+  }), { status: 400, headers: { 'content-type': 'application/json' } }), 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', input: 'hello', reasoning: { effort: 'private-value' }
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 400);
+    assert.deepEqual(result.body.error, {
+      type: 'invalid_request_error', code: 'unsupported_value', param: 'reasoning.effort',
+      message: 'upstream rejected parameter reasoning.effort (unsupported_value); supported values: low, high'
+    });
+    assert.equal(JSON.stringify(result.body).includes('private-value'), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
