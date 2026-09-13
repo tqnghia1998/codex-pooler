@@ -1449,6 +1449,81 @@ test('rejects invalid WebSocket stream IDs and recovers on the next turn', async
   }
 });
 
+test('reconnects public WebSockets when prompt-cache session identity changes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-cache-session-'));
+  const { store } = configuredStore(dir);
+  const sessions = [];
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket, request) => {
+    sessions.push(request.headers['session-id']);
+    socket.on('message', (data) => {
+      const input = JSON.parse(data).input;
+      socket.send(JSON.stringify({ type: 'response.completed', response: { id: `ws-${input}`, status: 'completed', output: [] } }));
+    });
+  });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, websocketUrl: () => `ws://127.0.0.1:${target.address().port}`, fetchImpl: async () => new Response('{}') });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: `Bearer ${API_KEY}` } });
+      let turns = 0;
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'one', prompt_cache_key: 'cache-one' })));
+      client.on('message', () => {
+        if (++turns === 1) client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'two', prompt_cache_key: 'cache-two' }));
+        else { client.close(); resolve(); }
+      });
+      client.once('error', reject);
+    });
+    assert.equal(sessions.length, 2);
+    assert.ok(sessions.every((session) => /^[0-9a-f-]{36}$/.test(session)));
+    assert.notEqual(sessions[0], sessions[1]);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('retires an upstream WebSocket after a connection-limit terminal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-connection-limit-'));
+  const { store } = configuredStore(dir);
+  let connections = 0;
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => {
+    connections += 1;
+    socket.on('message', () => {
+      if (connections === 1) socket.send(JSON.stringify({ type: 'response.failed', error: { code: 'websocket_connection_limit_reached' } }));
+      else socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'after-limit', status: 'completed', output: [] } }));
+    });
+  });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, websocketUrl: () => `ws://127.0.0.1:${target.address().port}`, fetchImpl: async () => new Response('{}') });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: `Bearer ${API_KEY}` } });
+      let failed = false;
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'limit' })));
+      client.on('message', (data) => {
+        const event = JSON.parse(data);
+        if (!failed && event.type === 'response.failed') { failed = true; setTimeout(() => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'after' })), 10); }
+        else if (event.type === 'response.completed') { client.close(); resolve(); }
+      });
+      client.once('error', reject);
+    });
+    assert.equal(connections, 2);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fails over a public WebSocket turn before output and settles its terminal usage', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-failover-'));
   const store = new Store(dir);
@@ -2003,13 +2078,14 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
     assert.equal(targetHeaders['openai-beta'], 'responses_websockets=2026-02-06');
     assert.match(targetHeaders.authorization, /^Bearer header\./);
     assert.equal(targetHeaders['chatgpt-account-id'], 'acct-routes');
+    assert.equal(targetHeaders['session-id'], undefined);
 
     const models = await gatewayFetch(`http://127.0.0.1:${gateway.address().port}`, '/backend-api/codex/models');
     const expectedModelsEtag = models.headers.get('etag');
     await models.text();
     let backendModelsEtag;
     const backendMessages = await new Promise((resolve, reject) => {
-      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, { headers: { authorization: `Bearer ${API_KEY}` } });
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, { headers: { authorization: `Bearer ${API_KEY}`, 'session-id': 'native-session', 'thread-id': 'native-thread', 'x-client-request-id': 'native-request' } });
       client.once('upgrade', (response) => { backendModelsEtag = response.headers['x-models-etag']; });
       client.once('open', () => client.send('{"backend":true}'));
       const received = [];
@@ -2029,6 +2105,9 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
       response: { id: 'backend-native', headers: { 'x-reasoning-included': 'true' } }
     });
     assert.equal(backendModelsEtag, expectedModelsEtag);
+    assert.equal(targetHeaders['session-id'], 'native-session');
+    assert.equal(targetHeaders['thread-id'], 'native-thread');
+    assert.equal(targetHeaders['x-client-request-id'], 'native-request');
 
     const status = await new Promise((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: 'Bearer wrong' } });
