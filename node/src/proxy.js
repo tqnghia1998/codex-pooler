@@ -45,7 +45,8 @@ import {
   codexGatewayOptions,
   prepareCodexMultiAgentRequest,
   restoreCodexMultiAgentResponse,
-  sanitizeCodexInputItemIds
+  sanitizeCodexInputItemIds,
+  promptCacheSessionId
 } from './codex-compatibility.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
@@ -82,6 +83,9 @@ const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('co
 const COMPATIBILITY_RETRY_LIMIT = Math.max(CODEX_OPTIONAL_FALLBACK_FIELDS.size, COMPASS_OPTIONAL_FALLBACK_FIELDS.size + 1);
 const ANTHROPIC_BETA_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORWARDED_HEADER_MAX_BYTES = 1024;
+const PROVIDER_SESSION_HEADERS = ['session-id', 'thread-id', 'x-client-request-id'];
+const PROVIDER_SESSION_HEADER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const RELAYABLE_VALIDATION_CODES = new Set(['unsupported_value', 'invalid_value', 'unsupported_parameter', 'missing_required_parameter', 'invalid_type', 'string_above_max_length']);
 const CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS = 5 * 60_000;
 const CLAUDE_QUOTA_HEADER_NAMES = [
   'anthropic-ratelimit-unified-5h-utilization',
@@ -240,7 +244,9 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       responseStatusCode: response.status
     });
     const validAnthropic = response.status >= 400 && response.status < 500 && ['compass', 'claude'].includes(upstream.type) && CLAUDE_MESSAGES_PATHS.has(sourcePath) && validAnthropicError(errorBytes);
+    const validationError = publicValidationError(response, errorBytes, path, sourcePath);
     if (policyError) sendJson(res, response.status, { error: policyError });
+    else if (validationError) sendJson(res, response.status, { error: validationError });
     else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
     else sendFailure(res, retryAfterHeader(response));
     return;
@@ -1247,11 +1253,18 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
   const forwarded = upstream.type === 'compass' && sourcePath === '/v1/messages'
     ? ANTHROPIC_HEADERS
     : !direct && isBackendMetadataRoute(originalPath) && sourcePath !== '/v1/chat/completions'
-      ? BACKEND_METADATA_HEADERS
+      ? [...BACKEND_METADATA_HEADERS, ...PROVIDER_SESSION_HEADERS]
       : [];
   for (const name of forwarded) {
-    const value = direct ? anthropicHeader(req, name) : req.headers[name];
-    if (typeof value === 'string' && value) headers[name] = projectMetadataHeader(name, value);
+    const value = direct ? anthropicHeader(req, name) : header(req, name);
+    if (!value) continue;
+    if (PROVIDER_SESSION_HEADERS.includes(name)) {
+      if (validProviderSessionHeader(value)) headers[name] = value;
+    } else headers[name] = projectMetadataHeader(name, value);
+  }
+  if (!direct && originalPath.startsWith('/v1/')) {
+    const sessionId = promptCacheSessionId({ scopeId: requestScopeId(req), apiKeyId: requestAccounting(req).apiKeyId }, projectedBody?.prompt_cache_key);
+    if (sessionId) headers['session-id'] = sessionId;
   }
   if (direct && sourcePath === '/v1/messages' && !headers['anthropic-version']) headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
   return {
@@ -2522,7 +2535,19 @@ function backendWebSocketMetadata(req) {
     const value = header(req, name);
     if (value) headers[name] = projectMetadataHeader(name, value);
   }
+  for (const name of PROVIDER_SESSION_HEADERS) {
+    const value = header(req, name);
+    if (validProviderSessionHeader(value)) headers[name] = value;
+  }
   return headers;
+}
+
+function validProviderSessionHeader(value) {
+  return typeof value === 'string' && PROVIDER_SESSION_HEADER_PATTERN.test(value);
+}
+
+function publicWebSocketSessionId(payload, req) {
+  return promptCacheSessionId({ scopeId: requestScopeId(req), apiKeyId: requestAccounting(req).apiKeyId }, payload?.prompt_cache_key);
 }
 
 function rawHeaders(upstream, credentials, req, protocolOptions = {}) {
@@ -2696,6 +2721,14 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let credentials = upstream && store.credentials(upstream.id);
   let targetSocket;
   let targetUpstreamId = upstream?.id || null;
+  let targetPromptCacheSessionId = null;
+  const retireUpstreamSocket = (socket) => {
+    if (socket !== targetSocket) return;
+    targetSocket = undefined;
+    targetUpstreamId = null;
+    targetPromptCacheSessionId = null;
+    if ([WebSocket.OPEN, WebSocket.CONNECTING].includes(socket.readyState)) socket.close();
+  };
   let pendingBytes = 0;
   let publicSequence = 0;
   let publicTurnActive = false;
@@ -3043,14 +3076,16 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           void executePublicWebSocketCompaction(compactionBridge.payload, candidate);
           return;
         }
+        const promptCacheSessionId = publicWebSocketSessionId(payload, req);
         const needsConnection = !compactionBridge
-          && (!targetSocket || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(targetSocket.readyState) || targetUpstreamId !== candidate.id);
+          && (!targetSocket || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(targetSocket.readyState) || targetUpstreamId !== candidate.id || targetPromptCacheSessionId !== promptCacheSessionId);
         upstream = candidate;
         if (needsConnection) {
           if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
           credentials = store.credentials(upstream.id);
           targetSocket = undefined;
           targetUpstreamId = null;
+          targetPromptCacheSessionId = null;
           void ensureProviderCredentials(upstream, credentials, { fetchImpl, saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt) }).then((refreshed) => {
             gatewayDiagnosticsForStore(store).credentialPrepared(attempt.id);
             if (refreshed && !renewPublicAdmission(upstream)) {
@@ -3134,6 +3169,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
     targetSocket = undefined;
     targetUpstreamId = null;
+    targetPromptCacheSessionId = null;
   });
   client.on('error', () => closeBoth(1011, 'Client websocket error'));
 
@@ -3152,6 +3188,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     const previousSocket = targetSocket;
     targetSocket = undefined;
     targetUpstreamId = null;
+    targetPromptCacheSessionId = null;
     if (previousSocket?.readyState === WebSocket.OPEN || previousSocket?.readyState === WebSocket.CONNECTING) previousSocket.close();
     publicAttempt = publicLifecycle
       ? store.beginGatewayAttempt(publicLifecycle.id, upstream.id)
@@ -3376,7 +3413,10 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       socket = new WebSocket(target, {
         headers: {
           ...rawHeaders(connectionUpstream, connectionCredentials, req, { inheritClient: !publicResponses, websocket: true }),
-          ...(publicResponses ? {} : backendWebSocketMetadata(req)),
+          ...(publicResponses ? (() => {
+            const sessionId = publicWebSocketSessionId(publicPayload, req);
+            return sessionId ? { 'session-id': sessionId } : {};
+          })() : backendWebSocketMetadata(req)),
           origin: 'https://chatgpt.com'
         },
         handshakeTimeout: 120_000,
@@ -3409,6 +3449,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     };
     targetSocket = socket;
     targetUpstreamId = connectionUpstream.id;
+    targetPromptCacheSessionId = publicResponses ? publicWebSocketSessionId(publicPayload, req) : null;
     socket.on('upgrade', (response) => {
       settleHostResponse();
       if (publicResponses) gatewayDiagnosticsForStore(store).responseHeaders(publicAttempt?.id);
@@ -3434,6 +3475,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         gatewayDiagnosticsForStore(store).firstSseEvent(publicAttempt?.id);
         if (retryPublicWebSocketCompatibility(frame, connectionUpstream)) return;
         const frameOutcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
+        if (frameOutcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
         if (!publicOutput && frameOutcome.retryable) {
           if (modelNotFoundFailure(frame)) modelCatalog.markUnsupported(connectionUpstream.id, publicPayload?.model);
           if (retryPublicTurn(frameOutcome)) return;
@@ -3483,7 +3525,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       if (nativeAttempt && nativeFrame) nativeUsage = mergeUsage(nativeUsage, extractUsage(nativeFrame));
       if (nativeFrame && ['error', 'response.failed'].includes(nativeFrame.type)) {
-        settleNativeAdmission(classifySseEvent(nativeFrame));
+        const outcome = classifySseEvent(nativeFrame);
+        if (outcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
+        settleNativeAdmission(outcome);
         releaseNativeAttempt('upstream_response_failed');
         nativeAttempt = null;
         nativePayload = null;
@@ -3585,6 +3629,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       if (socket !== targetSocket || refreshingConnection || client.readyState !== WebSocket.OPEN) return;
       targetSocket = undefined;
       targetUpstreamId = null;
+      targetPromptCacheSessionId = null;
       const outcome = code === 1009
         ? { class: 'neutral', retryable: false, requestScoped: true, status: 413, errorCode: 'request_too_large' }
         : socketTransportOutcome || classifyTransportError(new Error('Upstream WebSocket closed'));
@@ -3752,6 +3797,45 @@ function policyErrorForRoute(bytes, path, sourcePath) {
 
 function publicPolicyError(bytes, path, sourcePath) {
   return policyRoute(path, sourcePath) ? publicMisalignmentError(parseJson(bytes)) : null;
+}
+
+function publicValidationError(response, bytes, path, sourcePath) {
+  if (response.status !== 400 || !['/v1/responses', '/v1/chat/completions'].includes(path) || sourcePath === '/v1/responses/compact' || bytes.length > 64 * 1024) return null;
+  const error = parseJson(bytes)?.error;
+  if (!error || error.type !== 'invalid_request_error' || !RELAYABLE_VALIDATION_CODES.has(error.code)) return null;
+  const param = validValidationParam(error.param) ? mapChatValidationParam(error.param, path) : null;
+  const supported = ['unsupported_value', 'invalid_value'].includes(error.code) ? supportedValidationValues(error.message) : null;
+  return {
+    type: 'invalid_request_error',
+    code: error.code,
+    param,
+    message: `upstream rejected${param ? ` parameter ${param}` : ' the request'} (${error.code})${supported ? `; supported values: ${supported.join(', ')}` : ''}`
+  };
+}
+
+function validValidationParam(value) {
+  return typeof value === 'string' && value.length <= 256 && /^[A-Za-z0-9_.[\]-]+$/.test(value);
+}
+
+function mapChatValidationParam(param, path) {
+  if (path !== '/v1/chat/completions') return param;
+  return {
+    'reasoning.effort': 'reasoning_effort',
+    max_output_tokens: 'max_completion_tokens',
+    'text.verbosity': 'verbosity',
+    'text.format': 'response_format'
+  }[param] || param;
+}
+
+function supportedValidationValues(message) {
+  if (typeof message !== 'string' || Buffer.byteLength(message) > 2_048) return null;
+  const marker = 'Supported values are: ';
+  if (message.split(marker).length !== 2) return null;
+  const values = message.match(/Supported values are: ('[A-Za-z0-9_.-]{1,32}'(?:(?:, and |, | and )'[A-Za-z0-9_.-]{1,32}')*)\.?$/)?.[1]
+    ?.match(/'([^']+)'/g)?.map((value) => value.slice(1, -1)) || [];
+  const quotedBefore = new Set((message.slice(0, message.indexOf(marker)).match(/'([^']+)'/g) || []).map((value) => value.slice(1, -1)));
+  const unique = [...new Set(values.filter((value) => !quotedBefore.has(value)))];
+  return unique.length && unique.length <= 12 ? unique : null;
 }
 
 function projectNativeMisalignmentEvent(event) {
