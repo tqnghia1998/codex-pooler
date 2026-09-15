@@ -44,6 +44,12 @@ store for imported Codex credentials. `pool/.data/pool.sqlite` and
 `pool/.data/.pool-key` hold product accounts, offers, tickets, sessions, key
 hashes, and audit events. Back up all four files together.
 
+QuotaHub also writes a full JSON snapshot to `pool/.data/quotahub-snapshot.json`
+on startup and then every hour, replacing the previous snapshot. The file uses
+the same format as the admin export and can be restored through admin import;
+it contains the encrypted gateway records and every product table. Set
+`POOL_BACKUP_INTERVAL_MS` to change the cadence.
+
 The embedded pool always uses local SQLite. Deploy it with a persistent volume
 for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone
 `codex-share` repository.

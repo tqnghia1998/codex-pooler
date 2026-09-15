@@ -23,6 +23,7 @@ import {
 import { ProductStore } from './product-store.js';
 import { CodexLoginManager } from './codex-login.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
+import { createSnapshotBackup, SNAPSHOT_BACKUP_INTERVAL_MS, snapshotBackupPath } from './backup.js';
 import { providerIssue } from './provider-availability.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -183,7 +184,8 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   quotaRefreshIntervalMs = Number(process.env.POOL_QUOTA_REFRESH_INTERVAL_MS) || QUOTA_REFRESH_INTERVAL_MS,
   tokenRefreshIntervalMs = Number(process.env.POOL_TOKEN_REFRESH_INTERVAL_MS) || TOKEN_REFRESH_INTERVAL_MS,
   emailDeliveryIntervalMs = Number(process.env.POOL_EMAIL_DELIVERY_INTERVAL_MS) || EMAIL_DELIVERY_INTERVAL_MS,
-  productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS
+  productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS,
+  backupIntervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS
 } = {}) {
   const poolDataDir = requirePoolDataDir(dataDir);
   store ||= new Store(poolDataDir);
@@ -196,6 +198,12 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   const codexHostHealth = codexHostHealthForStore(store);
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl });
   const emailScheduler = createEmailScheduler(productStore, { intervalMs: emailDeliveryIntervalMs });
+  const snapshotBackup = createSnapshotBackup({
+    store,
+    productStore,
+    filePath: snapshotBackupPath(poolDataDir),
+    intervalMs: backupIntervalMs
+  });
   store.setTokenRefreshFailureHandler?.(tokenScheduler.schedule);
   let refreshing = false;
   const refresh = async () => {
@@ -240,6 +248,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     codexHostHealth
   });
   productStore.cleanup();
+  snapshotBackup.run();
   void refresh();
   const timer = setInterval(refresh, quotaRefreshIntervalMs);
   timer.unref?.();
@@ -256,6 +265,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     store.setTokenRefreshFailureHandler?.(null);
     tokenScheduler.close();
     emailScheduler.close();
+    snapshotBackup.close();
     websocketServer.close();
     codexLoginManager.close();
   });
