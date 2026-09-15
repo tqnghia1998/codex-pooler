@@ -2993,6 +2993,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   client.on('message', (data, isBinary) => {
     if (client.readyState !== WebSocket.OPEN) return;
     if (isBinary) return client.close(1003, 'Binary WebSocket frames are not supported');
+    if (!isShareCredential(req.proxyAuth) && req.proxyAuth?.id && !store.authorizeApiKey(req.proxyAuth.id)) {
+      return client.close(1008, 'API key is no longer authorized');
+    }
     const shareDenial = refreshShareSessionAuthorization(req);
     if (shareDenial) {
       if (!publicResponses) return client.close(1008, shareDenial.message);
