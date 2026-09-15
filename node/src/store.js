@@ -150,8 +150,13 @@ export class Store {
     const db = this.load();
     const keyHash = apiKeyHash(key);
     const record = db.apiKeys.find((item) => constantHashEqual(item.keyHash, keyHash));
-    if (!record || record.status !== 'active' || activeScope(db, record.scopeId, false)?.status !== 'active') return null;
-    return publicApiKey(record);
+    return activeApiKey(db, record);
+  }
+
+  authorizeApiKey(id) {
+    if (typeof id !== 'string' || !id) return null;
+    const db = this.load();
+    return activeApiKey(db, db.apiKeys.find((item) => item.id === id));
   }
 
   updateApiKey(id, { status }) {
@@ -1221,7 +1226,7 @@ function scoped(items, scopeId) {
 
 function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), ignoreQuotaCooldown = false, allowUnknownQuota = false, ignoreSpendingCap = false) {
   for (const upstream of upstreams) ensureSpending(upstream);
-  const blocked = upstreams.filter((upstream) => ['failed', 'reauth_required'].includes(upstream.tokenRefresh?.status)
+  const blocked = upstreams.filter((upstream) => tokenRefreshBlocksRouting(upstream, now)
     || upstream.health?.status === 'reauth_required'
     || !ignoreQuotaCooldown && accountCooldownBlocks(upstream.health, now));
   const result = filterSpendCapEligible(upstreams.filter((upstream) => !blocked.includes(upstream)), { continuationId, allowUnknownQuota, ignoreSpendingCap });
@@ -1236,6 +1241,14 @@ function eligibilityFromUpstreams(upstreams, continuationId, now = Date.now(), i
       nextEligibleAt: upstream.health?.nextEligibleAt || null
     }))]
   };
+}
+
+function tokenRefreshBlocksRouting(upstream, now) {
+  const refresh = upstream.tokenRefresh;
+  if (!['failed', 'reauth_required'].includes(refresh?.status)) return false;
+  if (refresh.status !== 'failed' || refresh.trigger !== 'scheduled') return true;
+  const expiresAt = Date.parse(upstream.accessTokenExpiresAt);
+  return !Number.isFinite(expiresAt) || expiresAt <= now;
 }
 
 function accountCooldownBlocks(health, now) {
@@ -1589,6 +1602,11 @@ function publicScope({ id, status, models }) {
 
 function publicApiKey({ id, scopeId, status, createdAt }) {
   return { id, scopeId, status, createdAt };
+}
+
+function activeApiKey(db, record) {
+  if (!record || record.status !== 'active' || activeScope(db, record.scopeId, false)?.status !== 'active') return null;
+  return publicApiKey(record);
 }
 
 function publicFile({ scopeId: _scopeId, ...file }) {

@@ -84,6 +84,42 @@ test('routes legacy Claude OAuth records without auth metadata', () => {
   }
 });
 
+test('keeps an unexpired credential eligible after a scheduled refresh failure', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'codex',
+      authJson: JSON.stringify({ tokens: { access_token: 'still-valid', refresh_token: 'refresh-token' } })
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    store.setTokenRefresh(upstream.id, {
+      status: 'failed',
+      trigger: 'scheduled',
+      finishedAt: new Date().toISOString(),
+      errorCode: 'failed'
+    });
+    store.persistCredentials(upstream.id, store.credentials(upstream.id), new Date(Date.now() + 60_000).toISOString());
+    store.setTokenRefresh(upstream.id, {
+      status: 'failed',
+      trigger: 'scheduled',
+      finishedAt: new Date().toISOString(),
+      errorCode: 'failed'
+    });
+
+    assert.deepEqual(store.candidatePlan({ model: 'gpt-5.6-sol' }).map(({ id }) => id), [upstream.id]);
+
+    store.setTokenRefresh(upstream.id, {
+      status: 'failed',
+      trigger: 'runtime',
+      finishedAt: new Date().toISOString(),
+      errorCode: 'failed'
+    });
+    assert.deepEqual(store.candidatePlan({ model: 'gpt-5.6-sol' }).map(({ id }) => id), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('allows Codex accounts that share an organization account ID', () => {
   const { dir, store } = tempStore();
   try {
