@@ -932,6 +932,46 @@ test('refreshes and retries a rejected upstream WebSocket handshake', async () =
   }
 });
 
+test('rechecks a scoped API key before each public WebSocket turn', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-key-recheck-'));
+  const { store } = configuredStore(dir);
+  const scopedKey = 'scoped-websocket-key';
+  const scope = store.createScope();
+  const record = store.createApiKey({ key: scopedKey, scopeId: scope.id });
+  let upstreamConnections = 0;
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', () => { upstreamConnections += 1; });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    fetchImpl: async () => new Response('{}'),
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const code = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
+        headers: { authorization: `Bearer ${scopedKey}` }
+      });
+      client.once('open', () => {
+        store.updateApiKey(record.id, { status: 'disabled' });
+        client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'must-not-dispatch' }));
+      });
+      client.once('close', resolve);
+      client.once('error', reject);
+    });
+    assert.equal(code, 1008);
+    assert.equal(upstreamConnections, 0);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('recovers after a public WebSocket handshake failure without replaying the failed turn', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-handshake-recovery-'));
   const { store } = configuredStore(dir);
