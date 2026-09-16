@@ -2190,7 +2190,7 @@ function writeResponse(res, response, body, responseOptions = {}) {
 
 function responseHeaders(response, contentType = null, { relayTurnState = false, modelsEtag = null, nativeResponseControls = false } = {}) {
   const headers = { 'content-type': contentType || response.headers.get('content-type') || 'application/json' };
-  for (const name of ['cache-control', 'content-disposition', 'request-id', 'retry-after', 'x-request-id']) {
+  for (const name of ['cache-control', 'content-disposition', 'request-id', 'retry-after', 'x-request-id', 'x-oai-request-id', 'openai-request-id']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
   }
@@ -3753,6 +3753,10 @@ function redactNativeMisalignmentDetails(event) {
 function nativeResponseControlMap(headers) {
   const entries = Object.entries(headers);
   const projected = {};
+  for (const name of ['x-request-id', 'x-oai-request-id', 'openai-request-id']) {
+    const value = entries.find(([headerName]) => headerName.toLowerCase() === name)?.[1];
+    if (validResponseControlValue(value)) projected[name] = value;
+  }
   for (const [outputName, inputNames, presence = false] of [
     ['openai-model', ['openai-model', 'x-openai-model']],
     ['x-reasoning-included', ['x-reasoning-included'], true],
