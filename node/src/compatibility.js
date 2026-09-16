@@ -622,7 +622,7 @@ async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDead
 
 function responseHeaders(response) {
   const headers = {};
-  for (const name of ['x-request-id', 'cache-control', 'retry-after']) {
+  for (const name of ['x-request-id', 'x-oai-request-id', 'openai-request-id', 'cache-control', 'retry-after']) {
     const value = response.headers.get(name);
     if (value) headers[name] = value;
   }
