@@ -166,7 +166,15 @@ test('maps compact and native backend media routes while preserving request byte
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url, method: options.method, headers: options.headers, body: options.body });
-    return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { 'content-type': 'application/json', 'x-request-id': 'request-1' } });
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'x-request-id': 'request-1',
+        'x-oai-request-id': 'request-oai-1',
+        'openai-request-id': 'request-openai-1'
+      }
+    });
   };
   const { server, base } = await start(store, fetchImpl);
   try {
@@ -180,6 +188,8 @@ test('maps compact and native backend media routes while preserving request byte
     assert.equal(JSON.parse(calls[0].body).temperature, 0.2);
     assert.equal(JSON.parse(calls[0].body).top_p, 0.9);
     assert.equal(compact.headers.get('x-request-id'), 'request-1');
+    assert.equal(compact.headers.get('x-oai-request-id'), 'request-oai-1');
+    assert.equal(compact.headers.get('openai-request-id'), 'request-openai-1');
 
     const bytes = Buffer.from([0, 1, 2, 255]);
     const raw = await gatewayFetch(base, '/backend-api/transcribe', {
@@ -2085,7 +2095,11 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
       } else if (frame.backend === true) {
         socket.send(JSON.stringify({
           type: 'response.completed',
-          headers: { 'openai-model': 'gpt-native', 'x-provider-secret': 'drop' },
+          headers: {
+            'openai-model': 'gpt-native',
+            'x-oai-request-id': 'native-oai-request',
+            'x-provider-secret': 'drop'
+          },
           response: {
             id: 'backend-native',
             headers: { 'x-reasoning-included': false, 'x-provider-secret': 'drop' }
@@ -2141,7 +2155,7 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
     });
     assert.deepEqual(JSON.parse(backendMessages[1]), {
       type: 'response.completed',
-      headers: { 'openai-model': 'gpt-native' },
+      headers: { 'x-oai-request-id': 'native-oai-request', 'openai-model': 'gpt-native' },
       response: { id: 'backend-native', headers: { 'x-reasoning-included': 'true' } }
     });
     assert.equal(backendModelsEtag, expectedModelsEtag);
