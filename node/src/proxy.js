@@ -1129,6 +1129,7 @@ export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, o
       const events = pending.trim()
         ? [...result.blocks, pending]
         : result.blocks;
+      let retryPreambleSeen = false;
       for (const event of events) {
         if (!hasSseData(event)) continue;
         seenEvents += 1;
@@ -1144,13 +1145,24 @@ export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, o
         if (parsed) {
           firstEvent ||= parsed;
           const retryable = retryableSseFailure(parsed);
-          if (retryable || !bootstrap || parsed.type === 'error' || parsed.type === 'response.failed' || isSseBootstrapComplete(parsed)) {
+          if (retryable || parsed.type === 'error' || parsed.type === 'response.failed' || isSseBootstrapComplete(parsed)) {
             return finish({ response: streamResponseClone(response, downstream), retryable, firstEvent: parsed });
           }
+          // A created/in-progress preamble contains no output. Keep looking
+          // through blocks already read so a terminal in the same transport
+          // chunk can fail over before the response is committed downstream.
+          if (isSseRetryPreamble(parsed)) {
+            retryPreambleSeen = true;
+            continue;
+          }
+          if (!bootstrap) return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent: parsed });
           continue;
         }
         if (event.includes('data: [DONE]')) return finish({ response: streamResponseClone(response, downstream), retryable: false });
         if (!bootstrap) return finish({ response: streamResponseClone(response, downstream), retryable: false });
+      }
+      if (!bootstrap && retryPreambleSeen) {
+        return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
       }
       if (done) return finish({ response: streamResponseClone(response, downstream), retryable: true });
     }
@@ -1161,6 +1173,10 @@ export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, o
 
 function isSseBootstrapComplete(event) {
   return !['response.created', 'response.queued', 'response.in_progress', 'codex.response.metadata'].includes(event?.type);
+}
+
+function isSseRetryPreamble(event) {
+  return ['response.created', 'response.in_progress'].includes(event?.type);
 }
 
 function streamResponseClone(response, body) {
