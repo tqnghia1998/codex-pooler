@@ -112,6 +112,30 @@ test('buffers Codex SSE bootstrap events so overload can fail over before output
   assert.equal(await inspected.response.text(), raw);
 });
 
+test('classifies a retryable terminal behind a zero-output preamble in one read without bootstrap buffering', async () => {
+  const raw = [
+    'event: response.created\ndata: {"type":"response.created"}\n\n',
+    'event: response.in_progress\ndata: {"type":"response.in_progress"}\n\n',
+    'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}\n\n'
+  ].join('');
+  const inspected = await inspectInitialSseEvent(
+    new Response(raw, { headers: { 'content-type': 'text/event-stream' } })
+  );
+  assert.equal(inspected.retryable, true);
+  assert.equal(inspected.firstEvent.error.code, 'server_is_overloaded');
+  assert.equal(await inspected.response.text(), raw);
+});
+
+test('retains an observed zero-output preamble when it is relayed normally', async () => {
+  const raw = 'event: response.created\ndata: {"type":"response.created"}\n\n';
+  const inspected = await inspectInitialSseEvent(
+    new Response(raw, { headers: { 'content-type': 'text/event-stream' } })
+  );
+  assert.equal(inspected.retryable, false);
+  assert.equal(inspected.firstEvent.type, 'response.created');
+  assert.equal(await inspected.response.text(), raw);
+});
+
 test('releases stalled Codex SSE bootstrap buffering at its total timeout', async () => {
   const body = new ReadableStream({ start() {} });
   const started = Date.now();

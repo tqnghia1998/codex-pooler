@@ -1654,6 +1654,47 @@ test('fails over only an initial retryable SSE terminal event', async () => {
   }
 });
 
+test('fails over a retryable SSE terminal behind a zero-output preamble in one upstream read', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-preamble-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-preamble@example.com', accountId: 'first-preamble' }));
+  const second = store.create(codexInput({ email: 'second-preamble@example.com', accountId: 'second-preamble' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"first","status":"in_progress"}}',
+        'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"first","status":"in_progress"}}',
+        'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}', ''
+      ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"preamble-fallback","status":"completed","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'retry', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(text, /preamble-fallback/);
+    assert.doesNotMatch(text, /"id":"first"|server_is_overloaded/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fails over Codex overloads delivered after the SSE handshake when bootstrap buffering is enabled', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-bootstrap-failover-'));
   const store = new Store(dir);
