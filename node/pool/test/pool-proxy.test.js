@@ -18,8 +18,8 @@ function account(store, sub) {
   return store.upsertAccount({ email: `${sub}@example.com`, name: sub });
 }
 
-async function running(store, sharingStore, fetchImpl) {
-  const server = createServer(createApp({ store, productStore: sharingStore, fetchImpl }));
+async function running(store, sharingStore, fetchImpl, options = {}) {
+  const server = createServer(createApp({ store, productStore: sharingStore, fetchImpl, ...options }));
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
     base: `http://127.0.0.1:${server.address().port}`,
@@ -95,6 +95,78 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
       assert.equal(response.status, 403);
       assert.equal((await response.json()).error.code, 'share_session_exhausted');
 
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('personal-key SSE requests honor QuotaHub bootstrap buffering before failover', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-bootstrap-failover-'));
+  try {
+    const store = new Store(dir);
+    const first = store.create({ type: 'codex', authJson: JSON.stringify({ tokens: {
+      access_token: jwt({ email: 'bootstrap-first@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'bootstrap-first' } }),
+      id_token: jwt({ email: 'bootstrap-first@example.com' })
+    }}) });
+    const second = store.create({ type: 'codex', authJson: JSON.stringify({ tokens: {
+      access_token: jwt({ email: 'bootstrap-second@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'bootstrap-second' } }),
+      id_token: jwt({ email: 'bootstrap-second@example.com' })
+    }}) });
+    store.setCap(first.id, { capDollars: 100 });
+    store.setCap(second.id, { capDollars: 100 });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'bootstrap-provider');
+    const consumer = account(sharingStore, 'bootstrap-consumer');
+    sharingStore.linkUpstream(provider.id, first.id);
+    sharingStore.linkUpstream(provider.id, second.id);
+    const firstOffer = sharingStore.createOffer(provider.id, { upstreamId: first.id, quotaDollars: 10 }, store);
+    const secondOffer = sharingStore.createOffer(provider.id, { upstreamId: second.id, quotaDollars: 5 }, store);
+    const firstTicket = sharingStore.createTicket(consumer.id, { offerId: firstOffer.id, quotaDollars: 10 }, store);
+    const secondTicket = sharingStore.createTicket(consumer.id, { offerId: secondOffer.id, quotaDollars: 5 }, store);
+    sharingStore.approveTicket(provider.id, firstTicket.id, {}, store);
+    sharingStore.approveTicket(provider.id, secondTicket.id, {}, store);
+    const { apiKey } = sharingStore.revealPersonalKey(consumer.id);
+    const firstToken = store.credentials(first.id).accessToken;
+    const calls = [];
+    const app = await running(store, sharingStore, async (_url, options) => {
+      calls.push(options.headers.authorization);
+      if (options.headers.authorization === `Bearer ${firstToken}`) {
+        return new Response(new ReadableStream({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"first","status":"in_progress"}}\n\n'));
+            setTimeout(() => {
+              controller.enqueue(new TextEncoder().encode('event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}\n\n'));
+              controller.close();
+            }, 10);
+          }
+        }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+      }
+      return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"pool-bootstrap-fallback","status":"completed","output":[]}}\n\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' }
+      });
+    }, {
+      codexOptions: {
+        streamBootstrapBuffering: true,
+        streamBootstrapBytes: 64 * 1024,
+        streamBootstrapEvents: 8,
+        streamBootstrapTimeoutMs: 500
+      }
+    });
+    try {
+      const response = await fetch(`${app.base}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'retry', stream: true })
+      });
+      const text = await response.text();
+      assert.equal(response.status, 200);
+      assert.equal(calls.length, 2);
+      assert.match(text, /pool-bootstrap-fallback/);
+      assert.doesNotMatch(text, /"id":"first"|server_is_overloaded/);
     } finally {
       await app.close();
     }

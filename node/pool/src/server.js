@@ -20,6 +20,7 @@ import {
   authenticateProxyRequest,
   testUpstreamConnection
 } from '../../src/proxy.js';
+import { codexGatewayOptions } from '../../src/codex-compatibility.js';
 import { ProductStore } from './product-store.js';
 import { CodexLoginManager } from './codex-login.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
@@ -56,7 +57,8 @@ export function createApp({
   logger = console,
   codexHostHealth = codexHostHealthForStore(store),
   onCodexCredentialsImported = () => {},
-  publicBasePath = process.env.POOL_PUBLIC_BASE_PATH
+  publicBasePath = process.env.POOL_PUBLIC_BASE_PATH,
+  codexOptions = poolCodexGatewayOptions(ingress)
 } = {}) {
   store.clearAisSpendingCaps();
   const modelCatalog = modelCatalogForStore(store);
@@ -142,6 +144,7 @@ export function createApp({
           logger,
           codexHostHealth,
           modelCatalog,
+          codexOptions,
           sendJson,
           handleUsage: () => {
             if (url.searchParams.size) throw new HttpError(400, 'invalid_request', 'Usage query parameters are not supported');
@@ -196,6 +199,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     command: process.env.POOL_CODEX_CLI || 'codex'
   });
   const codexHostHealth = codexHostHealthForStore(store);
+  const codexOptions = poolCodexGatewayOptions(ingress);
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl });
   const emailScheduler = createEmailScheduler(productStore, { intervalMs: emailDeliveryIntervalMs });
   const snapshotBackup = createSnapshotBackup({
@@ -234,6 +238,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     ingress,
     cookieSecure,
     codexHostHealth,
+    codexOptions,
     onCodexCredentialsImported: refreshImportedUpstream
   }));
   const websocketServer = attachWebSocketProxy(server, {
@@ -245,7 +250,8 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     apiKey: null,
     fetchImpl,
     ingress,
-    codexHostHealth
+    codexHostHealth,
+    codexOptions
   });
   productStore.cleanup();
   snapshotBackup.run();
@@ -907,6 +913,22 @@ function poolIngress(input = {}) {
     maxCompressedBodyBytes: Number(input.maxCompressedBodyBytes) || 2 * 1024 * 1024,
     maxDecompressedBodyBytes: Number(input.maxDecompressedBodyBytes) || 2 * 1024 * 1024
   };
+}
+
+function poolCodexGatewayOptions(input = {}) {
+  return codexGatewayOptions({
+    websocketKeepAliveMs: input.websocketKeepAliveMs ?? process.env.POOL_CODEX_WEBSOCKET_KEEPALIVE_MS,
+    websocketIdleMs: input.websocketIdleMs ?? process.env.POOL_CODEX_WEBSOCKET_IDLE_MS,
+    websocketFrameBytes: input.websocketFrameBytes ?? process.env.POOL_CODEX_WEBSOCKET_FRAME_BYTES,
+    websocketPendingBytes: input.websocketPendingBytes ?? process.env.POOL_CODEX_WEBSOCKET_PENDING_BYTES,
+    websocketBackpressureBytes: input.websocketBackpressureBytes ?? process.env.POOL_CODEX_WEBSOCKET_BACKPRESSURE_BYTES,
+    streamBootstrapBuffering: input.streamBootstrapBuffering ?? process.env.POOL_CODEX_STREAM_BOOTSTRAP_BUFFERING,
+    streamBootstrapBytes: input.streamBootstrapBytes ?? process.env.POOL_CODEX_STREAM_BOOTSTRAP_BYTES,
+    streamBootstrapEvents: input.streamBootstrapEvents ?? process.env.POOL_CODEX_STREAM_BOOTSTRAP_EVENTS,
+    streamBootstrapTimeoutMs: input.streamBootstrapTimeoutMs ?? process.env.POOL_CODEX_STREAM_BOOTSTRAP_TIMEOUT_MS,
+    optimizeMultiAgentV2: input.optimizeMultiAgentV2 ?? process.env.POOL_CODEX_OPTIMIZE_MULTI_AGENT_V2,
+    orphanDelegationCompatibility: input.orphanDelegationCompatibility ?? process.env.POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
+  }, {});
 }
 
 function normalizeHost(value) {
