@@ -71,12 +71,15 @@ export class Store {
     this.events = new EventEmitter();
     this.allowLegacyClaudeApiKey = Boolean(allowLegacyClaudeApiKey);
     this.claudeRuntimeConfig = {};
+    this.apiKeyByHash = new Map();
+    this.apiKeyById = new Map();
     if (inMemory || this.sqlite.prepare('SELECT COUNT(*) AS count FROM records').get().count || !existsSync(this.legacyDbPath)) this.db = this.load();
     else {
       this.db = normalizeDatabase(JSON.parse(readFileSync(this.legacyDbPath, 'utf8')));
       this.save(this.db);
       unlinkSync(this.legacyDbPath);
     }
+    this.rebuildApiKeyIndex();
   }
 
   onUpstreamsChange(listener) {
@@ -129,6 +132,7 @@ export class Store {
     if (db.apiKeys.some((item) => item.keyHash === keyHash)) throw new Error('api key already exists');
     const record = { id: randomUUID(), scopeId, status, keyHash, createdAt: new Date().toISOString() };
     db.apiKeys.push(record);
+    this.indexApiKey(record);
     this.save(db);
     return publicApiKey(record);
   }
@@ -137,10 +141,15 @@ export class Store {
     if (!key) return null;
     const db = this.load();
     const keyHash = apiKeyHash(key);
-    const existing = db.apiKeys.find((item) => item.keyHash === keyHash);
+    let existing = this.apiKeyByHash.get(keyHash);
+    if (!existing) {
+      existing = db.apiKeys.find((item) => item.keyHash === keyHash);
+      if (existing) this.indexApiKey(existing);
+    }
     if (existing) return publicApiKey(existing);
     const record = { id: randomUUID(), scopeId: DEFAULT_SCOPE_ID, status: 'active', keyHash, createdAt: new Date().toISOString() };
     db.apiKeys.push(record);
+    this.indexApiKey(record);
     this.save(db);
     return publicApiKey(record);
   }
@@ -149,14 +158,23 @@ export class Store {
     if (typeof key !== 'string' || !key) return null;
     const db = this.load();
     const keyHash = apiKeyHash(key);
-    const record = db.apiKeys.find((item) => constantHashEqual(item.keyHash, keyHash));
+    let record = this.apiKeyByHash.get(keyHash);
+    if (!record) {
+      record = db.apiKeys.find((item) => constantHashEqual(item.keyHash, keyHash));
+      if (record) this.indexApiKey(record);
+    }
     return activeApiKey(db, record);
   }
 
   authorizeApiKey(id) {
     if (typeof id !== 'string' || !id) return null;
     const db = this.load();
-    return activeApiKey(db, db.apiKeys.find((item) => item.id === id));
+    let record = this.apiKeyById.get(id);
+    if (!record) {
+      record = db.apiKeys.find((item) => item.id === id);
+      if (record) this.indexApiKey(record);
+    }
+    return activeApiKey(db, record);
   }
 
   updateApiKey(id, { status }) {
@@ -165,6 +183,7 @@ export class Store {
     const record = db.apiKeys.find((item) => item.id === id);
     if (!record) throw notFound();
     record.status = status;
+    this.indexApiKey(record);
     this.save(db);
     return publicApiKey(record);
   }
@@ -1109,6 +1128,7 @@ export class Store {
       }
       const persisted = structuredClone(db);
       this.db = normalizeDatabase(db);
+      this.rebuildApiKeyIndex();
       this.persisted = persisted;
       this.save(this.db);
       return this.db;
@@ -1137,6 +1157,17 @@ export class Store {
       }
     })();
     this.persisted = persisted;
+  }
+
+  indexApiKey(record) {
+    this.apiKeyByHash.set(record.keyHash, record);
+    this.apiKeyById.set(record.id, record);
+  }
+
+  rebuildApiKeyIndex(db = this.db) {
+    this.apiKeyByHash = new Map();
+    this.apiKeyById = new Map();
+    for (const record of db?.apiKeys || []) this.indexApiKey(record);
   }
 
   saveCredentials(upstream) {
