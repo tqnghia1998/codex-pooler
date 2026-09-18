@@ -576,6 +576,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     const upstream = store.create({
       type: 'compass',
       quotaSource: 'ais',
+      email: auth.account.email,
       projectId: input.projectId,
       projectKey: input.projectKey
     });
@@ -681,6 +682,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         const provider = productStore.providerSummary(accountId, upstreamId, store);
         return [{
           ...upstream,
+          ...(upstream.quotaSource === 'ais' && !upstream.email ? { email: auth.account.email } : {}),
           name: upstream.email || upstream.name,
           providerIssue: providerIssue(upstream),
           sharing: provider.sharing,
