@@ -2,7 +2,7 @@
 
 本分支以 [`node/`](node/) 中的独立 Node.js 实现为主要开发目标。它提供本地
 管理面板，以及支持 Responses、Chat Completions、Anthropic Messages、SSE 和
-WebSocket 的 Codex/Compass 网关。
+WebSocket 的 Codex、Compass 与 Claude Enterprise OAuth 网关。
 
 ## 运行
 
@@ -18,6 +18,12 @@ npm start
 
 打开 `http://localhost:3000`。配置、路由、支持的端点、存储方式和运行限制请见
 [`node/README.md`](node/README.md)。
+
+QuotaHub 是独立的好友额度共享产品，拥有自己的服务、登录和数据。它可共享
+Codex、Claude 或 AIS 访问，但其共享模型只刷新和执行 Codex 的提供方额度；
+Claude 和 AIS 的共享额度是名义上的本地结算限制。使用
+`cd node && npm run pool:start` 启动；详见
+[`node/pool/README.md`](node/pool/README.md)。
 
 ## 项目方向
 

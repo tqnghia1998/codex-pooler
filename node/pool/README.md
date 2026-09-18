@@ -40,7 +40,7 @@ configuration.
 - Personal keys: `cp_personal_...`
 
 `pool/.data/db.sqlite` and `pool/.data/.key` are the product's private gateway
-store for imported Codex credentials. `pool/.data/pool.sqlite` and
+store for linked Codex and Claude credentials. `pool/.data/pool.sqlite` and
 `pool/.data/.pool-key` hold product accounts, offers, tickets, sessions, key
 hashes, and audit events. Back up all four files together.
 
@@ -101,22 +101,24 @@ Offers, pending tickets, and share sessions show a sanitized provider issue to
 both providers and consumers when the provider needs reauthentication, has a
 token-refresh failure, or has exhausted its provider quota.
 
-After signing in, a user can also add an AIS project by entering its
-project ID and project key. AIS does not expose a quota query to this
-product, so its quota is shown as **unknown**. The owner publishes an offer
-based on their own knowledge. QuotaHub keeps the offer and session amounts
-as local sharing limits, but does not estimate or reserve against the real
-AIS quota. External use of the project is not visible here and may cause
-the project to stop working when its provider quota is exhausted. Use **Add
-AIS project** and its **How to get AIS project** guide to retrieve
-`project_id` and `api_key` from Compass.
+Users can also link Claude with a Claude CLI setup token or supported OAuth
+credential JSON, or add an AIS project by entering its project ID and project
+key. Claude and AIS quotas are both **unknown** to the sharing model. QuotaHub
+does not query provider quota, display it as verified, reserve against it, or
+enforce it for either provider; manual and scheduled quota refresh apply only
+to Codex.
+The owner chooses a nominal offer amount based on their own knowledge, and
+QuotaHub settles usage only against that local offer or session grant. External
+use is not visible here and a provider can reject requests before the local
+grant is consumed. Use **Add AIS project** and its **How to get AIS project**
+guide to retrieve `project_id` and `api_key` from Compass.
 
 ## Sharing Flow
 
-1. A provider publishes an offer for one imported Codex account or added
-   AIS project and a dollar amount they are willing to share. Codex
-   offers are checked against the provider's currently offerable quota;
-   AIS quota is unknown and offers are best effort.
+1. A provider publishes an offer for one imported Codex account, linked Claude
+   account, or added AIS project and a dollar amount they are willing to share.
+   Codex offers are checked against the provider's currently offerable quota;
+   Claude and AIS quotas are unknown and their offers are best effort.
 2. A consumer requests a dollar quota through a ticket.
 3. The provider approves the request, changes the approved amount, or rejects
    it.
@@ -139,24 +141,24 @@ selects an active session with the most remaining quota, keeps normal
 conversation and Responses continuations on that selected session, and moves
 to another session only for a new request after the prior session becomes
 unavailable. Neither key type can access product management routes.
-If every active provider session needs Codex reauthentication, requests return
-`share_provider_reauth_required` until a provider signs in again.
+If every active provider session needs reauthentication, requests return
+`share_provider_reauth_required` until a provider reconnects.
 
 Offers, sessions, personal keys, and public quota requests expire. Pending
 tickets remain open until the source offer is closed or expires.
-Offer and session expiry is bounded by the provider quota reset when that reset
-is known. For Codex, creating or resizing a grant is rejected atomically when
-it would overcommit the provider's current quota. If Codex quota later falls
-below existing commitments, affected offers and sessions remain visible as
+Offer and session expiry is bounded by a provider reset time when one is known.
+For Codex, creating or resizing a grant is rejected atomically when it would
+overcommit the provider's current quota. If Codex quota later falls below
+existing commitments, affected offers and sessions remain visible as
 underfunded but cannot accept or route new work beyond their backed amount.
-AIS quota is not checked or reserved; external use can make an AIS
-offer stop working before its local share grant is consumed.
+Claude and AIS balances are never checked or reserved; external use can make
+either provider reject an offer before its local share grant is consumed.
 Providers can extend an active session's expiry from **Resize share session**;
 the new expiry cannot shorten the session or exceed the provider quota reset
 or the 30-day session limit.
 Providers can pause all sharing without deleting grants, or revoke all sharing
 to close offers, reject pending tickets, and revoke sessions for one Codex
-account.
+or Claude account or AIS project.
 
 Consumers can create multiple named personal keys, optionally with an expiry,
 so each device or client can be rotated or revoked independently. The dashboard
@@ -218,10 +220,11 @@ POST   /api/pool/personal-keys/:id/reveal
 POST   /api/pool/personal-keys/:id/rotate
 POST   /api/pool/personal-keys/:id/revoke
 GET    /api/pool/upstreams
+POST   /api/pool/upstreams/claude                   { token|accessToken|authJson, name? }
 POST   /api/pool/upstreams/ais                      { projectId, projectKey }
-PATCH  /api/pool/upstreams/:id                      { projectId, projectKey? } (AIS only)
+PATCH  /api/pool/upstreams/:id                      AIS: { projectId, projectKey? }; Claude: { token|accessToken|authJson }
 GET    /api/pool/upstreams/credentials
-POST   /api/pool/upstreams/:id/refresh-quota
+POST   /api/pool/upstreams/:id/refresh-quota        Codex only; Claude and AIS return skipped: quota_unknown
 POST   /api/pool/upstreams/:id/test-connection
 GET    /api/pool/providers/:id
 POST   /api/pool/providers/:id/pause
@@ -250,7 +253,8 @@ GET    /v1/models
 POST   /v1/responses
 GET    /v1/responses                 # WebSocket upgrade
 POST   /v1/chat/completions
-POST   /v1/messages                  # AIS only
+POST   /v1/messages                  # native Anthropic Messages for AIS or Claude
+POST   /v1/messages/count_tokens     # Claude only; native or local count
 GET    /v1/files
 POST   /v1/files
 GET    /v1/files/:id
@@ -291,9 +295,9 @@ QuotaHub dispatches the same Codex Responses, Chat Completions, streaming,
 tool-call, compaction, model-catalog, public file/audio/image, and native
 WebSocket implementations as Relaydeck. A share key limits candidate accounts
 and accounting; it does not create a second protocol adapter. Public file
-metadata is isolated per share session. QuotaHub accepts `/v1/messages`
-for manually added AIS projects. Codex-native backend API and
-WebSocket routes remain Codex-only.
+metadata is isolated per share session. QuotaHub accepts native `/v1/messages`
+for manually added AIS projects and linked Claude accounts. Codex-native backend
+API and WebSocket routes remain Codex-only.
 
 Client-facing gateway route classification and dispatch live in
 `../src/gateway-dispatch.js`, shared with Relaydeck. Future proxy or
@@ -345,13 +349,14 @@ POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
 ```
 
 The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
-executable, refresh quota every 60 seconds, check due tokens every hour, and
-store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
-a 15-second outbox delivery interval are the defaults.
+executable, refresh Codex sharing quota every 60 seconds, check due tokens
+every hour, and store data in `node/pool/.data`. SMTP is optional; when
+enabled, port `587` and a 15-second outbox delivery interval are the defaults.
 
 `POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
 Claude request shaping, header defaults, aliases, exclusions, retry, cooling,
-and cloak controls. It does not inherit Relaydeck environment variables.
+and cloak controls. It does not inherit Relaydeck environment variables and
+does not change QuotaHub's unknown-quota policy for Claude sharing.
 
 The shared Codex origin circuit is enabled conservatively by default. Configure
 its Pool-only behavior with `POOL_CODEX_HOST_CIRCUIT_ENABLED`,
