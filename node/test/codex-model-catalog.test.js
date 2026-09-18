@@ -68,6 +68,30 @@ test('coalesces concurrent discovery and serves fresh cache hits', async () => {
   }
 });
 
+test('reuses aggregated model snapshots until catalog or scope policy changes', async () => {
+  const { dir, store, upstreams } = fixture();
+  const catalog = new CodexModelCatalog(store);
+  try {
+    await catalog.resolve('default', { fetchImpl: async () => modelsResponse([{ slug: 'gpt-live' }]) });
+    const first = catalog.snapshot('default');
+    const second = catalog.snapshot('default');
+    assert.equal(second.nativeModels, first.nativeModels);
+    assert.notEqual(second.status, first.status);
+
+    catalog.markUnsupported(upstreams[0].id, 'gpt-live');
+    const unsupported = catalog.snapshot('default');
+    assert.notEqual(unsupported.nativeModels, first.nativeModels);
+    assert.equal(unsupported.publicModels.some(({ id }) => id === 'gpt-live'), false);
+
+    store.updateScope('default', { models: ['gpt-5.6-sol'] });
+    const restricted = catalog.snapshot('default');
+    assert.notEqual(restricted.nativeModels, unsupported.nativeModels);
+    assert.deepEqual(restricted.publicModels.map(({ id }) => id), ['gpt-5.6-sol']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps last-known-good catalogs stale on failure and suppresses repeated retries', async () => {
   const { dir, store } = fixture();
   let now = 1_000;
