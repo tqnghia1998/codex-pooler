@@ -48,7 +48,8 @@ QuotaHub also writes a full JSON snapshot to `pool/.data/quotahub-snapshot.json`
 on startup and then every hour, replacing the previous snapshot. The file uses
 the same format as the admin export and can be restored through admin import;
 it contains the encrypted gateway records and every product table. Set
-`POOL_BACKUP_INTERVAL_MS` to change the cadence.
+`POOL_BACKUP_INTERVAL_MS` to change the cadence. Admin Data management shows
+the last successful automatic snapshot time.
 
 The embedded pool always uses local SQLite. Deploy it with a persistent volume
 for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone

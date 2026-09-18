@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { exportAllData } from '../../src/data-portability.js';
 
@@ -26,6 +26,15 @@ export function writeSnapshotBackup({ store, productStore, filePath }) {
   return { exportedAt: data.exportedAt, filePath };
 }
 
+function backupTimestamp(filePath) {
+  try {
+    const stat = statSync(filePath);
+    return stat.isFile() ? stat.mtime.toISOString() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function createSnapshotBackup({
   store,
   productStore,
@@ -33,13 +42,17 @@ export function createSnapshotBackup({
   intervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS,
   logger = console
 } = {}) {
+  const resolvedFilePath = resolve(filePath);
   let running = false;
   let closed = false;
+  let lastBackupAt = backupTimestamp(resolvedFilePath);
   const run = () => {
     if (running || closed) return null;
     running = true;
     try {
-      return writeSnapshotBackup({ store, productStore, filePath });
+      const result = writeSnapshotBackup({ store, productStore, filePath: resolvedFilePath });
+      lastBackupAt = backupTimestamp(resolvedFilePath);
+      return result;
     } catch (error) {
       logger?.error?.(`QuotaHub automatic backup failed: ${error?.message || 'unknown error'}`);
       return null;
@@ -50,8 +63,11 @@ export function createSnapshotBackup({
   const timer = setInterval(run, intervalMs);
   timer.unref?.();
   return {
-    filePath,
+    filePath: resolvedFilePath,
     run,
+    status() {
+      return { enabled: true, lastBackupAt };
+    },
     close() {
       closed = true;
       clearInterval(timer);

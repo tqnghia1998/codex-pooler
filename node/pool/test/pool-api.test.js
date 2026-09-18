@@ -466,7 +466,8 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       const id = `pagination-${String(index).padStart(2, '0')}`;
       addEvent.run(id, admin.id, id);
     }
-    const server = createServer(createApp({ store, productStore: sharingStore }));
+    const backup = { enabled: true, lastBackupAt: '2026-09-18T09:30:00.000Z' };
+    const server = createServer(createApp({ store, productStore: sharingStore, backupStatus: () => backup }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
@@ -489,6 +490,7 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       assert.deepEqual(malformedCursor.body.analytics.recentEvents.map(({ id }) => id), analytics.body.analytics.recentEvents.map(({ id }) => id));
       assert.equal(analytics.body.analytics.overview.accounts, 2);
       assert.equal(analytics.body.analytics.usage.todayMicros, 1000000);
+      assert.deepEqual(analytics.body.analytics.backup, backup);
       assert.deepEqual(analytics.body.analytics.topProviders[0], {
         id: 'quangnghia.trinh@shopee.com', email: 'quangnghia.trinh@shopee.com', sessionCount: 1, consumedMicros: 2500000
       });
