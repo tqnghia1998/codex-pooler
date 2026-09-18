@@ -303,13 +303,8 @@ function requirePoolDataDir(dataDir) {
 export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } = {}) {
   return refreshAllUpstreamQuotas(store, {
     fetchImpl,
-    shouldRefresh: (upstream) => upstream.type === 'codex' || hasClaudeOAuthQuota(store, upstream)
+    shouldRefresh: (upstream) => upstream.type === 'codex'
   });
-}
-
-function hasClaudeOAuthQuota(store, upstream) {
-  return upstream?.type === 'claude'
-    && isSupportedClaudeOAuthUpstream({ ...upstream, credentials: store.credentials(upstream.id) });
 }
 
 async function authRequest(req, res, url, { store, productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
@@ -533,7 +528,6 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         }
       }
       productStore.linkUpstream(accountId, upstream.id);
-      await refreshLinkedClaudeQuota(store, upstream.id, fetchImpl, logger);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
       const latest = store.get(upstream.id) || upstream;
       sendJson(res, 201, {
@@ -629,7 +623,6 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         }
         logger?.warn?.(`[pool] Advisory Claude identity lookup failed on update for ${id}: ${error?.message || error}`);
       }
-      await refreshLinkedClaudeQuota(store, id, fetchImpl, logger);
     }
     const provider = productStore.providerSummary(accountId, id, store);
     sendJson(res, 200, {
@@ -717,16 +710,12 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
-    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch') {
+    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch' || upstream.type === 'claude') {
       sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
       return;
     }
-    if (upstream.type === 'claude' && !hasClaudeOAuthQuota(store, upstream)) {
-      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'claude_oauth_required' });
-      return;
-    }
-    if (upstream.type !== 'codex' && upstream.type !== 'claude') throw new HttpError(400, 'invalid_request', 'Only Codex and Claude accounts can refresh quota');
-    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl, force: upstream.type === 'claude' }) });
+    if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
+    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'test-connection') {
@@ -953,14 +942,6 @@ function poolCodexGatewayOptions(input = {}) {
 
 function poolClaudeConfigFromEnv(env = process.env) {
   return claudeConfigFromEnv(env, 'POOL_CLAUDE_CONFIG_JSON');
-}
-
-async function refreshLinkedClaudeQuota(store, upstreamId, fetchImpl, logger) {
-  try {
-    await refreshUpstreamQuota(store, upstreamId, { fetchImpl });
-  } catch (error) {
-    logger?.warn?.(`QuotaHub Claude quota refresh failed for upstream ${upstreamId}: ${error?.code || error?.name || 'Error'}`);
-  }
 }
 
 function normalizeHost(value) {

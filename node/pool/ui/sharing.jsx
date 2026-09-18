@@ -487,7 +487,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   };
 
   const refreshQuota = async ({ silent = false } = {}) => {
-    const refreshable = upstreams.filter((upstream) => upstream.type === 'codex' || upstream.type === 'claude');
+    const refreshable = upstreams.filter((upstream) => upstream.type === 'codex');
     if (!refreshable.length) {
       if (!silent) onNotice(t('aisQuotaExternal'));
       return;
@@ -498,7 +498,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         method: 'POST',
         body: '{}'
       })));
-      if (!silent) onNotice(t('providerQuotaRefreshed'));
+      if (!silent) onNotice(t('codexQuotaRefreshed'));
       await load({ background: silent });
       await loadTable({ background: silent });
     } catch (nextError) {
@@ -1234,8 +1234,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
   const quota = upstream.quota;
   const isAis = upstream.quotaSource === 'ais';
   const isClaude = upstream.type === 'claude';
-  const hasDisplayQuota = hasObservableQuota(upstream);
-  const hasUnverifiedQuota = isAis || !hasEnforceableQuota(upstream);
+  const hasUnknownQuota = isAis || isClaude;
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
@@ -1264,7 +1263,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
               {issue && <ProviderIssueBadge issue={issue} />}
             </HStack>
           </HStack>
-          {!hasDisplayQuota ? (
+          {hasUnknownQuota ? (
             <HStack gap={1.5} vAlign="center">
               <Text weight="bold" maxLines={1}>{t('unknownQuota')}</Text>
               <Tooltip
@@ -1290,7 +1289,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           ) : (
             <Text weight="bold" maxLines={1}>{quotaRemaining(t, quota)}</Text>
           )}
-          {hasDisplayQuota && percentage !== null && (
+          {!hasUnknownQuota && percentage !== null && (
             <ProgressBar
               label={t('providerQuotaRemaining')}
               isLabelHidden
@@ -1300,13 +1299,13 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
             />
           )}
           <Text type="supporting" color="secondary" maxLines={1}>
-            {!hasDisplayQuota
+            {hasUnknownQuota
               ? t('checkBalanceIn', { app: dedicatedAppName })
               : quotaTiming(t, quota)}
           </Text>
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
-              {hasUnverifiedQuota
+              {hasUnknownQuota
                 ? t('committedUnknownQuota', { amount: money(commitment.totalCommitmentDollars) })
                 : `${t('committedAmount', { amount: money(commitment.totalCommitmentDollars) })} · ${Number.isFinite(commitment.offerableQuotaDollars)
                   ? t('availableToOffer', { amount: money(commitment.offerableQuotaDollars) })
@@ -1622,13 +1621,13 @@ function UpstreamSourceBadge({ upstream }) {
   const { t } = useLanguage();
   const isClaude = upstream?.type === 'claude';
   const isAis = upstream?.quotaSource === 'ais';
-  const hasUnverifiedQuota = isAis || !hasEnforceableQuota(upstream);
+  const hasUnknownQuota = isAis || isClaude;
   const dedicatedAppName = isClaude ? t('claudeDesktopApp') : t('aisSwitchApp');
   const badge = isClaude
     ? <Badge label="claude" variant="blue" />
     : <Badge label={isAis ? 'ais' : 'codex'} variant={isAis ? 'teal' : 'purple'} />;
 
-  if (!hasUnverifiedQuota) {
+  if (!hasUnknownQuota) {
     return badge;
   }
 
@@ -1972,7 +1971,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
   const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
   const isAis = selectedUpstream?.quotaSource === 'ais';
   const isClaude = selectedUpstream?.type === 'claude';
-  const hasUnverifiedQuota = isAis || !hasEnforceableQuota(selectedUpstream);
+  const hasUnknownQuota = isAis || isClaude;
   const dedicatedAppName = isClaude ? t('claudeDedicatedApp') : t('aisDedicatedApp');
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
@@ -1995,7 +1994,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   width="100%"
                 />
               )}
-              {hasUnverifiedQuota && (
+              {hasUnknownQuota && (
                 <Banner
                   title={t('externalQuotaNotice')}
                   description={t('unknownQuotaDialogExplanation', { app: dedicatedAppName })}
@@ -2360,17 +2359,6 @@ function quotaProgressVariant(value, isAvailable = true) {
   if (percentage <= 15) return 'error';
   if (percentage <= 30) return 'warning';
   return 'success';
-}
-
-function hasObservableQuota(upstream) {
-  const quota = upstream?.quota;
-  return Number.isFinite(quota?.remainingDollars)
-    || Number.isFinite(quota?.remainingPercent)
-    || Number.isFinite(quota?.remainingUnits);
-}
-
-function hasEnforceableQuota(upstream) {
-  return Number.isFinite(upstream?.quota?.remainingDollars);
 }
 
 function anthropicBaseUrl() {

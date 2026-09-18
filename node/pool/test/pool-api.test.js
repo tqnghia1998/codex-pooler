@@ -1034,7 +1034,7 @@ test('Pool quota refresh batches provider-change notifications', async () => {
   }
 });
 
-test('Pool refreshes supported Claude OAuth quota and enforces reported extra-usage dollars', async () => {
+test('Pool treats Claude quota as unknown even when the gateway has reported usage data', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-quota-'));
   try {
     const store = new Store(dir);
@@ -1046,56 +1046,36 @@ test('Pool refreshes supported Claude OAuth quota and enforces reported extra-us
     const sharingStore = new ProductStore(dir);
     const provider = account(sharingStore, 'claude-quota-provider');
     sharingStore.linkUpstream(provider.id, upstream.id);
+    store.setQuota(upstream.id, {
+      label: 'Claude extra usage',
+      usedPercent: 50,
+      remainingPercent: 50,
+      remainingUnits: null,
+      limitUnits: null,
+      remainingDollars: 5,
+      limitDollars: 10,
+      windowSeconds: 3600,
+      resetAt: null,
+      observedAt: new Date().toISOString(),
+      source: 'claude_usage_api'
+    });
 
+    let refreshRequests = 0;
     const results = await refreshAllQuotas(store, {
-      fetchImpl: async (url) => {
-        assert.equal(url, 'https://api.anthropic.com/api/oauth/usage');
-        return new Response(JSON.stringify({
-          five_hour: { utilization: 25, resets_at: '2026-09-19T05:00:00Z' },
-          extra_usage: { is_enabled: true, monthly_limit: 1_000, used_credits: 500 }
-        }), { status: 200 });
+      fetchImpl: async () => {
+        refreshRequests += 1;
+        throw new Error('Claude quota must not be refreshed by QuotaHub');
       }
     });
 
-    assert.equal(results.filter((result) => result.value?.status === 'refreshed').length, 1);
+    assert.equal(results.length, 1);
+    assert.equal(results[0].value, null);
+    assert.equal(refreshRequests, 0);
     assert.equal(store.getPublic(upstream.id).quota.remainingDollars, 5);
-    assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, 5);
-    assert.throws(
-      () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 6 }, store),
-      /truly offerable quota/
-    );
-    assert.equal(sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store).quotaDollars, 5);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('Pool preserves a linked Claude account when its initial quota refresh is unavailable', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-link-refresh-'));
-  try {
-    const store = new Store(dir);
-    const sharingStore = new ProductStore(dir);
-    const provider = account(sharingStore, 'claude-link-refresh');
-    const session = sharingStore.createAccountSession(provider.id);
-    const server = createServer(createApp({
-      store,
-      productStore: sharingStore,
-      fetchImpl: async () => new Response('unavailable', { status: 503 }),
-      logger: { warn() {} }
-    }));
-    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-    const base = `http://127.0.0.1:${server.address().port}`;
-    try {
-      const result = await request(base, '/api/pool/upstreams/claude', session, {
-        method: 'POST',
-        body: JSON.stringify({ token: 'sk-ant-oat-link-refresh' })
-      });
-      assert.equal(result.response.status, 201);
-      assert.equal(result.body.upstream.type, 'claude');
-      assert.equal(result.body.upstream.quota, null);
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
+    const summary = sharingStore.providerSummary(provider.id, upstream.id, store);
+    assert.equal(summary.commitment.actualQuotaDollars, null);
+    assert.equal(summary.commitment.offerableQuotaDollars, null);
+    assert.equal(sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 999 }, store).quotaDollars, 999);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
