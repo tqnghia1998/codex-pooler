@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../../src/store.js';
 import { exportUpstreamCredentials, parseClaudeAuthJson, claudeOAuthInputError, isSupportedClaudeOAuthUpstream } from '../../src/domain.js';
+import { claudeConfigFromEnv, normalizeClaudeConfig } from '../../src/claude-config.js';
 import { ensureClaudeCredentialIdentity } from '../../src/claude-protocol.js';
 import { createTokenRefreshScheduler, TOKEN_REFRESH_INTERVAL_MS } from '../../src/codex-token-refresh.js';
 import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from '../../src/upstream-quota-refresh.js';
@@ -13,7 +14,7 @@ import { dispatchGatewayRequest, gatewayRequestKind } from '../../src/gateway-di
 import { errorEnvelope, openaiError } from '../../src/public-errors.js';
 import { exportAllData, importAllData } from '../../src/data-portability.js';
 import { firewallAllowed, hostAllowed, originAllowed } from '../../src/admission.js';
-import { codexHostHealthForStore } from '../../src/codex-host-health.js';
+import { CodexHostHealth, codexHostHealthForStore, codexHostHealthOptionsFromEnv } from '../../src/codex-host-health.js';
 import { modelCatalogForStore } from '../../src/codex-model-catalog.js';
 import {
   attachWebSocketProxy,
@@ -58,8 +59,11 @@ export function createApp({
   codexHostHealth = codexHostHealthForStore(store),
   onCodexCredentialsImported = () => {},
   publicBasePath = process.env.POOL_PUBLIC_BASE_PATH,
-  codexOptions = poolCodexGatewayOptions(ingress)
+  codexOptions = poolCodexGatewayOptions(ingress),
+  claudeConfig = poolClaudeConfigFromEnv()
 } = {}) {
+  claudeConfig = normalizeClaudeConfig(claudeConfig);
+  store.configureClaudeRuntime?.(claudeConfig);
   store.clearAisSpendingCaps();
   const modelCatalog = modelCatalogForStore(store);
   const basePath = normalizePublicBasePath(publicBasePath);
@@ -94,7 +98,7 @@ export function createApp({
         return;
       }
       if (url.pathname.startsWith('/api/pool/')) {
-        await productApi(req, res, url, { store, productStore, fetchImpl });
+        await productApi(req, res, url, { store, productStore, fetchImpl, claudeConfig, logger });
         return;
       }
       if (url.pathname === '/admin') {
@@ -144,6 +148,7 @@ export function createApp({
           logger,
           codexHostHealth,
           modelCatalog,
+          claudeConfig,
           codexOptions,
           sendJson,
           handleUsage: () => {
@@ -188,7 +193,8 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   tokenRefreshIntervalMs = Number(process.env.POOL_TOKEN_REFRESH_INTERVAL_MS) || TOKEN_REFRESH_INTERVAL_MS,
   emailDeliveryIntervalMs = Number(process.env.POOL_EMAIL_DELIVERY_INTERVAL_MS) || EMAIL_DELIVERY_INTERVAL_MS,
   productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS,
-  backupIntervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS
+  backupIntervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS,
+  claudeConfig = poolClaudeConfigFromEnv()
 } = {}) {
   const poolDataDir = requirePoolDataDir(dataDir);
   store ||= new Store(poolDataDir);
@@ -198,7 +204,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     upstreamStore: store,
     command: process.env.POOL_CODEX_CLI || 'codex'
   });
-  const codexHostHealth = codexHostHealthForStore(store);
+  const codexHostHealth = new CodexHostHealth(codexHostHealthOptionsFromEnv(process.env, 'POOL_CODEX_HOST_'));
   const codexOptions = poolCodexGatewayOptions(ingress);
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl });
   const emailScheduler = createEmailScheduler(productStore, { intervalMs: emailDeliveryIntervalMs });
@@ -239,6 +245,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     cookieSecure,
     codexHostHealth,
     codexOptions,
+    claudeConfig,
     onCodexCredentialsImported: refreshImportedUpstream
   }));
   const websocketServer = attachWebSocketProxy(server, {
@@ -296,8 +303,13 @@ function requirePoolDataDir(dataDir) {
 export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } = {}) {
   return refreshAllUpstreamQuotas(store, {
     fetchImpl,
-    shouldRefresh: (upstream) => upstream.type === 'codex'
+    shouldRefresh: (upstream) => upstream.type === 'codex' || hasClaudeOAuthQuota(store, upstream)
   });
+}
+
+function hasClaudeOAuthQuota(store, upstream) {
+  return upstream?.type === 'claude'
+    && isSupportedClaudeOAuthUpstream({ ...upstream, credentials: store.credentials(upstream.id) });
 }
 
 async function authRequest(req, res, url, { store, productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
@@ -444,7 +456,7 @@ async function refreshImportedCredentials(refresh, upstreamId, logger) {
   }
 }
 
-async function productRequest(req, res, url, { store, productStore, fetchImpl }) {
+async function productRequest(req, res, url, { store, productStore, fetchImpl, claudeConfig = null, logger = console }) {
   const auth = accountSession(req, productStore, isMutation(req.method));
   const accountId = auth.account.id;
   const parts = url.pathname.split('/').filter(Boolean);
@@ -517,10 +529,11 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
             throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
           }
           // Profile lookup is advisory; log warning for transient upstream connectivity issues
-          console.warn(`[pool] Advisory Claude identity lookup failed for ${upstream.id}:`, error?.message || error);
+          logger?.warn?.(`[pool] Advisory Claude identity lookup failed for ${upstream.id}: ${error?.message || error}`);
         }
       }
       productStore.linkUpstream(accountId, upstream.id);
+      await refreshLinkedClaudeQuota(store, upstream.id, fetchImpl, logger);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
       const latest = store.get(upstream.id) || upstream;
       sendJson(res, 201, {
@@ -614,8 +627,9 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
         if (error?.statusCode === 401 || error?.statusCode === 403) {
           throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
         }
-        console.warn(`[pool] Advisory Claude identity lookup failed on update for ${id}:`, error?.message || error);
+        logger?.warn?.(`[pool] Advisory Claude identity lookup failed on update for ${id}: ${error?.message || error}`);
       }
+      await refreshLinkedClaudeQuota(store, id, fetchImpl, logger);
     }
     const provider = productStore.providerSummary(accountId, id, store);
     sendJson(res, 200, {
@@ -707,8 +721,12 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
       sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
       return;
     }
+    if (upstream.type === 'claude' && !hasClaudeOAuthQuota(store, upstream)) {
+      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'claude_oauth_required' });
+      return;
+    }
     if (upstream.type !== 'codex' && upstream.type !== 'claude') throw new HttpError(400, 'invalid_request', 'Only Codex and Claude accounts can refresh quota');
-    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl }) });
+    sendJson(res, 200, { upstream: await refreshUpstreamQuota(store, id, { fetchImpl, force: upstream.type === 'claude' }) });
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'test-connection') {
@@ -722,7 +740,8 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
         upstreamId: id,
         req,
         res,
-        fetchImpl
+        fetchImpl,
+        claudeConfig
       })
     });
     return;
@@ -814,7 +833,8 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl })
         fetchImpl,
         proxyAuth,
         sharingStore: productStore,
-        allowUnavailableCandidate: false
+        allowUnavailableCandidate: false,
+        claudeConfig
       })
     });
     return;
@@ -929,6 +949,18 @@ function poolCodexGatewayOptions(input = {}) {
     optimizeMultiAgentV2: input.optimizeMultiAgentV2 ?? process.env.POOL_CODEX_OPTIMIZE_MULTI_AGENT_V2,
     orphanDelegationCompatibility: input.orphanDelegationCompatibility ?? process.env.POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
   }, {});
+}
+
+function poolClaudeConfigFromEnv(env = process.env) {
+  return claudeConfigFromEnv(env, 'POOL_CLAUDE_CONFIG_JSON');
+}
+
+async function refreshLinkedClaudeQuota(store, upstreamId, fetchImpl, logger) {
+  try {
+    await refreshUpstreamQuota(store, upstreamId, { fetchImpl });
+  } catch (error) {
+    logger?.warn?.(`QuotaHub Claude quota refresh failed for upstream ${upstreamId}: ${error?.code || error?.name || 'Error'}`);
+  }
 }
 
 function normalizeHost(value) {
