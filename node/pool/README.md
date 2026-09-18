@@ -323,7 +323,6 @@ POOL_PUBLIC_BASE_PATH
 POOL_CODEX_CLI
 POOL_DATA_DIR
 POOL_QUOTA_REFRESH_INTERVAL_MS
-POOL_AI_QUOTA_BASE_URL
 POOL_AI_QUOTA_SERVICE_TOKEN
 POOL_AI_QUOTA_DELAY_MS
 POOL_AI_QUOTA_REFRESH_INTERVAL_MS
@@ -361,10 +360,10 @@ The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
 executable, refresh Codex sharing quota every 60 seconds, check due tokens
 every hour, and store data in `node/pool/.data`. When
 `POOL_AI_QUOTA_SERVICE_TOKEN` is configured, the delayed Claude/AIS integration
-queries `POOL_AI_QUOTA_BASE_URL` hourly with a 30-second timeout and labels the
-source data as one hour delayed. The service token remains server-side and must
-not be committed. SMTP is optional; when enabled, port `587` and a 15-second
-outbox delivery interval are the defaults.
+queries the fixed `https://loop.shopee.io` endpoint hourly with a 30-second
+timeout and labels the source data as one hour delayed. The service token
+remains server-side and must not be committed. SMTP is optional; when enabled,
+port `587` and a 15-second outbox delivery interval are the defaults.
 
 `POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
 Claude request shaping, header defaults, aliases, exclusions, retry, cooling,

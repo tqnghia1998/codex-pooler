@@ -6,9 +6,31 @@ import { join } from 'node:path';
 import { Store } from '../../src/store.js';
 import { ProductStore } from '../src/product-store.js';
 import {
+  advisoryQuotaClientFromEnv,
   createAdvisoryQuotaClient,
   refreshAllAdvisoryQuotas
 } from '../src/advisory-quota.js';
+
+test('delayed quota environment uses the fixed Loop endpoint and dedicated token', async () => {
+  let request;
+  const client = advisoryQuotaClientFromEnv({
+    POOL_AI_QUOTA_SERVICE_TOKEN: 'dedicated-token',
+    POOL_AI_QUOTA_BASE_URL: 'https://ignored.example',
+    LOOP_API_BASE_URL: 'https://also-ignored.example',
+    LOOP_SERVICE_TOKEN: 'legacy-token'
+  }, {
+    fetchImpl: async (url, options) => {
+      request = { url: new URL(url), options };
+      return new Response(JSON.stringify({ success: true, result: { data: [] } }), { status: 200 });
+    }
+  });
+
+  await client.query('owner@example.com', ['claude']);
+
+  assert.equal(request.url.origin, 'https://loop.shopee.io');
+  assert.equal(request.options.headers.authorization, 'Bearer dedicated-token');
+  assert.equal(advisoryQuotaClientFromEnv({ LOOP_SERVICE_TOKEN: 'legacy-token' }).enabled, false);
+});
 
 test('delayed quota client reads monthly Claude and AIS observations', async () => {
   const values = new Map([
