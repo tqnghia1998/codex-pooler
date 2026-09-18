@@ -480,7 +480,8 @@ export class Store {
       if (values.userAgent && values.packageVersion && values.runtimeVersion) sanitized[name] = values;
     }
     if (!Object.keys(sanitized).length) return false;
-    const previous = this.persisted?.upstreams?.find((item) => item.id === id)?.claudeDeviceProfiles || null;
+    const persisted = this.persistedRecords?.get(JSON.stringify(['upstreams', id]));
+    const previous = persisted ? JSON.parse(persisted).claudeDeviceProfiles || null : null;
     if (JSON.stringify(previous) === JSON.stringify(sanitized)) return false;
     upstream.claudeDeviceProfiles = sanitized;
     upstream.updatedAt = new Date().toISOString();
@@ -1126,10 +1127,10 @@ export class Store {
         if (Array.isArray(target)) target.push(JSON.parse(value));
         else target[key] = JSON.parse(value);
       }
-      const persisted = structuredClone(db);
+      const persistedRecords = databaseRecords(db);
       this.db = normalizeDatabase(db);
       this.rebuildApiKeyIndex();
-      this.persisted = persisted;
+      this.persistedRecords = persistedRecords;
       this.save(this.db);
       return this.db;
     } catch (error) {
@@ -1139,11 +1140,8 @@ export class Store {
 
   save(db) {
     this.db = db;
-    const persisted = structuredClone(db);
-    persisted.gatewayUsage = compactGatewayUsage(persisted.gatewayUsage);
-    pruneGatewayHistory(persisted);
-    const previous = databaseRecords(this.persisted || emptyDatabase());
-    const next = databaseRecords(persisted);
+    const previous = this.persistedRecords || databaseRecords(emptyDatabase());
+    const next = persistedDatabaseRecords(db);
     const upsert = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
     const remove = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
     this.sqlite.transaction(() => {
@@ -1156,7 +1154,7 @@ export class Store {
         remove.run(collection, key);
       }
     })();
-    this.persisted = persisted;
+    this.persistedRecords = next;
   }
 
   indexApiKey(record) {
@@ -1259,6 +1257,21 @@ function databaseRecords(db) {
   for (const [key, value] of Object.entries(db.responsePins)) add('responsePins', key, value);
   for (const [key, value] of Object.entries(normalizeRoutingPolicy(db.routingPolicy))) add('routingPolicy', key, value);
   return records;
+}
+
+function persistedDatabaseRecords(db) {
+  const gatewayRequests = db.gatewayRequests
+    .filter((item) => item.status === 'failed' && item.completedAt)
+    .slice(-GATEWAY_ERROR_HISTORY_LIMIT);
+  const requestIds = new Set(gatewayRequests.map(({ id }) => id));
+  const gatewayAttempts = db.gatewayAttempts.filter(({ requestId, status }) =>
+    requestIds.has(requestId) && !['in_progress', 'succeeded'].includes(status));
+  return databaseRecords({
+    ...db,
+    gatewayUsage: compactGatewayUsage(db.gatewayUsage),
+    gatewayRequests,
+    gatewayAttempts
+  });
 }
 
 function scoped(items, scopeId) {
