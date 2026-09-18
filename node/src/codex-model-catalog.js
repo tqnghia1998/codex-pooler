@@ -17,6 +17,7 @@ const FAILURE_SUPPRESSION_MS = 30_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_MODELS = 512;
 const MAX_ACCOUNT_CATALOGS = 512;
+const MAX_AGGREGATION_CACHE_ENTRIES = 128;
 const MAX_NEGATIVE_MODELS = 128;
 const DISCOVERY_CONCURRENCY = 3;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
@@ -69,6 +70,8 @@ export class CodexModelCatalog {
     this.concurrency = concurrency;
     this.entries = new Map();
     this.inflight = new Map();
+    this.aggregationCache = new Map();
+    this.entryRevision = 0;
   }
 
   async resolve(scopeId = DEFAULT_SCOPE_ID, options = {}) {
@@ -88,7 +91,11 @@ export class CodexModelCatalog {
       return [{ id, entry }];
     });
     const accountCatalogs = accountEntries.filter(({ entry }) => entry.hasCatalog);
-    const aggregated = aggregateCatalog(accountCatalogs.map(({ entry }) => entry.models), (id) => this.store.modelAllowed(scopeId, id));
+    const aggregated = this.cachedAggregation(
+      `scope:${scopeCatalogSignature(this.store, scopeId)}:${accountCatalogs.map(({ id, entry }) => `${id}:${entry.revision}`).join(',')}`,
+      accountCatalogs.map(({ entry }) => entry.models),
+      (id) => this.store.modelAllowed(scopeId, id)
+    );
     const status = catalogStatus(
       accountEntries.map(({ entry }) => entry),
       accountCatalogs.length,
@@ -98,8 +105,6 @@ export class CodexModelCatalog {
     );
     return {
       ...aggregated,
-      etag: modelCatalogEtag({ models: aggregated.nativeModels }),
-      publicEtag: modelCatalogEtag({ object: 'list', data: aggregated.publicModels }),
       status
     };
   }
@@ -118,12 +123,14 @@ export class CodexModelCatalog {
     const accountModels = entries.flatMap((entry) => entry?.hasCatalog ? [entry.models] : []);
     const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
       && !upstreams.some((upstream) => upstream.type === 'codex' && STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by === 'compass');
-    const aggregated = aggregateCatalog(accountModels, providerAllowed);
+    const aggregated = this.cachedAggregation(
+      `accounts:${scopeCatalogSignature(this.store, scopeId)}:${upstreams.map((upstream, index) => `${upstream.id}:${upstream.type}:${entries[index]?.revision || 0}`).join(',')}`,
+      accountModels,
+      providerAllowed
+    );
     const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, this.now(), this.freshTtlMs);
     return {
       ...aggregated,
-      etag: modelCatalogEtag({ models: aggregated.nativeModels }),
-      publicEtag: modelCatalogEtag({ object: 'list', data: aggregated.publicModels }),
       status
     };
   }
@@ -184,7 +191,9 @@ export class CodexModelCatalog {
     while (entry.negativeModels.size > MAX_NEGATIVE_MODELS) {
       entry.negativeModels.delete(entry.negativeModels.values().next().value);
     }
-    entry.models = entry.models.filter(({ id }) => id !== normalized);
+    const models = entry.models.filter(({ id }) => id !== normalized);
+    if (models.length !== entry.models.length) entry.revision = ++this.entryRevision;
+    entry.models = models;
     entry.modelIds.delete(normalized);
     entry.lastSuccessAt = 0;
     entry.lastFailureAt = 0;
@@ -264,6 +273,7 @@ export class CodexModelCatalog {
       entry.models = models;
       entry.modelIds = new Set(models.map(({ id }) => id));
       entry.negativeModels.clear();
+      entry.revision = ++this.entryRevision;
       entry.lastSuccessAt = now;
       entry.lastAttemptAt = now;
       entry.lastFailureAt = 0;
@@ -327,6 +337,7 @@ export class CodexModelCatalog {
     if (!entry || entry.generation !== generation) {
       entry = {
         generation,
+        revision: ++this.entryRevision,
         hasCatalog: false,
         models: [],
         modelIds: new Set(),
@@ -340,6 +351,22 @@ export class CodexModelCatalog {
       this.entries.set(upstreamId, entry);
     }
     return entry;
+  }
+
+  cachedAggregation(key, accountModels, modelAllowed) {
+    const cached = this.aggregationCache.get(key);
+    if (cached) return cached;
+    const aggregated = aggregateCatalog(accountModels, modelAllowed);
+    const value = {
+      ...aggregated,
+      etag: modelCatalogEtag({ models: aggregated.nativeModels }),
+      publicEtag: modelCatalogEtag({ object: 'list', data: aggregated.publicModels })
+    };
+    this.aggregationCache.set(key, value);
+    while (this.aggregationCache.size > MAX_AGGREGATION_CACHE_ENTRIES) {
+      this.aggregationCache.delete(this.aggregationCache.keys().next().value);
+    }
+    return value;
   }
 
   reconcile() {
@@ -358,6 +385,11 @@ export class CodexModelCatalog {
 
 function catalogGeneration(upstream) {
   return upstream ? Math.max(1, Number(upstream.modelCatalogEpoch) || 1) : 0;
+}
+
+function scopeCatalogSignature(store, scopeId) {
+  const scope = store.load().scopes.find(({ id }) => id === scopeId);
+  return JSON.stringify([scope?.status || null, scope?.models || []]);
 }
 
 function accountResult(entry, fresh) {
