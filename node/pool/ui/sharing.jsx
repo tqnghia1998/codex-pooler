@@ -1249,7 +1249,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
     || Number.isFinite(quota?.remainingPercent)
     || Number.isFinite(quota?.remainingUnits);
   const hasUnknownQuota = isExternal && !hasQuota;
-  const hasDelayedQuota = quota?.source === 'loop_ai_usage';
+  const showExternalQuotaWarning = isExternal;
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
@@ -1317,17 +1317,12 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           <Text type="supporting" color="secondary" maxLines={1}>
             {hasUnknownQuota ? advisoryQuotaSummary(t, advisoryQuota, dedicatedAppName) : quotaTiming(t, quota)}
           </Text>
-          {hasDelayedQuota && (
-            <>
-              <Text type="supporting" color="secondary" maxLines={1}>
-                {delayedQuotaTiming(t, quota)}
-              </Text>
-              <Banner
-                title={t('delayedQuotaWarningTitle')}
-                description={t('delayedQuotaWarningDescription')}
-                status="warning"
-              />
-            </>
+          {showExternalQuotaWarning && (
+            <Banner
+              title={t('delayedQuotaWarningTitle')}
+              description={t('delayedQuotaWarningDescription')}
+              status="warning"
+            />
           )}
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
@@ -2005,12 +2000,6 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
   const isAis = selectedUpstream?.quotaSource === 'ais';
   const isClaude = selectedUpstream?.type === 'claude';
   const isExternal = isAis || isClaude;
-  const hasQuota = Number.isFinite(selectedUpstream?.quota?.remainingDollars)
-    || Number.isFinite(selectedUpstream?.quota?.remainingPercent)
-    || Number.isFinite(selectedUpstream?.quota?.remainingUnits);
-  const hasUnknownQuota = isExternal && !hasQuota;
-  const hasDelayedQuota = selectedUpstream?.quota?.source === 'loop_ai_usage';
-  const dedicatedAppName = isClaude ? t('claudeDedicatedApp') : t('aisDedicatedApp');
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
       <Layout
@@ -2032,14 +2021,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   width="100%"
                 />
               )}
-              {hasUnknownQuota && (
-                <Banner
-                  title={t('externalQuotaNotice')}
-                  description={t('unknownQuotaDialogExplanation', { app: dedicatedAppName })}
-                  status="info"
-                />
-              )}
-              {hasDelayedQuota && (
+              {isExternal && (
                 <Banner
                   title={t('delayedQuotaWarningTitle')}
                   description={t('delayedQuotaWarningDescription')}
@@ -2460,18 +2442,6 @@ function advisoryQuotaSummary(t, quota, app) {
     });
   }
   return t('delayedQuotaNoData');
-}
-
-function delayedQuotaTiming(t, quota) {
-  const dataThrough = quota?.dataThroughAt
-    ? t('dataThroughAt', { date: dateTime(t, quota.dataThroughAt) })
-    : t('approximatelyOneHourDelayed');
-  const delay = Number.isFinite(quota?.delaySeconds) && quota.delaySeconds > 0
-    ? t('delayedByHours', { hours: money(quota.delaySeconds / 3600) })
-    : t('approximatelyOneHourDelayed');
-  return quota?.observedAt
-    ? `${delay} · ${dataThrough} · ${t('updatedAt', { date: dateTime(t, quota.observedAt) })}`
-    : `${delay} · ${dataThrough}`;
 }
 
 function activitySummary(t, activity) {

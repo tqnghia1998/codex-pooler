@@ -512,6 +512,7 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     if (!upstream.projectId) throw new Error('projectId is required');
     const projectKey = text(input.projectKey);
     if (!projectKey) throw new Error('projectKey is required');
+    upstream.email = text(input.email) || '';
     upstream.credentials = { projectKey };
     if (input.metadata && typeof input.metadata === 'object') upstream.metadata = input.metadata;
   } else {

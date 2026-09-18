@@ -944,6 +944,7 @@ test('an owner can add an AIS project without a local quota estimate', async () 
       assert.equal(added.response.status, 201);
       assert.equal(added.body.upstream.type, 'compass');
       assert.equal(added.body.upstream.quotaSource, 'ais');
+      assert.equal(added.body.upstream.email, provider.email);
       assert.equal(added.body.upstream.commitment.actualQuotaDollars, null);
       assert.equal(added.body.upstream.commitment.offerableQuotaDollars, null);
       const upstream = store.get(added.body.upstream.id);
@@ -969,6 +970,7 @@ test('an owner can add an AIS project without a local quota estimate', async () 
       assert.equal(listed.body.upstreams[0].commitment.actualQuotaDollars, null);
       assert.equal(listed.body.upstreams[0].commitment.offerableQuotaDollars, null);
       assert.equal(listed.body.upstreams[0].commitment.totalCommitmentDollars, 4);
+      assert.equal(listed.body.upstreams[0].email, provider.email);
       const nextOffer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store);
       assert.equal(nextOffer.isUnderfunded, false);
 
