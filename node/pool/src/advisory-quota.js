@@ -1,4 +1,4 @@
-const DEFAULT_BASE_URL = 'https://loop.shopee.io';
+const LOOP_API_BASE_URL = 'https://loop.shopee.io';
 const DEFAULT_DELAY_MS = 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DATA_PATH = '/api/v1/admin/ai-usage-personal/data';
@@ -11,8 +11,7 @@ export const ADVISORY_QUOTA_REFRESH_INTERVAL_MS = 60 * 60 * 1_000;
 
 export function advisoryQuotaClientFromEnv(env = process.env, { fetchImpl = globalThis.fetch } = {}) {
   return createAdvisoryQuotaClient({
-    baseUrl: env.POOL_AI_QUOTA_BASE_URL || env.LOOP_API_BASE_URL || DEFAULT_BASE_URL,
-    serviceToken: env.POOL_AI_QUOTA_SERVICE_TOKEN || env.LOOP_SERVICE_TOKEN || '',
+    serviceToken: env.POOL_AI_QUOTA_SERVICE_TOKEN || '',
     delayMs: positiveNumber(env.POOL_AI_QUOTA_DELAY_MS, DEFAULT_DELAY_MS),
     timeoutMs: positiveNumber(env.POOL_AI_QUOTA_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
     fetchImpl
@@ -20,15 +19,13 @@ export function advisoryQuotaClientFromEnv(env = process.env, { fetchImpl = glob
 }
 
 export function createAdvisoryQuotaClient({
-  baseUrl = DEFAULT_BASE_URL,
   serviceToken = '',
   delayMs = DEFAULT_DELAY_MS,
   timeoutMs = DEFAULT_TIMEOUT_MS,
   fetchImpl = globalThis.fetch
 } = {}) {
-  const normalizedBaseUrl = String(baseUrl || '').trim().replace(/\/+$/, '');
   const token = String(serviceToken || '').trim();
-  const enabled = Boolean(normalizedBaseUrl && token);
+  const enabled = Boolean(token);
 
   return {
     enabled,
@@ -44,7 +41,6 @@ export function createAdvisoryQuotaClient({
         PROVIDER_KEYS[provider].map(async (dataKey) => [
           `${provider}:${dataKey}`,
           await getMonthlyValue({
-            baseUrl: normalizedBaseUrl,
             serviceToken: token,
             email: normalizedEmail,
             bounds,
@@ -128,7 +124,6 @@ export function advisoryProvider(upstream) {
 }
 
 async function getMonthlyValue({
-  baseUrl,
   serviceToken,
   email,
   bounds,
@@ -136,7 +131,7 @@ async function getMonthlyValue({
   timeoutMs,
   fetchImpl
 }) {
-  const url = new URL(DATA_PATH, `${baseUrl}/`);
+  const url = new URL(DATA_PATH, `${LOOP_API_BASE_URL}/`);
   url.searchParams.set('user_email', email);
   url.searchParams.set('data_key', dataKey);
   url.searchParams.set('from_date', String(bounds.startDate));
