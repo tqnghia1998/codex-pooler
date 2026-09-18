@@ -203,13 +203,13 @@ export function codexHostHealthForStore(store) {
   return health;
 }
 
-export function codexHostHealthOptionsFromEnv(env = process.env) {
+export function codexHostHealthOptionsFromEnv(env = process.env, prefix = 'CODEX_POOLER_CODEX_HOST_') {
   return {
-    enabled: envBoolean(env.CODEX_POOLER_CODEX_HOST_CIRCUIT_ENABLED, true),
-    failureThreshold: envInteger(env.CODEX_POOLER_CODEX_HOST_FAILURE_THRESHOLD),
-    failureWindowMs: envInteger(env.CODEX_POOLER_CODEX_HOST_FAILURE_WINDOW_MS),
-    cooldownMs: envInteger(env.CODEX_POOLER_CODEX_HOST_COOLDOWN_MS),
-    maxEntries: envInteger(env.CODEX_POOLER_CODEX_HOST_MAX_ENTRIES)
+    enabled: envBoolean(env[`${prefix}CIRCUIT_ENABLED`], true),
+    failureThreshold: envInteger(env[`${prefix}FAILURE_THRESHOLD`]),
+    failureWindowMs: envInteger(env[`${prefix}FAILURE_WINDOW_MS`]),
+    cooldownMs: envInteger(env[`${prefix}COOLDOWN_MS`]),
+    maxEntries: envInteger(env[`${prefix}MAX_ENTRIES`])
   };
 }
 

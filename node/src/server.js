@@ -431,7 +431,8 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
         req,
         res,
         fetchImpl,
-        codexHostHealth
+        codexHostHealth,
+        claudeConfig: store.claudeRuntimeConfig
       })
     });
     return;
