@@ -49,7 +49,7 @@ const COOKIE_NAMES = {
   csrf: 'codex_pool_csrf',
   login: 'codex_pool_login'
 };
-export const QUOTA_REFRESH_INTERVAL_MS = 60_000;
+export const QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 export const PRODUCT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const ACCOUNT_COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60;
 const ADMIN_EMAIL = 'quangnghia.trinh@shopee.com';

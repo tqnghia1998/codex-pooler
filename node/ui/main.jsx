@@ -44,6 +44,7 @@ const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 50, capDollars: 5 },
   { minQuotaLeft: 0, capDollars: 0 }
 ];
+const FOCUSED_QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 
 const FILTER_OPTIONS = {
   status: [
@@ -361,7 +362,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       timer = null;
       if (focused()) {
         void refreshFocusedQuota();
-        timer = window.setInterval(() => void refreshFocusedQuota(), 60_000);
+        timer = window.setInterval(() => void refreshFocusedQuota(), FOCUSED_QUOTA_REFRESH_INTERVAL_MS);
       }
     };
     window.addEventListener('focus', updateTimer);
