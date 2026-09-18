@@ -1962,9 +1962,19 @@ export class ProductStore {
     return publicShareSession(result.row, null, null);
   }
 
-  cleanupUpstream(upstreamId) {
+  cleanupUpstream(upstreamId, { actorAccountId = null } = {}) {
     const now = new Date().toISOString();
-    this.sqlite.transaction(() => {
+    const participantIds = this.sqlite.transaction(() => {
+      const participants = this.sqlite.prepare(`
+        SELECT account_id AS accountId FROM account_upstreams WHERE upstream_id = ?
+        UNION
+        SELECT consumer_account_id AS accountId FROM sharing_sessions WHERE upstream_id = ?
+        UNION
+        SELECT consumer_account_id AS accountId
+        FROM sharing_tickets
+        JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
+        WHERE sharing_offers.upstream_id = ? AND sharing_tickets.status = 'pending'
+      `).all(upstreamId, upstreamId, upstreamId).map((row) => row.accountId);
       const offers = this.sqlite.prepare('SELECT id FROM sharing_offers WHERE upstream_id = ?').all(upstreamId);
       for (const { id } of offers) {
         this.sqlite.prepare("UPDATE sharing_offers SET status = 'closed', updated_at = ? WHERE id = ?").run(now, id);
@@ -1974,9 +1984,25 @@ export class ProductStore {
       for (const { id } of sessions) {
         this.sqlite.prepare("UPDATE sharing_sessions SET status = 'revoked', pending_key_cipher = NULL, updated_at = ? WHERE id = ?").run(now, id);
         this.sqlite.prepare('UPDATE sharing_session_keys SET disabled_at = ? WHERE session_id = ? AND disabled_at IS NULL').run(now, id);
+        this.releaseSessionReservations(id);
       }
       this.sqlite.prepare('DELETE FROM account_upstreams WHERE upstream_id = ?').run(upstreamId);
+      if (actorAccountId) {
+        this.event(actorAccountId, 'upstream', upstreamId, 'unlinked', {
+          offerCount: offers.length,
+          sessionCount: sessions.length
+        });
+      }
+      return participants;
     })();
+    for (const accountId of participantIds) {
+      this.notifyAccount(
+        accountId,
+        'QuotaHub provider unlinked',
+        'The provider removed this QuotaHub link. All related offers and share sessions were revoked.',
+        `provider:${upstreamId}:unlinked:${now}:${accountId}`
+      );
+    }
   }
 
   offerAllocatedMicros(offerId, excludingSessionId = null) {

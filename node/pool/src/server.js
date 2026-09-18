@@ -677,6 +677,16 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     });
     return;
   }
+  if (req.method === 'DELETE' && resource === 'upstreams' && id && parts.length === 4) {
+    const upstream = store.get(id);
+    if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
+      throw new HttpError(404, 'not_found', 'Not found');
+    }
+    productStore.cleanupUpstream(id, { actorAccountId: accountId });
+    store.remove(id);
+    sendJson(res, 204, null);
+    return;
+  }
   if (req.method === 'POST' && resource === 'personal-keys' && id && action === 'reveal') {
     sendJson(res, 200, productStore.revealNamedPersonalKey(accountId, id));
     return;
