@@ -371,7 +371,7 @@ export class Store {
     const upstream = findOrThrow(db, id);
     ensureSpending(upstream);
     upstream.quota = quota;
-    upstream.quotaSource = quota?.source || null;
+    if (!isAisUpstream(upstream)) upstream.quotaSource = quota?.source || null;
     if (upstream.health?.status === 'reauth_required') {
       upstream.healthGeneration = Math.max(0, Number(upstream.health.generation ?? upstream.healthGeneration) || 0) + 1;
       delete upstream.health;

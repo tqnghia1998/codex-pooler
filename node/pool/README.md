@@ -92,8 +92,9 @@ stored quota state and can also refresh it manually. Some Codex plans expose
 only a percentage or provider units; QuotaHub shows that reported value rather
 than estimating a dollar balance. When the optional delayed quota integration
 is configured, QuotaHub also reads monthly Claude and AIS usage by the
-provider's QuotaHub email once per hour. Those observations are approximately
-one hour behind and remain advisory only.
+provider's QuotaHub email once per hour. Those balances are approximately one
+hour behind, visibly labeled with their data-through time, and used as the
+current sharing balance until the next refresh.
 At startup and once per hour, QuotaHub also refreshes any refreshable Codex
 token that expires within 12 hours. Transient refresh failures retry with
 bounded exponential backoff; revoked or missing refresh tokens require the
@@ -106,23 +107,21 @@ token-refresh failure, or has exhausted its provider quota.
 
 Users can also link Claude with a Claude CLI setup token or supported OAuth
 credential JSON, or add an AIS project by entering its project ID and project
-key. Claude and AIS quotas are both **unknown** to the sharing model. Optional
-delayed observations are displayed with their reporting timestamp, but are not
-treated as verified real-time balances, reserved against, used for routing, or
-enforced. Manual refresh updates Codex quota and, when configured, delayed
-Claude and AIS observations.
-The owner chooses a nominal offer amount based on their own knowledge, and
-QuotaHub settles usage only against that local offer or session grant. External
-use is not visible here and a provider can reject requests before the local
-grant is consumed. Use **Add AIS project** and its **How to get AIS project**
-guide to retrieve `project_id` and `api_key` from Compass.
+key. Claude and AIS use the delayed monthly balance when the integration has
+data for the provider email. That balance caps new offers and sessions and
+marks the provider unavailable at zero, just like a dollar-denominated Codex
+balance. It is still not a real-time provider response: external consumption
+within the delay window can make the actual balance lower. Manual refresh
+updates Codex quota and, when configured, Claude and AIS monthly balances. Use
+**Add AIS project** and its **How to get AIS project** guide to retrieve
+`project_id` and `api_key` from Compass.
 
 ## Sharing Flow
 
 1. A provider publishes an offer for one imported Codex account, linked Claude
    account, or added AIS project and a dollar amount they are willing to share.
-   Codex offers are checked against the provider's currently offerable quota;
-   Claude and AIS quotas are unknown and their offers are best effort.
+   Offers are checked against the provider's current stored balance. Claude and
+   AIS balances are approximately one hour delayed when supplied by Loop.
 2. A consumer requests a dollar quota through a ticket.
 3. The provider approves the request, changes the approved amount, or rejects
    it.
@@ -151,12 +150,13 @@ If every active provider session needs reauthentication, requests return
 Offers, sessions, personal keys, and public quota requests expire. Pending
 tickets remain open until the source offer is closed or expires.
 Offer and session expiry is bounded by a provider reset time when one is known.
-For Codex, creating or resizing a grant is rejected atomically when it would
-overcommit the provider's current quota. If Codex quota later falls below
-existing commitments, affected offers and sessions remain visible as
-underfunded but cannot accept or route new work beyond their backed amount.
-Claude and AIS balances are never checked or reserved; external use can make
-either provider reject an offer before its local share grant is consumed.
+For Codex and Loop-backed Claude/AIS balances, creating or resizing a grant is
+rejected atomically when it would overcommit the stored provider balance. If a
+stored balance later falls below existing commitments, affected offers and
+sessions remain visible as underfunded but cannot accept or route new work
+beyond their backed amount. Claude and AIS accounts without a Loop balance
+remain best effort; external use can make either provider reject a request
+before its local share grant is consumed.
 Providers can extend an active session's expiry from **Resize share session**;
 the new expiry cannot shorten the session or exceed the provider quota reset
 or the 30-day session limit.
@@ -361,14 +361,15 @@ executable, refresh Codex sharing quota every 60 seconds, check due tokens
 every hour, and store data in `node/pool/.data`. When
 `POOL_AI_QUOTA_SERVICE_TOKEN` is configured, the delayed Claude/AIS integration
 queries the fixed `https://loop.shopee.io` endpoint hourly with a 30-second
-timeout and labels the source data as one hour delayed. The service token
-remains server-side and must not be committed. SMTP is optional; when enabled,
-port `587` and a 15-second outbox delivery interval are the defaults.
+timeout. It uses the returned Claude/AIS balance as the sharing balance while
+showing its approximately one-hour delay. The service token remains server-side
+and must not be committed. SMTP is optional; when enabled, port `587` and a
+15-second outbox delivery interval are the defaults.
 
 `POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
 Claude request shaping, header defaults, aliases, exclusions, retry, cooling,
-and cloak controls. It does not inherit Relaydeck environment variables and
-does not change QuotaHub's unknown-quota policy for Claude sharing.
+and cloak controls. It does not inherit Relaydeck environment variables or
+affect QuotaHub's delayed Loop balance policy for Claude sharing.
 
 The shared Codex origin circuit is enabled conservatively by default. Configure
 its Pool-only behavior with `POOL_CODEX_HOST_CIRCUIT_ENABLED`,

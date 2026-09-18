@@ -3947,7 +3947,7 @@ function refreshShareSessionAuthorization(req) {
       : { ...req.proxyAuth, ...access };
     return null;
   }
-  const access = req.sharingStore?.shareSessionAccess(req.proxyAuth.shareSessionId);
+  const access = req.sharingStore?.shareSessionAccess(req.proxyAuth.shareSessionId, req.upstreamStore);
   if (!access
     || access.upstreamId !== req.proxyAuth.upstreamId
     || access.scopeId !== req.proxyAuth.scopeId) {

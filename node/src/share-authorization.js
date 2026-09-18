@@ -11,6 +11,7 @@ export function shareSessionDenial(auth) {
   if (auth.sessionStatus === 'paused') return { code: 'share_session_paused', message: 'The share session is paused' };
   if (auth.sessionStatus === 'revoked') return { code: 'share_session_revoked', message: 'The share session is revoked' };
   if (auth.sessionStatus === 'expired') return { code: 'share_session_expired', message: 'The share session expired' };
+  if (auth.providerIssue) return auth.providerIssue;
   if (auth.sessionStatus !== 'active' || auth.remainingMicros <= 0) {
     return { code: 'share_session_exhausted', message: 'The share session quota is exhausted' };
   }

@@ -90,6 +90,11 @@ export async function refreshAccountAdvisoryQuotas({
     const observation = byProvider.get(target.provider);
     if (!observation) continue;
     store.setAdvisoryQuota(target.upstreamId, observation, { notify: false });
+    if (observation.found) {
+      store.setQuota(target.upstreamId, quotaFromObservation(observation), { notify: false });
+    } else if (hasExpiredLoopQuota(store.getPublic(target.upstreamId), observation)) {
+      store.setQuota(target.upstreamId, null, { notify: false });
+    }
     updated += 1;
   }
   if (updated) store.notifyUpstreamsChange();
@@ -176,6 +181,45 @@ function normalizeEmail(value) {
   return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '';
 }
 
+function quotaFromObservation(observation) {
+  return {
+    label: 'Monthly usage',
+    usedPercent: percentage(observation.usageDollars, observation.limitDollars),
+    remainingPercent: percentage(observation.remainingDollars, observation.limitDollars),
+    remainingUnits: null,
+    limitUnits: null,
+    remainingDollars: observation.remainingDollars,
+    limitDollars: observation.limitDollars,
+    windowSeconds: null,
+    resetAt: nextMonthStart(observation.quotaMonth),
+    observedAt: observation.reportedAt,
+    dataThroughAt: observation.dataThroughAt,
+    delaySeconds: observation.delaySeconds,
+    source: observation.source
+  };
+}
+
+function nextMonthStart(value) {
+  const month = Number(value);
+  const year = Math.floor(month / 100);
+  const monthIndex = month % 100;
+  return new Date(Date.UTC(year, monthIndex, 1)).toISOString();
+}
+
+function percentage(value, total) {
+  const amount = Number(value);
+  const limit = Number(total);
+  if (!Number.isFinite(amount) || !Number.isFinite(limit) || limit <= 0) return null;
+  return Number(Math.max(0, Math.min(100, amount / limit * 100)).toFixed(6));
+}
+
+function hasExpiredLoopQuota(upstream, observation) {
+  if (upstream?.quota?.source !== 'loop_ai_usage') return false;
+  const resetAt = Date.parse(upstream.quota.resetAt);
+  const reportedAt = Date.parse(observation?.reportedAt);
+  return Number.isFinite(resetAt) && Number.isFinite(reportedAt) && resetAt <= reportedAt;
+}
+
 function positiveNumber(value, fallback) {
   const number = Number(value);
   return Number.isFinite(number) && number > 0 ? number : fallback;
@@ -187,6 +231,7 @@ function finiteNumber(value) {
 }
 
 function money(value) {
+  if (value === null || value === undefined || value === '') return null;
   const number = finiteNumber(value);
   return number === null ? null : Number(number.toFixed(6));
 }
