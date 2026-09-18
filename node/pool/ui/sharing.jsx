@@ -26,7 +26,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
-import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling } from 'lucide-react';
+import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { useLanguage } from './i18n.jsx';
 
@@ -171,6 +171,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [personalKeyActionLoading, setPersonalKeyActionLoading] = useState(false);
   const [providerRevokeTarget, setProviderRevokeTarget] = useState(null);
   const [providerActionLoading, setProviderActionLoading] = useState(false);
+  const [providerUnlinkTarget, setProviderUnlinkTarget] = useState(null);
+  const [providerUnlinkLoading, setProviderUnlinkLoading] = useState(false);
   const [login, setLogin] = useState(null);
   const [loginLoading, setLoginLoading] = useState(false);
   const [authJsonDialog, setAuthJsonDialog] = useState(false);
@@ -718,6 +720,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             )}
             isActionLoading={isActionLoading}
             onRevokeAll={setProviderRevokeTarget}
+            onUnlink={setProviderUnlinkTarget}
           />
         </GridSpan>
         <PersonalKeyCard
@@ -1105,6 +1108,28 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           if (changed) setProviderRevokeTarget(null);
         }}
       />
+      <AlertDialog
+        isOpen={Boolean(providerUnlinkTarget)}
+        onOpenChange={(isOpen) => { if (!isOpen && !providerUnlinkLoading) setProviderUnlinkTarget(null); }}
+        title={t('unlinkProviderTitle')}
+        description={providerUnlinkTarget
+          ? t('unlinkProviderDesc', { name: providerUnlinkTarget.name })
+          : ''}
+        actionLabel={t('unlinkProvider')}
+        actionVariant="destructive"
+        isActionLoading={providerUnlinkLoading}
+        onAction={async () => {
+          const target = providerUnlinkTarget;
+          if (!target) return;
+          setProviderUnlinkLoading(true);
+          const changed = await mutate(
+            () => api(`/api/pool/upstreams/${target.id}`, { method: 'DELETE' }),
+            t('providerUnlinked')
+          );
+          setProviderUnlinkLoading(false);
+          if (changed) setProviderUnlinkTarget(null);
+        }}
+      />
     </VStack>
   );
 }
@@ -1124,6 +1149,7 @@ function QuotaOverview({
   testingUpstreamId,
   onToggleSharing,
   onRevokeAll,
+  onUnlink,
   isActionLoading = () => false
 }) {
   const { t } = useLanguage();
@@ -1163,6 +1189,11 @@ function QuotaOverview({
             <Button label={t('refreshQuota')} size="sm" variant="ghost" isLoading={isRefreshing} onClick={onRefresh} />
           </HStack>
         </HStack>
+        <Banner
+          title={t('delayedQuotaWarningTitle')}
+          description={t('delayedQuotaWarningDescription')}
+          status="info"
+        />
         <Grid columns={PROVIDER_CARD_GRID_COLUMNS} gap={2}>
           {orderedUpstreams.map((upstream) => (
             <QuotaCard
@@ -1177,6 +1208,7 @@ function QuotaOverview({
               onEditAis={onEditAis}
               onEditClaude={onEditClaude}
               isActionLoading={isActionLoading}
+              onUnlink={onUnlink}
             />
           ))}
         </Grid>
@@ -1238,7 +1270,7 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, isActionLoading = () => false }) {
+function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, onUnlink, isActionLoading = () => false }) {
   const { t } = useLanguage();
   const quota = upstream.quota;
   const advisoryQuota = upstream.advisoryQuota;
@@ -1249,7 +1281,6 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
     || Number.isFinite(quota?.remainingPercent)
     || Number.isFinite(quota?.remainingUnits);
   const hasUnknownQuota = isExternal && !hasQuota;
-  const showExternalQuotaWarning = isExternal;
   const percentage = Number.isFinite(quota?.remainingPercent) ? Math.max(0, Math.min(100, quota.remainingPercent)) : null;
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
@@ -1317,13 +1348,6 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           <Text type="supporting" color="secondary" maxLines={1}>
             {hasUnknownQuota ? advisoryQuotaSummary(t, advisoryQuota, dedicatedAppName) : quotaTiming(t, quota)}
           </Text>
-          {showExternalQuotaWarning && (
-            <Banner
-              title={t('delayedQuotaWarningTitle')}
-              description={t('delayedQuotaWarningDescription')}
-              status="warning"
-            />
-          )}
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
               {hasUnknownQuota
@@ -1372,6 +1396,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
             onClick={() => void onToggleSharing(upstream)}
           />
           <IconButton label={t('revokeAll')} tooltip={t('revokeAll')} icon={<Ban size={16} />} size="sm" variant="destructive" onClick={() => onRevokeAll(upstream)} />
+          <IconButton label={t('unlinkProvider')} tooltip={t('unlinkProvider')} icon={<Unplug size={16} />} size="sm" variant="destructive" onClick={() => onUnlink(upstream)} />
         </HStack>
       </VStack>
     </Card>
@@ -1997,9 +2022,6 @@ function ClaudeUpstreamDialog({ value, onClose, onSave, onChange }) {
 function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, onChange }) {
   const { t } = useLanguage();
   const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
-  const isAis = selectedUpstream?.quotaSource === 'ais';
-  const isClaude = selectedUpstream?.type === 'claude';
-  const isExternal = isAis || isClaude;
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
       <Layout
@@ -2019,13 +2041,6 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                   value={value.upstreamId}
                   onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
                   width="100%"
-                />
-              )}
-              {isExternal && (
-                <Banner
-                  title={t('delayedQuotaWarningTitle')}
-                  description={t('delayedQuotaWarningDescription')}
-                  status="warning"
                 />
               )}
               <NumberInput

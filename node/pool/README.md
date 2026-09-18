@@ -115,6 +115,11 @@ within the delay window can make the actual balance lower. Manual refresh
 updates Codex quota and, when configured, Claude and AIS monthly balances. Use
 **Add AIS project** and its **How to get AIS project** guide to retrieve
 `project_id` and `api_key` from Compass.
+Every linked-provider overview shows one informational delayed-estimate notice:
+Codex, Claude, and AIS values can all lag their live provider quota. The
+publish-offer form intentionally does not repeat that notice. Unlinking a
+provider removes its saved credentials and closes related offers and share
+sessions.
 
 ## Sharing Flow
 
@@ -227,6 +232,7 @@ GET    /api/pool/upstreams
 POST   /api/pool/upstreams/claude                   { token|accessToken|authJson, name? }
 POST   /api/pool/upstreams/ais                      { projectId, projectKey }
 PATCH  /api/pool/upstreams/:id                      AIS: { projectId, projectKey? }; Claude: { token|accessToken|authJson }
+DELETE /api/pool/upstreams/:id                      removes credentials; revokes related offers and sessions
 GET    /api/pool/upstreams/credentials
 POST   /api/pool/upstreams/:id/refresh-quota        Codex quota or optional delayed Claude/AIS observation
 POST   /api/pool/upstreams/:id/test-connection
