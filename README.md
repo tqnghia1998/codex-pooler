@@ -1,8 +1,9 @@
 # Codex Pooler — Node.js fork
 
 This fork develops the standalone Node.js implementation in [`node/`](node/).
-It provides a local dashboard plus a Codex/Compass gateway with Responses, Chat
-Completions, Anthropic Messages, SSE, and WebSocket support.
+It provides a local dashboard plus a Codex, Compass, and Claude Enterprise
+OAuth gateway with Responses, Chat Completions, Anthropic Messages, SSE, and
+WebSocket support.
 
 ## Run
 
@@ -19,8 +20,10 @@ npm start
 Open `http://localhost:3000`. See [`node/README.md`](node/README.md) for setup,
 routing, supported routes, storage, and operational limits.
 
-QuotaHub is a separate friend-sharing product with its own server, login,
-and data. Start it with `cd node && npm run pool:start`; see
+QuotaHub is a separate friend-sharing product with its own server, login, and
+data. It shares Codex, Claude, or AIS access, but only Codex provider quota is
+refreshed and enforced by its sharing model; Claude and AIS offers use nominal,
+locally settled limits. Start it with `cd node && npm run pool:start`; see
 [`node/pool/README.md`](node/pool/README.md).
 
 ## Project direction
