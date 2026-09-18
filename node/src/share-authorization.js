@@ -23,6 +23,16 @@ export function isShareCredential(auth) {
 
 export function personalShareSessions(req, { sessionId = '', responseId = '' } = {}) {
   if (req.proxyAuth?.kind !== 'personal_share') return [];
+  const cached = req.proxyAuth?.personalShareSessions;
+  if (Array.isArray(cached)) {
+    const route = responseId ? `response:${responseId}` : sessionId ? `session:${sessionId}` : '';
+    if (route) {
+      const pinned = req.sharingStore?.personalRouteSession?.(req.proxyAuth.personalKeyId, route, req.upstreamStore);
+      if (pinned) return [pinned];
+      if (req.sharingStore?.personalRouteExists?.(req.proxyAuth.personalKeyId, route)) return [];
+    }
+    return cached;
+  }
   return req.sharingStore?.personalShareSessionCandidates(req.proxyAuth.personalKeyId, { sessionId, responseId }, req.upstreamStore) || [];
 }
 

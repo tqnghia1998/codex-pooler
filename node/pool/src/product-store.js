@@ -1799,10 +1799,17 @@ export class ProductStore {
   personalShareAccess(personalKeyId, upstreamStore) {
     const key = this.personalKeyRow(personalKeyId);
     if (!key || key.disabled_at) return null;
-    const access = this.personalKeyAccess(key.id, key.account_id, upstreamStore);
-    const providerReauthUpstreamIds = this.activeConsumerSessions(key.account_id)
-      .filter((session) => providerIssue(upstreamStore?.getPublic(session.upstreamId))?.code === 'provider_reauth_required')
-      .map((session) => session.upstreamId);
+    const sessionRows = this.consumerSessionRows(key.account_id, upstreamStore, { includeUnavailable: true });
+    const activeSessions = this.activeConsumerSessions(
+      key.account_id,
+      upstreamStore,
+      sessionRows.filter((row) => personalSessionAvailable(row, upstreamStore))
+    );
+    const access = this.personalKeyAccess(key.id, key.account_id, upstreamStore, activeSessions);
+    const providerReauthUpstreamIds = sessionRows
+      .filter((session) => providerIssue(upstreamStore?.getPublic(session.upstream_id))?.code === 'provider_reauth_required')
+      .map((session) => session.upstream_id);
+    const orderedSessions = orderPersonalSessions(activeSessions, key.last_session_id);
     return {
       id: key.id,
       kind: 'personal_share',
@@ -1812,7 +1819,8 @@ export class ProductStore {
       activeSessionCount: access.activeSessionCount,
       remainingMicros: access.remainingMicros,
       providerReauthRequired: access.activeSessionCount === 0 && providerReauthUpstreamIds.length > 0,
-      providerReauthUpstreamIds
+      providerReauthUpstreamIds,
+      personalShareSessions: orderedSessions
     };
   }
 
@@ -2040,23 +2048,27 @@ export class ProductStore {
     return Boolean(this.sqlite.prepare('SELECT 1 FROM personal_api_key_routes WHERE key_id = ? AND route_key = ?').get(keyId, route));
   }
 
-  activeConsumerSessions(accountId, upstreamStore) {
+  consumerSessionRows(accountId, upstreamStore, { includeUnavailable = false } = {}) {
     this.expireDue();
     const pausedUpstreams = new Set(this.sqlite.prepare(`
       SELECT upstream_id
       FROM account_upstreams
       WHERE sharing_status = 'paused'
     `).all().map(({ upstream_id }) => upstream_id));
-    const rows = this.sqlite.prepare(`
+    return this.sqlite.prepare(`
       SELECT id, status, granted_micros, consumed_micros, upstream_id, scope_id, expires_at
       FROM sharing_sessions
       WHERE consumer_account_id = ? AND status = 'active' AND granted_micros > consumed_micros
     `).all(accountId)
-      .filter((row) => personalSessionAvailable(row, upstreamStore))
+      .filter((row) => includeUnavailable || personalSessionAvailable(row, upstreamStore))
       .filter((row) => !pausedUpstreams.has(row.upstream_id));
-    if (!rows.length) return [];
+  }
+
+  activeConsumerSessions(accountId, upstreamStore, rows = null) {
+    const sessionRows = rows || this.consumerSessionRows(accountId, upstreamStore);
+    if (!sessionRows.length) return [];
     const commitmentCache = new Map();
-    return rows.flatMap((row) => {
+    return sessionRows.flatMap((row) => {
       const commitment = upstreamStore ? this.providerCommitment(row.upstream_id, upstreamStore, commitmentCache) : null;
       const sessionRemaining = Math.max(0, row.granted_micros - row.consumed_micros);
       const backedMicros = commitment?.sessionBacking.get(row.id) ?? sessionRemaining;
@@ -2065,8 +2077,8 @@ export class ProductStore {
     });
   }
 
-  personalKeyAccess(keyId, accountId, upstreamStore) {
-    const sessions = this.activeConsumerSessions(accountId, upstreamStore);
+  personalKeyAccess(keyId, accountId, upstreamStore, sessions = null) {
+    const activeSessions = sessions || this.activeConsumerSessions(accountId, upstreamStore);
     const totals = this.sqlite.prepare(`
       SELECT
         COALESCE(SUM(granted_micros), 0) AS granted_micros,
@@ -2076,10 +2088,10 @@ export class ProductStore {
     `).get(accountId);
     return {
       personalKeyId: keyId,
-      activeSessionCount: sessions.length,
+      activeSessionCount: activeSessions.length,
       grantedMicros: totals.granted_micros,
       consumedMicros: totals.consumed_micros,
-      remainingMicros: sessions.reduce((total, session) => total + session.remainingMicros, 0)
+      remainingMicros: activeSessions.reduce((total, session) => total + session.remainingMicros, 0)
     };
   }
 
