@@ -8,8 +8,10 @@ import { ProductStore } from '../src/product-store.js';
 import {
   advisoryQuotaClientFromEnv,
   createAdvisoryQuotaClient,
+  refreshAccountAdvisoryQuotas,
   refreshAllAdvisoryQuotas
 } from '../src/advisory-quota.js';
+import { providerIssue } from '../src/provider-availability.js';
 
 test('delayed quota environment uses the fixed Loop endpoint and dedicated token', async () => {
   let request;
@@ -65,7 +67,41 @@ test('delayed quota client reads monthly Claude and AIS observations', async () 
   assert.equal(Date.parse(observations[0].reportedAt) - Date.parse(observations[0].dataThroughAt), 3_600_000);
 });
 
-test('hourly delayed refresh stores advisory data without setting enforceable quota', async () => {
+test('an empty delayed response remains unknown instead of becoming a zero balance', async () => {
+  const client = createAdvisoryQuotaClient({
+    serviceToken: 'server-only-token',
+    fetchImpl: async () => new Response(JSON.stringify({
+      success: true,
+      result: { data: [] }
+    }), { status: 200 })
+  });
+  const [observation] = await client.query('owner@example.com', ['claude']);
+  const dir = mkdtempSync(join(tmpdir(), 'quotahub-advisory-quota-unknown-'));
+  try {
+    const store = new Store(dir);
+    const claude = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-advisory-unknown',
+      metadata: { skip_account_profile: true }
+    });
+
+    await refreshAccountAdvisoryQuotas({
+      store,
+      email: 'owner@example.com',
+      targets: [{ upstreamId: claude.id, provider: 'claude' }],
+      client: { enabled: true, async query() { return [observation]; } }
+    });
+
+    assert.equal(observation.found, false);
+    assert.equal(observation.remainingDollars, null);
+    assert.equal(store.getPublic(claude.id).quota, null);
+    assert.equal(providerIssue(store.getPublic(claude.id)), null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('hourly delayed refresh promotes Claude and AIS data into enforceable quota', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'quotahub-advisory-quota-'));
   try {
     const store = new Store(dir);
@@ -109,12 +145,154 @@ test('hourly delayed refresh stores advisory data without setting enforceable qu
 
     assert.equal(results[0].status, 'fulfilled');
     assert.deepEqual(queried, [{ email: 'owner@example.com', providers: ['claude', 'ais'] }]);
-    assert.equal(store.getPublic(claude.id).quota, null);
+    assert.equal(store.getPublic(claude.id).quota.remainingDollars, 16);
+    assert.equal(store.getPublic(claude.id).quota.remainingPercent, 80);
     assert.equal(store.getPublic(claude.id).advisoryQuota.remainingDollars, 16);
-    assert.equal(store.getPublic(ais.id).quota, null);
+    assert.equal(store.getPublic(ais.id).quota.remainingDollars, 14);
+    assert.equal(store.getPublic(ais.id).quota.remainingPercent, 70);
+    assert.equal(store.getPublic(ais.id).quotaSource, 'ais');
     assert.equal(store.getPublic(ais.id).advisoryQuota.remainingDollars, 14);
-    assert.equal(productStore.providerSummary(account.id, claude.id, store).commitment.actualQuotaDollars, null);
-    assert.equal(productStore.providerSummary(account.id, ais.id, store).commitment.actualQuotaDollars, null);
+    assert.equal(productStore.providerSummary(account.id, claude.id, store).commitment.actualQuotaDollars, 16);
+    assert.equal(productStore.providerSummary(account.id, ais.id, store).commitment.actualQuotaDollars, 14);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an AIS balance without a monthly cap remains available for sharing', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quotahub-advisory-quota-ais-balance-'));
+  try {
+    const store = new Store(dir);
+    const productStore = new ProductStore(dir);
+    const account = productStore.upsertAccount({ email: 'owner@example.com', name: 'Owner' });
+    const ais = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: 'ais-balance-project',
+      projectKey: 'ais-balance-key'
+    });
+    productStore.linkUpstream(account.id, ais.id);
+    const client = createAdvisoryQuotaClient({
+      serviceToken: 'server-only-token',
+      fetchImpl: async (url) => {
+        const dataKey = new URL(url).searchParams.get('data_key');
+        const value = dataKey === 'ais.balance_usd' ? 24 : null;
+        return new Response(JSON.stringify({
+          success: true,
+          result: { data: value === null ? [] : [{ numeric_value: value }] }
+        }), { status: 200 });
+      }
+    });
+
+    await refreshAccountAdvisoryQuotas({
+      store,
+      email: 'owner@example.com',
+      targets: [{ upstreamId: ais.id, provider: 'ais' }],
+      client
+    });
+
+    const upstream = store.getPublic(ais.id);
+    assert.equal(upstream.quota.remainingDollars, 24);
+    assert.equal(upstream.quota.remainingPercent, null);
+    assert.equal(providerIssue(upstream), null);
+    assert.equal(productStore.providerSummary(account.id, ais.id, store).commitment.actualQuotaDollars, 24);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an empty delayed observation retains the last enforceable Loop balance', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quotahub-advisory-quota-empty-'));
+  try {
+    const store = new Store(dir);
+    const claude = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-advisory-empty',
+      metadata: { skip_account_profile: true }
+    });
+    store.setQuota(claude.id, {
+      remainingDollars: 0,
+      remainingPercent: 0,
+      observedAt: '2026-09-18T12:00:00.000Z',
+      source: 'loop_ai_usage'
+    });
+
+    const result = await refreshAccountAdvisoryQuotas({
+      store,
+      email: 'owner@example.com',
+      targets: [{ upstreamId: claude.id, provider: 'claude' }],
+      client: {
+        enabled: true,
+        async query() {
+          return [{
+            provider: 'claude',
+            found: false,
+            quotaMonth: 202609,
+            usageDollars: null,
+            limitDollars: null,
+            remainingDollars: null,
+            reportedAt: '2026-09-18T13:00:00.000Z',
+            dataThroughAt: '2026-09-18T12:00:00.000Z',
+            delaySeconds: 3600,
+            source: 'loop_ai_usage'
+          }];
+        }
+      }
+    });
+
+    assert.deepEqual(result, { status: 'refreshed', updated: 1 });
+    assert.equal(store.getPublic(claude.id).advisoryQuota.found, false);
+    assert.equal(store.getPublic(claude.id).quota.remainingDollars, 0);
+    assert.equal(store.getPublic(claude.id).quota.remainingPercent, 0);
+    assert.equal(store.getPublic(claude.id).quota.source, 'loop_ai_usage');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('an empty delayed observation clears an expired Loop balance after the monthly reset', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'quotahub-advisory-quota-rollover-'));
+  try {
+    const store = new Store(dir);
+    const claude = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-advisory-rollover',
+      metadata: { skip_account_profile: true }
+    });
+    store.setQuota(claude.id, {
+      remainingDollars: 0,
+      remainingPercent: 0,
+      resetAt: '2026-09-01T00:00:00.000Z',
+      observedAt: '2026-08-31T23:00:00.000Z',
+      source: 'loop_ai_usage'
+    });
+
+    await refreshAccountAdvisoryQuotas({
+      store,
+      email: 'owner@example.com',
+      targets: [{ upstreamId: claude.id, provider: 'claude' }],
+      client: {
+        enabled: true,
+        async query() {
+          return [{
+            provider: 'claude',
+            found: false,
+            quotaMonth: 202609,
+            usageDollars: null,
+            limitDollars: null,
+            remainingDollars: null,
+            reportedAt: '2026-09-18T13:00:00.000Z',
+            dataThroughAt: '2026-09-18T12:00:00.000Z',
+            delaySeconds: 3600,
+            source: 'loop_ai_usage'
+          }];
+        }
+      }
+    });
+
+    const upstream = store.getPublic(claude.id);
+    assert.equal(upstream.quota, null);
+    assert.equal(providerIssue(upstream), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

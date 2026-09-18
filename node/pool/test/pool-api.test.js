@@ -1083,7 +1083,7 @@ test('Pool treats Claude quota as unknown even when the gateway has reported usa
   }
 });
 
-test('a provider can manually refresh delayed Claude quota without making it enforceable', async () => {
+test('a provider can manually refresh delayed Claude quota as the primary sharing balance', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-advisory-quota-'));
   try {
     const store = new Store(dir);
@@ -1129,9 +1129,13 @@ test('a provider can manually refresh delayed Claude quota without making it enf
       assert.equal(result.response.status, 200);
       assert.equal(result.body.advisory, true);
       assert.equal(result.body.upstream.advisoryQuota.remainingDollars, 15);
-      assert.equal(result.body.upstream.quota, null);
-      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, null);
-      assert.equal(sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 999 }, store).quotaDollars, 999);
+      assert.equal(result.body.upstream.quota.remainingDollars, 15);
+      assert.equal(result.body.upstream.quota.source, 'loop_ai_usage');
+      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, 15);
+      assert.throws(
+        () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 16 }, store),
+        /provider’s truly offerable quota/
+      );
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
