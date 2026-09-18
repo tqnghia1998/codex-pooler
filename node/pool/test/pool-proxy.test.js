@@ -226,6 +226,62 @@ test('an AIS project with unknown quota serves a pinned Compass Messages share s
   }
 });
 
+test('shared Claude requests apply Pool runtime configuration', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-runtime-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-pool-runtime',
+      metadata: { skip_account_profile: true }
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'claude-runtime-provider');
+    const consumer = account(sharingStore, 'claude-runtime-consumer');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 1 }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id, quotaDollars: 1 }, store);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const { apiKey } = sharingStore.revealSessionKey(consumer.id, session.id);
+    let requestHeaders = null;
+    const app = await running(store, sharingStore, async (url, options) => {
+      assert.equal(new URL(url).pathname, '/v1/messages');
+      requestHeaders = options.headers;
+      return new Response(JSON.stringify({
+        id: 'msg-pool-runtime',
+        model: 'claude-sonnet-5',
+        content: [{ type: 'text', text: 'configured' }],
+        usage: { price_cost_usd: 0.01 }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }, {
+      claudeConfig: {
+        claudeHeaderDefaults: { userAgent: 'claude-cli/9.9.9 (external, cli)' }
+      }
+    });
+    try {
+      const response = await fetch(`${app.base}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          'content-type': 'application/json',
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-5',
+          max_tokens: 32,
+          messages: [{ role: 'user', content: 'hello' }]
+        })
+      });
+      assert.equal(response.status, 200);
+      assert.equal(requestHeaders['user-agent'], 'claude-cli/9.9.9 (external, cli)');
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('share keys expose only the granted provider model catalog', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-models-'));
   try {

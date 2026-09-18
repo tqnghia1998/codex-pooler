@@ -348,7 +348,8 @@ export async function testUpstreamConnection({
   codexHostHealth = codexHostHealthForStore(store),
   proxyAuth = null,
   sharingStore = null,
-  allowUnavailableCandidate = true
+  allowUnavailableCandidate = true,
+  claudeConfig = null
 }) {
   const upstream = store.get(upstreamId);
   if (!upstream) throw new HttpError(404, 'not_found', 'Upstream not found');
@@ -396,7 +397,8 @@ export async function testUpstreamConnection({
     logger,
     modelCatalog,
     codexHostHealth,
-    allowUnavailableCandidate
+    allowUnavailableCandidate,
+    claudeConfig
   });
   if (!dispatched?.response?.ok) {
     throw new HttpError(502, 'connection_test_failed', connectionTestFailureMessage(dispatched?.response?.status));

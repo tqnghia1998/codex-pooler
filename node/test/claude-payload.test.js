@@ -15,6 +15,9 @@ test('loads bounded JSON Claude configuration without exposing credential state'
   });
   assert.throws(() => claudeConfigFromEnv({ CODEX_POOLER_CLAUDE_CONFIG_JSON: '{broken' }), /valid JSON/);
   assert.throws(() => claudeConfigFromEnv({ CODEX_POOLER_CLAUDE_CONFIG_JSON: '[]' }), /JSON object/);
+  assert.deepEqual(claudeConfigFromEnv({ POOL_CLAUDE_CONFIG_JSON: '{"requestRetry":1}' }, 'POOL_CLAUDE_CONFIG_JSON'), {
+    requestRetry: 1
+  });
 });
 
 test('applies CPA global Claude header defaults and cloak disable precedence', () => {

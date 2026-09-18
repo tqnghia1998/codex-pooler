@@ -85,15 +85,15 @@ browser cookies are issued with a ten-year lifetime; clearing cookies still
 requires signing in again in that browser.
 
 After sign-in, QuotaHub waits for an immediate best-effort Codex quota
-refresh before completing the browser login, then
-refreshes every linked Codex account automatically every minute in batches of
-ten. The dashboard polls this stored quota state and can also refresh it
-manually. Some Codex plans expose only a percentage or provider units; Codex
-Share shows that reported value rather than estimating a dollar balance.
-At startup and once per hour, QuotaHub also refreshes any refreshable Codex token
-that expires within 12 hours. Transient refresh failures retry with bounded
-exponential backoff; revoked or missing refresh tokens require the provider to
-sign in again.
+refresh before completing the browser login, then refreshes linked Codex and
+supported Claude OAuth accounts automatically every minute in batches of ten.
+The dashboard polls this stored quota state and can also refresh it manually.
+Some plans expose only a percentage or provider units; QuotaHub shows that
+reported value rather than estimating a dollar balance.
+At startup and once per hour, QuotaHub also refreshes any refreshable Codex or
+Claude OAuth token that expires within 12 hours. Transient refresh failures
+retry with bounded exponential backoff; revoked or missing refresh tokens
+require the provider to sign in again.
 When a provider's Codex credentials need reauthentication, its quota card shows
 the affected state and offers both sign-in and `auth.json` import actions.
 Offers, pending tickets, and share sessions show a sanitized provider issue to
@@ -324,6 +324,12 @@ POOL_SMTP_FROM
 POOL_EMAIL_DELIVERY_INTERVAL_MS
 POOL_PRODUCT_CLEANUP_INTERVAL_MS
 POOL_BACKUP_INTERVAL_MS
+POOL_CLAUDE_CONFIG_JSON
+POOL_CODEX_HOST_CIRCUIT_ENABLED
+POOL_CODEX_HOST_FAILURE_THRESHOLD
+POOL_CODEX_HOST_FAILURE_WINDOW_MS
+POOL_CODEX_HOST_COOLDOWN_MS
+POOL_CODEX_HOST_MAX_ENTRIES
 POOL_CODEX_WEBSOCKET_KEEPALIVE_MS
 POOL_CODEX_WEBSOCKET_IDLE_MS
 POOL_CODEX_WEBSOCKET_FRAME_BYTES
@@ -341,6 +347,15 @@ The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
 executable, refresh quota every 60 seconds, check due tokens every hour, and
 store data in `node/pool/.data`. SMTP is optional; when enabled, port `587` and
 a 15-second outbox delivery interval are the defaults.
+
+`POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
+Claude request shaping, header defaults, aliases, exclusions, retry, cooling,
+and cloak controls. It does not inherit Relaydeck environment variables.
+
+The shared Codex origin circuit is enabled conservatively by default. Configure
+its Pool-only behavior with `POOL_CODEX_HOST_CIRCUIT_ENABLED`,
+`POOL_CODEX_HOST_FAILURE_THRESHOLD`, `POOL_CODEX_HOST_FAILURE_WINDOW_MS`,
+`POOL_CODEX_HOST_COOLDOWN_MS`, and `POOL_CODEX_HOST_MAX_ENTRIES`.
 
 Set `POOL_PUBLIC_BASE_PATH=/quotahub` when a reverse proxy or API Gateway
 publishes QuotaHub below that path and strips the prefix before forwarding.
