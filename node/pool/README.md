@@ -357,14 +357,14 @@ POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
 ```
 
 The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
-executable, refresh Codex sharing quota every 60 seconds, check due tokens
-every hour, and store data in `node/pool/.data`. When
+executable, refresh Codex sharing quota every 5 minutes, check due tokens every
+hour, and store data in `node/pool/.data`. When
 `POOL_AI_QUOTA_SERVICE_TOKEN` is configured, the delayed Claude/AIS integration
 queries the fixed `https://loop.shopee.io` endpoint hourly with a 30-second
 timeout. It uses the returned Claude/AIS balance as the sharing balance while
-showing its approximately one-hour delay. The service token remains server-side
-and must not be committed. SMTP is optional; when enabled, port `587` and a
-15-second outbox delivery interval are the defaults.
+the provider's live quota remains authoritative. The service token remains
+server-side and must not be committed. SMTP is optional; when enabled, port
+`587` and a 15-second outbox delivery interval are the defaults.
 
 `POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
 Claude request shaping, header defaults, aliases, exclusions, retry, cooling,
