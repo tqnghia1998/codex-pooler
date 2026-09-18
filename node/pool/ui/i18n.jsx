@@ -56,7 +56,7 @@ const DICTIONARY = {
     'noShareProviderLinked': 'No share provider linked',
     'noShareProviderDesc': 'Link Codex, Claude, or an AIS project to start sharing quota.',
     'yourShareProviders': 'Your share providers',
-    'shareProvidersDesc': 'Codex refreshes live; Claude and AIS use delayed monthly quota data when available.',
+    'shareProvidersDesc': 'Quota estimates are refreshed regularly and may lag the provider’s live balance.',
     'linkCodex': 'Link Codex',
     'linkClaude': 'Link Claude',
     'linkAis': 'Link AIS',
@@ -68,6 +68,7 @@ const DICTIONARY = {
     'pauseSharing': 'Pause sharing',
     'resumeSharing': 'Resume sharing',
     'revokeAll': 'Revoke all',
+    'unlinkProvider': 'Unlink provider',
     'testConnection': 'Test connection',
 
     // Quota card
@@ -87,7 +88,7 @@ const DICTIONARY = {
     'approximatelyOneHourDelayed': 'approximately 1 hour delayed',
     'delayedByHours': 'about {hours} hours delayed',
     'delayedQuotaWarningTitle': 'Delayed quota estimate',
-    'delayedQuotaWarningDescription': 'This is not real-time. The provider’s live quota remains authoritative and can still limit requests.',
+    'delayedQuotaWarningDescription': 'Quota estimates for Codex, Claude, and AIS are not real-time. The provider’s live quota remains authoritative and can still limit requests.',
     'externalQuotaNotice': 'External quota notice',
     'claudeDedicatedApp': 'Claude Desktop or Anthropic Console',
     'aisDedicatedApp': 'AIS Switch',
@@ -122,6 +123,7 @@ const DICTIONARY = {
     'sessionQuotaAdded': 'Session quota added',
     'sessionUpdated': 'Session updated',
     'providerSharingRevoked': 'All sharing from this Codex account was revoked',
+    'providerUnlinked': 'Provider unlinked',
     'signedInWithCodex': 'Signed in with Codex',
     'smartAuthFailedToast': 'Failed to authenticate Smart session',
     'codexSignInCancelled': 'Codex sign-in cancelled',
@@ -141,6 +143,8 @@ const DICTIONARY = {
     'revokeKeyConfirmDesc': '"{name}" will stop working immediately. Existing share sessions are not changed.',
     'revokeAllSharingTitle': 'Revoke all sharing?',
     'revokeAllSharingDesc': 'Close every offer and revoke every share session backed by {name}. This cannot be undone.',
+    'unlinkProviderTitle': 'Unlink provider?',
+    'unlinkProviderDesc': 'Remove {name} and delete its saved credentials. All related offers and share sessions will be revoked. This cannot be undone.',
 
     // Personal Keys Card
     'myKeys': 'My keys',
@@ -471,7 +475,7 @@ const DICTIONARY = {
     'noShareProviderLinked': '尚未绑定任何算力提供方',
     'noShareProviderDesc': '绑定 Codex、Claude 或 AIS 项目即可开始共享额度。',
     'yourShareProviders': '已绑定的算力提供方',
-    'shareProvidersDesc': 'Codex 额度实时刷新；Claude 与 AIS 在可用时使用延迟的月度额度数据。',
+    'shareProvidersDesc': '额度估算会定期刷新，可能落后于提供方的实时余额。',
     'linkCodex': '绑定 Codex',
     'linkClaude': '绑定 Claude',
     'linkAis': '绑定 AIS',
@@ -483,6 +487,7 @@ const DICTIONARY = {
     'pauseSharing': '暂停共享',
     'resumeSharing': '恢复共享',
     'revokeAll': '撤回全部共享',
+    'unlinkProvider': '解绑提供方',
     'testConnection': '测试连接',
 
     // Quota card
@@ -502,7 +507,7 @@ const DICTIONARY = {
     'approximatelyOneHourDelayed': '数据约延迟 1 小时',
     'delayedByHours': '数据约延迟 {hours} 小时',
     'delayedQuotaWarningTitle': '延迟额度估算',
-    'delayedQuotaWarningDescription': '这不是实时数据。提供方的实时额度仍为准，并可能继续限制请求。',
+    'delayedQuotaWarningDescription': 'Codex、Claude 和 AIS 的额度估算不是实时数据。提供方的实时额度仍为准，并可能继续限制请求。',
     'externalQuotaNotice': '外部额度说明',
     'claudeDedicatedApp': 'Claude Desktop 或 Anthropic Console',
     'aisDedicatedApp': 'AIS Switch',
@@ -537,6 +542,7 @@ const DICTIONARY = {
     'sessionQuotaAdded': '会话额度已追加',
     'sessionUpdated': '会话已更新',
     'providerSharingRevoked': '该 Codex 账户的全部共享已注销',
+    'providerUnlinked': '提供方已解绑',
     'signedInWithCodex': '已通过 Codex 登录',
     'smartAuthFailedToast': 'Smart 会话验证失败',
     'codexSignInCancelled': '已取消 Codex 登录',
@@ -556,6 +562,8 @@ const DICTIONARY = {
     'revokeKeyConfirmDesc': '“{name}” 将立即失效。现有的共享会话不受影响。',
     'revokeAllSharingTitle': '确认撤回全部共享？',
     'revokeAllSharingDesc': '将关闭 {name} 名下的所有共享额度并注销所有共享会话。此操作无法撤销。',
+    'unlinkProviderTitle': '确认解绑提供方？',
+    'unlinkProviderDesc': '将移除 {name} 并删除其已保存的凭证。所有相关共享和共享会话将被注销。此操作无法撤销。',
 
     // Personal Keys Card
     'myKeys': '我的密钥',

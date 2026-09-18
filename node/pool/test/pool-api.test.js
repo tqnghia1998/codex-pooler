@@ -1418,6 +1418,21 @@ test('provider controls, named keys, and friend quota requests are available thr
       assert.equal(result.response.status, 200);
       assert.equal(result.body.offer.visibility, 'public');
       assert.equal(result.body.offer.allowedEmails, null);
+
+      sharingStore.setEmailNotificationsEnabled(true);
+      result = await request(base, `/api/pool/upstreams/${upstream.id}`, providerSession, {
+        method: 'DELETE',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 204);
+      assert.equal(store.get(upstream.id), null);
+      assert.equal(sharingStore.accountOwnsUpstream(provider.id, upstream.id), false);
+      assert.equal(sharingStore.sqlite.prepare('SELECT status FROM sharing_offers WHERE id = ?').get(restrictedOfferId).status, 'closed');
+      assert.equal(sharingStore.sqlite.prepare('SELECT status FROM sharing_tickets WHERE offer_id = ?').get(restrictedOfferId).status, 'rejected');
+      assert.equal(sharingStore.sqlite.prepare(`
+        SELECT subject FROM email_outbox
+        WHERE account_id = ? AND subject = 'QuotaHub provider unlinked'
+      `).get(consumer.id)?.subject, 'QuotaHub provider unlinked');
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
