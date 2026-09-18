@@ -486,19 +486,28 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     setLogin(null);
   };
 
-  const refreshQuota = async ({ silent = false } = {}) => {
-    const refreshable = upstreams.filter((upstream) => upstream.type === 'codex');
+  const refreshQuota = async ({ silent = false, includeAdvisory = true } = {}) => {
+    const refreshable = upstreams.filter((upstream) => (
+      upstream.type === 'codex'
+      || includeAdvisory && (
+        upstream.type === 'claude'
+        || upstream.quotaSource === 'ais'
+      )
+    ));
     if (!refreshable.length) {
       if (!silent) onNotice(t('aisQuotaExternal'));
       return;
     }
     setQuotaRefreshing(true);
     try {
-      await Promise.all(refreshable.map((upstream) => api(`/api/pool/upstreams/${upstream.id}/refresh-quota`, {
+      const results = await Promise.all(refreshable.map((upstream) => api(`/api/pool/upstreams/${upstream.id}/refresh-quota`, {
         method: 'POST',
         body: '{}'
       })));
-      if (!silent) onNotice(t('codexQuotaRefreshed'));
+      if (!silent) {
+        const refreshed = results.some((result) => !result.skipped);
+        onNotice(t(refreshed ? 'quotaDataRefreshed' : 'delayedQuotaUnavailable'), !refreshed);
+      }
       await load({ background: silent });
       await loadTable({ background: silent });
     } catch (nextError) {
@@ -562,7 +571,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     if (!account) return undefined;
     const refreshOnFocus = () => {
       if (document.hidden) return;
-      void refreshQuota({ silent: true });
+      void refreshQuota({ silent: true, includeAdvisory: false });
       void load({ background: true });
       void loadTable();
     };
@@ -1232,6 +1241,7 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
 function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, isActionLoading = () => false }) {
   const { t } = useLanguage();
   const quota = upstream.quota;
+  const advisoryQuota = upstream.advisoryQuota;
   const isAis = upstream.quotaSource === 'ais';
   const isClaude = upstream.type === 'claude';
   const hasUnknownQuota = isAis || isClaude;
@@ -1301,9 +1311,14 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           )}
           <Text type="supporting" color="secondary" maxLines={1}>
             {hasUnknownQuota
-              ? t('checkBalanceIn', { app: dedicatedAppName })
+              ? advisoryQuotaSummary(t, advisoryQuota, dedicatedAppName)
               : quotaTiming(t, quota)}
           </Text>
+          {hasUnknownQuota && advisoryQuota && (
+            <Text type="supporting" color="secondary" maxLines={1}>
+              {advisoryQuotaTiming(t, advisoryQuota)}
+            </Text>
+          )}
           {commitment && (
             <Text type="supporting" color="secondary" maxLines={1}>
               {hasUnknownQuota
@@ -2404,6 +2419,30 @@ function quotaRemaining(t, quota) {
 function quotaTiming(t, quota) {
   const reset = quota?.resetAt ? t('resetsAt', { date: dateTime(t, quota.resetAt) }) : t('resetTimeUnavailable');
   return quota?.observedAt ? `${reset} · ${t('updatedAt', { date: dateTime(t, quota.observedAt) })}` : reset;
+}
+
+function advisoryQuotaSummary(t, quota, app) {
+  if (!quota) return t('checkBalanceIn', { app });
+  if (!quota.found) return t('delayedQuotaNoData');
+  if (Number.isFinite(quota.remainingDollars)) {
+    return t('delayedQuotaRemaining', { amount: money(quota.remainingDollars) });
+  }
+  if (Number.isFinite(quota.limitDollars) && Number.isFinite(quota.usageDollars)) {
+    return t('delayedQuotaUsage', {
+      used: money(quota.usageDollars),
+      limit: money(quota.limitDollars)
+    });
+  }
+  return t('delayedQuotaNoData');
+}
+
+function advisoryQuotaTiming(t, quota) {
+  const dataThrough = quota?.dataThroughAt
+    ? t('dataThroughAt', { date: dateTime(t, quota.dataThroughAt) })
+    : t('approximatelyOneHourDelayed');
+  return quota?.reportedAt
+    ? `${dataThrough} · ${t('updatedAt', { date: dateTime(t, quota.reportedAt) })}`
+    : dataThrough;
 }
 
 function activitySummary(t, activity) {

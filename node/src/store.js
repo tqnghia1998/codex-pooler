@@ -363,6 +363,16 @@ export class Store {
     return publicUpstream(upstream);
   }
 
+  setAdvisoryQuota(id, advisoryQuota, { notify = true } = {}) {
+    const db = this.load();
+    const upstream = findOrThrow(db, id);
+    upstream.advisoryQuota = advisoryQuota;
+    upstream.updatedAt = new Date().toISOString();
+    this.save(db);
+    if (notify) this.notifyUpstreamsChange();
+    return publicUpstream(upstream);
+  }
+
   persistCredentials(id, credentials, accessTokenExpiresAt = null) {
     const db = this.load();
     const upstream = findOrThrow(db, id);

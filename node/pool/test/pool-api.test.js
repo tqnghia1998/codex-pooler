@@ -1083,6 +1083,63 @@ test('Pool treats Claude quota as unknown even when the gateway has reported usa
   }
 });
 
+test('a provider can manually refresh delayed Claude quota without making it enforceable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-advisory-quota-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-pool-advisory',
+      metadata: { skip_account_profile: true }
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'claude-advisory-provider');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const session = sharingStore.createAccountSession(provider.id);
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      advisoryQuotaClient: {
+        enabled: true,
+        async query(email, providers) {
+          assert.equal(email, provider.email);
+          assert.deepEqual(providers, ['claude']);
+          return [{
+            provider: 'claude',
+            found: true,
+            quotaMonth: 202609,
+            usageDollars: 5,
+            limitDollars: 20,
+            remainingDollars: 15,
+            reportedAt: '2026-09-18T12:00:00.000Z',
+            dataThroughAt: '2026-09-18T11:00:00.000Z',
+            delaySeconds: 3600,
+            source: 'loop_ai_usage'
+          }];
+        }
+      }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const result = await request(base, `/api/pool/upstreams/${upstream.id}/refresh-quota`, session, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.advisory, true);
+      assert.equal(result.body.upstream.advisoryQuota.remainingDollars, 15);
+      assert.equal(result.body.upstream.quota, null);
+      assert.equal(sharingStore.providerSummary(provider.id, upstream.id, store).commitment.actualQuotaDollars, null);
+      assert.equal(sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 999 }, store).quotaDollars, 999);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a consumer can reveal and rotate one personal key for active share sessions', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-personal-key-api-'));
   try {
