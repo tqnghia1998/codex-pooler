@@ -6,14 +6,28 @@ export function offerExceedsProviderQuota(quotaMicros, upstream) {
 }
 
 export function providerQuotaExhausted(upstream) {
+  if (!quotaControlsSharing(upstream)) return false;
   const quota = upstream?.quota;
   if (!quota || typeof quota !== 'object') return false;
-  const remainingPercent = Number(quota.remainingPercent);
-  if (Number.isFinite(remainingPercent)) return remainingPercent <= 0;
-  const remainingDollars = Number(quota.remainingDollars);
-  if (Number.isFinite(remainingDollars)) return remainingDollars <= 0;
-  const remainingUnits = Number(quota.remainingUnits);
-  return Number.isFinite(remainingUnits) && remainingUnits <= 0;
+  const remainingPercent = finiteQuotaValue(quota.remainingPercent);
+  if (remainingPercent !== null) return remainingPercent <= 0;
+  const remainingDollars = finiteQuotaValue(quota.remainingDollars);
+  if (remainingDollars !== null) return remainingDollars <= 0;
+  const remainingUnits = finiteQuotaValue(quota.remainingUnits);
+  return remainingUnits !== null && remainingUnits <= 0;
+}
+
+function quotaControlsSharing(upstream) {
+  const isExternal = upstream?.type === 'claude'
+    || upstream?.quotaSource === 'ais'
+    || upstream?.quotaSource === 'aiswitch';
+  return !isExternal || upstream?.quota?.source === 'loop_ai_usage';
+}
+
+function finiteQuotaValue(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 export function providerIssue(upstream) {

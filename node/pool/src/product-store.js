@@ -647,9 +647,7 @@ export class ProductStore {
     if (cache?.has(upstreamId)) return cache.get(upstreamId);
     this.expireDue();
     const upstream = upstreamStore?.getPublic(upstreamId) || upstreamStore?.get(upstreamId) || null;
-    const actualMicros = (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch' || upstream?.type === 'claude')
-      ? null
-      : providerRemainingMicros(upstream);
+    const actualMicros = providerRemainingMicros(upstream);
     const sessions = this.sqlite.prepare(`
       SELECT id, granted_micros, consumed_micros, created_at
       FROM sharing_sessions
@@ -1770,7 +1768,12 @@ export class ProductStore {
       WHERE sharing_session_keys.key_hash = ? AND sharing_session_keys.disabled_at IS NULL
     `).get(hash(key));
     return row && row.status !== 'revoked'
-      ? shareSessionAccess(row, row.key_id, this.providerSharingState(row.upstream_id)?.status)
+      ? shareSessionAccess(
+          row,
+          row.key_id,
+          this.providerSharingState(row.upstream_id)?.status,
+          upstreamStore ? providerIssue(upstreamStore.getPublic(row.upstream_id)) : null
+        )
       : null;
   }
 
@@ -1872,14 +1875,21 @@ export class ProductStore {
     `).run(key.id, `response:${responseId}`, row.shareSessionId, now);
   }
 
-  shareSessionAccess(sessionId) {
+  shareSessionAccess(sessionId, upstreamStore = null) {
     this.expireDue();
     const row = this.sqlite.prepare(`
       SELECT id, status, granted_micros, consumed_micros, upstream_id, scope_id
       FROM sharing_sessions
       WHERE id = ?
     `).get(sessionId);
-    return row ? shareSessionAccess(row, null, this.providerSharingState(row.upstream_id)?.status) : null;
+    return row
+      ? shareSessionAccess(
+          row,
+          null,
+          this.providerSharingState(row.upstream_id)?.status,
+          upstreamStore ? providerIssue(upstreamStore.getPublic(row.upstream_id)) : null
+        )
+      : null;
   }
 
   reserveSession(sessionId, attemptId, { keyId = null, model = '', upstreamStore = null } = {}) {
@@ -2704,7 +2714,7 @@ function publicShareSession(row, viewerAccountId, upstream, {
   };
 }
 
-function shareSessionAccess(row, keyId = null, providerSharingStatus = 'active') {
+function shareSessionAccess(row, keyId = null, providerSharingStatus = 'active', issue = null) {
   return {
     ...(keyId ? { id: keyId } : {}),
     kind: 'share_session',
@@ -2713,6 +2723,7 @@ function shareSessionAccess(row, keyId = null, providerSharingStatus = 'active')
     upstreamId: row.upstream_id,
     sessionStatus: row.status,
     providerSharingStatus,
+    providerIssue: issue,
     remainingMicros: Math.max(0, row.granted_micros - row.consumed_micros)
   };
 }
@@ -2771,6 +2782,10 @@ function microsToDollars(value) {
 }
 
 function providerRemainingMicros(upstream) {
+  const isExternal = upstream?.type === 'claude'
+    || upstream?.quotaSource === 'ais'
+    || upstream?.quotaSource === 'aiswitch';
+  if (isExternal && upstream?.quota?.source !== 'loop_ai_usage') return null;
   const value = upstream?.quota?.remainingDollars;
   if (value === null || value === undefined || value === '') return null;
   const remainingDollars = Number(value);
