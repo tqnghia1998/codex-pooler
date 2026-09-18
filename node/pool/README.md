@@ -90,8 +90,10 @@ refresh before completing the browser login, then refreshes every linked Codex
 account automatically every minute in batches of ten. The dashboard polls this
 stored quota state and can also refresh it manually. Some Codex plans expose
 only a percentage or provider units; QuotaHub shows that reported value rather
-than estimating a dollar balance. Claude and AIS quotas remain unknown to the
-sharing model.
+than estimating a dollar balance. When the optional delayed quota integration
+is configured, QuotaHub also reads monthly Claude and AIS usage by the
+provider's QuotaHub email once per hour. Those observations are approximately
+one hour behind and remain advisory only.
 At startup and once per hour, QuotaHub also refreshes any refreshable Codex
 token that expires within 12 hours. Transient refresh failures retry with
 bounded exponential backoff; revoked or missing refresh tokens require the
@@ -104,10 +106,11 @@ token-refresh failure, or has exhausted its provider quota.
 
 Users can also link Claude with a Claude CLI setup token or supported OAuth
 credential JSON, or add an AIS project by entering its project ID and project
-key. Claude and AIS quotas are both **unknown** to the sharing model. QuotaHub
-does not query provider quota, display it as verified, reserve against it, or
-enforce it for either provider; manual and scheduled quota refresh apply only
-to Codex.
+key. Claude and AIS quotas are both **unknown** to the sharing model. Optional
+delayed observations are displayed with their reporting timestamp, but are not
+treated as verified real-time balances, reserved against, used for routing, or
+enforced. Manual refresh updates Codex quota and, when configured, delayed
+Claude and AIS observations.
 The owner chooses a nominal offer amount based on their own knowledge, and
 QuotaHub settles usage only against that local offer or session grant. External
 use is not visible here and a provider can reject requests before the local
@@ -225,7 +228,7 @@ POST   /api/pool/upstreams/claude                   { token|accessToken|authJson
 POST   /api/pool/upstreams/ais                      { projectId, projectKey }
 PATCH  /api/pool/upstreams/:id                      AIS: { projectId, projectKey? }; Claude: { token|accessToken|authJson }
 GET    /api/pool/upstreams/credentials
-POST   /api/pool/upstreams/:id/refresh-quota        Codex only; Claude and AIS return skipped: quota_unknown
+POST   /api/pool/upstreams/:id/refresh-quota        Codex quota or optional delayed Claude/AIS observation
 POST   /api/pool/upstreams/:id/test-connection
 GET    /api/pool/providers/:id
 POST   /api/pool/providers/:id/pause
@@ -320,6 +323,11 @@ POOL_PUBLIC_BASE_PATH
 POOL_CODEX_CLI
 POOL_DATA_DIR
 POOL_QUOTA_REFRESH_INTERVAL_MS
+POOL_AI_QUOTA_BASE_URL
+POOL_AI_QUOTA_SERVICE_TOKEN
+POOL_AI_QUOTA_DELAY_MS
+POOL_AI_QUOTA_REFRESH_INTERVAL_MS
+POOL_AI_QUOTA_TIMEOUT_MS
 POOL_TOKEN_REFRESH_INTERVAL_MS
 POOL_SMTP_HOST
 POOL_SMTP_PORT
@@ -351,8 +359,12 @@ POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
 
 The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
 executable, refresh Codex sharing quota every 60 seconds, check due tokens
-every hour, and store data in `node/pool/.data`. SMTP is optional; when
-enabled, port `587` and a 15-second outbox delivery interval are the defaults.
+every hour, and store data in `node/pool/.data`. When
+`POOL_AI_QUOTA_SERVICE_TOKEN` is configured, the delayed Claude/AIS integration
+queries `POOL_AI_QUOTA_BASE_URL` hourly with a 30-second timeout and labels the
+source data as one hour delayed. The service token remains server-side and must
+not be committed. SMTP is optional; when enabled, port `587` and a 15-second
+outbox delivery interval are the defaults.
 
 `POOL_CLAUDE_CONFIG_JSON` is the Pool-only bounded JSON configuration for
 Claude request shaping, header defaults, aliases, exclusions, retry, cooling,

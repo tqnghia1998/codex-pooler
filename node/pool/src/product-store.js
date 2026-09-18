@@ -497,6 +497,23 @@ export class ProductStore {
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
   }
 
+  listAdvisoryQuotaTargets(upstreamStore) {
+    return this.sqlite.prepare(`
+      SELECT account_upstreams.upstream_id AS upstreamId, accounts.email
+      FROM account_upstreams
+      JOIN accounts ON accounts.id = account_upstreams.account_id
+      ORDER BY accounts.email, account_upstreams.link_order
+    `).all().flatMap((row) => {
+      const upstream = upstreamStore.get(row.upstreamId);
+      const provider = upstream?.type === 'claude'
+        ? 'claude'
+        : upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch'
+          ? 'ais'
+          : null;
+      return provider ? [{ ...row, provider }] : [];
+    });
+  }
+
   upstreamActivity(upstreamId) {
     const offers = this.sqlite.prepare(`
       SELECT

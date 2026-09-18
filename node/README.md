@@ -24,8 +24,10 @@ optional SMTP settings are configured; see `pool/README.md`.
 QuotaHub supports Codex, Claude, and AIS upstreams, but its sharing quota model
 only refreshes and enforces Codex provider quota. Claude and AIS provider quota
 remain unknown there: their offers are nominal local limits settled against
-observed usage, not verified provider balances. Relaydeck's separate Claude
-quota and OAuth management behavior is unchanged.
+observed usage, not verified provider balances. An optional monthly usage
+integration can display approximately one-hour-delayed Claude and AIS
+observations, but those values never affect sharing enforcement or routing.
+Relaydeck's separate Claude quota and OAuth management behavior is unchanged.
 
 ## Proxy compatibility status
 
