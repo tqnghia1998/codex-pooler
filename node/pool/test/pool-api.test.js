@@ -1146,6 +1146,83 @@ test('a provider can manually refresh delayed Claude quota as the primary sharin
   }
 });
 
+test('Loop quota is prioritized when imported upstreams refresh after Codex login', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-imported-loop-first-'));
+  try {
+    const store = new Store(dir);
+    const productStore = new ProductStore(dir);
+    const owner = productStore.upsertAccount({ email: 'loop-first@example.com', name: 'Loop First' });
+    const claude = store.create({
+      type: 'claude',
+      accessToken: 'sk-ant-oat-loop-first',
+      metadata: { skip_account_profile: true }
+    });
+    const ais = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: 'loop-first-ais',
+      projectKey: 'loop-first-key'
+    });
+    productStore.linkUpstream(owner.id, claude.id);
+    productStore.linkUpstream(owner.id, ais.id);
+
+    const queries = [];
+    let directFetches = 0;
+    const advisoryQuotaClient = {
+      enabled: true,
+      async query(email, providers) {
+        queries.push({ email, providers });
+        return providers.map((provider) => ({
+          provider,
+          found: true,
+          quotaMonth: 202609,
+          usageDollars: 4,
+          limitDollars: 20,
+          remainingDollars: 16,
+          reportedAt: '2026-09-18T12:00:00.000Z',
+          dataThroughAt: '2026-09-18T11:00:00.000Z',
+          delaySeconds: 3600,
+          source: 'loop_ai_usage'
+        }));
+      }
+    };
+    const server = start(0, {
+      store,
+      productStore,
+      fetchImpl: async () => {
+        directFetches += 1;
+        throw new Error('Direct provider quota refresh must not run');
+      },
+      advisoryQuotaClient
+    });
+    try {
+      await new Promise((resolve) => server.once('listening', resolve));
+      const attempt = productStore.createCodexLoginAttempt();
+      productStore.updateCodexLoginAttempt(attempt.login.id, {
+        accountId: owner.id,
+        status: 'completed'
+      });
+      const before = queries.length;
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/auth/codex/status`, {
+        headers: { cookie: `codex_pool_login=${encodeURIComponent(attempt.token)}` }
+      });
+      assert.equal(response.status, 200);
+      const after = queries.slice(before);
+      assert.deepEqual(after.map(({ email, providers }) => ({ email, providers })), [
+        { email: 'loop-first@example.com', providers: ['claude'] },
+        { email: 'loop-first@example.com', providers: ['ais'] }
+      ]);
+      assert.equal(directFetches, 0);
+      assert.equal(store.getPublic(claude.id).quota.source, 'loop_ai_usage');
+      assert.equal(store.getPublic(ais.id).quota.source, 'loop_ai_usage');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a consumer can reveal and rotate one personal key for active share sessions', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-personal-key-api-'));
   try {

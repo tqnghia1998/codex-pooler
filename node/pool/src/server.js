@@ -246,6 +246,21 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   });
   const refreshImportedUpstream = async (upstreamId) => {
     try {
+      const upstream = store.get(upstreamId);
+      const provider = advisoryProvider(upstream);
+      if (provider) {
+        if (!advisoryQuotaClient?.enabled) return;
+        const accountId = productStore.accountIdForUpstream(upstreamId);
+        const email = accountId ? productStore.account(accountId)?.email || '' : '';
+        if (!email) return;
+        await refreshAccountAdvisoryQuotas({
+          store,
+          email,
+          client: advisoryQuotaClient,
+          targets: [{ upstreamId, provider }]
+        });
+        return;
+      }
       await refreshUpstreamQuota(store, upstreamId, { fetchImpl });
     } finally {
       productStore.observeProviders(store);
