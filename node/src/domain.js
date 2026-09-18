@@ -1099,6 +1099,7 @@ export function publicUpstream(upstream) {
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
     metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
+    advisoryQuota: upstream.advisoryQuota && typeof upstream.advisoryQuota === 'object' ? upstream.advisoryQuota : null,
     quotaSource: isAisUpstream(upstream) ? 'ais' : upstream.quotaSource || null,
     pacing: upstream.pacing,
     spending,

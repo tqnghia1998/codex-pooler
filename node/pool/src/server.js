@@ -27,6 +27,13 @@ import { CodexLoginManager } from './codex-login.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
 import { createSnapshotBackup, SNAPSHOT_BACKUP_INTERVAL_MS, snapshotBackupPath } from './backup.js';
 import { providerIssue } from './provider-availability.js';
+import {
+  ADVISORY_QUOTA_REFRESH_INTERVAL_MS,
+  advisoryProvider,
+  advisoryQuotaClientFromEnv,
+  refreshAccountAdvisoryQuotas,
+  refreshAllAdvisoryQuotas
+} from './advisory-quota.js';
 
 const productRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicDir = join(productRoot, 'public');
@@ -61,6 +68,7 @@ export function createApp({
   publicBasePath = process.env.POOL_PUBLIC_BASE_PATH,
   codexOptions = poolCodexGatewayOptions(ingress),
   claudeConfig = poolClaudeConfigFromEnv(),
+  advisoryQuotaClient = advisoryQuotaClientFromEnv(process.env, { fetchImpl }),
   backupStatus = () => ({ enabled: false, lastBackupAt: null })
 } = {}) {
   claudeConfig = normalizeClaudeConfig(claudeConfig);
@@ -99,7 +107,7 @@ export function createApp({
         return;
       }
       if (url.pathname.startsWith('/api/pool/')) {
-        await productApi(req, res, url, { store, productStore, fetchImpl, claudeConfig, logger, backupStatus });
+        await productApi(req, res, url, { store, productStore, fetchImpl, claudeConfig, advisoryQuotaClient, logger, backupStatus });
         return;
       }
       if (url.pathname === '/admin') {
@@ -195,6 +203,8 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   emailDeliveryIntervalMs = Number(process.env.POOL_EMAIL_DELIVERY_INTERVAL_MS) || EMAIL_DELIVERY_INTERVAL_MS,
   productCleanupIntervalMs = Number(process.env.POOL_PRODUCT_CLEANUP_INTERVAL_MS) || PRODUCT_CLEANUP_INTERVAL_MS,
   backupIntervalMs = Number(process.env.POOL_BACKUP_INTERVAL_MS) || SNAPSHOT_BACKUP_INTERVAL_MS,
+  advisoryQuotaRefreshIntervalMs = Number(process.env.POOL_AI_QUOTA_REFRESH_INTERVAL_MS) || ADVISORY_QUOTA_REFRESH_INTERVAL_MS,
+  advisoryQuotaClient = advisoryQuotaClientFromEnv(process.env, { fetchImpl }),
   claudeConfig = poolClaudeConfigFromEnv()
 } = {}) {
   const poolDataDir = requirePoolDataDir(dataDir);
@@ -230,6 +240,10 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
       refreshing = false;
     }
   };
+  const refreshAdvisory = () => refreshAllAdvisoryQuotas(store, productStore, {
+    client: advisoryQuotaClient,
+    logger: console
+  });
   const refreshImportedUpstream = async (upstreamId) => {
     try {
       await refreshUpstreamQuota(store, upstreamId, { fetchImpl });
@@ -247,6 +261,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     codexHostHealth,
     codexOptions,
     claudeConfig,
+    advisoryQuotaClient,
     onCodexCredentialsImported: refreshImportedUpstream,
     backupStatus: () => snapshotBackup.status()
   }));
@@ -265,8 +280,16 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   productStore.cleanup();
   snapshotBackup.run();
   void refresh();
+  const scheduleAdvisoryRefresh = () => {
+    void refreshAdvisory().catch((error) => {
+      console.warn(`QuotaHub delayed quota refresh failed: ${error?.message || error}`);
+    });
+  };
+  scheduleAdvisoryRefresh();
   const timer = setInterval(refresh, quotaRefreshIntervalMs);
   timer.unref?.();
+  const advisoryTimer = setInterval(scheduleAdvisoryRefresh, advisoryQuotaRefreshIntervalMs);
+  advisoryTimer.unref?.();
   const cleanupTimer = setInterval(() => productStore.cleanup(), productCleanupIntervalMs);
   cleanupTimer.unref?.();
   void tokenScheduler.run();
@@ -275,6 +298,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   tokenTimer.unref?.();
   server.once('close', () => {
     clearInterval(timer);
+    clearInterval(advisoryTimer);
     clearInterval(cleanupTimer);
     clearInterval(tokenTimer);
     store.setTokenRefreshFailureHandler?.(null);
@@ -453,7 +477,7 @@ async function refreshImportedCredentials(refresh, upstreamId, logger) {
   }
 }
 
-async function productRequest(req, res, url, { store, productStore, fetchImpl, claudeConfig = null, logger = console, backupStatus = () => ({ enabled: false, lastBackupAt: null }) }) {
+async function productRequest(req, res, url, { store, productStore, fetchImpl, claudeConfig = null, advisoryQuotaClient = null, logger = console, backupStatus = () => ({ enabled: false, lastBackupAt: null }) }) {
   const auth = accountSession(req, productStore, isMutation(req.method));
   const accountId = auth.account.id;
   const parts = url.pathname.split('/').filter(Boolean);
@@ -714,8 +738,19 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     if (!upstream || !productStore.accountOwnsUpstream(accountId, id)) {
       throw new HttpError(404, 'not_found', 'Not found');
     }
-    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch' || upstream.type === 'claude') {
-      sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'quota_unknown' });
+    const provider = advisoryProvider(upstream);
+    if (provider) {
+      if (!advisoryQuotaClient?.enabled) {
+        sendJson(res, 200, { upstream: store.getPublic(id), skipped: 'advisory_quota_unconfigured' });
+        return;
+      }
+      await refreshAccountAdvisoryQuotas({
+        store,
+        email: auth.account.email,
+        client: advisoryQuotaClient,
+        targets: [{ upstreamId: id, provider }]
+      });
+      sendJson(res, 200, { upstream: store.getPublic(id), advisory: true });
       return;
     }
     if (upstream.type !== 'codex') throw new HttpError(400, 'invalid_request', 'Only Codex accounts can refresh quota');
