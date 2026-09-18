@@ -137,7 +137,7 @@ export function AdminAnalytics() {
           </HStack>
         )}
       />
-      <DataPortabilityCard />
+      <DataPortabilityCard backup={analytics.backup} />
     </VStack>
   );
 }
@@ -147,8 +147,8 @@ function exportRecordCount(data) {
     + Object.values(data.product || {}).reduce((total, rows) => total + (Array.isArray(rows) ? rows.length : 0), 0);
 }
 
-function DataPortabilityCard() {
-  const { t } = useLanguage();
+function DataPortabilityCard({ backup }) {
+  const { t, language } = useLanguage();
   const fileRef = useRef(null);
   const [pending, setPending] = useState(null);
   const [notice, setNotice] = useState('');
@@ -220,6 +220,7 @@ function DataPortabilityCard() {
           <Heading level={3}>{t('adminDataTitle')}</Heading>
         </HStack>
         <Text type="supporting" color="secondary">{t('adminDataDesc')}</Text>
+        <Text type="supporting" color="secondary">{backupStatusText(backup, language, t)}</Text>
         {notice && <Banner title={notice} status="success" />}
         {error && <Banner title={error} status="warning" />}
         {pending
@@ -320,4 +321,10 @@ function dateTime(value, language, t) {
   return date.toLocaleString(locale, {
     month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit'
   });
+}
+
+function backupStatusText(backup, language, t) {
+  if (!backup?.enabled) return t('adminBackupDisabled');
+  if (!backup.lastBackupAt) return t('adminBackupPending');
+  return t('adminBackupLast', { time: dateTime(backup.lastBackupAt, language, t) });
 }

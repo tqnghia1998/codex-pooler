@@ -21,6 +21,8 @@ test('hourly snapshot backup keeps one replaceable QuotaHub snapshot on disk', a
       const first = backup.run();
       assert.equal(typeof first.exportedAt, 'string');
       assert.equal(first.filePath, filePath);
+      assert.deepEqual(backup.status().enabled, true);
+      assert.equal(typeof backup.status().lastBackupAt, 'string');
       const firstData = JSON.parse(readFileSync(filePath, 'utf8'));
       assert.equal(firstData.format, 'quotahub-export');
       assert.equal(firstData.product.accounts.length, 1);

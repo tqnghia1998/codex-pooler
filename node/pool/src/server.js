@@ -60,7 +60,8 @@ export function createApp({
   onCodexCredentialsImported = () => {},
   publicBasePath = process.env.POOL_PUBLIC_BASE_PATH,
   codexOptions = poolCodexGatewayOptions(ingress),
-  claudeConfig = poolClaudeConfigFromEnv()
+  claudeConfig = poolClaudeConfigFromEnv(),
+  backupStatus = () => ({ enabled: false, lastBackupAt: null })
 } = {}) {
   claudeConfig = normalizeClaudeConfig(claudeConfig);
   store.configureClaudeRuntime?.(claudeConfig);
@@ -98,7 +99,7 @@ export function createApp({
         return;
       }
       if (url.pathname.startsWith('/api/pool/')) {
-        await productApi(req, res, url, { store, productStore, fetchImpl, claudeConfig, logger });
+        await productApi(req, res, url, { store, productStore, fetchImpl, claudeConfig, logger, backupStatus });
         return;
       }
       if (url.pathname === '/admin') {
@@ -246,7 +247,8 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     codexHostHealth,
     codexOptions,
     claudeConfig,
-    onCodexCredentialsImported: refreshImportedUpstream
+    onCodexCredentialsImported: refreshImportedUpstream,
+    backupStatus: () => snapshotBackup.status()
   }));
   const websocketServer = attachWebSocketProxy(server, {
     store,
@@ -451,7 +453,7 @@ async function refreshImportedCredentials(refresh, upstreamId, logger) {
   }
 }
 
-async function productRequest(req, res, url, { store, productStore, fetchImpl, claudeConfig = null, logger = console }) {
+async function productRequest(req, res, url, { store, productStore, fetchImpl, claudeConfig = null, logger = console, backupStatus = () => ({ enabled: false, lastBackupAt: null }) }) {
   const auth = accountSession(req, productStore, isMutation(req.method));
   const accountId = auth.account.id;
   const parts = url.pathname.split('/').filter(Boolean);
@@ -670,7 +672,9 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
   }
   if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
     requireAdmin(auth.account);
-    sendJson(res, 200, { analytics: productStore.adminAnalytics({ eventCursor: adminEventCursor(url) }) });
+    const analytics = productStore.adminAnalytics({ eventCursor: adminEventCursor(url) });
+    analytics.backup = backupStatus();
+    sendJson(res, 200, { analytics });
     return;
   }
   if (req.method === 'GET' && resource === 'admin' && id === 'export' && parts.length === 4) {
