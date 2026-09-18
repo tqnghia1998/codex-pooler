@@ -85,15 +85,16 @@ browser cookies are issued with a ten-year lifetime; clearing cookies still
 requires signing in again in that browser.
 
 After sign-in, QuotaHub waits for an immediate best-effort Codex quota
-refresh before completing the browser login, then refreshes linked Codex and
-supported Claude OAuth accounts automatically every minute in batches of ten.
-The dashboard polls this stored quota state and can also refresh it manually.
-Some plans expose only a percentage or provider units; QuotaHub shows that
-reported value rather than estimating a dollar balance.
-At startup and once per hour, QuotaHub also refreshes any refreshable Codex or
-Claude OAuth token that expires within 12 hours. Transient refresh failures
-retry with bounded exponential backoff; revoked or missing refresh tokens
-require the provider to sign in again.
+refresh before completing the browser login, then refreshes every linked Codex
+account automatically every minute in batches of ten. The dashboard polls this
+stored quota state and can also refresh it manually. Some Codex plans expose
+only a percentage or provider units; QuotaHub shows that reported value rather
+than estimating a dollar balance. Claude and AIS quotas remain unknown to the
+sharing model.
+At startup and once per hour, QuotaHub also refreshes any refreshable Codex
+token that expires within 12 hours. Transient refresh failures retry with
+bounded exponential backoff; revoked or missing refresh tokens require the
+provider to sign in again.
 When a provider's Codex credentials need reauthentication, its quota card shows
 the affected state and offers both sign-in and `auth.json` import actions.
 Offers, pending tickets, and share sessions show a sanitized provider issue to
