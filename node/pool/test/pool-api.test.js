@@ -4,7 +4,7 @@ import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createApp, refreshAllQuotas, start } from '../src/server.js';
+import { createApp, QUOTA_REFRESH_INTERVAL_MS, refreshAllQuotas, start } from '../src/server.js';
 import { Store } from '../../src/store.js';
 import { ProductStore } from '../src/product-store.js';
 import { CodexLoginManager } from '../src/codex-login.js';
@@ -174,6 +174,10 @@ test('Codex device sign-in creates an opaque browser session and enforces origin
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('Codex quota refresh defaults to five minutes', () => {
+  assert.equal(QUOTA_REFRESH_INTERVAL_MS, 5 * 60 * 1_000);
 });
 
 test('auth.json sign-in imports credentials and returns only public account data', async () => {
