@@ -1239,6 +1239,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
+  const needsReauthentication = issue?.code === 'provider_reauth_required';
   const providerTypeLabel = isAis
     ? t('aisExternalQuota')
     : isClaude
@@ -1317,18 +1318,8 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
           )}
         </VStack>
         <HStack justify="end" gap={1} wrap="wrap">
-          <IconButton
-            label={t('testConnection')}
-            tooltip={t('testConnection')}
-            icon={<PlugZap size={16} />}
-            size="sm"
-            variant="secondary"
-            isLoading={isTestingConnection}
-            isDisabled={isTestingConnection}
-            onClick={() => onTestConnection(upstream)}
-          />
-          {issue?.code === 'provider_reauth_required' && (
-            <>
+          {needsReauthentication ? (
+            <HStack gap={1} wrap="wrap">
               {isClaude ? (
                 <Button label={t('updateToken')} size="sm" variant="primary" onClick={() => onEditClaude(upstream)} />
               ) : (
@@ -1337,17 +1328,30 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
                   <Button label={t('useAuthJson')} size="sm" variant="secondary" onClick={onImportAuthJson} />
                 </>
               )}
-            </>
+            </HStack>
+          ) : (
+            <IconButton
+              label={t('testConnection')}
+              tooltip={t('testConnection')}
+              icon={<PlugZap size={16} />}
+              size="sm"
+              variant="secondary"
+              isLoading={isTestingConnection}
+              isDisabled={isTestingConnection}
+              onClick={() => onTestConnection(upstream)}
+            />
           )}
-          <Button
+          <IconButton
             label={sharingPaused ? t('resumeSharing') : t('pauseSharing')}
+            tooltip={sharingPaused ? t('resumeSharing') : t('pauseSharing')}
+            icon={sharingPaused ? <Play size={16} /> : <Pause size={16} />}
             size="sm"
             variant="secondary"
             isLoading={isActionLoading(`provider-sharing:${upstream.id}`)}
             isDisabled={isActionLoading(`provider-sharing:${upstream.id}`)}
             onClick={() => void onToggleSharing(upstream)}
           />
-          <Button label={t('revokeAll')} size="sm" variant="ghost" onClick={() => onRevokeAll(upstream)} />
+          <IconButton label={t('revokeAll')} tooltip={t('revokeAll')} icon={<Ban size={16} />} size="sm" variant="destructive" onClick={() => onRevokeAll(upstream)} />
         </HStack>
       </VStack>
     </Card>
