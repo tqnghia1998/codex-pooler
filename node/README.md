@@ -21,6 +21,11 @@ QuotaHub is an informal, free friend-sharing tool. It intentionally has no
 payments, marketplace pricing, reputation system, ratings, or availability
 guarantees. Durable operational notifications are delivered by email when its
 optional SMTP settings are configured; see `pool/README.md`.
+QuotaHub supports Codex, Claude, and AIS upstreams, but its sharing quota model
+only refreshes and enforces Codex provider quota. Claude and AIS provider quota
+remain unknown there: their offers are nominal local limits settled against
+observed usage, not verified provider balances. Relaydeck's separate Claude
+quota and OAuth management behavior is unchanged.
 
 ## Proxy compatibility status
 
