@@ -497,6 +497,22 @@ export class ProductStore {
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
   }
 
+  findOwnedUpstreamByIdentity(accountId, upstreamStore, identity) {
+    const key = upstreamIdentityKey(identity);
+    if (!key) return null;
+    return this.listAccountUpstreamLinks(accountId)
+      .map((link) => {
+        const upstream = upstreamStore.get(link.upstreamId);
+        return upstream ? { link, upstream, credentials: upstreamStore.credentials(upstream.id) } : null;
+      })
+      .filter(Boolean)
+      .filter(({ upstream, credentials }) => upstream && (
+        sameProviderCredentials(upstream, credentials, identity)
+        || upstreamIdentityKey(upstream) === key
+      ))
+      .sort((left, right) => compareCanonicalUpstreams(left, right, this))[0]?.upstream || null;
+  }
+
   listAdvisoryQuotaTargets(upstreamStore) {
     return this.sqlite.prepare(`
       SELECT account_upstreams.upstream_id AS upstreamId, accounts.email
@@ -3063,6 +3079,18 @@ function upstreamIdentityKey(upstream) {
     return projectId ? `ais:${projectId}` : null;
   }
   return null;
+}
+
+function sameProviderCredentials(upstream, credentials, candidate) {
+  if (upstream?.type !== candidate?.type) return false;
+  if (upstream.type === 'claude') {
+    if (candidate.projectKey) return String(credentials?.projectKey || '') === String(candidate.projectKey);
+    return Boolean(candidate.accessToken) && String(credentials?.accessToken || '') === String(candidate.accessToken);
+  }
+  if (upstream.type === 'compass') {
+    return Boolean(candidate.projectId) && String(upstream.projectId || '') === String(candidate.projectId);
+  }
+  return false;
 }
 
 function normalizeEncryptionKey(value) {

@@ -929,6 +929,100 @@ test('Pool upstreams expose server-authoritative provider availability', async (
   }
 });
 
+test('providers can unlink and relink duplicate Claude and AIS credentials independently', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-provider-relink-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const firstProvider = account(sharingStore, 'first-provider');
+    const secondProvider = account(sharingStore, 'second-provider');
+    const firstSession = sharingStore.createAccountSession(firstProvider.id);
+    const secondSession = sharingStore.createAccountSession(secondProvider.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const claudeAuthJson = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: 'sk-ant-oat-shared-setup-token',
+        refreshToken: '',
+        expiresAt: 0
+      },
+      metadata: { skip_account_profile: true }
+    });
+    try {
+      const firstClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ authJson: claudeAuthJson })
+      });
+      const secondClaude = await request(base, '/api/pool/upstreams/claude', secondSession, {
+        method: 'POST',
+        body: JSON.stringify({ authJson: claudeAuthJson })
+      });
+      assert.equal(firstClaude.response.status, 201);
+      assert.equal(secondClaude.response.status, 201);
+      assert.notEqual(firstClaude.body.upstream.id, secondClaude.body.upstream.id);
+
+      const repeatedClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ authJson: claudeAuthJson })
+      });
+      assert.equal(repeatedClaude.response.status, 201);
+      assert.equal(repeatedClaude.body.upstream.id, firstClaude.body.upstream.id);
+
+      const removedClaude = await request(base, `/api/pool/upstreams/${firstClaude.body.upstream.id}`, firstSession, {
+        method: 'DELETE',
+        body: '{}'
+      });
+      assert.equal(removedClaude.response.status, 204);
+      assert.equal(store.get(firstClaude.body.upstream.id), null);
+
+      const relinkedClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ authJson: claudeAuthJson })
+      });
+      assert.equal(relinkedClaude.response.status, 201);
+      assert.notEqual(relinkedClaude.body.upstream.id, firstClaude.body.upstream.id);
+
+      const firstAis = await request(base, '/api/pool/upstreams/ais', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'shared-ais-project', projectKey: 'shared-ais-key' })
+      });
+      const secondAis = await request(base, '/api/pool/upstreams/ais', secondSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'shared-ais-project', projectKey: 'shared-ais-key' })
+      });
+      assert.equal(firstAis.response.status, 201);
+      assert.equal(secondAis.response.status, 201);
+      assert.notEqual(firstAis.body.upstream.id, secondAis.body.upstream.id);
+
+      const repeatedAis = await request(base, '/api/pool/upstreams/ais', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'shared-ais-project', projectKey: 'shared-ais-key' })
+      });
+      assert.equal(repeatedAis.response.status, 201);
+      assert.equal(repeatedAis.body.upstream.id, firstAis.body.upstream.id);
+
+      const removedAis = await request(base, `/api/pool/upstreams/${firstAis.body.upstream.id}`, firstSession, {
+        method: 'DELETE',
+        body: '{}'
+      });
+      assert.equal(removedAis.response.status, 204);
+      assert.equal(store.get(firstAis.body.upstream.id), null);
+
+      const relinkedAis = await request(base, '/api/pool/upstreams/ais', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'shared-ais-project', projectKey: 'shared-ais-key' })
+      });
+      assert.equal(relinkedAis.response.status, 201);
+      assert.notEqual(relinkedAis.body.upstream.id, firstAis.body.upstream.id);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('an owner can add an AIS project without a local quota estimate', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-unknown-quota-api-'));
   try {
@@ -1084,6 +1178,43 @@ test('Pool treats Claude quota as unknown even when the gateway has reported usa
     assert.equal(summary.commitment.actualQuotaDollars, null);
     assert.equal(summary.commitment.offerableQuotaDollars, null);
     assert.equal(sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 999 }, store).quotaDollars, 999);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('linking a Claude setup token uses the signed-in QuotaHub email when profile access is unavailable', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-setup-email-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'claude-setup-owner');
+    const session = sharingStore.createAccountSession(provider.id);
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async () => new Response(JSON.stringify({
+        error: { details: { required_scopes: ['user:profile'] } }
+      }), { status: 403 })
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const linked = await request(base, '/api/pool/upstreams/claude', session, {
+        method: 'POST',
+        body: JSON.stringify({ token: 'sk-ant-oat-setup-token' })
+      });
+      assert.equal(linked.response.status, 201);
+      assert.equal(linked.body.upstream.email, provider.email);
+
+      const upstreams = await request(base, '/api/pool/upstreams', session);
+      assert.equal(upstreams.response.status, 200);
+      assert.equal(upstreams.body.upstreams.length, 1);
+      assert.equal(upstreams.body.upstreams[0].email, provider.email);
+      assert.equal(upstreams.body.upstreams[0].name, provider.email);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

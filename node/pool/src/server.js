@@ -3,7 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Store } from '../../src/store.js';
-import { exportUpstreamCredentials, parseClaudeAuthJson, claudeOAuthInputError, isSupportedClaudeOAuthUpstream } from '../../src/domain.js';
+import {
+  deriveClaudeAccountId,
+  exportUpstreamCredentials,
+  parseClaudeAuthJson,
+  claudeOAuthInputError,
+  isSupportedClaudeOAuthUpstream
+} from '../../src/domain.js';
 import { claudeConfigFromEnv, normalizeClaudeConfig } from '../../src/claude-config.js';
 import { ensureClaudeCredentialIdentity } from '../../src/claude-protocol.js';
 import { createTokenRefreshScheduler, TOKEN_REFRESH_INTERVAL_MS } from '../../src/codex-token-refresh.js';
@@ -550,12 +556,25 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     } catch (error) {
       throw new HttpError(400, 'invalid_request', String(error?.message || 'Invalid Claude OAuth token'));
     }
-    const upstream = store.create({
+    const existing = productStore.findOwnedUpstreamByIdentity(accountId, store, {
       type: 'claude',
-      authJson,
-      name: input.name || parsedAuth.account?.displayName || parsedAuth.account?.emailAddress || 'Claude OAuth'
+      accountId: parsedAuth.accountId || (parsedAuth.projectKey ? '' : deriveClaudeAccountId(parsedAuth)),
+      email: parsedAuth.email || auth.account.email,
+      accessToken: parsedAuth.accessToken,
+      projectKey: parsedAuth.projectKey
     });
+    const created = !existing;
+    const upstream = existing
+      ? store.update(existing.id, { authJson })
+      : store.create({
+        type: 'claude',
+        authJson,
+        name: input.name || parsedAuth.account?.displayName || parsedAuth.account?.emailAddress || 'Claude OAuth'
+      }, { allowDuplicateIdentity: true });
     try {
+      // Setup tokens cannot read Claude's profile endpoint. QuotaHub's signed-in
+      // account is the authoritative owner identity for the linked provider.
+      store.persistClaudeIdentity(upstream.id, { email: auth.account.email });
       const credentials = store.credentials(upstream.id);
       if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
         try {
@@ -580,21 +599,34 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         }
       });
     } catch (error) {
-      productStore.cleanupUpstream(upstream.id);
-      store.remove(upstream.id);
+      if (created) {
+        productStore.cleanupUpstream(upstream.id);
+        store.remove(upstream.id);
+      }
       throw error;
     }
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
     const input = await body(req);
-    const upstream = store.create({
+    const existing = productStore.findOwnedUpstreamByIdentity(accountId, store, {
       type: 'compass',
       quotaSource: 'ais',
-      email: auth.account.email,
-      projectId: input.projectId,
-      projectKey: input.projectKey
+      projectId: input.projectId
     });
+    const created = !existing;
+    const upstream = existing
+      ? store.update(existing.id, {
+        projectId: input.projectId,
+        ...(input.projectKey !== undefined ? { projectKey: input.projectKey } : {})
+      })
+      : store.create({
+        type: 'compass',
+        quotaSource: 'ais',
+        email: auth.account.email,
+        projectId: input.projectId,
+        projectKey: input.projectKey
+      }, { allowDuplicateIdentity: true });
     try {
       productStore.linkUpstream(accountId, upstream.id);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
@@ -607,8 +639,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         }
       });
     } catch (error) {
-      productStore.cleanupUpstream(upstream.id);
-      store.remove(upstream.id);
+      if (created) {
+        productStore.cleanupUpstream(upstream.id);
+        store.remove(upstream.id);
+      }
       throw error;
     }
     return;
@@ -655,6 +689,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     const updated = store.update(id, updateFields);
     if (isClaude && updateFields.authJson) {
       try {
+        store.persistClaudeIdentity(id, { email: auth.account.email });
         const credentials = store.credentials(id);
         if (isSupportedClaudeOAuthUpstream({ ...updated, credentials })) {
           await ensureClaudeCredentialIdentity({ upstream: updated, credentials, store, fetchImpl, refreshProfile: true });
@@ -705,10 +740,11 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         const upstream = store.getPublic(upstreamId);
         if (!upstream) return [];
         const provider = productStore.providerSummary(accountId, upstreamId, store);
+        const ownerEmail = upstream.email || ((upstream.type === 'claude' || upstream.quotaSource === 'ais') ? auth.account.email : '');
         return [{
           ...upstream,
-          ...(upstream.quotaSource === 'ais' && !upstream.email ? { email: auth.account.email } : {}),
-          name: upstream.email || upstream.name,
+          ...(ownerEmail ? { email: ownerEmail } : {}),
+          name: ownerEmail || upstream.name,
           providerIssue: providerIssue(upstream),
           sharing: provider.sharing,
           commitment: provider.commitment

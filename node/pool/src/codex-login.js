@@ -74,7 +74,7 @@ export class CodexLoginManager {
     } else {
       upstream = this.upstreamStore.create(
         { type: 'codex', authJson: normalizedAuthJson },
-        { allowDuplicateCodexIdentity: true }
+        { allowDuplicateIdentity: true }
       );
     }
     if (!(Number(upstream.spending?.capDollars) > 0)) {
@@ -89,15 +89,17 @@ export class CodexLoginManager {
     const candidates = this.sharingStore.listAccountUpstreamLinks(accountId)
       .map(({ upstreamId }) => this.upstreamStore.get(upstreamId))
       .filter((upstream) => upstream?.type === 'codex');
-    if (candidates.length === 1) return candidates[0];
-    if (!parsed.accountId) return null;
-    const matches = candidates.filter((upstream) => upstream.accountId === parsed.accountId);
+    const matches = parsed.accountId
+      ? candidates.filter((upstream) => upstream.accountId === parsed.accountId)
+      : candidates.filter((upstream) => upstream.email === parsed.email);
     if (matches.length === 1) return matches[0];
     if (matches.length > 1) {
       const canonical = this.sharingStore.listCanonicalAccountUpstreamLinks(accountId, this.upstreamStore);
       return canonical
         .map(({ upstreamId }) => this.upstreamStore.get(upstreamId))
-        .find((upstream) => upstream?.type === 'codex' && upstream.accountId === parsed.accountId) || null;
+        .find((upstream) => upstream?.type === 'codex' && (
+          parsed.accountId ? upstream.accountId === parsed.accountId : upstream.email === parsed.email
+        )) || null;
     }
     return null;
   }

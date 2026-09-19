@@ -46,8 +46,18 @@ const SHARING_CARD_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
 const LOGIN_CARD_GRID_COLUMNS = { minWidth: 280, max: 2, repeat: 'fill' };
 const PROVIDER_CARD_GRID_COLUMNS = { minWidth: 220, max: 3, repeat: 'fit' };
 const PROVIDER_RANK = { codex: 0, ais: 1, aiswitch: 1, claude: 2 };
+const OFFER_PROVIDER_TYPES = [
+  { value: 'codex', label: 'Codex' },
+  { value: 'claude', label: 'Claude' },
+  { value: 'ais', label: 'AIS' }
+];
 function upstreamProviderRank(u) {
   return PROVIDER_RANK[u?.type] ?? PROVIDER_RANK[u?.quotaSource] ?? 3;
+}
+function offerProviderType(upstream) {
+  if (upstream?.type === 'claude') return 'claude';
+  if (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') return 'ais';
+  return 'codex';
 }
 const SHARING_LIST_CONFIG = {
   'community-offers': { resource: 'offers', key: 'offers', role: 'community' },
@@ -799,7 +809,17 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               width={300}
             />
             {offerableUpstreams.length > 0 && (
-              <Button label={t('publishOffer')} variant="primary" onClick={() => setOfferDialog({ upstreamId: offerableUpstreams[0].id, quotaDollars: 10, expiresOn: '', visibility: 'public', allowedEmails: '' })} />
+              <Button label={t('publishOffer')} variant="primary" onClick={() => {
+                const upstream = offerableUpstreams[0];
+                setOfferDialog({
+                  providerType: offerProviderType(upstream),
+                  upstreamId: upstream.id,
+                  quotaDollars: 10,
+                  expiresOn: '',
+                  visibility: 'public',
+                  allowedEmails: ''
+                });
+              }} />
             )}
           </HStack>
           </HStack>
@@ -2021,7 +2041,10 @@ function ClaudeUpstreamDialog({ value, onClose, onSave, onChange }) {
 
 function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, onChange }) {
   const { t } = useLanguage();
-  const selectedUpstream = upstreams.find((item) => item.id === value?.upstreamId) || value?.offer?.upstream;
+  const selectedProviderType = value?.providerType || offerProviderType(upstreams.find((item) => item.id === value?.upstreamId));
+  const availableProviderTypes = OFFER_PROVIDER_TYPES.filter(({ value: providerType }) => (
+    offerableUpstreams.some((upstream) => offerProviderType(upstream) === providerType)
+  ));
   return (
     <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
       <Layout
@@ -2029,19 +2052,20 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
         content={(
           <LayoutContent>
             {value && <VStack gap={3}>
-              {value.offer ? (
-                <TextInput label={t('shareSource')} value={selectedUpstream?.name || ''} isDisabled />
-              ) : (
-                <Selector
+              {!value.offer && (
+                <SegmentedControl
                   label={t('shareSource')}
-                  options={offerableUpstreams.map((upstream) => ({
-                    value: upstream.id,
-                    label: `${upstream.name} · ${upstream.type === 'claude' ? 'Claude' : (upstream.quotaSource === 'ais' ? 'AIS' : 'Codex')}`
-                  }))}
-                  value={value.upstreamId}
-                  onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
-                  width="100%"
-                />
+                  value={selectedProviderType}
+                  onChange={(providerType) => {
+                    const upstream = offerableUpstreams.find((item) => offerProviderType(item) === providerType);
+                    if (upstream) onChange((current) => ({ ...current, providerType, upstreamId: upstream.id }));
+                  }}
+                  layout="hug"
+                >
+                  {availableProviderTypes.map(({ value: providerType, label }) => (
+                    <SegmentedControlItem key={providerType} value={providerType} label={label} />
+                  ))}
+                </SegmentedControl>
               )}
               <NumberInput
                 label={t('shareableQuotaUsd')}

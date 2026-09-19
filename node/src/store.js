@@ -221,7 +221,11 @@ export class Store {
     return upstream ? publicUpstream(upstream) : null;
   }
 
-  create(input, { scopeId = input?.scopeId || DEFAULT_SCOPE_ID, allowDuplicateCodexIdentity = false } = {}) {
+  create(input, {
+    scopeId = input?.scopeId || DEFAULT_SCOPE_ID,
+    allowDuplicateIdentity = false,
+    allowDuplicateCodexIdentity = false
+  } = {}) {
     const upstream = createUpstream(input, { allowLegacyClaudeApiKey: this.allowLegacyClaudeApiKey });
     const db = this.load();
     activeScope(db, scopeId);
@@ -231,7 +235,7 @@ export class Store {
       : upstream.type === 'compass'
         ? item.projectId === upstream.projectId
         : upstream.email && item.email === upstream.email || upstream.accountId && item.accountId === upstream.accountId));
-    if (isDuplicate && !(allowDuplicateCodexIdentity && upstream.type === 'codex')) {
+    if (isDuplicate && !allowDuplicateIdentity && !(allowDuplicateCodexIdentity && upstream.type === 'codex')) {
       throw new Error(`${upstream.type} upstream already exists`);
     }
 
