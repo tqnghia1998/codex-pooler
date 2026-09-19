@@ -38,6 +38,7 @@ test('delayed quota client reads monthly Claude and AIS observations', async () 
   const values = new Map([
     ['claude.usage_usd', 7],
     ['claude.cap_usd', 20],
+    ['claude.balance_usd', 12.5],
     ['ais.usage_usd', 5],
     ['ais.cap_usd', 30],
     ['ais.balance_usd', 24]
@@ -58,13 +59,36 @@ test('delayed quota client reads monthly Claude and AIS observations', async () 
 
   const observations = await client.query('OWNER@EXAMPLE.COM', ['claude', 'ais']);
 
-  assert.equal(requests.length, 5);
+  assert.equal(requests.length, 6);
   assert.equal(requests[0].options.headers.authorization, 'Bearer server-only-token');
   assert.equal(requests[0].url.searchParams.get('user_email'), 'owner@example.com');
-  assert.equal(observations[0].remainingDollars, 13);
+  assert.equal(observations[0].remainingDollars, 12.5);
   assert.equal(observations[1].remainingDollars, 24);
   assert.equal(observations[0].delaySeconds, 3600);
   assert.equal(Date.parse(observations[0].reportedAt) - Date.parse(observations[0].dataThroughAt), 3_600_000);
+});
+
+test('delayed quota client falls back to Claude cap minus usage when Loop has no balance', async () => {
+  const client = createAdvisoryQuotaClient({
+    serviceToken: 'server-only-token',
+    fetchImpl: async (url) => {
+      const dataKey = new URL(url).searchParams.get('data_key');
+      const value = new Map([
+        ['claude.usage_usd', 7],
+        ['claude.cap_usd', 20]
+      ]).get(dataKey);
+      return new Response(JSON.stringify({
+        success: true,
+        result: { data: value === undefined ? [] : [{ numeric_value: value }] }
+      }), { status: 200 });
+    }
+  });
+
+  const [observation] = await client.query('owner@example.com', ['claude']);
+
+  assert.equal(observation.remainingDollars, 13);
+  assert.equal(observation.limitDollars, 20);
+  assert.equal(observation.usageDollars, 7);
 });
 
 test('an empty delayed response remains unknown instead of becoming a zero balance', async () => {

@@ -3,7 +3,7 @@ const DEFAULT_DELAY_MS = 60 * 60 * 1_000;
 const DEFAULT_TIMEOUT_MS = 30_000;
 const DATA_PATH = '/api/v1/admin/ai-usage-personal/data';
 const PROVIDER_KEYS = {
-  claude: ['claude.usage_usd', 'claude.cap_usd'],
+  claude: ['claude.usage_usd', 'claude.cap_usd', 'claude.balance_usd'],
   ais: ['ais.usage_usd', 'ais.cap_usd', 'ais.balance_usd']
 };
 
@@ -54,9 +54,7 @@ export function createAdvisoryQuotaClient({
       return selectedProviders.map((provider) => {
         const usageDollars = money(values.get(`${provider}:${provider}.usage_usd`));
         const limitDollars = money(values.get(`${provider}:${provider}.cap_usd`));
-        const storedBalance = provider === 'ais'
-          ? money(values.get('ais:ais.balance_usd'))
-          : null;
+        const storedBalance = money(values.get(`${provider}:${provider}.balance_usd`));
         const remainingDollars = storedBalance ?? balance(limitDollars, usageDollars);
         return {
           provider,

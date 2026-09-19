@@ -92,9 +92,11 @@ stored quota state and can also refresh it manually. Some Codex plans expose
 only a percentage or provider units; QuotaHub shows that reported value rather
 than estimating a dollar balance. When the optional delayed quota integration
 is configured, QuotaHub also reads monthly Claude and AIS usage by the
-provider's QuotaHub email once per hour. Those balances are approximately one
-hour behind, visibly labeled with their data-through time, and used as the
-current sharing balance until the next refresh.
+provider's QuotaHub email once per hour. When Loop publishes a provider
+balance, QuotaHub uses that value; otherwise it calculates the balance as
+monthly cap minus usage. Those balances are approximately one hour behind,
+visibly labeled with their data-through time, and used as the current sharing
+balance until the next refresh.
 At startup and once per hour, QuotaHub also refreshes any refreshable Codex
 token that expires within 12 hours. Transient refresh failures retry with
 bounded exponential backoff; revoked or missing refresh tokens require the
@@ -107,11 +109,12 @@ token-refresh failure, or has exhausted its provider quota.
 
 Users can also link Claude with a Claude CLI setup token or supported OAuth
 credential JSON, or add an AIS project by entering its project ID and project
-key. Claude and AIS use the delayed monthly balance when the integration has
-data for the provider email. That balance caps new offers and sessions and
-marks the provider unavailable at zero, just like a dollar-denominated Codex
-balance. It is still not a real-time provider response: external consumption
-within the delay window can make the actual balance lower. Manual refresh
+key. Claude cards use the signed-in QuotaHub email because setup tokens may not
+have permission to read a Claude profile. Claude and AIS use the delayed monthly
+balance when the integration has data for the provider email. That balance caps
+new offers and sessions and marks the provider unavailable at zero, just like a
+dollar-denominated Codex balance. It is still not a real-time provider response:
+external consumption within the delay window can make the actual balance lower. Manual refresh
 updates Codex quota and, when configured, Claude and AIS monthly balances. Use
 **Add AIS project** and its **How to get AIS project** guide to retrieve
 `project_id` and `api_key` from Compass.

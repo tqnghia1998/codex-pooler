@@ -148,6 +148,36 @@ test('reuses the canonical Codex upstream when duplicate links already exist', (
   }
 });
 
+test('the gateway store permits duplicate identities for every provider when QuotaHub owns the links', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-duplicate-provider-identities-'));
+  try {
+    const store = new Store(dir);
+    const providers = [
+      () => ({ type: 'codex', authJson: authJson() }),
+      () => ({
+        type: 'claude',
+        accessToken: 'sk-ant-oat-duplicate-provider',
+        metadata: { skip_account_profile: true }
+      }),
+      () => ({
+        type: 'compass',
+        quotaSource: 'ais',
+        projectId: 'duplicate-ais-project',
+        projectKey: 'duplicate-ais-key'
+      })
+    ];
+
+    for (const input of providers) {
+      store.create(input());
+      assert.doesNotThrow(() => store.create(input(), { allowDuplicateIdentity: true }));
+    }
+
+    assert.equal(store.list().length, 6);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('auth.json import signs into the same account and replaces stored credentials', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-import-'));
   try {
@@ -166,6 +196,28 @@ test('auth.json import signs into the same account and replaces stored credentia
       SELECT COUNT(*) AS count FROM sharing_events
       WHERE entity_type = 'upstream' AND entity_id = ? AND action = 'linked'
     `).get(first.upstream.id).count, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('one QuotaHub account can link multiple Codex accounts without replacing either credential', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-multiple-codex-providers-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const manager = new CodexLoginManager({ sharingStore, upstreamStore });
+
+    const first = manager.importAuthJson(authJson({ accountId: 'first-codex-account', refreshToken: 'first-refresh' }));
+    const second = manager.importAuthJson(authJson({ accountId: 'second-codex-account', refreshToken: 'second-refresh' }));
+    const repeatedFirst = manager.importAuthJson(authJson({ accountId: 'first-codex-account', refreshToken: 'rotated-first-refresh' }));
+
+    assert.equal(second.account.id, first.account.id);
+    assert.notEqual(second.upstream.id, first.upstream.id);
+    assert.equal(repeatedFirst.upstream.id, first.upstream.id);
+    assert.equal(upstreamStore.list().length, 2);
+    assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'rotated-first-refresh');
+    assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'second-refresh');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
