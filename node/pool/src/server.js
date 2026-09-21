@@ -704,6 +704,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     sendJson(res, 200, { counts: productStore.sharingCounts(accountId) });
     return;
   }
+  if (req.method === 'GET' && resource === 'leaderboard' && parts.length === 3) {
+    sendJson(res, 200, { leaderboard: productStore.communityLeaderboard() });
+    return;
+  }
   if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
     requireAdmin(auth.account);
     const analytics = productStore.adminAnalytics({ eventCursor: adminEventCursor(url) });

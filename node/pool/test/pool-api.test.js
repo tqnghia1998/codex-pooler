@@ -627,6 +627,59 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
   }
 });
 
+test('signed-in members can read a masked community leaderboard', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-leaderboard-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'provider');
+    const consumer = account(sharingStore, 'consumer');
+    const providerSession = sharingStore.createAccountSession(provider.id);
+    const consumerSession = sharingStore.createAccountSession(consumer.id);
+    const now = new Date().toISOString();
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
+      VALUES ('leaderboard-offer', ?, 'leaderboard-upstream', 5000000, 'active', NULL, ?, ?)
+    `).run(provider.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_tickets (id, offer_id, provider_account_id, consumer_account_id, demand_request_id, requested_micros, approved_micros, status, expires_at, created_at, resolved_at)
+      VALUES ('leaderboard-ticket', 'leaderboard-offer', ?, ?, NULL, 5000000, 5000000, 'approved', NULL, ?, ?)
+    `).run(provider.id, consumer.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_sessions (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id, granted_micros, consumed_micros, status, expires_at, created_at, updated_at)
+      VALUES ('leaderboard-session', 'leaderboard-offer', 'leaderboard-ticket', ?, ?, 'leaderboard-upstream', 'default', 5000000, 2500000, 'active', NULL, ?, ?)
+    `).run(provider.id, consumer.id, now, now);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      assert.equal((await fetch(`${base}/api/pool/leaderboard`)).status, 401);
+      const result = await request(base, '/api/pool/leaderboard', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.deepEqual(result.body.leaderboard.topProviders, [{
+        rank: 1,
+        emailMasked: 'pr***@example.com',
+        sessionCount: 1,
+        consumedMicros: 2500000
+      }]);
+      assert.deepEqual(result.body.leaderboard.topConsumers, [{
+        rank: 1,
+        emailMasked: 'co***@example.com',
+        sessionCount: 1,
+        consumedMicros: 2500000
+      }]);
+      assert.equal(result.body.leaderboard.topProviders[0].email, undefined);
+      assert.equal(result.body.leaderboard.topProviders[0].id, undefined);
+      assert.equal(result.body.leaderboard.topProviders[0].displayName, undefined);
+      assert.equal((await fetch(`${base}/api/pool/leaderboard`, { headers: authHeaders(providerSession) })).status, 200);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('admin export and import restore QuotaHub data', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-portability-'));
   try {
