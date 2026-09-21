@@ -1,4 +1,5 @@
 import { createServer as createHttpServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,7 +30,7 @@ import {
 } from '../../src/proxy.js';
 import { codexGatewayOptions } from '../../src/codex-compatibility.js';
 import { ProductStore } from './product-store.js';
-import { CodexLoginManager } from './codex-login.js';
+import { CodexAuthImporter } from './codex-import.js';
 import { createEmailScheduler, EMAIL_DELIVERY_INTERVAL_MS } from './email.js';
 import { createSnapshotBackup, SNAPSHOT_BACKUP_INTERVAL_MS, snapshotBackupPath } from './backup.js';
 import { providerIssue } from './provider-availability.js';
@@ -52,18 +53,18 @@ const MIME_TYPES = {
 };
 const COOKIE_NAMES = {
   session: 'codex_pool_session',
-  csrf: 'codex_pool_csrf',
-  login: 'codex_pool_login'
+  csrf: 'codex_pool_csrf'
 };
 export const QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 export const PRODUCT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1_000;
 const ACCOUNT_COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60;
 const ADMIN_EMAIL = 'quangnghia.trinh@shopee.com';
+const SPACE_TOKEN_VALIDATE_URL = 'https://space.shopee.io/apis/space_auth/v1/token_validate';
 
 export function createApp({
   store = new Store(resolve(productRoot, '.data')),
   productStore = new ProductStore(resolve(productRoot, '.data')),
-  codexLoginManager = new CodexLoginManager({ sharingStore: productStore, upstreamStore: store }),
+  codexAuthImporter = new CodexAuthImporter({ sharingStore: productStore, upstreamStore: store }),
   fetchImpl = globalThis.fetch,
   ingress = poolIngress(),
   cookieSecure = envBoolean(process.env.POOL_COOKIE_SECURE, false),
@@ -82,6 +83,7 @@ export function createApp({
   store.clearAisSpendingCaps();
   const modelCatalog = modelCatalogForStore(store);
   const basePath = normalizePublicBasePath(publicBasePath);
+  const spaceSessionValidations = new Map();
   return async function app(req, res) {
     try {
       const url = new URL(req.url, 'http://localhost');
@@ -105,8 +107,10 @@ export function createApp({
         await authRequest(req, res, url, {
           store,
           productStore,
-          codexLoginManager,
+          codexAuthImporter,
           cookieSecure,
+          fetchImpl,
+          spaceSessionValidations,
           onCodexCredentialsImported,
           logger
         });
@@ -216,11 +220,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   const poolDataDir = requirePoolDataDir(dataDir);
   store ||= new Store(poolDataDir);
   productStore ||= new ProductStore(poolDataDir);
-  const codexLoginManager = new CodexLoginManager({
-    sharingStore: productStore,
-    upstreamStore: store,
-    command: process.env.POOL_CODEX_CLI || 'codex'
-  });
+  const codexAuthImporter = new CodexAuthImporter({ sharingStore: productStore, upstreamStore: store });
   const codexHostHealth = new CodexHostHealth(codexHostHealthOptionsFromEnv(process.env, 'POOL_CODEX_HOST_'));
   const codexOptions = poolCodexGatewayOptions(ingress);
   const tokenScheduler = createTokenRefreshScheduler(store, { fetchImpl });
@@ -275,7 +275,7 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   const server = createHttpServer(createApp({
     store,
     productStore,
-    codexLoginManager,
+    codexAuthImporter,
     fetchImpl,
     ingress,
     cookieSecure,
@@ -327,7 +327,6 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
     emailScheduler.close();
     snapshotBackup.close();
     websocketServer.close();
-    codexLoginManager.close();
   });
   server.listen(port, host, () => {
     console.log(`codex-share listening on http://${host}:${server.address().port}`);
@@ -354,7 +353,16 @@ export async function refreshAllQuotas(store, { fetchImpl = globalThis.fetch } =
   });
 }
 
-async function authRequest(req, res, url, { store, productStore, codexLoginManager, cookieSecure, onCodexCredentialsImported, logger }) {
+async function authRequest(req, res, url, {
+  store,
+  productStore,
+  codexAuthImporter,
+  cookieSecure,
+  fetchImpl,
+  spaceSessionValidations,
+  onCodexCredentialsImported,
+  logger
+}) {
   if (req.method === 'POST' && url.pathname === '/auth/codex/import') {
     const input = await body(req);
     if (typeof input.authJson !== 'string' || !input.authJson.trim()) {
@@ -363,117 +371,56 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     let account;
     let upstream;
     try {
-      ({ account, upstream } = codexLoginManager.importAuthJson(input.authJson));
+      ({ account, upstream } = codexAuthImporter.importAuthJson(input.authJson));
     } catch (error) {
       if (error?.statusCode) throw error;
       throw new HttpError(400, 'invalid_request', String(error.message || 'Codex auth JSON could not be imported').slice(0, 300));
     }
-    const session = productStore.createAccountSession(account.id);
+    const session = productStore.createAccountSession(account.id, { source: 'import' });
     await refreshImportedCredentials(onCodexCredentialsImported, upstream.id, logger);
     setCookies(res, [
-      cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
       cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
       cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
     ]);
     sendJson(res, 200, { account });
     return;
   }
-  if (req.method === 'POST' && url.pathname === '/auth/codex/start') {
-    const attempt = codexLoginManager.start();
-    setCookies(res, [
-      cookie(COOKIE_NAMES.login, attempt.token, { httpOnly: true, secure: cookieSecure, maxAge: 20 * 60 })
-    ]);
-    sendJson(res, 201, { login: attempt.login });
-    return;
-  }
-  if (req.method === 'GET' && url.pathname === '/auth/codex/status') {
-    const token = requestCookies(req)[COOKIE_NAMES.login];
-    const login = codexLoginManager.status(token);
-    if (!login) throw new HttpError(401, 'authentication_error', 'Codex login attempt is unavailable');
-    if (login.status === 'completed') {
-      const accountId = productStore.accountIdForCompletedCodexLogin(token);
-      if (!accountId) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
-      await Promise.all(productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-        .map(({ upstreamId }) => refreshImportedCredentials(onCodexCredentialsImported, upstreamId, logger)));
-      const completed = productStore.consumeCompletedCodexLogin(token);
-      if (!completed) throw new HttpError(401, 'authentication_error', 'Codex login attempt has already been consumed');
-      setCookies(res, [
-        cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
-        cookie(COOKIE_NAMES.session, completed.session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
-        cookie(COOKIE_NAMES.csrf, completed.session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
-      ]);
-      sendJson(res, 200, { login: completed.login });
-      return;
-    }
-    sendJson(res, 200, { login });
-    return;
-  }
-  if (req.method === 'DELETE' && url.pathname === '/auth/codex/login') {
-    const token = requestCookies(req)[COOKIE_NAMES.login];
-    if (!token || !codexLoginManager.cancel(token)) throw new HttpError(404, 'not_found', 'Codex login attempt was not found');
-    setCookies(res, [cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 })]);
-    sendJson(res, 204, null);
-    return;
-  }
   if (req.method === 'POST' && url.pathname === '/auth/session') {
     const input = await body(req);
-    let sessionData = input?.session;
-    if (typeof sessionData === 'string') {
-      try {
-        sessionData = JSON.parse(sessionData);
-      } catch {
-        sessionData = { sub: sessionData };
+    const currentSessionToken = requestCookies(req)[COOKIE_NAMES.session];
+    const currentAuth = productStore.authenticateAccountSession(currentSessionToken);
+    if (currentAuth && currentAuth.authSource !== 'space') {
+      sendJson(res, 200, { account: currentAuth.account });
+      return;
+    }
+    try {
+      const result = await coalesceSpaceSessionValidation(
+        spaceSessionValidations,
+        currentSessionToken,
+        input?.session,
+        async () => {
+          const account = productStore.upsertAccount(await validateSpaceSession(input?.session, fetchImpl));
+          if (currentAuth?.account.id === account.id) return { account, session: null };
+          if (currentAuth?.authSource === 'space') productStore.revokeAccountSession(currentSessionToken);
+          return { account, session: productStore.createAccountSession(account.id, { source: 'space' }) };
+        }
+      );
+      if (result.session) {
+        setCookies(res, [
+          cookie(COOKIE_NAMES.session, result.session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
+          cookie(COOKIE_NAMES.csrf, result.session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
+        ]);
       }
+      sendJson(res, 200, {
+        account: result.account,
+        ...(result.session ? { csrfToken: result.session.csrfToken } : {})
+      });
+    } catch (error) {
+      if (error?.statusCode === 401 && currentAuth?.authSource === 'space') {
+        clearAccountCookies(req, res, productStore, cookieSecure);
+      }
+      throw error;
     }
-    if (!sessionData || typeof sessionData !== 'object') {
-      throw new HttpError(400, 'invalid_request', 'session data is required');
-    }
-    const userObj = (sessionData.user && typeof sessionData.user === 'object') ? sessionData.user : {};
-    const email = String(
-      sessionData.email ||
-      sessionData.login_email ||
-      userObj.email ||
-      userObj.login_email ||
-      sessionData.mail ||
-      ''
-    ).trim();
-    const username = String(
-      userObj.username ||
-      (typeof sessionData.username === 'string' ? sessionData.username : '') ||
-      (typeof sessionData.user === 'string' ? sessionData.user : '') ||
-      email.split('@')[0] ||
-      ''
-    ).trim();
-    const name = String(
-      userObj.full_name ||
-      userObj.family_name ||
-      userObj.given_name ||
-      sessionData.displayName ||
-      (typeof sessionData.name === 'string' ? sessionData.name : '') ||
-      username ||
-      email ||
-      'SPACE User'
-    ).trim();
-    const sub = String(
-      sessionData.identity_uuid ||
-      userObj.sub ||
-      sessionData.sub ||
-      sessionData.id ||
-      sessionData.userId ||
-      username ||
-      email
-    ).trim();
-    if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
-    const finalEmail = email || (username ? `${username}@shopee.com` : '');
-    if (!finalEmail) throw new HttpError(400, 'invalid_request', 'SPACE session email is required');
-    const account = productStore.upsertAccount({ email: finalEmail, name });
-    const session = productStore.createAccountSession(account.id);
-    setCookies(res, [
-      cookie(COOKIE_NAMES.login, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
-      cookie(COOKIE_NAMES.session, session.token, { httpOnly: true, secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS }),
-      cookie(COOKIE_NAMES.csrf, session.csrfToken, { secure: cookieSecure, maxAge: ACCOUNT_COOKIE_MAX_AGE_SECONDS })
-    ]);
-    sendJson(res, 200, { account, csrfToken: session.csrfToken });
     return;
   }
   if (req.method === 'POST' && url.pathname === '/auth/logout') {
@@ -963,6 +910,78 @@ function accountSession(req, productStore, requireCsrf) {
     throw new HttpError(403, 'permission_error', 'CSRF validation failed');
   }
   return auth;
+}
+
+async function validateSpaceSession(rawSession, fetchImpl) {
+  const token = spaceSessionToken(rawSession);
+  if (!token) throw new HttpError(401, 'space_session_invalid', 'SPACE session is invalid or expired');
+  let response;
+  try {
+    response = await fetchImpl(SPACE_TOKEN_VALIDATE_URL, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        referer: 'https://space.shopee.io/',
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify({ requires_2fa: true }),
+      redirect: 'error',
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch {
+    throw new HttpError(503, 'space_session_unavailable', 'Unable to validate SPACE session');
+  }
+  const validated = await response.json().catch(() => null);
+  if (!response.ok || !validated || typeof validated !== 'object') {
+    throw new HttpError(401, 'space_session_invalid', 'SPACE session is invalid or expired');
+  }
+  const user = validated.user && typeof validated.user === 'object' ? validated.user : {};
+  const email = String(validated.login_email || user.email || '').trim().toLowerCase();
+  const username = String(user.username || email.split('@')[0] || '').trim();
+  const name = String(user.full_name || user.family_name || user.given_name || user.name || username || email).trim();
+  const subject = String(validated.identity_uuid || user.sub || '').trim();
+  if (!email || !subject) throw new HttpError(401, 'space_session_invalid', 'SPACE session is invalid or expired');
+  return { email, name: name || 'SPACE User' };
+}
+
+function coalesceSpaceSessionValidation(validations, currentSessionToken, rawSession, operation) {
+  const submittedToken = spaceSessionToken(rawSession);
+  if (!submittedToken) return operation();
+  const key = createHash('sha256')
+    .update(`${currentSessionToken || ''}\0${submittedToken}`)
+    .digest('hex');
+  const existing = validations.get(key);
+  if (existing) return existing;
+  const pending = Promise.resolve()
+    .then(operation)
+    .finally(() => validations.delete(key));
+  validations.set(key, pending);
+  return pending;
+}
+
+function spaceSessionToken(value) {
+  const submitted = parseSpaceSession(value);
+  return typeof submitted?.token === 'string' ? submitted.token.trim() : '';
+}
+
+function parseSpaceSession(value) {
+  if (value && typeof value === 'object') return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearAccountCookies(req, res, productStore, cookieSecure) {
+  const sessionToken = requestCookies(req)[COOKIE_NAMES.session];
+  if (sessionToken) productStore.revokeAccountSession(sessionToken);
+  setCookies(res, [
+    cookie(COOKIE_NAMES.session, '', { httpOnly: true, secure: cookieSecure, maxAge: 0 }),
+    cookie(COOKIE_NAMES.csrf, '', { secure: cookieSecure, maxAge: 0 })
+  ]);
 }
 
 function requireAdmin(account) {

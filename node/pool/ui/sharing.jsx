@@ -109,11 +109,7 @@ const STATUS_LABEL_KEYS = {
   cancelled: 'statusCancelled',
   expired: 'statusExpired',
   exhausted: 'statusExhausted',
-  revoked: 'statusRevoked',
-  starting: 'loginStatusStarting',
-  waiting: 'loginStatusWaiting',
-  completed: 'loginStatusCompleted',
-  failed: 'loginStatusFailed'
+  revoked: 'statusRevoked'
 };
 
 function statusLabel(t, status) {
@@ -169,7 +165,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [smartSession, setSmartSession] = useState(() => {
     try { return window.localStorage.getItem('session'); } catch { return null; }
   });
-  const [smartAuthenticating, setSmartAuthenticating] = useState(false);
   const [offerDialog, setOfferDialog] = useState(null);
   const [ticketDialog, setTicketDialog] = useState(null);
   const [sessionDialog, setSessionDialog] = useState(null);
@@ -183,8 +178,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [providerActionLoading, setProviderActionLoading] = useState(false);
   const [providerUnlinkTarget, setProviderUnlinkTarget] = useState(null);
   const [providerUnlinkLoading, setProviderUnlinkLoading] = useState(false);
-  const [login, setLogin] = useState(null);
-  const [loginLoading, setLoginLoading] = useState(false);
   const [authJsonDialog, setAuthJsonDialog] = useState(false);
   const [authJson, setAuthJson] = useState('');
   const [authJsonLoading, setAuthJsonLoading] = useState(false);
@@ -197,6 +190,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [loadingActions, setLoadingActions] = useState(new Set());
   const actionsInFlight = useRef(new Set());
   const tableRequestVersion = useRef(0);
+  const smartSessionSyncs = useRef(new Map());
   const resetTablePage = useCallback(() => {
     tableRequestVersion.current += 1;
     setTablePage({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
@@ -210,16 +204,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     } catch (nextError) {
       if (nextError.status === 401) {
         setAccount(null);
-        try {
-          const data = await api('/auth/codex/status');
-          if (data.login.status === 'completed') {
-            setLogin(null);
-            onNotice(t('signedInWithCodex'));
-            await load();
-          } else {
-            setLogin(data.login);
-          }
-        } catch {}
       } else if (!background) onNotice(nextError.message, true);
       if (!background) setLoading(false);
       return;
@@ -245,55 +229,70 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   }, [api, onNotice, t]);
 
   const syncSmartSession = useCallback(async (sessionVal) => {
-    if (!sessionVal) return;
-    setSmartAuthenticating(true);
+    if (!sessionVal) return false;
+    const existing = smartSessionSyncs.current.get(sessionVal);
+    if (existing) return existing;
+    const sync = (async () => {
+      try {
+        await api('/auth/session', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ session: sessionVal })
+        });
+        return true;
+      } catch (err) {
+        if (err.status === 401) {
+          try { window.localStorage.removeItem('session'); } catch {}
+          setSmartSession(null);
+        }
+        setAccount(null);
+        onNotice(err.message || t('smartAuthFailedToast'), true);
+        return false;
+      }
+    })();
+    smartSessionSyncs.current.set(sessionVal, sync);
     try {
-      await api('/auth/session', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ session: sessionVal })
-      });
-      await load();
-    } catch (err) {
-      onNotice(err.message || t('smartAuthFailedToast'), true);
+      return await sync;
     } finally {
-      setSmartAuthenticating(false);
+      if (smartSessionSyncs.current.get(sessionVal) === sync) {
+        smartSessionSyncs.current.delete(sessionVal);
+      }
     }
-  }, [api, load, onNotice, t]);
+  }, [api, onNotice, t]);
 
   useEffect(() => {
-    void load();
-  }, [load]);
-
-  useEffect(() => {
-    const handleFocusOrVisible = () => {
+    let active = true;
+    const validateThenLoad = async ({ background = false } = {}) => {
       let currentSession = null;
       try {
         currentSession = window.localStorage.getItem('session');
       } catch {}
+      if (!active) return;
       setSmartSession(currentSession);
-      if (currentSession && !account && !smartAuthenticating) {
-        void syncSmartSession(currentSession);
+      if (currentSession) {
+        const valid = await syncSmartSession(currentSession);
+        if (!active || !valid) return;
       }
+      if (active) await load({ background });
+    };
+
+    const handleFocusOrVisible = () => {
+      if (document.hidden) return;
+      void validateThenLoad({ background: true });
     };
 
     window.addEventListener('focus', handleFocusOrVisible);
     document.addEventListener('visibilitychange', handleFocusOrVisible);
     window.addEventListener('storage', handleFocusOrVisible);
-
-    // Initial check on mount if localStorage already has session
-    let initialSession = null;
-    try { initialSession = window.localStorage.getItem('session'); } catch {}
-    if (initialSession && !account) {
-      void syncSmartSession(initialSession);
-    }
+    void validateThenLoad();
 
     return () => {
+      active = false;
       window.removeEventListener('focus', handleFocusOrVisible);
       document.removeEventListener('visibilitychange', handleFocusOrVisible);
       window.removeEventListener('storage', handleFocusOrVisible);
     };
-  }, [account, smartAuthenticating, syncSmartSession]);
+  }, [load, syncSmartSession]);
 
   useEffect(() => {
     onLoadingChange(loading);
@@ -384,33 +383,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     return () => window.clearInterval(timer);
   }, [account, load, loadTable]);
 
-  useEffect(() => {
-    if (!login || ['completed', 'failed', 'cancelled'].includes(login.status)) return undefined;
-    let active = true;
-    let timer = null;
-    const poll = async () => {
-      try {
-        const data = await api('/auth/codex/status');
-        if (!active) return;
-        if (data.login.status === 'completed') {
-          setLogin(null);
-          onNotice(t('signedInWithCodex'));
-          await load();
-        } else {
-          setLogin(data.login);
-        }
-      } catch (nextError) {
-        if (active) onNotice(nextError.message, true);
-      }
-      if (active) timer = window.setTimeout(() => void poll(), 1500);
-    };
-    void poll();
-    return () => {
-      active = false;
-      if (timer) window.clearTimeout(timer);
-    };
-  }, [api, load, login, onNotice, t]);
-
   const mutate = useCallback(async (operation, message, actionKey = null) => {
     if (actionKey && actionsInFlight.current.has(actionKey)) return false;
     if (actionKey) {
@@ -440,28 +412,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   const isActionLoading = useCallback((actionKey) => loadingActions.has(actionKey), [loadingActions]);
 
-  const startCodexLogin = async () => {
-    setLoginLoading(true);
-    try {
-      const data = await api('/auth/codex/start', { method: 'POST', body: '{}' });
-      setLogin(data.login);
-    } catch (nextError) {
-      onNotice(nextError.message, true);
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const cancelCodexLogin = async () => {
-    try {
-      await api('/auth/codex/login', { method: 'DELETE' });
-      setLogin(null);
-      onNotice(t('codexSignInCancelled'));
-    } catch (nextError) {
-      onNotice(nextError.message, true);
-    }
-  };
-
   const openAuthJsonDialog = () => setAuthJsonDialog(true);
 
   const importAuthJson = async () => {
@@ -474,7 +424,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       });
       setAuthJson('');
       setAuthJsonDialog(false);
-      setLogin(null);
       onNotice(t('signedInFromAuthJson'));
       await load();
     } catch (nextError) {
@@ -495,7 +444,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     setTableTotals({});
     setUpstreams([]);
     setPersonalKeys([]);
-    setLogin(null);
   };
 
   const refreshQuota = async ({ silent = false, includeAdvisory = true } = {}) => {
@@ -633,12 +581,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             </VStack>
           </Card>
         </Grid>
-        <CodexLoginDialog
-          login={login}
-          onClose={() => setLogin(null)}
-          onRetry={() => void startCodexLogin()}
-          onCancel={() => void cancelCodexLogin()}
-        />
         <AuthJsonLoginDialog
           isOpen={authJsonDialog}
           value={authJson}
@@ -703,7 +645,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             upstreams={upstreams}
             isRefreshing={quotaRefreshing}
             onRefresh={() => void refreshQuota()}
-            onLinkCodex={() => void startCodexLogin()}
             onImportAuthJson={openAuthJsonDialog}
             onAddAis={() => setAisDialog({ projectId: '', projectKey: '' })}
             onEditAis={(upstream) => setAisDialog({
@@ -748,12 +689,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           isActionLoading={isActionLoading}
         />
       </Grid>
-      <CodexLoginDialog
-        login={login}
-        onClose={() => setLogin(null)}
-        onRetry={() => void startCodexLogin()}
-        onCancel={() => void cancelCodexLogin()}
-      />
       <VStack gap={2}>
         <VStack paddingBlock={1}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
@@ -1158,7 +1093,6 @@ function QuotaOverview({
   upstreams,
   isRefreshing,
   onRefresh,
-  onLinkCodex,
   onImportAuthJson,
   onAddAis,
   onEditAis,
@@ -1185,7 +1119,7 @@ function QuotaOverview({
             <Text type="supporting" color="secondary" maxLines={1}>{t('noShareProviderDesc')}</Text>
           </VStack>
           <HStack justify="center" gap={1} wrap="wrap">
-            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onLinkCodex} />
+            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onImportAuthJson} />
             <Button label={t('linkClaude')} size="sm" variant="secondary" onClick={onAddClaude} />
             <Button label={t('linkAis')} size="sm" variant="secondary" onClick={onAddAis} />
           </HStack>
@@ -1202,7 +1136,7 @@ function QuotaOverview({
             <Text type="supporting" color="secondary" maxLines={1}>{t('shareProvidersDesc')}</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
-            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onLinkCodex} />
+            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onImportAuthJson} />
             <Button label={t('linkClaude')} size="sm" variant="secondary" onClick={onAddClaude} />
             <Button label={t('linkAis')} size="sm" variant="secondary" onClick={onAddAis} />
             <Button label={t('credentials')} size="sm" variant="ghost" onClick={onRevealCredentials} />
@@ -1219,7 +1153,6 @@ function QuotaOverview({
             <QuotaCard
               key={upstream.id}
               upstream={upstream}
-              onLinkCodex={onLinkCodex}
               onImportAuthJson={onImportAuthJson}
               onTestConnection={onTestConnection}
               isTestingConnection={testingUpstreamId === upstream.id}
@@ -1290,7 +1223,7 @@ function PersonalKeyCard({ personalKeys, onCreate, onReveal, onRotate, onRevoke,
   );
 }
 
-function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, onUnlink, isActionLoading = () => false }) {
+function QuotaCard({ upstream, onImportAuthJson, onTestConnection, isTestingConnection, onToggleSharing, onRevokeAll, onEditAis, onEditClaude, onUnlink, isActionLoading = () => false }) {
   const { t } = useLanguage();
   const quota = upstream.quota;
   const advisoryQuota = upstream.advisoryQuota;
@@ -1388,8 +1321,7 @@ function QuotaCard({ upstream, onLinkCodex, onImportAuthJson, onTestConnection, 
                 <Button label={t('updateToken')} size="sm" variant="primary" onClick={() => onEditClaude(upstream)} />
               ) : (
                 <>
-                  <Button label={t('reconnect')} size="sm" variant="primary" onClick={onLinkCodex} />
-                  <Button label={t('useAuthJson')} size="sm" variant="secondary" onClick={onImportAuthJson} />
+                  <Button label={t('useAuthJson')} size="sm" variant="primary" onClick={onImportAuthJson} />
                 </>
               )}
             </HStack>
@@ -1727,109 +1659,6 @@ function UpstreamSourceBadge({ upstream }) {
         </span>
       </Tooltip>
     </HStack>
-  );
-}
-
-function CodexLoginDialog({ login, onClose, onCancel, onRetry }) {
-  const { t } = useLanguage();
-  if (!login) return null;
-  const waiting = ['starting', 'waiting'].includes(login.status);
-  const retryable = ['failed', 'cancelled'].includes(login.status);
-  const [isOpeningSignIn, setIsOpeningSignIn] = useState(false);
-
-  useEffect(() => {
-    if (!waiting) setIsOpeningSignIn(false);
-  }, [waiting]);
-
-  const openSignIn = () => {
-    setIsOpeningSignIn(true);
-    if (login.verificationUrl) {
-      window.open(login.verificationUrl, '_blank', 'noopener,noreferrer');
-    }
-  };
-
-  return (
-    <Dialog isOpen={Boolean(login)} onOpenChange={onClose} purpose="form" width={540}>
-      <Layout
-        header={(
-          <DialogHeader
-            title={t('linkCodexDialogTitle')}
-            subtitle={t('linkCodexDialogSub')}
-            onOpenChange={onClose}
-            hasDivider
-          />
-        )}
-        content={(
-          <LayoutContent>
-            <VStack gap={3}>
-              <HStack justify="between" vAlign="center">
-                <Text type="supporting" color="secondary">{t('connectionStatus')}</Text>
-                <Badge
-                  label={statusLabel(t, login.status)}
-                  variant={login.status === 'completed' ? 'green' : login.status === 'failed' ? 'error' : 'warning'}
-                />
-              </HStack>
-
-              {login.userCode ? (
-                <VStack gap={3}>
-                  <VStack gap={1}>
-                    <Text weight="bold">{t('codexStep1Title')}</Text>
-                    <Text type="supporting" color="secondary">
-                      {t('codexStep1Detail')}
-                    </Text>
-                    <HStack gap={2} vAlign="center">
-                      <Button
-                        label={t('openVerificationPage')}
-                        variant="primary"
-                        isLoading={isOpeningSignIn}
-                        onClick={openSignIn}
-                      />
-                      <Text type="supporting" color="secondary">
-                        {t('opensInNewTab')}
-                      </Text>
-                    </HStack>
-                  </VStack>
-
-                  <VStack gap={1}>
-                    <Text weight="bold">{t('codexStep2Title')}</Text>
-                    <Text type="supporting" color="secondary">
-                      {t('codexStep2Desc')}
-                    </Text>
-                    <CodeBlock
-                      code={login.userCode}
-                      language="text"
-                      hasCopyButton
-                      width="100%"
-                    />
-                  </VStack>
-                </VStack>
-              ) : (
-                <VStack gap={2} vAlign="center" justify="center" style={{ padding: '24px 0' }}>
-                  <Text color="secondary">{t('generatingDeviceCode')}</Text>
-                </VStack>
-              )}
-
-              {login.errorCode && (
-                <Banner title={t('authorizationError')} description={login.errorCode} status="error" />
-              )}
-            </VStack>
-          </LayoutContent>
-        )}
-        footer={(
-          <LayoutFooter hasDivider>
-            <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-              <HStack gap={2}>
-                {waiting && <Button label={t('cancelSignIn')} variant="ghost" onClick={onCancel} />}
-              </HStack>
-              <HStack gap={2}>
-                {retryable && <Button label={t('retry')} variant="primary" onClick={onRetry} />}
-                <Button label={t('close')} variant="secondary" onClick={onClose} />
-              </HStack>
-            </HStack>
-          </LayoutFooter>
-        )}
-      />
-    </Dialog>
   );
 }
 
