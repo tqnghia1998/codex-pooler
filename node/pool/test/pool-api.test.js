@@ -627,7 +627,7 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
   }
 });
 
-test('signed-in members can read a masked community leaderboard', async () => {
+test('signed-in members can read a community leaderboard with account emails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-leaderboard-api-'));
   try {
     const store = new Store(dir);
@@ -658,17 +658,16 @@ test('signed-in members can read a masked community leaderboard', async () => {
       assert.equal(result.response.status, 200);
       assert.deepEqual(result.body.leaderboard.topProviders, [{
         rank: 1,
-        emailMasked: 'pr***@example.com',
+        email: 'provider@example.com',
         sessionCount: 1,
         consumedMicros: 2500000
       }]);
       assert.deepEqual(result.body.leaderboard.topConsumers, [{
         rank: 1,
-        emailMasked: 'co***@example.com',
+        email: 'consumer@example.com',
         sessionCount: 1,
         consumedMicros: 2500000
       }]);
-      assert.equal(result.body.leaderboard.topProviders[0].email, undefined);
       assert.equal(result.body.leaderboard.topProviders[0].id, undefined);
       assert.equal(result.body.leaderboard.topProviders[0].displayName, undefined);
       assert.equal((await fetch(`${base}/api/pool/leaderboard`, { headers: authHeaders(providerSession) })).status, 200);

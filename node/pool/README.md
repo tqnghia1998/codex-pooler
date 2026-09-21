@@ -183,8 +183,8 @@ stores only privacy-safe activity totals: request and success counts, spend, and
 last use. It never stores prompts, responses, models, failure history, or a row
 per request.
 The dashboard also shows a community leaderboard to signed-in members. It ranks
-the top providers and consumers by settled session usage and masks account
-emails; it exposes only the aggregate totals the product already stores.
+the top providers and consumers by settled session usage and exposes their
+account emails alongside aggregate totals the product already stores.
 
 ## Friend Requests
 
@@ -225,7 +225,7 @@ POST   /auth/codex/import
 POST   /auth/logout
 
 GET    /api/pool/me
-GET    /api/pool/leaderboard                    # top providers/consumers by settled usage, with masked emails
+GET    /api/pool/leaderboard                    # top providers/consumers by settled usage, with account emails
 GET    /api/pool/admin/analytics                 # quangnghia.trinh@shopee.com only; recent events use eventCursor
 GET    /api/pool/admin/export                    # admin only; full JSON snapshot (gateway records + all product tables)
 POST   /api/pool/admin/import                    # admin only; restore from an export file, replacing the collections it contains

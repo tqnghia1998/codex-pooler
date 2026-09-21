@@ -1079,7 +1079,7 @@ export class ProductStore {
       LIMIT 5
     `).all().map((leader, index) => ({
       rank: index + 1,
-      emailMasked: maskEmail(leader.email),
+      email: leader.email,
       sessionCount: leader.session_count,
       consumedMicros: leader.consumed_micros
     }));
@@ -2968,11 +2968,6 @@ function cleanName(value, email) {
 function poolDisplayName(email, fallback = '') {
   const local = typeof email === 'string' ? email.trim().split('@')[0].slice(0, 120) : '';
   return local || cleanName(fallback, email);
-}
-
-function maskEmail(email) {
-  const [local = '', domain] = String(email || '').split('@');
-  return domain ? `${local.slice(0, 2)}***@${domain}` : '';
 }
 
 function upstreamIdentityKey(upstream) {
