@@ -4,12 +4,10 @@ import { join, resolve } from 'node:path';
 import Database from 'better-sqlite3';
 import { offerExceedsProviderQuota, providerIssue } from './provider-availability.js';
 
-const LOGIN_ATTEMPT_TTL_MS = 20 * 60 * 1_000;
 const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
 const SHARE_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const RESERVATION_TTL_MS = 2 * 60 * 60 * 1_000;
 const SETTLED_ATTEMPT_LIMIT = 100;
-const LOGIN_ATTEMPT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const ROUTE_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const ACCOUNT_SESSION_RETENTION_MS = 180 * 24 * 60 * 60 * 1_000;
 const EXPIRY_CHECK_INTERVAL_MS = 1_000;
@@ -54,6 +52,7 @@ export class ProductStore {
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         token_hash TEXT NOT NULL UNIQUE,
         csrf_hash TEXT NOT NULL,
+        auth_source TEXT NOT NULL DEFAULT 'legacy',
         created_at TEXT NOT NULL,
         expires_at TEXT,
         revoked_at TEXT
@@ -67,19 +66,6 @@ export class ProductStore {
         link_order INTEGER,
         created_at TEXT NOT NULL,
         PRIMARY KEY (account_id, upstream_id)
-      );
-      CREATE TABLE IF NOT EXISTS codex_login_attempts (
-        id TEXT PRIMARY KEY,
-        account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
-        attempt_token_hash TEXT NOT NULL UNIQUE,
-        status TEXT NOT NULL,
-        verification_url TEXT,
-        user_code TEXT,
-        error_code TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL,
-        consumed_at TEXT
       );
       CREATE TABLE IF NOT EXISTS sharing_offers (
         id TEXT PRIMARY KEY,
@@ -220,7 +206,6 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS email_outbox_pending_idx ON email_outbox(status, next_attempt_at);
       CREATE INDEX IF NOT EXISTS personal_api_keys_account_idx ON personal_api_keys(account_id, created_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_session_idx ON personal_api_key_routes(session_id);
-      CREATE INDEX IF NOT EXISTS codex_login_attempts_expiry_idx ON codex_login_attempts(expires_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_updated_idx ON personal_api_key_routes(updated_at);
       CREATE INDEX IF NOT EXISTS sharing_sessions_retention_idx ON sharing_sessions(status, updated_at);
       CREATE INDEX IF NOT EXISTS sharing_tickets_retention_idx ON sharing_tickets(status, resolved_at, created_at);
@@ -234,30 +219,10 @@ export class ProductStore {
   }
 
   migrateIdentitySchema() {
-    const attemptColumns = this.sqlite.pragma('table_info(codex_login_attempts)');
-    const accountColumn = attemptColumns.find(({ name }) => name === 'account_id');
-    const current = attemptColumns.some(({ name }) => name === 'attempt_token_hash')
-      && attemptColumns.some(({ name }) => name === 'consumed_at')
-      && accountColumn?.notnull === 0;
-    if (!current) {
-      this.sqlite.exec(`
-        DROP TABLE codex_login_attempts;
-        CREATE TABLE codex_login_attempts (
-          id TEXT PRIMARY KEY,
-          account_id TEXT REFERENCES accounts(id) ON DELETE CASCADE,
-          attempt_token_hash TEXT NOT NULL UNIQUE,
-          status TEXT NOT NULL,
-          verification_url TEXT,
-          user_code TEXT,
-          error_code TEXT,
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL,
-          expires_at TEXT NOT NULL,
-          consumed_at TEXT
-        );
-      `);
-    }
-    this.sqlite.exec('DROP TABLE IF EXISTS oauth_states');
+    this.sqlite.exec(`
+      DROP TABLE IF EXISTS codex_login_attempts;
+      DROP TABLE IF EXISTS oauth_states;
+    `);
 
     const sessionColumns = this.sqlite.pragma('table_info(account_sessions)');
     if (sessionColumns.find(({ name }) => name === 'expires_at')?.notnull) {
@@ -269,17 +234,24 @@ export class ProductStore {
           account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
           token_hash TEXT NOT NULL UNIQUE,
           csrf_hash TEXT NOT NULL,
+          auth_source TEXT NOT NULL DEFAULT 'legacy',
           created_at TEXT NOT NULL,
           expires_at TEXT,
           revoked_at TEXT
         );
-        INSERT INTO account_sessions (id, account_id, token_hash, csrf_hash, created_at, expires_at, revoked_at)
-        SELECT id, account_id, token_hash, csrf_hash, created_at, NULL, revoked_at
+        INSERT INTO account_sessions (id, account_id, token_hash, csrf_hash, auth_source, created_at, expires_at, revoked_at)
+        SELECT id, account_id, token_hash, csrf_hash, 'legacy', created_at, NULL, revoked_at
         FROM account_sessions_legacy;
         DROP TABLE account_sessions_legacy;
         PRAGMA foreign_keys = ON;
       `);
     }
+    addColumn(this.sqlite, 'account_sessions', 'auth_source', "TEXT NOT NULL DEFAULT 'legacy'");
+    this.sqlite.prepare(`
+      UPDATE account_sessions
+      SET revoked_at = COALESCE(revoked_at, ?)
+      WHERE auth_source IN ('legacy', 'codex')
+    `).run(new Date().toISOString());
   }
 
   migrateSharingSchema() {
@@ -364,7 +336,6 @@ export class ProductStore {
       CREATE INDEX IF NOT EXISTS sharing_sessions_consumer_status_created_idx ON sharing_sessions(consumer_account_id, status, created_at DESC, id DESC);
       CREATE INDEX IF NOT EXISTS quota_requests_status_idx ON quota_requests(status, created_at);
       CREATE INDEX IF NOT EXISTS email_outbox_pending_idx ON email_outbox(status, next_attempt_at);
-      CREATE INDEX IF NOT EXISTS codex_login_attempts_expiry_idx ON codex_login_attempts(expires_at);
       CREATE INDEX IF NOT EXISTS personal_api_key_routes_updated_idx ON personal_api_key_routes(updated_at);
       CREATE INDEX IF NOT EXISTS sharing_sessions_retention_idx ON sharing_sessions(status, updated_at);
       CREATE INDEX IF NOT EXISTS sharing_tickets_retention_idx ON sharing_tickets(status, resolved_at, created_at);
@@ -400,15 +371,16 @@ export class ProductStore {
     return this.account(apply());
   }
 
-  createAccountSession(accountId) {
+  createAccountSession(accountId, { source = 'legacy' } = {}) {
     this.requireAccount(accountId);
+    const authSource = normalizeSessionSource(source);
     const token = randomToken(32);
     const csrfToken = randomToken(24);
     const now = new Date();
     this.sqlite.prepare(`
-      INSERT INTO account_sessions (id, account_id, token_hash, csrf_hash, created_at, expires_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(randomUUID(), accountId, hash(token), hash(csrfToken), now.toISOString(), null);
+      INSERT INTO account_sessions (id, account_id, token_hash, csrf_hash, auth_source, created_at, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(randomUUID(), accountId, hash(token), hash(csrfToken), authSource, now.toISOString(), null);
     return { token, csrfToken, expiresAt: null };
   }
 
@@ -423,6 +395,7 @@ export class ProductStore {
     const csrfValid = csrfToken ? constantEqual(row.csrf_hash, hash(csrfToken)) : false;
     return {
       sessionId: row.id,
+      authSource: normalizeSessionSource(row.auth_source),
       account: publicAccount({
         id: row.account_id,
         email: row.email,
@@ -710,82 +683,6 @@ export class ProductStore {
     return commitment;
   }
 
-  createCodexLoginAttempt() {
-    const id = randomUUID();
-    const token = randomToken(32);
-    const now = new Date();
-    this.sqlite.prepare(`
-      INSERT INTO codex_login_attempts
-      (id, attempt_token_hash, status, created_at, updated_at, expires_at)
-      VALUES (?, ?, 'starting', ?, ?, ?)
-    `).run(id, hash(token), now.toISOString(), now.toISOString(), new Date(now.getTime() + LOGIN_ATTEMPT_TTL_MS).toISOString());
-    return { login: this.codexLoginAttemptById(id), token };
-  }
-
-  updateCodexLoginAttempt(id, patch = {}) {
-    const allowedStatuses = new Set(['starting', 'waiting', 'completed', 'failed', 'cancelled']);
-    const current = this.sqlite.prepare('SELECT * FROM codex_login_attempts WHERE id = ?').get(id);
-    if (!current) throw notFound();
-    const status = patch.status || current.status;
-    if (!allowedStatuses.has(status)) throw new Error('invalid Codex login status');
-    this.sqlite.prepare(`
-      UPDATE codex_login_attempts
-      SET account_id = ?, status = ?, verification_url = ?, user_code = ?, error_code = ?, updated_at = ?
-      WHERE id = ?
-    `).run(
-      patch.accountId === undefined ? current.account_id : patch.accountId,
-      status,
-      patch.verificationUrl === undefined ? current.verification_url : cleanUrl(patch.verificationUrl),
-      patch.userCode === undefined ? current.user_code : cleanCode(patch.userCode),
-      patch.errorCode === undefined ? current.error_code : cleanCode(patch.errorCode),
-      new Date().toISOString(),
-      id
-    );
-    return this.codexLoginAttemptById(id);
-  }
-
-  codexLoginAttemptById(id) {
-    const row = this.sqlite.prepare('SELECT * FROM codex_login_attempts WHERE id = ?').get(id);
-    return row ? publicLoginAttempt(row) : null;
-  }
-
-  codexLoginAttemptByToken(token) {
-    if (!token) return null;
-    const row = this.sqlite.prepare(`
-      SELECT * FROM codex_login_attempts
-      WHERE attempt_token_hash = ? AND expires_at > ?
-    `).get(hash(token), new Date().toISOString());
-    return row ? publicLoginAttempt(row) : null;
-  }
-
-  accountIdForCompletedCodexLogin(token) {
-    if (!token) return null;
-    return this.sqlite.prepare(`
-      SELECT account_id AS accountId
-      FROM codex_login_attempts
-      WHERE attempt_token_hash = ? AND expires_at > ?
-        AND status = 'completed' AND account_id IS NOT NULL AND consumed_at IS NULL
-    `).get(hash(token), new Date().toISOString())?.accountId || null;
-  }
-
-  consumeCompletedCodexLogin(token) {
-    if (!token) return null;
-    const consume = this.sqlite.transaction(() => {
-      const row = this.sqlite.prepare(`
-        SELECT * FROM codex_login_attempts
-        WHERE attempt_token_hash = ? AND expires_at > ?
-          AND status = 'completed' AND account_id IS NOT NULL AND consumed_at IS NULL
-      `).get(hash(token), new Date().toISOString());
-      if (!row) return null;
-      const session = this.createAccountSession(row.account_id);
-      const consumedAt = new Date().toISOString();
-      this.sqlite.prepare('UPDATE codex_login_attempts SET consumed_at = ?, updated_at = ? WHERE id = ? AND consumed_at IS NULL')
-        .run(consumedAt, consumedAt, row.id);
-      return { login: publicLoginAttempt({ ...row, consumed_at: consumedAt, updated_at: consumedAt }), session };
-    });
-    return consume();
-  }
-
   expireDue(now = new Date(), { force = false } = {}) {
     const timestampMs = new Date(now).getTime();
     if (!force && timestampMs >= this.lastExpiryCheckAt && timestampMs - this.lastExpiryCheckAt < EXPIRY_CHECK_INTERVAL_MS) {
@@ -864,16 +761,11 @@ export class ProductStore {
   cleanup(now = new Date()) {
     this.expireDue(now, { force: true });
     const timestamp = new Date(now).getTime();
-    const loginAttemptCutoff = new Date(timestamp - LOGIN_ATTEMPT_RETENTION_MS).toISOString();
     const routeCutoff = new Date(timestamp - ROUTE_RETENTION_MS).toISOString();
     const emailCutoff = new Date(timestamp - EMAIL_RETENTION_MS).toISOString();
     const eventCutoff = new Date(timestamp - EVENT_RETENTION_MS).toISOString();
     const historyCutoff = new Date(timestamp - HISTORY_RETENTION_MS).toISOString();
     const remove = this.sqlite.transaction(() => ({
-      loginAttempts: this.sqlite.prepare(`
-        DELETE FROM codex_login_attempts
-        WHERE expires_at <= ?
-      `).run(loginAttemptCutoff).changes,
       routes: this.sqlite.prepare(`
         DELETE FROM personal_api_key_routes
         WHERE updated_at <= ?
@@ -2590,6 +2482,10 @@ function hasUniqueSingleColumnIndex(sqlite, table, column) {
   });
 }
 
+function normalizeSessionSource(value) {
+  return ['space', 'import', 'legacy'].includes(value) ? value : 'legacy';
+}
+
 function publicAccount(row) {
   return {
     id: row.id,
@@ -2598,19 +2494,6 @@ function publicAccount(row) {
     avatarUrl: row.avatar_url || null,
     createdAt: row.created_at || null,
     updatedAt: row.updated_at || null
-  };
-}
-
-function publicLoginAttempt(row) {
-  return {
-    id: row.id,
-    status: row.status,
-    verificationUrl: row.verification_url || null,
-    userCode: row.user_code || null,
-    errorCode: row.error_code || null,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    expiresAt: row.expires_at
   };
 }
 
@@ -3110,22 +2993,6 @@ function compareCanonicalUpstreams(left, right, productStore) {
     || String(right.link.createdAt).localeCompare(String(left.link.createdAt))
     || Number(right.link.linkOrder || 0) - Number(left.link.linkOrder || 0)
     || String(right.upstream.id).localeCompare(String(left.upstream.id));
-}
-
-function cleanUrl(value) {
-  if (value === null || value === undefined || value === '') return null;
-  try {
-    const url = new URL(String(value));
-    return url.protocol === 'https:' ? url.toString().slice(0, 1000) : null;
-  } catch {
-    return null;
-  }
-}
-
-function cleanCode(value) {
-  if (value === null || value === undefined || value === '') return null;
-  const code = String(value).replace(/\x1b\[[0-9;]*m/g, '').trim();
-  return /^[A-Za-z0-9_.:-]{1,120}$/.test(code) ? code : null;
 }
 
 function notFound() {

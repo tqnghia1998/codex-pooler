@@ -39,16 +39,7 @@ test('Codex Pool routes, cookies, and data stay isolated from Relaydeck', async 
     const poolStore = new Store(poolDir);
     const productStore = new ProductStore(poolDir);
     const account = productStore.upsertAccount({ email: 'pool@example.com', name: 'Pool User' });
-    const manager = {
-      start() {
-        const attempt = productStore.createCodexLoginAttempt();
-        productStore.updateCodexLoginAttempt(attempt.login.id, { accountId: account.id, status: 'completed' });
-        return { ...attempt, login: productStore.codexLoginAttemptById(attempt.login.id) };
-      },
-      status: (token) => productStore.codexLoginAttemptByToken(token),
-      cancel: () => null
-    };
-    const pool = await listen(createPoolApp({ store: poolStore, productStore, codexLoginManager: manager }));
+    const pool = await listen(createPoolApp({ store: poolStore, productStore }));
     try {
       let response = await fetch(`${relaydeck.base}/auth/codex/start`, {
         method: 'POST',
@@ -67,12 +58,7 @@ test('Codex Pool routes, cookies, and data stay isolated from Relaydeck', async 
         headers: { 'content-type': 'application/json' },
         body: '{}'
       });
-      assert.equal(response.status, 201);
-      const cookies = typeof response.headers.getSetCookie === 'function'
-        ? response.headers.getSetCookie()
-        : [response.headers.get('set-cookie')].filter(Boolean);
-      assert.equal(cookies.some((value) => value.startsWith('codex_pool_login=')), true);
-      assert.equal(cookies.some((value) => value.startsWith('relaydeck_')), false);
+      assert.equal(response.status, 404);
 
       productStore.createAccountSession(account.id);
       assert.equal(digest(relaydeckStore.dbPath), relaydeckDigest);

@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { createApp, QUOTA_REFRESH_INTERVAL_MS, refreshAllQuotas, start } from '../src/server.js';
 import { Store } from '../../src/store.js';
 import { ProductStore } from '../src/product-store.js';
-import { CodexLoginManager } from '../src/codex-login.js';
 import { upstreamPacerForStore } from '../../src/upstream-pacer.js';
 
 function jwt(payload) {
@@ -58,116 +57,36 @@ function cookieValue(cookies, name) {
   return item?.slice(name.length + 1).split(';')[0] || '';
 }
 
-test('Codex device sign-in creates an opaque browser session and enforces origin and CSRF checks', async () => {
+test('legacy Codex device-auth routes are unavailable', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-api-'));
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const account = sharingStore.upsertAccount({ email: 'browser@example.com', name: 'Browser User' });
-    const manager = {
-      start() {
-        const attempt = sharingStore.createCodexLoginAttempt();
-        sharingStore.updateCodexLoginAttempt(attempt.login.id, { accountId: account.id, status: 'completed' });
-        return { ...attempt, login: sharingStore.codexLoginAttemptById(attempt.login.id) };
-      },
-      status(token) {
-        return sharingStore.codexLoginAttemptByToken(token);
-      },
-      cancel(token) {
-        const login = sharingStore.codexLoginAttemptByToken(token);
-        return login ? sharingStore.updateCodexLoginAttempt(login.id, { status: 'cancelled' }) : null;
-      }
-    };
-    let refreshedUpstreamId = null;
-    const upstream = store.create({ type: 'codex', authJson: authJson({
-      subject: 'browser-user',
-      email: 'browser@example.com',
-      accountId: 'browser-account'
-    }) });
-    sharingStore.linkUpstream(account.id, upstream.id);
-    const server = createServer(createApp({
-      store,
-      productStore: sharingStore,
-      codexLoginManager: manager,
-      onCodexCredentialsImported: async (upstreamId) => {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-        refreshedUpstreamId = upstreamId;
-        store.setQuota(upstreamId, {
-          label: 'Provider quota window',
-          usedPercent: 20,
-          remainingPercent: 80,
-          remainingUnits: null,
-          limitUnits: null,
-          remainingDollars: null,
-          limitDollars: null,
-          windowSeconds: 3600,
-          resetAt: null,
-          observedAt: new Date().toISOString(),
-          source: 'codex_usage_api'
-        });
-      }
-    }));
+    const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
-      let response = await fetch(`${base}/auth/codex/start`, {
+      const responses = await Promise.all([
+        fetch(`${base}/auth/codex/start`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: '{}'
+        }),
+        fetch(`${base}/auth/codex/status`),
+        fetch(`${base}/auth/codex/login`, { method: 'DELETE' })
+      ]);
+      for (const response of responses) {
+        assert.equal(response.status, 404);
+        assert.equal(setCookies(response).some((value) => value.startsWith('codex_pool_login=')), false);
+      }
+
+      const response = await fetch(`${base}/auth/codex/import`, {
         method: 'POST',
-        headers: { origin: 'https://attacker.example', 'content-type': 'application/json' },
-        body: '{}'
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authJson: authJson() })
       });
-      assert.equal(response.status, 403);
-
-      response = await fetch(`${base}/auth/codex/start`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
-      assert.equal(response.status, 201);
-      const loginCookies = setCookies(response);
-      const loginToken = decodeURIComponent(cookieValue(loginCookies, 'codex_pool_login'));
-      assert.ok(loginToken);
-      assert.equal(JSON.stringify(await response.json()).includes(loginToken), false);
-
-      response = await fetch(`${base}/auth/codex/login`, {
-        method: 'DELETE',
-        headers: { origin: 'https://attacker.example', cookie: `codex_pool_login=${encodeURIComponent(loginToken)}` }
-      });
-      assert.equal(response.status, 403);
-      response = await fetch(`${base}/auth/codex/status`);
-      assert.equal(response.status, 401);
-      response = await fetch(`${base}/auth/codex/status`, { headers: { cookie: `codex_pool_login=${encodeURIComponent(loginToken)}` } });
       assert.equal(response.status, 200);
-      assert.equal((await response.json()).login.status, 'completed');
-      assert.equal(refreshedUpstreamId, upstream.id);
-      assert.equal(store.getPublic(upstream.id).quota.remainingPercent, 80);
-      const sessionCookies = setCookies(response);
-      const sessionToken = decodeURIComponent(cookieValue(sessionCookies, 'codex_pool_session'));
-      const csrfToken = decodeURIComponent(cookieValue(sessionCookies, 'codex_pool_csrf'));
-      assert.ok(sessionToken);
-      assert.ok(csrfToken);
-      assert.match(sessionCookies.find((value) => value.startsWith('codex_pool_session=')), /Max-Age=315360000/);
-
-      response = await fetch(`${base}/auth/codex/status`, { headers: { cookie: `codex_pool_login=${encodeURIComponent(loginToken)}` } });
-      assert.equal(response.status, 401);
-
-      response = await fetch(`${base}/api/pool/me`, { headers: { cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}` } });
-      assert.equal(response.status, 200);
-      assert.equal((await response.json()).account.id, account.id);
-
-      response = await fetch(`${base}/auth/logout`, {
-        method: 'POST',
-        headers: { cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}; codex_pool_csrf=${encodeURIComponent(csrfToken)}` },
-        body: '{}'
-      });
-      assert.equal(response.status, 403);
-      response = await fetch(`${base}/auth/logout`, {
-        method: 'POST',
-        headers: {
-          cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}; codex_pool_csrf=${encodeURIComponent(csrfToken)}`,
-          'x-csrf-token': csrfToken,
-          'content-type': 'application/json'
-        },
-        body: '{}'
-      });
-      assert.equal(response.status, 204);
-      response = await fetch(`${base}/api/pool/me`, { headers: { cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}` } });
-      assert.equal(response.status, 401);
+      assert.equal(setCookies(response).some((value) => value.startsWith('codex_pool_login=')), false);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -180,17 +99,216 @@ test('Codex quota refresh defaults to five minutes', () => {
   assert.equal(QUOTA_REFRESH_INTERVAL_MS, 5 * 60 * 1_000);
 });
 
+test('SPACE sign-in trusts validated identity only and revokes the browser session when validation fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-space-session-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const calls = [];
+    let validationSucceeds = true;
+    const fetchImpl = async (url, options) => {
+      calls.push({ url: String(url), options });
+      if (!validationSucceeds) return new Response(JSON.stringify({ error: 'expired' }), { status: 401 });
+      return new Response(JSON.stringify({
+        login_email: 'verified@example.com',
+        identity_uuid: 'verified-identity',
+        user: {
+          email: 'verified@example.com',
+          full_name: 'Verified User',
+          sub: 'verified-subject'
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const server = createServer(createApp({ store, productStore: sharingStore, fetchImpl }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      let response = await fetch(`${base}/auth/session`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          session: JSON.stringify({
+            token: 'real-space-token',
+            login_email: 'spoofed@example.com',
+            identity_uuid: 'spoofed-identity',
+            user: { email: 'spoofed@example.com', sub: 'spoofed-subject' }
+          })
+        })
+      });
+      assert.equal(response.status, 200);
+      assert.equal((await response.json()).account.email, 'verified@example.com');
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, 'https://space.shopee.io/apis/space_auth/v1/token_validate');
+      assert.equal(calls[0].options.headers.authorization, 'Bearer real-space-token');
+      assert.deepEqual(JSON.parse(calls[0].options.body), { requires_2fa: true });
+      assert.equal(
+        sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM accounts WHERE email = ?').get('spoofed@example.com').count,
+        0
+      );
+
+      const sessionToken = decodeURIComponent(cookieValue(setCookies(response), 'codex_pool_session'));
+      validationSucceeds = false;
+      response = await fetch(`${base}/auth/session`, {
+        method: 'POST',
+        headers: {
+          cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ session: JSON.stringify({ token: 'expired-space-token' }) })
+      });
+      assert.equal(response.status, 401);
+      assert.match(setCookies(response).find((value) => value.startsWith('codex_pool_session=')), /Max-Age=0/);
+
+      response = await fetch(`${base}/api/pool/me`, {
+        headers: { cookie: `codex_pool_session=${encodeURIComponent(sessionToken)}` }
+      });
+      assert.equal(response.status, 401);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('SPACE validation preserves imported browser sessions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-space-preserve-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    let calls = 0;
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async () => {
+        calls += 1;
+        throw new Error('SPACE must not be called');
+      }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      for (const source of ['import']) {
+        const user = sharingStore.upsertAccount({ email: `${source}@example.com`, name: source });
+        const session = sharingStore.createAccountSession(user.id, { source });
+        const response = await fetch(`${base}/auth/session`, {
+          method: 'POST',
+          headers: {
+            cookie: `codex_pool_session=${encodeURIComponent(session.token)}`,
+            'content-type': 'application/json'
+          },
+          body: JSON.stringify({ session: JSON.stringify({ token: 'space-token' }) })
+        });
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).account.id, user.id);
+        assert.equal(sharingStore.authenticateAccountSession(session.token).account.id, user.id);
+      }
+      assert.equal(calls, 0);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('SPACE validation outages preserve the existing SPACE browser session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-space-outage-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const user = sharingStore.upsertAccount({ email: 'space@example.com', name: 'SPACE User' });
+    const session = sharingStore.createAccountSession(user.id, { source: 'space' });
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async () => { throw new Error('network unavailable'); }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const response = await fetch(`${base}/auth/session`, {
+        method: 'POST',
+        headers: {
+          cookie: `codex_pool_session=${encodeURIComponent(session.token)}`,
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({ session: JSON.stringify({ token: 'space-token' }) })
+      });
+      assert.equal(response.status, 503);
+      assert.deepEqual(setCookies(response), []);
+      assert.equal(sharingStore.authenticateAccountSession(session.token).account.id, user.id);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('concurrent SPACE validation requests share one replacement browser session', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-space-race-api-'));
+  try {
+    const store = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    let calls = 0;
+    let resolveValidation;
+    const validation = new Promise((resolve) => { resolveValidation = resolve; });
+    const server = createServer(createApp({
+      store,
+      productStore: sharingStore,
+      fetchImpl: async () => {
+        calls += 1;
+        return validation;
+      }
+    }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const options = {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ session: JSON.stringify({ token: 'shared-space-token' }) })
+      };
+      const first = fetch(`${base}/auth/session`, options);
+      while (calls === 0) await new Promise((resolve) => setTimeout(resolve, 1));
+      const second = fetch(`${base}/auth/session`, options);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      resolveValidation(new Response(JSON.stringify({
+        login_email: 'race@example.com',
+        identity_uuid: 'race-identity',
+        user: { email: 'race@example.com', full_name: 'Race User', sub: 'race-subject' }
+      }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+      const [firstResponse, secondResponse] = await Promise.all([first, second]);
+      assert.equal(firstResponse.status, 200);
+      assert.equal(secondResponse.status, 200);
+      assert.equal(calls, 1);
+      const firstToken = decodeURIComponent(cookieValue(setCookies(firstResponse), 'codex_pool_session'));
+      const secondToken = decodeURIComponent(cookieValue(setCookies(secondResponse), 'codex_pool_session'));
+      assert.ok(firstToken);
+      assert.equal(secondToken, firstToken);
+      assert.equal(
+        sharingStore.sqlite.prepare("SELECT COUNT(*) AS count FROM account_sessions WHERE auth_source = 'space' AND revoked_at IS NULL").get().count,
+        1
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('auth.json sign-in imports credentials and returns only public account data', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-auth-json-api-'));
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const manager = new CodexLoginManager({ sharingStore, upstreamStore: store });
     let refreshedUpstreamId = null;
     const server = createServer(createApp({
       store,
       productStore: sharingStore,
-      codexLoginManager: manager,
       onCodexCredentialsImported: async (upstreamId) => {
         await new Promise((resolve) => setTimeout(resolve, 10));
         refreshedUpstreamId = upstreamId;
@@ -231,6 +349,7 @@ test('auth.json sign-in imports credentials and returns only public account data
       const csrfToken = decodeURIComponent(cookieValue(cookies, 'codex_pool_csrf'));
       assert.ok(sessionToken);
       assert.ok(csrfToken);
+      assert.equal(cookies.some((value) => value.startsWith('codex_pool_login=')), false);
 
       const responseText = await response.text();
       const result = JSON.parse(responseText);
@@ -320,8 +439,7 @@ test('separate browser sessions keep different Codex Pool identities after anoth
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const manager = new CodexLoginManager({ sharingStore, upstreamStore: store });
-    const server = createServer(createApp({ store, productStore: sharingStore, codexLoginManager: manager }));
+    const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
@@ -367,8 +485,7 @@ test('multiple browser sessions for one QuotaHub account remain valid after anot
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
-    const manager = new CodexLoginManager({ sharingStore, upstreamStore: store });
-    const server = createServer(createApp({ store, productStore: sharingStore, codexLoginManager: manager }));
+    const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
@@ -1273,83 +1390,6 @@ test('a provider can manually refresh delayed Claude quota as the primary sharin
         () => sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 16 }, store),
         /provider’s truly offerable quota/
       );
-    } finally {
-      await new Promise((resolve) => server.close(resolve));
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('Loop quota is prioritized when imported upstreams refresh after Codex login', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-imported-loop-first-'));
-  try {
-    const store = new Store(dir);
-    const productStore = new ProductStore(dir);
-    const owner = productStore.upsertAccount({ email: 'loop-first@example.com', name: 'Loop First' });
-    const claude = store.create({
-      type: 'claude',
-      accessToken: 'sk-ant-oat-loop-first',
-      metadata: { skip_account_profile: true }
-    });
-    const ais = store.create({
-      type: 'compass',
-      quotaSource: 'ais',
-      projectId: 'loop-first-ais',
-      projectKey: 'loop-first-key'
-    });
-    productStore.linkUpstream(owner.id, claude.id);
-    productStore.linkUpstream(owner.id, ais.id);
-
-    const queries = [];
-    let directFetches = 0;
-    const advisoryQuotaClient = {
-      enabled: true,
-      async query(email, providers) {
-        queries.push({ email, providers });
-        return providers.map((provider) => ({
-          provider,
-          found: true,
-          quotaMonth: 202609,
-          usageDollars: 4,
-          limitDollars: 20,
-          remainingDollars: 16,
-          reportedAt: '2026-09-18T12:00:00.000Z',
-          dataThroughAt: '2026-09-18T11:00:00.000Z',
-          delaySeconds: 3600,
-          source: 'loop_ai_usage'
-        }));
-      }
-    };
-    const server = start(0, {
-      store,
-      productStore,
-      fetchImpl: async () => {
-        directFetches += 1;
-        throw new Error('Direct provider quota refresh must not run');
-      },
-      advisoryQuotaClient
-    });
-    try {
-      await new Promise((resolve) => server.once('listening', resolve));
-      const attempt = productStore.createCodexLoginAttempt();
-      productStore.updateCodexLoginAttempt(attempt.login.id, {
-        accountId: owner.id,
-        status: 'completed'
-      });
-      const before = queries.length;
-      const response = await fetch(`http://127.0.0.1:${server.address().port}/auth/codex/status`, {
-        headers: { cookie: `codex_pool_login=${encodeURIComponent(attempt.token)}` }
-      });
-      assert.equal(response.status, 200);
-      const after = queries.slice(before);
-      assert.deepEqual(after.map(({ email, providers }) => ({ email, providers })), [
-        { email: 'loop-first@example.com', providers: ['claude'] },
-        { email: 'loop-first@example.com', providers: ['ais'] }
-      ]);
-      assert.equal(directFetches, 0);
-      assert.equal(store.getPublic(claude.id).quota.source, 'loop_ai_usage');
-      assert.equal(store.getPublic(ais.id).quota.source, 'loop_ai_usage');
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

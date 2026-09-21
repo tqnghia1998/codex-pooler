@@ -1,13 +1,17 @@
 // Admin data portability: full JSON snapshot of the gateway record store and every
 // product table. Import replaces the data of each collection present in the file.
 export const PRODUCT_TABLES = [
-  ['accounts', 'id'], ['account_sessions', 'id'], ['account_upstreams', 'upstream_id'], ['codex_login_attempts', 'id'],
+  ['accounts', 'id'], ['account_sessions', 'id'], ['account_upstreams', 'upstream_id'],
   ['sharing_offers', 'id'], ['sharing_tickets', 'id'], ['sharing_sessions', 'id'], ['sharing_session_keys', 'id'],
   ['personal_api_keys', 'id'], ['personal_api_key_routes', "key_id || ':' || route_key"],
   ['sharing_activity', "subject_type || ':' || subject_id"], ['quota_requests', 'id'], ['provider_observations', 'upstream_id'],
   ['email_outbox', 'id'], ['sharing_events', 'id']
 ];
-const LEGACY_REQUEST_TABLES = new Set(['sharing_session_settlements', 'sharing_reservations']);
+const LEGACY_REQUEST_TABLES = new Set([
+  'codex_login_attempts',
+  'sharing_session_settlements',
+  'sharing_reservations'
+]);
 
 export function exportAllData({ store, productStore }) {
   return {

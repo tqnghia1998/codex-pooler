@@ -12,7 +12,7 @@ and consumers should treat shared quota as best-effort.
 
 ## Run
 
-Node 20+ and the Codex CLI are required.
+Node 20+ is required.
 
 ```bash
 cd node
@@ -34,8 +34,7 @@ configuration.
 - Generated UI: `pool/public/`
 - Runtime data: `pool/.data/`
 - Default port: `3010`
-- Account cookies: `codex_pool_session`, `codex_pool_csrf`,
-  `codex_pool_login`
+- Account cookies: `codex_pool_session`, `codex_pool_csrf`
 - Share keys: `cp_share_...`
 - Personal keys: `cp_personal_...`
 
@@ -62,15 +61,21 @@ rejects that configuration.
 
 ## Authentication
 
-Users can sign in through SPACE SSO, or link a provider by running
-`codex login --device-auth` or pasting the contents of an existing Codex
-`auth.json` into the login dialog. Device login runs the CLI with a temporary
-isolated `CODEX_HOME`. Accounts are keyed by email; Codex, Claude, and other
-provider credentials are only links attached to the account, never separate
-identities. Both paths validate the stable token issuer and subject, import or
-refresh the credentials in the private encrypted gateway store, and attach
-them to the account with the matching email. Pasted credentials
-are used only for the import request and are not saved in browser storage.
+Users can sign in through SPACE SSO, or link a Codex provider by pasting the
+contents of an existing Codex `auth.json` into the login dialog. SPACE sign-in
+validates the session bearer token with
+SPACE before QuotaHub loads account data, and derives the account email only
+from SPACE's validation response. This automatic validation applies only to
+browser sessions originally created by SPACE; `auth.json` import sessions
+remain active without a SPACE browser session.
+Accounts are keyed by email; Codex, Claude, and other provider credentials are
+only links attached to the account, never separate identities. Codex `auth.json`
+import validates the token issuer and stable subject before it imports or
+refreshes credentials in the private encrypted gateway store and attaches them
+to the account with the matching email. Pasted credentials are used only for
+the import request and are not saved in browser storage.
+Browser sessions issued by versions that supported device authentication are
+revoked during migration; sign in again through SPACE or import `auth.json`.
 The paste dialog accepts raw JSON and JSON surrounded by standalone Markdown
 code-fence lines. When Codex rotates an enterprise SSO subject, an import with
 the same email lands on the same account and refreshes the linked credential.
@@ -102,7 +107,7 @@ token that expires within 12 hours. Transient refresh failures retry with
 bounded exponential backoff; revoked or missing refresh tokens require the
 provider to sign in again.
 When a provider's Codex credentials need reauthentication, its quota card shows
-the affected state and offers both sign-in and `auth.json` import actions.
+the affected state and offers `auth.json` import.
 Offers, pending tickets, and share sessions show a sanitized provider issue to
 both providers and consumers when the provider needs reauthentication, has a
 token-refresh failure, or has exhausted its provider quota.
@@ -197,26 +202,23 @@ Email events cover ticket creation and resolution, session expiry and
 revocation, key replacement and revocation, provider pause/resume,
 provider-unavailable/recovered/reset transitions, and session usage crossing
 80%, 95%, or 100%. Email delivery uses the account email obtained from Codex
-sign-in.
+`auth.json` import or SPACE validation.
 
-The product database runs cleanup at startup and every six hours. Expired login
-attempts are retained for 24 hours, personal-key routing pins for 24 hours,
-completed email records for 30 days, audit events for 90 days, and terminal
-offers, tickets, sessions, and quota requests for 180 days. Request reservations
-and settlement deduplication exist only in process memory and are lost on
-restart; completed requests leave only aggregate activity and session-spend
-counters in SQLite. Active account sessions are permanent and never expire;
-records for sessions explicitly revoked by logout are retained for 180 days.
+The product database runs cleanup at startup and every six hours. Personal-key
+routing pins are retained for 24 hours, completed email records for 30 days,
+audit events for 90 days, and terminal offers, tickets, sessions, and quota
+requests for 180 days. Request reservations and settlement deduplication exist
+only in process memory and are lost on restart; completed requests leave only
+aggregate activity and session-spend counters in SQLite. Active account sessions
+are permanent and never expire; records for sessions explicitly revoked by
+logout are retained for 180 days.
 SQLite reuses pages freed by cleanup; it does not run a full `VACUUM` during
 normal operation.
 
 ## API
 
 ```text
-POST   /auth/codex/start
 POST   /auth/codex/import
-GET    /auth/codex/status
-DELETE /auth/codex/login
 POST   /auth/logout
 
 GET    /api/pool/me
@@ -329,7 +331,6 @@ POOL_FIREWALL_ALLOWLIST
 POOL_TRUSTED_PROXIES
 POOL_COOKIE_SECURE
 POOL_PUBLIC_BASE_PATH
-POOL_CODEX_CLI
 POOL_DATA_DIR
 POOL_QUOTA_REFRESH_INTERVAL_MS
 POOL_AI_QUOTA_SERVICE_TOKEN
@@ -365,9 +366,9 @@ POOL_CODEX_OPTIMIZE_MULTI_AGENT_V2
 POOL_CODEX_ORPHAN_DELEGATION_COMPATIBILITY
 ```
 
-The defaults bind to `127.0.0.1:3010`, allow localhost hosts, use the `codex`
-executable, refresh Codex sharing quota every 5 minutes, check due tokens every
-hour, and store data in `node/pool/.data`. When
+The defaults bind to `127.0.0.1:3010`, allow localhost hosts, refresh Codex
+sharing quota every 5 minutes, check due tokens every hour, and store data in
+`node/pool/.data`. When
 `POOL_AI_QUOTA_SERVICE_TOKEN` is configured, the delayed Claude/AIS integration
 queries the fixed `https://loop.shopee.io` endpoint hourly with a 30-second
 timeout. It uses the returned Claude/AIS balance as the sharing balance while

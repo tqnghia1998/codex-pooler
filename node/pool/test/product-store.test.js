@@ -75,9 +75,12 @@ test('migrates legacy Google-era sharing data and lets Codex claim the existing 
     assert.equal(claimed.id, 'legacy-account');
     assert.equal(sharingStore.accountIdForUpstream('upstream-legacy'), 'legacy-account');
     assert.equal(sharingStore.sqlite.prepare('SELECT provider_account_id FROM sharing_offers WHERE id = ?').get('legacy-offer').provider_account_id, 'legacy-account');
-    const attemptColumns = sharingStore.sqlite.pragma('table_info(codex_login_attempts)');
-    assert.equal(attemptColumns.find(({ name }) => name === 'account_id').notnull, 0);
-    assert.ok(attemptColumns.some(({ name }) => name === 'attempt_token_hash'));
+    assert.equal(
+      sharingStore.sqlite.prepare(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'codex_login_attempts'"
+      ).get().count,
+      0
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -484,12 +487,34 @@ test('keeps account sessions permanent, including sessions with an old expiry va
     const sharingStore = new ProductStore(dir);
     const user = account(sharingStore, 'permanent@example.com');
     const session = sharingStore.createAccountSession(user.id);
+    const spaceSession = sharingStore.createAccountSession(user.id, { source: 'space' });
     sharingStore.sqlite.prepare('UPDATE account_sessions SET expires_at = ? WHERE token_hash = ?')
       .run('2020-01-01T00:00:00.000Z', createHash('sha256').update(session.token).digest('hex'));
 
     assert.equal(sharingStore.authenticateAccountSession(session.token).account.id, user.id);
-    assert.equal(sharingStore.cleanup(new Date('2026-09-01T00:00:00.000Z')).loginAttempts, 0);
-    assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM account_sessions').get().count, 1);
+    assert.equal(sharingStore.authenticateAccountSession(session.token).authSource, 'legacy');
+    assert.equal(sharingStore.authenticateAccountSession(spaceSession.token).authSource, 'space');
+    sharingStore.cleanup(new Date('2026-09-01T00:00:00.000Z'));
+    assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM account_sessions').get().count, 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('revokes legacy browser sessions while preserving imported credential sessions', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-session-source-migration-'));
+  try {
+    const sharingStore = new ProductStore(dir);
+    const user = account(sharingStore, 'session-source@example.com');
+    const legacy = sharingStore.createAccountSession(user.id);
+    const imported = sharingStore.createAccountSession(user.id, { source: 'import' });
+    sharingStore.sqlite.prepare("UPDATE account_sessions SET auth_source = 'codex' WHERE token_hash = ?")
+      .run(createHash('sha256').update(legacy.token).digest('hex'));
+
+    const reopened = new ProductStore(dir);
+
+    assert.equal(reopened.authenticateAccountSession(legacy.token), null);
+    assert.equal(reopened.authenticateAccountSession(imported.token).account.id, user.id);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -505,17 +530,11 @@ test('cleans stale product records while retaining current records and account s
     const revokedSession = sharingStore.createAccountSession(consumer.id);
     const now = new Date('2026-09-01T00:00:00.000Z');
     const old = new Date(now.getTime() - 181 * 24 * 60 * 60 * 1_000).toISOString();
-    const oldLoginExpiry = new Date(now.getTime() - 25 * 60 * 60 * 1_000).toISOString();
     const recent = new Date(now.getTime() - 60 * 60 * 1_000).toISOString();
 
     sharingStore.sqlite.prepare('UPDATE account_sessions SET revoked_at = ? WHERE token_hash = ?')
       .run(old, createHash('sha256').update(revokedSession.token).digest('hex'));
 
-    sharingStore.sqlite.prepare(`
-      INSERT INTO codex_login_attempts
-        (id, account_id, attempt_token_hash, status, created_at, updated_at, expires_at)
-      VALUES ('old-login', ?, 'old-login-hash', 'failed', ?, ?, ?)
-    `).run(provider.id, old, old, oldLoginExpiry);
     sharingStore.sqlite.prepare(`
       INSERT INTO sharing_offers
         (id, provider_account_id, upstream_id, quota_micros, status, created_at, updated_at)
@@ -608,7 +627,6 @@ test('cleans stale product records while retaining current records and account s
 
     const removed = sharingStore.cleanup(now);
 
-    assert.equal(removed.loginAttempts, 1);
     assert.equal(removed.routes, 1);
     assert.equal(removed.emails, 1);
     assert.equal(removed.accountSessions, 1);
