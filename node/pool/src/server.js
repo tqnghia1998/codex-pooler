@@ -452,7 +452,7 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
       (typeof sessionData.name === 'string' ? sessionData.name : '') ||
       username ||
       email ||
-      'Smart User'
+      'SPACE User'
     ).trim();
     const sub = String(
       sessionData.identity_uuid ||
@@ -465,7 +465,7 @@ async function authRequest(req, res, url, { store, productStore, codexLoginManag
     ).trim();
     if (!sub) throw new HttpError(400, 'invalid_request', 'session identifier is required');
     const finalEmail = email || (username ? `${username}@shopee.com` : '');
-    if (!finalEmail) throw new HttpError(400, 'invalid_request', 'Smart session email is required');
+    if (!finalEmail) throw new HttpError(400, 'invalid_request', 'SPACE session email is required');
     const account = productStore.upsertAccount({ email: finalEmail, name });
     const session = productStore.createAccountSession(account.id);
     setCookies(res, [

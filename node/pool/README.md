@@ -62,7 +62,7 @@ rejects that configuration.
 
 ## Authentication
 
-Users can sign in through Smart SSO, or link a provider by running
+Users can sign in through SPACE SSO, or link a provider by running
 `codex login --device-auth` or pasting the contents of an existing Codex
 `auth.json` into the login dialog. Device login runs the CLI with a temporary
 isolated `CODEX_HOME`. Accounts are keyed by email; Codex, Claude, and other

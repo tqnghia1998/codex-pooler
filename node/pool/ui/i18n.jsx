@@ -26,9 +26,9 @@ const DICTIONARY = {
 
     // Hero / Auth
     'quotaSharing': 'Quota sharing',
-    'loginWithSmart': 'Login with Smart',
-    'loginSmartPrompt': 'Login with Smart to access QuotaHub.',
-    'authenticatingSmart': 'Authenticating with Smart session...',
+    'loginWithSmart': 'Login with SPACE',
+    'loginSmartPrompt': 'Login with SPACE to access QuotaHub.',
+    'authenticatingSmart': 'Authenticating with SPACE session...',
     'authenticating': 'Authenticating...',
 
     // Section switch
@@ -125,7 +125,7 @@ const DICTIONARY = {
     'providerSharingRevoked': 'All sharing from this Codex account was revoked',
     'providerUnlinked': 'Provider unlinked',
     'signedInWithCodex': 'Signed in with Codex',
-    'smartAuthFailedToast': 'Failed to authenticate Smart session',
+    'smartAuthFailedToast': 'Failed to authenticate SPACE session',
     'codexSignInCancelled': 'Codex sign-in cancelled',
     'signedInFromAuthJson': 'Signed in from auth.json',
     'aisQuotaExternal': 'Claude and AIS quotas are managed externally',
@@ -445,9 +445,9 @@ const DICTIONARY = {
 
     // Hero / Auth
     'quotaSharing': '额度共享',
-    'loginWithSmart': '使用 Smart 登录',
-    'loginSmartPrompt': '使用 Smart 登录即可访问 QuotaHub。',
-    'authenticatingSmart': '正在验证 Smart 会话...',
+    'loginWithSmart': '使用 SPACE 登录',
+    'loginSmartPrompt': '使用 SPACE 登录即可访问 QuotaHub。',
+    'authenticatingSmart': '正在验证 SPACE 会话...',
     'authenticating': '正在验证...',
 
     // Section switch
@@ -544,7 +544,7 @@ const DICTIONARY = {
     'providerSharingRevoked': '该 Codex 账户的全部共享已注销',
     'providerUnlinked': '提供方已解绑',
     'signedInWithCodex': '已通过 Codex 登录',
-    'smartAuthFailedToast': 'Smart 会话验证失败',
+    'smartAuthFailedToast': 'SPACE 会话验证失败',
     'codexSignInCancelled': '已取消 Codex 登录',
     'signedInFromAuthJson': '已通过 auth.json 登录',
     'aisQuotaExternal': 'Claude 与 AIS 额度在外部系统管理',

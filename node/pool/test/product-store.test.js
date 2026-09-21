@@ -628,11 +628,11 @@ test('cleans stale product records while retaining current records and account s
   }
 });
 
-test('accounts are keyed by email; codex and Smart sign-ins land on the same account', () => {
+test('accounts are keyed by email; codex and SPACE sign-ins land on the same account', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-email-keyed-'));
   try {
     const sharingStore = new ProductStore(dir);
-    const smart = sharingStore.upsertAccount({ email: 'user@shopee.com', name: 'Smart User' });
+    const smart = sharingStore.upsertAccount({ email: 'user@shopee.com', name: 'SPACE User' });
     const codex = sharingStore.upsertAccount({ email: 'User@Shopee.com', name: 'Codex User' });
     assert.equal(codex.id, smart.id);
     assert.equal(sharingStore.sqlite.prepare('SELECT COUNT(*) AS count FROM accounts').get().count, 1);
