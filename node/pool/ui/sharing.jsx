@@ -629,6 +629,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   return (
     <VStack gap={2}>
+      <LeaderboardView />
+
       <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
         <VStack gap={1}>
           <HStack gap={2} vAlign="center" wrap="wrap">
@@ -640,8 +642,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           <Button label={t('signOut')} variant="secondary" onClick={() => void logout()} />
         </HStack>
       </HStack>
-
-      <LeaderboardView />
 
       <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
         <GridSpan columns={2}>
@@ -1504,12 +1504,11 @@ function LeaderboardView() {
   }
 
   const columns = [
-    { key: 'rank', header: t('leaderboardRank'), width: pixel(70), renderCell: (leader) => <Text weight="bold">{leader.rank}</Text> },
     {
       key: 'account',
       header: t('accountCol'),
       width: proportional(2),
-      renderCell: (leader) => <Text maxLines={1}>{leaderMedal(leader.rank)}{leader.emailMasked}</Text>
+      renderCell: (leader) => <Text maxLines={1}>{leaderMedal(leader.rank)}{leader.email}</Text>
     },
     { key: 'sessions', header: t('sessionsCol'), width: pixel(90), renderCell: (leader) => <Text>{leader.sessionCount}</Text> },
     {
