@@ -1059,6 +1059,32 @@ export class ProductStore {
     }));
   }
 
+  communityLeaderboard() {
+    return {
+      topProviders: this.communityUsageLeaders('provider'),
+      topConsumers: this.communityUsageLeaders('consumer')
+    };
+  }
+
+  communityUsageLeaders(role) {
+    const accountColumn = role === 'provider' ? 'provider_account_id' : 'consumer_account_id';
+    return this.sqlite.prepare(`
+      SELECT accounts.email,
+        COUNT(sharing_sessions.id) AS session_count,
+        COALESCE(SUM(sharing_sessions.consumed_micros), 0) AS consumed_micros
+      FROM sharing_sessions
+      JOIN accounts ON accounts.id = sharing_sessions.${accountColumn}
+      GROUP BY accounts.id
+      ORDER BY consumed_micros DESC, session_count DESC, accounts.email ASC
+      LIMIT 5
+    `).all().map((leader, index) => ({
+      rank: index + 1,
+      emailMasked: maskEmail(leader.email),
+      sessionCount: leader.session_count,
+      consumedMicros: leader.consumed_micros
+    }));
+  }
+
   listOffersPage(viewerAccountId, upstreamStore, options) {
     this.expireDue();
     const viewerAccount = viewerAccountId ? this.account(viewerAccountId) : null;
@@ -2942,6 +2968,11 @@ function cleanName(value, email) {
 function poolDisplayName(email, fallback = '') {
   const local = typeof email === 'string' ? email.trim().split('@')[0].slice(0, 120) : '';
   return local || cleanName(fallback, email);
+}
+
+function maskEmail(email) {
+  const [local = '', domain] = String(email || '').split('@');
+  return domain ? `${local.slice(0, 2)}***@${domain}` : '';
 }
 
 function upstreamIdentityKey(upstream) {
