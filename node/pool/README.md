@@ -137,13 +137,19 @@ sessions.
    AIS balances are approximately one hour delayed when supplied by Loop.
 2. A consumer requests a dollar quota through a ticket.
 3. The provider approves the request, changes the approved amount, or rejects
-   it.
+   it. A partial approval closes the original offer, creates a replacement
+   offer for the remaining quota, and moves other pending tickets to it.
 4. Approval atomically creates a share session and a `cp_share_...` key.
 5. The consumer can instead reveal one `cp_personal_...` key that routes each
    request across their active share sessions.
 6. Successful priced usage is settled against the grant. QuotaHub does not pace
 requests, serialize active requests for a share session, or locally cool down a
 provider after a quota response; the provider and settled grant remain authoritative.
+
+An offer that created a grant is immutable history and cannot be edited or
+reopened. Providers edit the active replacement offer after a partial approval,
+or publish a new offer after a full approval. A manually closed offer that never
+created a grant can still be edited and reopened.
 
 Every new QuotaHub account receives a `Default` personal key automatically.
 Its secret is encrypted at rest and can be revealed or rotated from the

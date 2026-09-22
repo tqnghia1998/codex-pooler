@@ -820,9 +820,28 @@ test('sharing API requires account sessions and CSRF while offers stay public to
 
       result = await request(base, '/api/pool/offers', consumerSession);
       assert.equal(result.response.status, 200);
-      assert.equal(result.body.offers.length, 1);
-      assert.equal(result.body.offers[0].status, 'closed');
-      assert.equal(result.body.offers[0].isUsable, false);
+      assert.equal(result.body.offers.length, 2);
+      const replacementOffer = result.body.offers.find((offer) => offer.status === 'active');
+      assert.ok(replacementOffer);
+      assert.notEqual(replacementOffer.id, offerId);
+      assert.equal(replacementOffer.quotaDollars, 7);
+      assert.equal(replacementOffer.availableDollars, 7);
+      const closedOffer = result.body.offers.find((offer) => offer.id === offerId);
+      assert.equal(closedOffer.status, 'closed');
+      assert.equal(closedOffer.isUsable, false);
+      assert.equal(closedOffer.hasGrants, true);
+      assert.equal(closedOffer.canEdit, false);
+      assert.equal(closedOffer.canClose, false);
+      assert.equal(replacementOffer.hasGrants, false);
+      assert.equal(replacementOffer.canEdit, true);
+      assert.equal(replacementOffer.canClose, false);
+
+      result = await request(base, `/api/pool/offers/${offerId}`, providerSession, {
+        method: 'PATCH',
+        body: JSON.stringify({ status: 'active', quotaDollars: 7 })
+      });
+      assert.equal(result.response.status, 400);
+      assert.match(result.body.error.message, /historical and cannot be edited or reopened/);
 
       result = await request(base, `/api/pool/sessions/${sessionId}/reveal-key`, providerSession, {
         method: 'POST',
