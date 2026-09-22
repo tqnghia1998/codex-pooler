@@ -1044,8 +1044,8 @@ function poolIngress(input = {}) {
     allowedOrigins: csv(input.allowedOrigins ?? process.env.POOL_ALLOWED_ORIGINS, []),
     firewallAllowlist: csv(input.firewallAllowlist ?? process.env.POOL_FIREWALL_ALLOWLIST, []),
     trustedProxies: csv(input.trustedProxies ?? process.env.POOL_TRUSTED_PROXIES, []),
-    maxCompressedBodyBytes: Number(input.maxCompressedBodyBytes) || 2 * 1024 * 1024,
-    maxDecompressedBodyBytes: Number(input.maxDecompressedBodyBytes) || 2 * 1024 * 1024
+    maxCompressedBodyBytes: Number(input.maxCompressedBodyBytes) || 100 * 1024 * 1024,
+    maxDecompressedBodyBytes: Number(input.maxDecompressedBodyBytes) || 100 * 1024 * 1024
   };
 }
 
