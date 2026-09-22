@@ -167,6 +167,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     try { return window.localStorage.getItem('session'); } catch { return null; }
   });
   const [offerDialog, setOfferDialog] = useState(null);
+  const [offerCloseTarget, setOfferCloseTarget] = useState(null);
   const [ticketDialog, setTicketDialog] = useState(null);
   const [sessionDialog, setSessionDialog] = useState(null);
   const [keyDialog, setKeyDialog] = useState(null);
@@ -788,6 +789,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             allowedEmails: Array.isArray(offer.allowedEmails) ? offer.allowedEmails.join(', ') : '',
             expiresOn: dateFromTimestamp(offer.expiresAt)
           })}
+          onClose={setOfferCloseTarget}
         />
       )}
       {view === 'my-offers' && (
@@ -806,6 +808,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             allowedEmails: Array.isArray(offer.allowedEmails) ? offer.allowedEmails.join(', ') : '',
             expiresOn: dateFromTimestamp(offer.expiresAt)
           })}
+          onClose={setOfferCloseTarget}
         />
       )}
       {view === 'sent-requests' && (
@@ -1024,6 +1027,30 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         onSubmit={(event) => {
           event.preventDefault();
           void importAuthJson();
+        }}
+      />
+      <AlertDialog
+        isOpen={Boolean(offerCloseTarget)}
+        onOpenChange={(isOpen) => {
+          if (!isOpen && !isActionLoading(`offer-close:${offerCloseTarget?.id}`)) setOfferCloseTarget(null);
+        }}
+        title={t('closeOfferConfirmTitle')}
+        description={t('closeOfferConfirmDesc')}
+        actionLabel={t('close')}
+        actionVariant="destructive"
+        isActionLoading={isActionLoading(`offer-close:${offerCloseTarget?.id}`)}
+        onAction={async () => {
+          const target = offerCloseTarget;
+          if (!target) return;
+          const changed = await mutate(
+            () => api(`/api/pool/offers/${target.id}`, {
+              method: 'PATCH',
+              body: JSON.stringify({ status: 'closed' })
+            }),
+            t('offerClosed'),
+            `offer-close:${target.id}`
+          );
+          if (changed) setOfferCloseTarget(null);
         }}
       />
       <AlertDialog
@@ -1393,7 +1420,7 @@ function PaginatedSharingTable({ items, columns, emailQuery = '', emptyTitle, em
   );
 }
 
-function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onRequest, onEdit, tablePage, isActionLoading = () => false }) {
+function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onRequest, onEdit, onClose, tablePage, isActionLoading = () => false }) {
   const { t } = useLanguage();
   const columns = [
     { key: 'provider', header: t('provider'), width: proportional(2), renderCell: (offer) => <Text maxLines={1}>{accountLabel(offer.provider, t)}</Text> },
@@ -1420,6 +1447,7 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
             {!offer.isUsable && <Badge label={t('unusableBadge')} variant="error" />}
             {issue && <ProviderIssueBadge issue={issue} />}
             <Badge label={statusLabel(t, offer.status)} variant={offer.status === 'active' ? 'green' : 'neutral'} />
+            {offer.hasGrants && <Badge label={t('historicalOfferBadge')} variant="neutral" />}
             {tooltipContent ? (
               <Tooltip content={tooltipContent} placement="top">
                 {badge}
@@ -1442,16 +1470,48 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
       width: pixel(150),
       renderCell: (offer) => (
         <HStack justify="end" gap={1}>
-          {offer.isProvider
-            ? <Button label={t('edit')} size="sm" variant="secondary" onClick={() => onEdit(offer)} />
-            : offer.hasPendingRequest
-              ? <Button label={t('requestedBtn')} size="sm" variant="secondary" isDisabled />
-              : <Button label={t('requestQuotaBtn')} size="sm" variant="primary" isLoading={isActionLoading(`offer-request:${offer.id}`)} isDisabled={offer.status !== 'active' || !offer.isUsable || offer.availableDollars <= 0 || isActionLoading(`offer-request:${offer.id}`)} onClick={() => void onRequest(offer)} />}
+          {renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading, t })}
         </HStack>
       )
     }
   ];
   return <PaginatedSharingTable items={offers} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('offersTable')} tablePage={tablePage} />;
+}
+
+function renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading, t }) {
+  if (offer.isProvider) {
+    if (offer.canEdit) {
+      return <Button label={t('edit')} size="sm" variant="secondary" onClick={() => onEdit(offer)} />;
+    }
+    if (offer.canClose) {
+      const actionKey = `offer-close:${offer.id}`;
+      return (
+        <Button
+          label={t('close')}
+          size="sm"
+          variant="destructive"
+          isLoading={isActionLoading(actionKey)}
+          isDisabled={isActionLoading(actionKey)}
+          onClick={() => onClose(offer)}
+        />
+      );
+    }
+    return null;
+  }
+  if (offer.hasPendingRequest) {
+    return <Button label={t('requestedBtn')} size="sm" variant="secondary" isDisabled />;
+  }
+  const actionKey = `offer-request:${offer.id}`;
+  return (
+    <Button
+      label={t('requestQuotaBtn')}
+      size="sm"
+      variant="primary"
+      isLoading={isActionLoading(actionKey)}
+      isDisabled={offer.status !== 'active' || !offer.isUsable || offer.availableDollars <= 0 || isActionLoading(actionKey)}
+      onClick={() => void onRequest(offer)}
+    />
+  );
 }
 
 function LeaderboardView() {

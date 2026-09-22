@@ -72,6 +72,7 @@ export class ProductStore {
         provider_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         upstream_id TEXT NOT NULL,
         quota_micros INTEGER NOT NULL,
+        has_grants INTEGER NOT NULL DEFAULT 0,
         visibility TEXT NOT NULL DEFAULT 'public',
         allowed_emails TEXT,
         status TEXT NOT NULL,
@@ -274,6 +275,16 @@ export class ProductStore {
     addColumn(this.sqlite, 'sharing_offers', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'sharing_offers', 'visibility', "TEXT NOT NULL DEFAULT 'public'");
     addColumn(this.sqlite, 'sharing_offers', 'allowed_emails', 'TEXT');
+    addColumn(this.sqlite, 'sharing_offers', 'has_grants', 'INTEGER NOT NULL DEFAULT 0');
+    this.sqlite.exec(`
+      UPDATE sharing_offers
+      SET has_grants = 1
+      WHERE has_grants = 0
+        AND EXISTS (
+          SELECT 1 FROM sharing_sessions
+          WHERE sharing_sessions.offer_id = sharing_offers.id
+        )
+    `);
     addColumn(this.sqlite, 'sharing_tickets', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'sharing_tickets', 'demand_request_id', 'TEXT');
     addColumn(this.sqlite, 'sharing_sessions', 'expires_at', 'TEXT');
@@ -865,6 +876,17 @@ export class ProductStore {
     if (row.provider_account_id !== accountId) throw forbidden();
     const status = input.status === undefined ? row.status : input.status;
     if (!['active', 'paused', 'closed'].includes(status)) throw new Error('status must be active, paused, or closed');
+    if (this.offerHasGrants(id)) {
+      if (!['active', 'paused'].includes(row.status) || status !== 'closed') {
+        throw new Error('offers that created grants are historical and cannot be edited or reopened');
+      }
+      const now = new Date().toISOString();
+      this.sqlite.prepare("UPDATE sharing_offers SET status = 'closed', updated_at = ? WHERE id = ?").run(now, id);
+      this.sqlite.prepare("UPDATE sharing_tickets SET status = 'rejected', resolved_at = ? WHERE offer_id = ? AND status = 'pending'")
+        .run(now, id);
+      this.event(accountId, 'offer', id, 'updated', { status: 'closed' });
+      return this.offer(id, accountId, upstreamStore);
+    }
     const upstream = upstreamStore.get(row.upstream_id);
     if (!upstream) throw notFound();
     if (status === 'active') {
@@ -872,8 +894,6 @@ export class ProductStore {
       requireProviderSharing(this.providerSharingState(row.upstream_id));
     }
     const quotaMicros = input.quotaDollars === undefined ? row.quota_micros : dollarsToMicros(input.quotaDollars);
-    const allocated = this.offerAllocatedMicros(id);
-    if (quotaMicros < allocated) throw new Error('shareable quota cannot be below already allocated quota');
     const commitment = this.providerCommitment(row.upstream_id, upstreamStore);
     const currentCommitment = ['active', 'paused'].includes(row.status) ? row.quota_micros : 0;
     const nextCommitment = ['active', 'paused'].includes(status) ? quotaMicros : 0;
@@ -922,6 +942,7 @@ export class ProductStore {
     `).all();
     const visibleRows = rows.filter((row) => canViewOffer(row, viewerAccountId, viewerEmail));
     const allocations = this.offerAllocations(visibleRows.map(({ id }) => id));
+    const grantOfferIds = this.offerGrantOfferIds(visibleRows.map(({ id }) => id));
     const offers = visibleRows.flatMap((row) => {
       const upstream = upstreamStore.getPublic(row.upstream_id);
       if (!upstream) return [];
@@ -929,7 +950,8 @@ export class ProductStore {
       return [publicOffer(row, upstream, allocations.get(row.id) || 0, viewerAccountId, {
         sharing: this.providerSharingState(row.upstream_id),
         backedMicros: commitment.offerBacking.get(row.id) ?? row.quota_micros,
-        underfundedMicros: commitment.underfundedMicros
+        underfundedMicros: commitment.underfundedMicros,
+        hasGrants: grantOfferIds.has(row.id)
       })];
     });
     return offers.sort(compareOffers);
@@ -1121,6 +1143,7 @@ export class ProductStore {
     const pagedRows = visibleRows.slice(options.offset, options.offset + options.limit);
     const commitmentCache = new Map();
     const allocations = this.offerAllocations(pagedRows.map(({ id }) => id));
+    const grantOfferIds = this.offerGrantOfferIds(pagedRows.map(({ id }) => id));
     const offers = pagedRows.flatMap((row) => {
       const upstream = upstreamStore.getPublic(row.upstream_id);
       if (!upstream) return [];
@@ -1128,7 +1151,8 @@ export class ProductStore {
       return [publicOffer(row, upstream, allocations.get(row.id) || 0, viewerAccountId, {
         sharing: this.providerSharingState(row.upstream_id),
         backedMicros: commitment.offerBacking.get(row.id) ?? row.quota_micros,
-        underfundedMicros: commitment.underfundedMicros
+        underfundedMicros: commitment.underfundedMicros,
+        hasGrants: grantOfferIds.has(row.id)
       })];
     });
     return sharingListPage('offers', offers, totalItems, options);
@@ -1151,7 +1175,8 @@ export class ProductStore {
     return publicOffer(row, upstream, this.offerAllocatedMicros(id), viewerAccountId, {
       sharing: this.providerSharingState(row.upstream_id),
       backedMicros: commitment.offerBacking.get(row.id) ?? row.quota_micros,
-      underfundedMicros: commitment.underfundedMicros
+      underfundedMicros: commitment.underfundedMicros,
+      hasGrants: this.offerHasGrants(id)
     });
   }
 
@@ -1301,6 +1326,7 @@ export class ProductStore {
 
   approveTicket(accountId, id, { quotaDollars } = {}, upstreamStore) {
     this.expireDue(new Date(), { force: true });
+    let replacementOfferId = null;
     const approve = this.sqlite.transaction(() => {
       const ticket = this.requireTicket(id);
       if (ticket.provider_account_id !== accountId) throw forbidden();
@@ -1315,8 +1341,9 @@ export class ProductStore {
       const approvedMicros = quotaDollars === undefined ? ticket.requested_micros : dollarsToMicros(quotaDollars);
       const available = Math.max(0, offer.quota_micros - this.offerAllocatedMicros(offer.id));
       if (approvedMicros > available) throw new Error('approved quota exceeds available shareable quota');
+      const remainingMicros = available - approvedMicros;
       const commitment = this.providerCommitment(offer.upstream_id, upstreamStore);
-      const prospectiveCommitment = commitment.committedMicros - offer.quota_micros + approvedMicros;
+      const prospectiveCommitment = commitment.committedMicros - offer.quota_micros + approvedMicros + remainingMicros;
       if (commitment.actualMicros !== null && prospectiveCommitment > commitment.actualMicros) {
         throw new Error('approved quota exceeds the provider’s truly offerable quota');
       }
@@ -1332,8 +1359,39 @@ export class ProductStore {
         .run(approvedMicros, now.toISOString(), id);
       this.sqlite.prepare("UPDATE sharing_offers SET status = 'closed', updated_at = ? WHERE id = ?")
         .run(now.toISOString(), offer.id);
-      this.sqlite.prepare("UPDATE sharing_tickets SET status = 'rejected', resolved_at = ? WHERE offer_id = ? AND id != ? AND status = 'pending'")
-        .run(now.toISOString(), offer.id, id);
+      this.sqlite.prepare('UPDATE sharing_offers SET has_grants = 1 WHERE id = ?').run(offer.id);
+      if (remainingMicros > 0) {
+        replacementOfferId = randomUUID();
+        this.sqlite.prepare(`
+          INSERT INTO sharing_offers
+            (id, provider_account_id, upstream_id, quota_micros, visibility, allowed_emails,
+             status, expires_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+        `).run(
+          replacementOfferId, offer.provider_account_id, offer.upstream_id, remainingMicros,
+          offer.visibility || 'public', offer.allowed_emails || null, offer.expires_at || null,
+          now.toISOString(), now.toISOString()
+        );
+        this.event(accountId, 'offer', replacementOfferId, 'created', {
+          quotaMicros: remainingMicros,
+          expiresAt: offer.expires_at || null,
+          visibility: offer.visibility || 'public',
+          rolledOverFromOfferId: offer.id
+        });
+        const migratedTickets = this.sqlite.prepare(`
+          UPDATE sharing_tickets
+          SET offer_id = ?, requested_micros = MIN(requested_micros, ?)
+          WHERE offer_id = ? AND id != ? AND status = 'pending'
+        `).run(replacementOfferId, remainingMicros, offer.id, id).changes;
+        this.event(accountId, 'offer', offer.id, 'rolled_over', {
+          replacementOfferId,
+          remainingMicros,
+          migratedTickets
+        });
+      } else {
+        this.sqlite.prepare("UPDATE sharing_tickets SET status = 'rejected', resolved_at = ? WHERE offer_id = ? AND id != ? AND status = 'pending'")
+          .run(now.toISOString(), offer.id, id);
+      }
       if (ticket.demand_request_id) {
         this.sqlite.prepare(`
           UPDATE sharing_tickets
@@ -1366,6 +1424,7 @@ export class ProductStore {
       return sessionId;
     });
     const sessionId = approve();
+    if (replacementOfferId) this.notifyDemandForOffer(replacementOfferId, upstreamStore);
     this.notifyTicketParticipants(id, 'QuotaHub request approved', 'Your QuotaHub request was approved. A share session is ready to use.', `ticket:${id}:approved`);
     return this.session(sessionId, accountId, upstreamStore);
   }
@@ -1956,6 +2015,20 @@ export class ProductStore {
     `).all(...offerIds).map(({ offer_id, allocated_micros }) => [offer_id, allocated_micros]));
   }
 
+  offerHasGrants(offerId) {
+    return Boolean(this.sqlite.prepare('SELECT has_grants FROM sharing_offers WHERE id = ?').get(offerId)?.has_grants);
+  }
+
+  offerGrantOfferIds(offerIds) {
+    if (!offerIds.length) return new Set();
+    const placeholders = offerIds.map(() => '?').join(', ');
+    return new Set(this.sqlite.prepare(`
+      SELECT id
+      FROM sharing_offers
+      WHERE has_grants = 1 AND id IN (${placeholders})
+    `).all(...offerIds).map(({ id }) => id));
+  }
+
   upstreamAllocatedMicros(upstreamId, excludingSessionId = null) {
     const rows = this.sqlite.prepare('SELECT id, granted_micros, consumed_micros, status FROM sharing_sessions WHERE upstream_id = ?').all(upstreamId);
     return allocationTotal(rows, excludingSessionId);
@@ -2393,7 +2466,14 @@ export class ProductStore {
       SELECT id, account_id, quota_micros
       FROM quota_requests
       WHERE status = 'active' AND quota_micros <= ?
-    `).all(Math.round(offer.availableDollars * 1_000_000));
+        AND NOT EXISTS (
+          SELECT 1
+          FROM sharing_tickets
+          WHERE sharing_tickets.offer_id = ?
+            AND sharing_tickets.consumer_account_id = quota_requests.account_id
+            AND sharing_tickets.status = 'pending'
+        )
+    `).all(Math.round(offer.availableDollars * 1_000_000), offerId);
     for (const request of requests) {
       this.notifyAccount(
         request.account_id,
@@ -2526,7 +2606,8 @@ function publicAccount(row) {
 function publicOffer(row, upstream, allocatedMicros, viewerAccountId, {
   sharing = null,
   backedMicros = row.quota_micros,
-  underfundedMicros = 0
+  underfundedMicros = 0,
+  hasGrants = false
 } = {}) {
   const quotaMicros = row.quota_micros;
   const issue = providerIssue(upstream);
@@ -2556,6 +2637,9 @@ function publicOffer(row, upstream, allocatedMicros, viewerAccountId, {
     underfundedQuotaDollars: microsToDollars(offerUnderfundedMicros),
     providerUnderfundedQuotaDollars: microsToDollars(underfundedMicros),
     isUnderfunded: offerUnderfundedMicros > 0,
+    hasGrants,
+    canEdit: !hasGrants,
+    canClose: hasGrants && ['active', 'paused'].includes(row.status),
     providerSharingStatus: sharing?.status || 'active',
     status: row.status,
     isUsable: !unusable,

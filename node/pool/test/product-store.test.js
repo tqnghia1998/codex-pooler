@@ -86,6 +86,43 @@ test('migrates legacy Google-era sharing data and lets Codex claim the existing 
   }
 });
 
+test('backfills durable grant history for legacy offers with sessions', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-grant-history-migration-'));
+  try {
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'grant-history-provider@example.com');
+    const consumer = account(sharingStore, 'grant-history-consumer@example.com');
+    const now = new Date().toISOString();
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_offers
+        (id, provider_account_id, upstream_id, quota_micros, has_grants, status, created_at, updated_at)
+      VALUES ('grant-history-offer', ?, 'grant-history-upstream', 5000000, 0, 'closed', ?, ?)
+    `).run(provider.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_tickets
+        (id, offer_id, provider_account_id, consumer_account_id, requested_micros, approved_micros,
+         status, created_at, resolved_at)
+      VALUES ('grant-history-ticket', 'grant-history-offer', ?, ?, 5000000, 5000000, 'approved', ?, ?)
+    `).run(provider.id, consumer.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_sessions
+        (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id,
+         granted_micros, consumed_micros, status, created_at, updated_at)
+      VALUES ('grant-history-session', 'grant-history-offer', 'grant-history-ticket', ?, ?,
+        'grant-history-upstream', 'default', 5000000, 0, 'revoked', ?, ?)
+    `).run(provider.id, consumer.id, now, now);
+    sharingStore.sqlite.close();
+
+    const migrated = new ProductStore(dir);
+    assert.equal(
+      migrated.sqlite.prepare("SELECT has_grants FROM sharing_offers WHERE id = 'grant-history-offer'").get().has_grants,
+      1
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps product data in pool.sqlite without changing the private gateway database', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-store-isolation-'));
   try {
@@ -245,23 +282,62 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     const provider = account(sharingStore, 'provider@example.com');
     const first = account(sharingStore, 'first@example.com');
     const second = account(sharingStore, 'second@example.com');
+    const third = account(sharingStore, 'third@example.com');
     sharingStore.linkUpstream(provider.id, upstream.id);
     upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, observedAt: new Date().toISOString() });
-    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore);
+    const offer = sharingStore.createOffer(provider.id, {
+      upstreamId: upstream.id,
+      quotaDollars: 10,
+      visibility: 'restricted',
+      allowedEmails: [first.email, second.email, third.email]
+    }, upstreamStore);
     const firstTicket = sharingStore.createTicket(first.id, { offerId: offer.id, quotaDollars: 7 }, upstreamStore);
     const secondTicket = sharingStore.createTicket(second.id, { offerId: offer.id, quotaDollars: 7 }, upstreamStore);
+    const thirdTicket = sharingStore.createTicket(third.id, { offerId: offer.id, quotaDollars: 7 }, upstreamStore);
 
     const session = sharingStore.approveTicket(provider.id, firstTicket.id, { quotaDollars: 6 }, upstreamStore);
     assert.equal(session.grantedQuotaDollars, 6);
     assert.equal(session.consumer.email, 'first@example.com');
-    assert.equal(sharingStore.offer(offer.id, provider.id, upstreamStore).status, 'closed');
-    assert.equal(sharingStore.listOffers(second.id, upstreamStore)[0].status, 'closed');
-    assert.equal(sharingStore.listOffers(second.id, upstreamStore)[0].isUsable, false);
-    assert.equal(sharingStore.ticket(secondTicket.id, second.id, upstreamStore).status, 'rejected');
+    const historicalOffer = sharingStore.offer(offer.id, provider.id, upstreamStore);
+    assert.equal(historicalOffer.status, 'closed');
+    assert.equal(historicalOffer.hasGrants, true);
+    assert.equal(historicalOffer.canEdit, false);
+    assert.equal(historicalOffer.canClose, false);
     assert.throws(
-      () => sharingStore.approveTicket(provider.id, secondTicket.id, { quotaDollars: 5 }, upstreamStore),
-      /only pending tickets/
+      () => sharingStore.updateOffer(provider.id, offer.id, { status: 'active', quotaDollars: 4 }, upstreamStore),
+      /historical and cannot be edited or reopened/
     );
+    const replacementOffer = sharingStore.listOffers(second.id, upstreamStore).find(({ status }) => status === 'active');
+    assert.ok(replacementOffer);
+    assert.notEqual(replacementOffer.id, offer.id);
+    assert.equal(replacementOffer.quotaDollars, 4);
+    assert.equal(replacementOffer.availableDollars, 4);
+    assert.equal(replacementOffer.hasGrants, false);
+    assert.equal(replacementOffer.canEdit, true);
+    assert.equal(replacementOffer.canClose, false);
+    assert.equal(replacementOffer.expiresAt, offer.expiresAt);
+    const replacementCreatedEvent = sharingStore.sqlite.prepare(`
+      SELECT detail_json
+      FROM sharing_events
+      WHERE entity_type = 'offer' AND entity_id = ? AND action = 'created'
+    `).get(replacementOffer.id);
+    assert.ok(replacementCreatedEvent);
+    assert.equal(JSON.parse(replacementCreatedEvent.detail_json).rolledOverFromOfferId, offer.id);
+    const providerReplacementOffer = sharingStore.offer(replacementOffer.id, provider.id, upstreamStore);
+    assert.equal(providerReplacementOffer.visibility, 'restricted');
+    assert.deepEqual(providerReplacementOffer.allowedEmails, [first.email, second.email, third.email]);
+    const migratedTicket = sharingStore.ticket(secondTicket.id, second.id, upstreamStore);
+    assert.equal(migratedTicket.status, 'pending');
+    assert.equal(migratedTicket.offerId, replacementOffer.id);
+    assert.equal(migratedTicket.requestedQuotaDollars, 4);
+    assert.equal(sharingStore.ticket(thirdTicket.id, third.id, upstreamStore).offerId, replacementOffer.id);
+
+    const secondSession = sharingStore.approveTicket(provider.id, secondTicket.id, { quotaDollars: 4 }, upstreamStore);
+    assert.equal(secondSession.grantedQuotaDollars, 4);
+    assert.equal(sharingStore.offer(replacementOffer.id, provider.id, upstreamStore).status, 'closed');
+    assert.equal(sharingStore.ticket(secondTicket.id, second.id, upstreamStore).status, 'approved');
+    assert.equal(sharingStore.ticket(thirdTicket.id, third.id, upstreamStore).status, 'rejected');
+    assert.equal(sharingStore.listOffers(second.id, upstreamStore).filter(({ status }) => status === 'active').length, 0);
 
     const revealed = sharingStore.revealSessionKey(provider.id, session.id);
     assert.match(revealed.apiKey, /^cp_share_/);
@@ -291,6 +367,98 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).status, 'active');
     sharingStore.updateSession(provider.id, session.id, { quotaDollars: 11 }, upstreamStore);
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).grantedQuotaDollars, 11);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reopens only closed offers that never created grants', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-offer-reopen-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'offer-reopen', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'reopen-provider@example.com');
+    const consumer = account(sharingStore, 'reopen-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, observedAt: new Date().toISOString() });
+
+    const manual = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 8 }, upstreamStore);
+    sharingStore.updateOffer(provider.id, manual.id, { status: 'closed' }, upstreamStore);
+    const reopened = sharingStore.updateOffer(provider.id, manual.id, { status: 'active', quotaDollars: 4 }, upstreamStore);
+    assert.equal(reopened.status, 'active');
+    assert.equal(reopened.quotaDollars, 4);
+    assert.equal(reopened.hasGrants, false);
+    assert.equal(reopened.canEdit, true);
+
+    const granted = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: granted.id }, upstreamStore);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, upstreamStore);
+    sharingStore.revokeSession(provider.id, session.id, upstreamStore);
+    const historical = sharingStore.offer(granted.id, provider.id, upstreamStore);
+    assert.equal(historical.allocatedDollars, 0);
+    assert.equal(historical.hasGrants, true);
+    assert.equal(historical.canEdit, false);
+    assert.equal(historical.canClose, false);
+    assert.throws(
+      () => sharingStore.updateOffer(provider.id, granted.id, { status: 'active', quotaDollars: 5 }, upstreamStore),
+      /historical and cannot be edited or reopened/
+    );
+
+    sharingStore.sqlite.prepare("UPDATE sharing_offers SET status = 'active' WHERE id = ?").run(granted.id);
+    const legacyActive = sharingStore.offer(granted.id, provider.id, upstreamStore);
+    assert.equal(legacyActive.canEdit, false);
+    assert.equal(legacyActive.canClose, true);
+    const closedHistorical = sharingStore.updateOffer(provider.id, granted.id, { status: 'closed' }, upstreamStore);
+    assert.equal(closedHistorical.status, 'closed');
+    assert.equal(closedHistorical.canClose, false);
+
+    const old = new Date(Date.now() - 181 * 24 * 60 * 60 * 1_000).toISOString();
+    sharingStore.sqlite.prepare('UPDATE sharing_sessions SET updated_at = ? WHERE id = ?').run(old, session.id);
+    const removed = sharingStore.cleanup(new Date());
+    assert.equal(removed.sessions, 1);
+    assert.equal(sharingStore.sqlite.prepare('SELECT 1 FROM sharing_sessions WHERE id = ?').get(session.id), undefined);
+    const retainedHistorical = sharingStore.offer(granted.id, provider.id, upstreamStore);
+    assert.equal(retainedHistorical.hasGrants, true);
+    assert.equal(retainedHistorical.canEdit, false);
+    assert.throws(
+      () => sharingStore.updateOffer(provider.id, granted.id, { status: 'active' }, upstreamStore),
+      /historical and cannot be edited or reopened/
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('replacement offer notifications skip consumers with migrated pending tickets', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-rollover-notifications-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'rollover-notifications', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'notification-provider@example.com');
+    const approvedConsumer = account(sharingStore, 'notification-approved@example.com');
+    const migratedConsumer = account(sharingStore, 'notification-migrated@example.com');
+    const availableConsumer = account(sharingStore, 'notification-available@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    sharingStore.setEmailNotificationsEnabled(true);
+    upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, observedAt: new Date().toISOString() });
+    sharingStore.createQuotaRequest(migratedConsumer.id, { quotaDollars: 4 });
+    sharingStore.createQuotaRequest(availableConsumer.id, { quotaDollars: 4 });
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 10 }, upstreamStore);
+    const approvedTicket = sharingStore.createTicket(approvedConsumer.id, { offerId: offer.id }, upstreamStore);
+    sharingStore.createTicket(migratedConsumer.id, { offerId: offer.id }, upstreamStore);
+    sharingStore.sqlite.prepare('DELETE FROM email_outbox').run();
+
+    sharingStore.approveTicket(provider.id, approvedTicket.id, { quotaDollars: 6 }, upstreamStore);
+
+    const availabilityRecipients = sharingStore.sqlite.prepare(`
+      SELECT account_id
+      FROM email_outbox
+      WHERE subject = 'Codex quota is available'
+      ORDER BY account_id
+    `).all().map(({ account_id }) => account_id);
+    assert.deepEqual(availabilityRecipients, [availableConsumer.id]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
