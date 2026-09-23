@@ -642,7 +642,7 @@ test('personal keys rotate across active sessions and pin response continuations
     try {
       let response = await fetch(`${app.base}/v1/responses`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-codex-session-id': 'personal-conversation' },
         body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'first' })
       });
       assert.equal(response.status, 200);
@@ -652,7 +652,7 @@ test('personal keys rotate across active sessions and pin response continuations
 
       response = await fetch(`${app.base}/v1/responses`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-codex-session-id': 'personal-conversation' },
         body: JSON.stringify({
           model: 'gpt-5.6-sol',
           previous_response_id: firstResponse.id,
@@ -665,7 +665,19 @@ test('personal keys rotate across active sessions and pin response continuations
 
       response = await fetch(`${app.base}/v1/responses`, {
         method: 'POST',
-        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-codex-session-id': 'personal-conversation' },
+        body: JSON.stringify({
+          model: 'gpt-5.6-sol',
+          previous_response_id: firstResponse.id,
+          input: [{ type: 'function_call_output', call_id: 'call-personal', output: 'old continuation' }]
+        })
+      });
+      assert.equal(response.status, 503);
+      assert.equal(calls.length, 2);
+
+      response = await fetch(`${app.base}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-codex-session-id': 'personal-conversation' },
         body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'new turn' })
       });
       assert.equal(response.status, 200);

@@ -162,8 +162,10 @@ until it is revoked. Replacing a key immediately invalidates the previous key.
 Session keys are pinned to the approved provider upstream. A personal key
 selects an active session with the most remaining quota, keeps normal
 conversation and Responses continuations on that selected session, and moves
-to another session only for a new request after the prior session becomes
-unavailable. Neither key type can access product management routes.
+new requests to another session when the prior one becomes unavailable, even
+when the client reuses its session ID. A `previous_response_id` continuation
+never switches providers after its pinned session becomes unavailable. Neither
+key type can access product management routes.
 If every active provider session needs reauthentication, requests return
 `share_provider_reauth_required` until a provider reconnects.
 
