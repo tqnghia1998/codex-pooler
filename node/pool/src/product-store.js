@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { offerExceedsProviderQuota, providerIssue } from './provider-availability.js';
 
 const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
+const OFFER_MESSAGE_MAX_LENGTH = 500;
 const SHARE_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const RESERVATION_TTL_MS = 2 * 60 * 60 * 1_000;
 const SETTLED_ATTEMPT_LIMIT = 100;
@@ -72,6 +73,7 @@ export class ProductStore {
         provider_account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         upstream_id TEXT NOT NULL,
         quota_micros INTEGER NOT NULL,
+        message TEXT,
         has_grants INTEGER NOT NULL DEFAULT 0,
         visibility TEXT NOT NULL DEFAULT 'public',
         allowed_emails TEXT,
@@ -273,6 +275,7 @@ export class ProductStore {
     addColumn(this.sqlite, 'account_upstreams', 'link_order', 'INTEGER');
     this.sqlite.exec('UPDATE account_upstreams SET link_order = rowid WHERE link_order IS NULL');
     addColumn(this.sqlite, 'sharing_offers', 'expires_at', 'TEXT');
+    addColumn(this.sqlite, 'sharing_offers', 'message', 'TEXT');
     addColumn(this.sqlite, 'sharing_offers', 'visibility', "TEXT NOT NULL DEFAULT 'public'");
     addColumn(this.sqlite, 'sharing_offers', 'allowed_emails', 'TEXT');
     addColumn(this.sqlite, 'sharing_offers', 'has_grants', 'INTEGER NOT NULL DEFAULT 0');
@@ -840,7 +843,7 @@ export class ProductStore {
     return remove();
   }
 
-  createOffer(accountId, { upstreamId, quotaDollars, expiresAt, visibility, allowedEmails }, upstreamStore) {
+  createOffer(accountId, { upstreamId, quotaDollars, expiresAt, visibility, allowedEmails, message }, upstreamStore) {
     this.expireDue(new Date(), { force: true });
     const upstream = upstreamStore.get(upstreamId);
     if (!upstream || !this.accountOwnsUpstream(accountId, upstreamId)) throw notFound();
@@ -859,12 +862,13 @@ export class ProductStore {
       throw new Error('at least one valid email is required for restricted visibility');
     }
     const allowedEmailsJson = offerVisibility === 'restricted' ? JSON.stringify(cleanEmails) : null;
+    const offerMessage = cleanOfferMessage(message);
     const expiry = sharingExpiry(expiresAt, upstream, now, OFFER_TTL_MS);
     this.sqlite.prepare(`
       INSERT INTO sharing_offers
-        (id, provider_account_id, upstream_id, quota_micros, visibility, allowed_emails, status, expires_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
-    `).run(id, accountId, upstreamId, quotaMicros, offerVisibility, allowedEmailsJson, expiry, now.toISOString(), now.toISOString());
+        (id, provider_account_id, upstream_id, quota_micros, message, visibility, allowed_emails, status, expires_at, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+    `).run(id, accountId, upstreamId, quotaMicros, offerMessage, offerVisibility, allowedEmailsJson, expiry, now.toISOString(), now.toISOString());
     this.event(accountId, 'offer', id, 'created', { quotaMicros, expiresAt: expiry, visibility: offerVisibility });
     this.notifyDemandForOffer(id, upstreamStore);
     return this.offer(id, accountId, upstreamStore);
@@ -901,6 +905,7 @@ export class ProductStore {
       throw new Error('offer exceeds the provider’s truly offerable quota');
     }
     const visibility = input.visibility ?? row.visibility ?? 'public';
+    const message = input.message === undefined ? row.message : cleanOfferMessage(input.message);
     let allowedEmailsJson = row.allowed_emails;
     if (input.allowedEmails !== undefined || input.visibility !== undefined) {
       if (visibility === 'restricted') {
@@ -919,9 +924,9 @@ export class ProductStore {
       : sharingExpiry(input.expiresAt, upstream, now, OFFER_TTL_MS);
     this.sqlite.prepare(`
       UPDATE sharing_offers
-      SET quota_micros = ?, visibility = ?, allowed_emails = ?, status = ?, expires_at = ?, updated_at = ?
+      SET quota_micros = ?, message = ?, visibility = ?, allowed_emails = ?, status = ?, expires_at = ?, updated_at = ?
       WHERE id = ?
-    `).run(quotaMicros, visibility, allowedEmailsJson, status, expiry, now.toISOString(), id);
+    `).run(quotaMicros, message, visibility, allowedEmailsJson, status, expiry, now.toISOString(), id);
     if (status === 'closed') {
       this.sqlite.prepare("UPDATE sharing_tickets SET status = 'rejected', resolved_at = ? WHERE offer_id = ? AND status = 'pending'")
         .run(now.toISOString(), id);
@@ -1364,12 +1369,12 @@ export class ProductStore {
         replacementOfferId = randomUUID();
         this.sqlite.prepare(`
           INSERT INTO sharing_offers
-            (id, provider_account_id, upstream_id, quota_micros, visibility, allowed_emails,
+            (id, provider_account_id, upstream_id, quota_micros, message, visibility, allowed_emails,
              status, expires_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
         `).run(
           replacementOfferId, offer.provider_account_id, offer.upstream_id, remainingMicros,
-          offer.visibility || 'public', offer.allowed_emails || null, offer.expires_at || null,
+          offer.message || null, offer.visibility || 'public', offer.allowed_emails || null, offer.expires_at || null,
           now.toISOString(), now.toISOString()
         );
         this.event(accountId, 'offer', replacementOfferId, 'created', {
@@ -2631,6 +2636,7 @@ function publicOffer(row, upstream, allocatedMicros, viewerAccountId, {
       providerIssue: issue
     } : null,
     quotaDollars: microsToDollars(quotaMicros),
+    message: row.message || null,
     allocatedDollars: microsToDollars(allocatedMicros),
     availableDollars: microsToDollars(Math.max(0, quotaMicros - allocatedMicros)),
     backedQuotaDollars: microsToDollars(backedMicros),
@@ -3026,6 +3032,16 @@ function cleanEmail(value, fallback = '') {
   const email = typeof value === 'string' ? value.trim().slice(0, 320) : '';
   const fallbackEmail = typeof fallback === 'string' ? fallback.trim().slice(0, 320) : '';
   return email || fallbackEmail || 'Codex user';
+}
+
+function cleanOfferMessage(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== 'string') throw new Error('offer message must be text');
+  const message = value.replace(/\r\n?/g, '\n').trim();
+  if (message.length > OFFER_MESSAGE_MAX_LENGTH) {
+    throw new Error(`offer message must be ${OFFER_MESSAGE_MAX_LENGTH} characters or fewer`);
+  }
+  return message || null;
 }
 
 function parseAllowedEmails(value) {

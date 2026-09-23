@@ -757,7 +757,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
                   quotaDollars: 10,
                   expiresOn: '',
                   visibility: 'public',
-                  allowedEmails: ''
+                  allowedEmails: '',
+                  message: ''
                 });
               }} />
             )}
@@ -787,6 +788,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             status: offer.status,
             visibility: offer.visibility || 'public',
             allowedEmails: Array.isArray(offer.allowedEmails) ? offer.allowedEmails.join(', ') : '',
+            message: offer.message || '',
             expiresOn: dateFromTimestamp(offer.expiresAt)
           })}
           onClose={setOfferCloseTarget}
@@ -806,6 +808,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             status: offer.status,
             visibility: offer.visibility || 'public',
             allowedEmails: Array.isArray(offer.allowedEmails) ? offer.allowedEmails.join(', ') : '',
+            message: offer.message || '',
             expiresOn: dateFromTimestamp(offer.expiresAt)
           })}
           onClose={setOfferCloseTarget}
@@ -915,6 +918,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             body: JSON.stringify({
               ...(!value.offer ? { upstreamId: value.upstreamId } : {}),
               quotaDollars: value.quotaDollars,
+              message: value.message || '',
               expiresAt: expiryTimestamp(value.expiresOn),
               visibility: value.visibility || 'public',
               allowedEmails: value.visibility === 'restricted'
@@ -1425,6 +1429,20 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
   const columns = [
     { key: 'provider', header: t('provider'), width: proportional(2), renderCell: (offer) => <Text maxLines={1}>{accountLabel(offer.provider, t)}</Text> },
     { key: 'offered', header: t('offered'), width: pixel(120), renderCell: (offer) => <Text weight="bold" maxLines={1}>${money(offer.quotaDollars)}</Text> },
+    {
+      key: 'message',
+      header: t('message'),
+      width: proportional(4),
+      renderCell: (offer) => offer.message ? (
+        <Tooltip content={offer.message} placement="top">
+          <Text type="supporting" color="secondary" maxLines={1}>
+            {offer.message}
+          </Text>
+        </Tooltip>
+      ) : (
+        <Text type="supporting" color="secondary" maxLines={1}>{t('noOfferMessage')}</Text>
+      )
+    },
     {
       key: 'status',
       header: t('status'),
@@ -2050,7 +2068,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
     offerableUpstreams.some((upstream) => offerProviderType(upstream) === providerType)
   ));
   return (
-    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={640}>
       <Layout
         header={<DialogHeader title={value?.offer ? t('editOfferTitle') : t('publishOffer')} onOpenChange={onClose} hasDivider />}
         content={(
@@ -2091,6 +2109,16 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
                 isOptional
                 hasClear
                 width="100%"
+              />
+              <TextArea
+                label={t('offerMessage')}
+                description={t('offerMessageHelp')}
+                placeholder={t('offerMessagePlaceholder')}
+                value={value.message || ''}
+                onChange={(message) => onChange({ ...value, message })}
+                rows={3}
+                maxLength={500}
+                hasSpellCheck
               />
               <SegmentedControl
                 label={t('offerVisibility')}
