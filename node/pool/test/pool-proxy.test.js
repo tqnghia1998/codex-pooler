@@ -265,6 +265,79 @@ test('an AIS project with unknown quota serves a pinned Compass Messages share s
   }
 });
 
+test('AIS share recovers from a permission denial and requests a new key only after authentication fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-key-recovery-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: 'shared-project',
+      projectKey: 'old-key'
+    });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'ais-provider-recovery');
+    const consumer = account(sharingStore, 'ais-consumer-recovery');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, store);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const { apiKey } = sharingStore.revealSessionKey(consumer.id, session.id);
+    const upstreamResponses = [403, 200, 401, 200];
+    const seenKeys = [];
+    const app = await running(store, sharingStore, async (_url, options) => {
+      seenKeys.push(options.headers.authorization);
+      const status = upstreamResponses.shift();
+      return new Response(JSON.stringify(status === 200
+        ? { id: 'ais-success', content: [{ type: 'text', text: 'ok' }], usage: { price_cost_usd: 1 } }
+        : { type: 'error', error: { type: status === 401 ? 'authentication_error' : 'permission_error', message: 'Request denied' } }), {
+        status,
+        headers: { 'content-type': 'application/json' }
+      });
+    });
+    const request = () => fetch(`${app.base}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
+    });
+    try {
+      assert.equal((await request()).status, 403);
+      assert.equal(sharingStore.session(session.id, consumer.id, store).providerIssue, null);
+      assert.equal((await request()).status, 200);
+      assert.equal((await request()).status, 502);
+      assert.equal(sharingStore.session(session.id, consumer.id, store).providerIssue.code, 'provider_key_rejected');
+      assert.equal(sharingStore.personalShareAccess(sharingStore.personalKey(consumer.id, store).id, store)?.providerReauthRequired, true);
+      assert.notEqual((await request()).status, 200);
+      assert.deepEqual(seenKeys, ['Bearer old-key', 'Bearer old-key', 'Bearer old-key']);
+      const { apiKey: personalKey } = sharingStore.revealPersonalKey(consumer.id);
+      const personalResponse = await fetch(`${app.base}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${personalKey}`,
+          'content-type': 'application/json',
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({ model: 'claude-sonnet-5', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
+      });
+      assert.equal(personalResponse.status, 503);
+      assert.equal((await personalResponse.json()).error.code, 'share_provider_key_rejected');
+
+      store.update(upstream.id, { projectKey: 'new-key' });
+      assert.equal(sharingStore.session(session.id, consumer.id, store).providerIssue, null);
+      assert.equal((await request()).status, 200);
+      assert.deepEqual(seenKeys, ['Bearer old-key', 'Bearer old-key', 'Bearer old-key', 'Bearer new-key']);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('shared Claude requests apply Pool runtime configuration', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-claude-runtime-'));
   try {

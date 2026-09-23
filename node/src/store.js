@@ -533,6 +533,22 @@ export class Store {
     return changed;
   }
 
+  clearLegacyAisReauth() {
+    const db = this.load();
+    let changed = false;
+    for (const upstream of db.upstreams) {
+      if (!isAisUpstream(upstream) || upstream.health?.status !== 'reauth_required'
+        || upstream.health.credentialStatus || upstream.tokenRefresh?.status === 'reauth_required') continue;
+      upstream.healthGeneration = Math.max(0, Number(upstream.health.generation ?? upstream.healthGeneration) || 0) + 1;
+      delete upstream.health;
+      changed = true;
+    }
+    if (changed) {
+      this.save(db);
+      this.notifyUpstreamsChange();
+    }
+  }
+
   addUsage(id, input) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
@@ -870,6 +886,7 @@ export class Store {
         upstream.health = {
           status: 'reauth_required',
           failureClass: 'credential',
+          credentialStatus: outcome.status || null,
           generation: accountGeneration + 1,
           cooldownSource: null,
           cooldownStartedAt: new Date(now).toISOString(),

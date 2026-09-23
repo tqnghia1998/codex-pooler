@@ -1039,7 +1039,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const outcome = {
       ...applyClaudeRequestScopedAction(classifyHttpResponse(response, body, {
         allowMisalignmentPolicy: policyRoute(path, sourcePath),
-        upstreamType: upstream.type
+        upstreamType: upstream.type,
+        quotaSource: upstream.quotaSource
       }), upstream, response.status, body, claudeConfig),
       model: payload?.model
     };
@@ -3929,10 +3930,19 @@ function shareProviderRoutingError(req, store) {
   if (!upstreamIds.length) return null;
   const upstreams = [...new Set(upstreamIds)].map((id) => store.get(id, requestScopeId(req)));
   if (!upstreams.every((upstream) => upstream?.health?.status === 'reauth_required' || upstream?.tokenRefresh?.status === 'reauth_required')) return null;
+  if (upstreams.every((upstream) => upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch')) {
+    return {
+      status: 503,
+      code: 'share_provider_key_rejected',
+      message: 'The provider must update their AIS project key before this shared quota can be used'
+    };
+  }
   return {
     status: 503,
     code: 'share_provider_reauth_required',
-    message: 'The provider must sign in with Codex again before this shared quota can be used'
+    message: upstreams.every((upstream) => upstream?.type === 'codex')
+      ? 'The provider must sign in with Codex again before this shared quota can be used'
+      : 'The providers must update their credentials before this shared quota can be used'
   };
 }
 

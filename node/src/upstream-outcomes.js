@@ -24,9 +24,14 @@ const MAX_REQUEST_SCOPED_ERROR_TEXT = 64 * 1024;
 const REQUEST_SCOPED_REGEX_CACHE_LIMIT = 1_024;
 const requestScopedRegexCache = new Map();
 
-export function classifyHttpResponse(response, structuredBody = null, { allowMisalignmentPolicy = false, upstreamType = '' } = {}) {
+export function classifyHttpResponse(response, structuredBody = null, { allowMisalignmentPolicy = false, upstreamType = '', quotaSource = '' } = {}) {
   const status = Number(response?.status ?? response?.statusCode);
   const structured = structuredError(structuredBody);
+  if (status === 403 && upstreamType === 'compass' && ['ais', 'aiswitch'].includes(quotaSource)
+    && !['invalid_api_key', 'invalid_token', 'token_expired', 'authentication_error'].includes(structured.code)
+    && structured.type !== 'authentication_error') {
+    return { class: 'caller', retryable: false, status, errorCode: structured.code };
+  }
   const claudeRateLimit = status === 429 && upstreamType === 'claude'
     ? claudeRateLimitDetails(response?.headers)
     : null;

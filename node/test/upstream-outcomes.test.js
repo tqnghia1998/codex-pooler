@@ -30,6 +30,22 @@ test('classifies HTTP statuses without trusting contradictory body text', () => 
   }
 });
 
+test('does not permanently disable AIS for an ambiguous permission denial', () => {
+  const response = new Response(null, { status: 403 });
+  assert.equal(classifyHttpResponse(response, { error: { type: 'permission_error' } }, {
+    upstreamType: 'compass', quotaSource: 'ais'
+  }).class, 'caller');
+  assert.equal(classifyHttpResponse(response, { error: { code: 'invalid_api_key' } }, {
+    upstreamType: 'compass', quotaSource: 'ais'
+  }).class, 'credential');
+  assert.equal(classifyHttpResponse(response, null, {
+    upstreamType: 'compass', quotaSource: 'compass'
+  }).class, 'credential');
+  assert.equal(classifyHttpResponse(new Response(null, { status: 401 }), null, {
+    upstreamType: 'compass', quotaSource: 'ais'
+  }).class, 'credential');
+});
+
 test('classifies structured SSE and WebSocket terminal frames', () => {
   assert.equal(classifySseEvent({ type: 'response.completed' }).class, 'success');
   assert.equal(classifySseEvent({ type: 'response.failed', error: { code: 'rate_limit_exceeded' } }).class, 'quota');

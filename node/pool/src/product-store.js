@@ -1925,7 +1925,7 @@ export class ProductStore {
     );
     const access = this.personalKeyAccess(key.id, key.account_id, upstreamStore, activeSessions);
     const providerReauthUpstreamIds = sessionRows
-      .filter((session) => providerIssue(upstreamStore?.getPublic(session.upstream_id))?.code === 'provider_reauth_required')
+      .filter((session) => ['provider_reauth_required', 'provider_key_rejected'].includes(providerIssue(upstreamStore?.getPublic(session.upstream_id))?.code))
       .map((session) => session.upstream_id);
     const orderedSessions = orderPersonalSessions(activeSessions, key.last_session_id);
     return {

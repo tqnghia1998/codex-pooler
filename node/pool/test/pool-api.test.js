@@ -1425,6 +1425,33 @@ test('Pool clears legacy AIS spending caps when it starts', () => {
   }
 });
 
+test('Pool retries legacy AIS sign-in locks once without forgetting new key rejections', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-ais-legacy-auth-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({
+      type: 'compass',
+      quotaSource: 'ais',
+      projectId: 'legacy-project',
+      projectKey: 'saved-key'
+    });
+    const legacyAttempt = store.beginUpstreamAttempt(upstream.id, {});
+    store.settleUpstreamAttempt(upstream.id, legacyAttempt, { class: 'credential', retryable: true });
+    assert.equal(store.getPublic(upstream.id).health.status, 'reauth_required');
+
+    createApp({ store, productStore: new ProductStore(dir) });
+    assert.equal(store.getPublic(upstream.id).health, null);
+    assert.equal(store.credentials(upstream.id).projectKey, 'saved-key');
+
+    const rejectedAttempt = store.beginUpstreamAttempt(upstream.id, {});
+    store.settleUpstreamAttempt(upstream.id, rejectedAttempt, { class: 'credential', retryable: true, status: 401 });
+    createApp({ store, productStore: new ProductStore(dir) });
+    assert.equal(store.getPublic(upstream.id).health.status, 'reauth_required');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Pool quota refresh batches provider-change notifications', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-quota-batches-'));
   try {

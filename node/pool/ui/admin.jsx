@@ -451,6 +451,7 @@ function providerStatus(provider, t) {
   const issues = {
     provider_unavailable: 'adminProviderUnavailable',
     provider_reauth_required: 'adminProviderReauth',
+    provider_key_rejected: 'adminProjectKeyRejected',
     provider_token_refresh_failed: 'adminProviderRefreshFailed',
     provider_quota_exhausted: 'adminProviderExhausted'
   };

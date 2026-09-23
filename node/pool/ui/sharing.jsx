@@ -1410,7 +1410,7 @@ function QuotaCard({ upstream, onImportAuthJson, onTestConnection, isTestingConn
   const issue = upstream.providerIssue;
   const commitment = upstream.commitment;
   const sharingPaused = upstream.sharing?.status === 'paused';
-  const needsReauthentication = issue?.code === 'provider_reauth_required';
+  const needsReauthentication = ['provider_reauth_required', 'provider_key_rejected'].includes(issue?.code);
   const providerTypeLabel = isAis
     ? t('aisExternalQuota')
     : isClaude
@@ -1500,7 +1500,9 @@ function QuotaCard({ upstream, onImportAuthJson, onTestConnection, isTestingConn
         <HStack justify="end" gap={1} wrap="wrap">
           {needsReauthentication ? (
             <HStack gap={1} wrap="wrap">
-              {isClaude ? (
+              {isAis ? (
+                <Button label={t('updateProjectKey')} size="sm" variant="primary" onClick={() => onEditAis(upstream)} />
+              ) : isClaude ? (
                 <Button label={t('updateToken')} size="sm" variant="primary" onClick={() => onEditClaude(upstream)} />
               ) : (
                 <>
@@ -1575,12 +1577,22 @@ function PaginatedSharingTable({ items, columns, emailQuery = '', emptyTitle, em
 function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onRequest, onEdit, onClose, tablePage, isActionLoading = () => false }) {
   const { t } = useLanguage();
   const columns = [
-    { key: 'provider', header: t('provider'), width: proportional(2), renderCell: (offer) => <Text maxLines={1}>{accountLabel(offer.provider, t)}</Text> },
+    {
+      key: 'provider',
+      header: t('provider'),
+      width: proportional(2, { minWidth: 200 }),
+      renderCell: (offer) => (
+        <HStack gap={1} vAlign="center">
+          <UpstreamSourceBadge upstream={offer.upstream} />
+          <StackItem size="fill"><Text maxLines={1}>{accountLabel(offer.provider, t)}</Text></StackItem>
+        </HStack>
+      )
+    },
     { key: 'offered', header: t('offered'), width: pixel(120), renderCell: (offer) => <Text weight="bold" maxLines={1}>${money(offer.quotaDollars)}</Text> },
     {
       key: 'message',
       header: t('message'),
-      width: proportional(4),
+      width: proportional(3),
       renderCell: (offer) => offer.message ? (
         <Tooltip content={offer.message} placement="top">
           <Text type="supporting" color="secondary" maxLines={1}>
@@ -1594,7 +1606,7 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
     {
       key: 'status',
       header: t('status'),
-      width: proportional(2),
+      width: proportional(2, { minWidth: 200 }),
       renderCell: (offer) => {
         const issue = offer.status === 'active' ? offer.upstream?.providerIssue : null;
         const isRestricted = offer.visibility === 'restricted';
@@ -1610,16 +1622,15 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
         );
         return (
           <HStack gap={1} wrap="wrap">
-            {!offer.isUsable && <Badge label={t('unusableBadge')} variant="error" />}
-            {issue && <ProviderIssueBadge issue={issue} />}
-            <Badge label={statusLabel(t, offer.status)} variant={offer.status === 'active' ? 'green' : 'neutral'} />
+            {issue ? <ProviderIssueBadge issue={issue} /> : !offer.isUsable && offer.status === 'active'
+              ? <Badge label={t('unusableBadge')} variant="error" />
+              : <Badge label={statusLabel(t, offer.status)} variant={offer.status === 'active' ? 'green' : 'neutral'} />}
             {offer.hasGrants && <Badge label={t('historicalOfferBadge')} variant="neutral" />}
             {tooltipContent ? (
               <Tooltip content={tooltipContent} placement="top">
                 {badge}
               </Tooltip>
-            ) : badge}
-            <UpstreamSourceBadge upstream={offer.upstream} />
+            ) : !issue ? badge : null}
           </HStack>
         );
       }
@@ -1627,13 +1638,13 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
     {
       key: 'expiry',
       header: t('expires'),
-      width: proportional(1.5),
+      width: proportional(1.5, { minWidth: 160 }),
       renderCell: (offer) => <Text type="supporting" color="secondary" maxLines={1}>{offer.expiresAt ? dateTime(t, offer.expiresAt) : t('unavailable')}</Text>
     },
     {
       key: 'actions',
       header: '',
-      width: pixel(150),
+      width: pixel(170),
       renderCell: (offer) => (
         <HStack justify="end" gap={1}>
           {renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading, t })}
@@ -1892,7 +1903,11 @@ function ActivitySummary({ activity }) {
 
 function ProviderIssueBadge({ issue }) {
   const { t } = useLanguage();
-  return <Badge label={issue.code === 'provider_reauth_required' ? t('signInRequired') : t('unavailable')} variant="error" />;
+  return (
+    <Tooltip content={issue.message}>
+      <span><Badge label={issue.code === 'provider_key_rejected' ? t('projectKeyRejected') : issue.code === 'provider_reauth_required' ? t('signInRequired') : t('unavailable')} variant="error" /></span>
+    </Tooltip>
+  );
 }
 
 function UpstreamSourceBadge({ upstream }) {

@@ -108,8 +108,8 @@ provider to sign in again.
 When a provider's Codex credentials need reauthentication, its quota card shows
 the affected state and offers `auth.json` import.
 Offers, pending tickets, and share sessions show a sanitized provider issue to
-both providers and consumers when the provider needs reauthentication, has a
-token-refresh failure, or has exhausted its provider quota.
+both providers and consumers when the provider needs reauthentication, an AIS
+project key is rejected, token refresh fails, or provider quota is exhausted.
 
 Users can also link Claude with a Claude CLI setup token or supported OAuth
 credential JSON, or add an AIS project by entering its project ID and project
@@ -130,6 +130,12 @@ Linked-provider percentage bars have a help icon explaining that Codex,
 Claude, and AIS estimates can lag their live provider quota. Unknown-quota
 cards retain their own explanation. Unlinking a provider removes its saved
 credentials and closes related offers and share sessions.
+An AIS `401`, or an explicit invalid-key `403`, blocks sharing until the provider
+updates the project key. A generic AIS `403` may be a request-level permission
+denial and does not permanently disable the project; later requests can recover.
+On startup, legacy AIS sign-in locks without a recorded upstream status are
+cleared once so the saved key can be retried. New key rejections stay blocked
+across restarts.
 
 ## Sharing Flow
 
@@ -170,6 +176,8 @@ never switches providers after its pinned session becomes unavailable. Neither
 key type can access product management routes.
 If every active provider session needs reauthentication, requests return
 `share_provider_reauth_required` until a provider reconnects.
+If every blocked session uses a rejected AIS project key, personal-key requests
+instead return `share_provider_key_rejected`.
 
 Offers, sessions, personal keys, and public quota requests expire. Pending
 tickets remain open until the source offer is closed or expires; direct grants

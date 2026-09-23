@@ -38,9 +38,17 @@ export function providerIssue(upstream) {
     };
   }
   if (upstream.health?.status === 'reauth_required' || upstream.tokenRefresh?.status === 'reauth_required') {
+    if (upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch') {
+      return {
+        code: 'provider_key_rejected',
+        message: 'The AIS project key was rejected. The provider must update the project key to resume sharing.'
+      };
+    }
     return {
       code: 'provider_reauth_required',
-      message: 'The provider must sign in with Codex again before this quota can be used.'
+      message: upstream.type === 'claude'
+        ? 'The provider must update their Claude token before this quota can be used.'
+        : 'The provider must sign in with Codex again before this quota can be used.'
     };
   }
   if (upstream.tokenRefresh?.status === 'failed') {

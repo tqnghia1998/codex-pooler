@@ -81,6 +81,7 @@ export function createApp({
   claudeConfig = normalizeClaudeConfig(claudeConfig);
   store.configureClaudeRuntime?.(claudeConfig);
   store.clearAisSpendingCaps();
+  store.clearLegacyAisReauth();
   const modelCatalog = modelCatalogForStore(store);
   const basePath = normalizePublicBasePath(publicBasePath);
   const spaceSessionValidations = new Map();
