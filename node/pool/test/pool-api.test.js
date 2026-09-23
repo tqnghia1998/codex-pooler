@@ -671,6 +671,35 @@ test('signed-in members can read a community leaderboard with account emails', a
       assert.equal(result.body.leaderboard.topProviders[0].id, undefined);
       assert.equal(result.body.leaderboard.topProviders[0].displayName, undefined);
       assert.equal((await fetch(`${base}/api/pool/leaderboard`, { headers: authHeaders(providerSession) })).status, 200);
+
+      const addOffer = sharingStore.sqlite.prepare(`
+        INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, 'leaderboard-upstream', 12000000, 'active', NULL, ?, ?)
+      `);
+      const addTicket = sharingStore.sqlite.prepare(`
+        INSERT INTO sharing_tickets (id, offer_id, provider_account_id, consumer_account_id, demand_request_id, requested_micros, approved_micros, status, expires_at, created_at, resolved_at)
+        VALUES (?, ?, ?, ?, NULL, 12000000, 12000000, 'approved', NULL, ?, ?)
+      `);
+      const addSession = sharingStore.sqlite.prepare(`
+        INSERT INTO sharing_sessions (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id, granted_micros, consumed_micros, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'leaderboard-upstream', 'default', 12000000, ?, 'active', NULL, ?, ?)
+      `);
+      for (let index = 1; index <= 11; index += 1) {
+        const name = `ranked-provider-${String(index).padStart(2, '0')}`;
+        const leader = account(sharingStore, name);
+        addOffer.run(`${name}-offer`, leader.id, now, now);
+        addTicket.run(`${name}-ticket`, `${name}-offer`, leader.id, consumer.id, now, now);
+        addSession.run(`${name}-session`, `${name}-offer`, `${name}-ticket`, leader.id, consumer.id, index * 1000000, now, now);
+      }
+      const ranked = await request(base, '/api/pool/leaderboard', consumerSession);
+      assert.deepEqual(ranked.body.leaderboard.topProviders.map(({ rank, email }) => ({ rank, email })), [
+        ...Array.from({ length: 9 }, (_, index) => ({
+          rank: index + 1,
+          email: `ranked-provider-${String(11 - index).padStart(2, '0')}@example.com`
+        })),
+        { rank: 10, email: 'provider@example.com' }
+      ]);
+      assert.equal(sharingStore.adminUsageLeaders('provider').length, 5);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

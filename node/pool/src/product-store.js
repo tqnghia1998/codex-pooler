@@ -1115,8 +1115,8 @@ export class ProductStore {
       JOIN accounts ON accounts.id = sharing_sessions.${accountColumn}
       GROUP BY accounts.id
       ORDER BY consumed_micros DESC, session_count DESC, accounts.email ASC
-      LIMIT 5
-    `).all().map((leader, index) => ({
+      LIMIT ?
+    `).all(role === 'provider' ? 10 : 5).map((leader, index) => ({
       rank: index + 1,
       email: leader.email,
       sessionCount: leader.session_count,

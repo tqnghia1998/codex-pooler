@@ -192,9 +192,9 @@ so each device or client can be rotated or revoked independently. The dashboard
 stores only privacy-safe activity totals: request and success counts, spend, and
 last use. It never stores prompts, responses, models, failure history, or a row
 per request.
-The dashboard also shows a community leaderboard to signed-in members. It ranks
-the top providers and consumers by settled session usage and exposes their
-account emails alongside aggregate totals the product already stores.
+The dashboard also shows the top ten community providers to signed-in members,
+ranked by settled session usage with account emails and aggregate totals. The
+admin analytics view retains both provider and consumer rankings.
 
 ## Friend Requests
 

@@ -1760,11 +1760,12 @@ function LeaderboardView() {
   }
 
   const columns = [
+    { key: 'rank', header: t('leaderboardRank'), width: pixel(60), renderCell: (leader) => <Text>{leader.rank}</Text> },
     {
       key: 'account',
       header: t('accountCol'),
       width: proportional(2),
-      renderCell: (leader) => <Text maxLines={1}>{leaderMedal(leader.rank)}{leader.email}</Text>
+      renderCell: (leader) => <Text maxLines={1}>{leader.email}</Text>
     },
     { key: 'sessions', header: t('sessionsCol'), width: pixel(90), renderCell: (leader) => <Text>{leader.sessionCount}</Text> },
     {
@@ -1776,8 +1777,8 @@ function LeaderboardView() {
   ];
 
   return (
-    <Card variant="muted" padding={3}>
-      <VStack gap={2}>
+    <Card variant="muted" padding={0}>
+      <VStack gap={2} padding={3}>
         <VStack gap={1}>
           <HStack gap={2} vAlign="center">
             <Icon icon={Trophy} size="lg" color="accent" />
@@ -1785,40 +1786,17 @@ function LeaderboardView() {
           </HStack>
           <Text type="supporting" color="secondary">{t('leaderboardSubtitle')}</Text>
         </VStack>
-        <Grid columns={{ minWidth: 360, max: 2, repeat: 'fill' }} gap={2}>
-          <LeaderboardTable
-            title={t('leaderboardTopProviders')}
-            items={leaderboard.topProviders}
-            columns={columns}
-            emptyTitle={t('adminNoDataYet')}
-            emptyDescription={t('leaderboardProvidersEmpty')}
-          />
-          <LeaderboardTable
-            title={t('leaderboardTopConsumers')}
-            items={leaderboard.topConsumers}
-            columns={columns}
-            emptyTitle={t('adminNoDataYet')}
-            emptyDescription={t('leaderboardConsumersEmpty')}
-          />
-        </Grid>
+        {leaderboard.topProviders.length ? (
+          <Grid columns={{ minWidth: 320, repeat: 'fit' }} gap={2}>
+            <Table data={leaderboard.topProviders.slice(0, 5)} columns={columns} idKey="rank" textOverflow="truncate" />
+            {leaderboard.topProviders.length > 5 && (
+              <Table data={leaderboard.topProviders.slice(5, 10)} columns={columns} idKey="rank" textOverflow="truncate" />
+            )}
+          </Grid>
+        ) : <EmptyState title={t('adminNoDataYet')} description={t('leaderboardProvidersEmpty')} />}
       </VStack>
     </Card>
   );
-}
-
-function LeaderboardTable({ title, items, columns, emptyTitle, emptyDescription }) {
-  return (
-    <VStack gap={2}>
-      <Heading level={3}>{title}</Heading>
-      {items.length
-        ? <Table data={items} columns={columns} idKey="rank" textOverflow="truncate" />
-        : <EmptyState title={emptyTitle} description={emptyDescription} />}
-    </VStack>
-  );
-}
-
-function leaderMedal(rank) {
-  return ['', '🥇 ', '🥈 ', '🥉 '][rank] || '';
 }
 
 function TicketsView({ tickets, emailQuery = '', emptyTitle, emptyDescription, onApprove, onReject, onCancel, tablePage, isActionLoading = () => false }) {
