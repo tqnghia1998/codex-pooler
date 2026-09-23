@@ -34,6 +34,7 @@ const DICTIONARY = {
     // Section switch
     'forProviders': 'For Providers',
     'forConsumers': 'For Consumers',
+    'newBadge': 'New',
     'dashboardSection': 'Dashboard section',
     'providerTabs': 'Provider tabs',
     'consumerTabs': 'Consumer tabs',
@@ -470,6 +471,7 @@ const DICTIONARY = {
     // Section switch
     'forProviders': '提供方专区',
     'forConsumers': '使用方专区',
+    'newBadge': '新',
     'dashboardSection': '控制面板分区',
     'providerTabs': '提供方页签',
     'consumerTabs': '使用方页签',

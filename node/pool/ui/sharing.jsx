@@ -22,6 +22,7 @@ import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/Segme
 import { Selector } from '@astryxdesign/core/Selector';
 import { Spinner } from '@astryxdesign/core/Spinner';
 import { Switch } from '@astryxdesign/core/Switch';
+import { Tab, TabList } from '@astryxdesign/core/TabList';
 import { TextArea } from '@astryxdesign/core/TextArea';
 import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
@@ -30,6 +31,7 @@ import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '
 import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling, Trophy, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { useLanguage } from './i18n.jsx';
+import { isCountStorageEvent, openCountTab, reconcileTabCounts, SHARING_COUNTS_STORAGE_KEY } from './tab-counts.js';
 
 const SHARING_VIEWS = new Set([
   'community-offers',
@@ -88,6 +90,14 @@ function initialSharingSection(initialView) {
     if (stored === 'provider' || stored === 'consumer') return stored;
   } catch {}
   return PROVIDER_SECTIONS.has(initialView) ? 'provider' : 'consumer';
+}
+
+function storedTabCounts(accountId) {
+  try {
+    return JSON.parse(window.localStorage.getItem(`${SHARING_COUNTS_STORAGE_KEY}:${accountId}`));
+  } catch {
+    return null;
+  }
 }
 
 function csrfToken() {
@@ -160,9 +170,10 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const api = useSharingApi();
   const [account, setAccount] = useState(null);
   const [view, setView] = useState(initialSharingView);
+  const viewRef = useRef(view);
   const [section, setSection] = useState(() => initialSharingSection(initialSharingView()));
   const [tablePage, setTablePage] = useState({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
-  const [tableTotals, setTableTotals] = useState({});
+  const [tabCounts, setTabCounts] = useState({ accountId: null, totals: {}, unread: {} });
   const [tableOffset, setTableOffset] = useState(0);
   const [tablePageSize, setTablePageSize] = useState(10);
   const [showPastData, setShowPastData] = useState(false);
@@ -199,6 +210,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [loadingActions, setLoadingActions] = useState(new Set());
   const actionsInFlight = useRef(new Set());
   const tableRequestVersion = useRef(0);
+  const countRequestVersion = useRef(0);
   const smartSessionSyncs = useRef(new Map());
   const resetTablePage = useCallback(() => {
     tableRequestVersion.current += 1;
@@ -207,8 +219,10 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   const load = useCallback(async ({ background = false } = {}) => {
     if (!background) setLoading(true);
+    let accountId;
     try {
       const me = await api('/api/pool/me');
+      accountId = me.account.id;
       setAccount(me.account);
     } catch (nextError) {
       if (nextError.status === 401) {
@@ -225,8 +239,17 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       setUpstreams(upstreamData.upstreams || []);
       setPersonalKeys(personalKeyData.personalKeys || []);
       try {
+        const requestVersion = ++countRequestVersion.current;
         const countData = await api('/api/pool/sharing-counts');
-        setTableTotals(countData.counts || {});
+        if (requestVersion !== countRequestVersion.current) return;
+        setTabCounts((current) => ({
+          accountId,
+          ...reconcileTabCounts(
+            current.accountId === accountId ? current : storedTabCounts(accountId),
+            countData.counts || {},
+            viewRef.current
+          )
+        }));
       } catch (countError) {
         if (!background) onNotice(countError.message, true);
       }
@@ -236,6 +259,16 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       if (!background) setLoading(false);
     }
   }, [api, onNotice, t]);
+
+  useEffect(() => {
+    if (!tabCounts.accountId) return;
+    try {
+      window.localStorage.setItem(`${SHARING_COUNTS_STORAGE_KEY}:${tabCounts.accountId}`, JSON.stringify({
+        totals: tabCounts.totals,
+        unread: tabCounts.unread
+      }));
+    } catch {}
+  }, [tabCounts]);
 
   const syncSmartSession = useCallback(async (sessionVal) => {
     if (!sessionVal) return false;
@@ -285,7 +318,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       if (active) await load({ background });
     };
 
-    const handleFocusOrVisible = () => {
+    const handleFocusOrVisible = (event) => {
+      if (isCountStorageEvent(event)) return;
       if (document.hidden) return;
       void validateThenLoad({ background: true });
     };
@@ -347,27 +381,34 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   }, [account, emailQuery, loadTable]);
 
   const handleSectionChange = useCallback((nextSection) => {
+    if (nextSection === section) return;
     setSection(nextSection);
     try {
       window.localStorage.setItem(SHARING_SECTION_STORAGE_KEY, nextSection);
     } catch {}
     if (nextSection === 'provider') {
       if (!PROVIDER_SECTIONS.has(view)) {
+        viewRef.current = 'my-offers';
         setView('my-offers');
+        setTabCounts((current) => openCountTab(current, 'my-offers'));
         try { window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, 'my-offers'); } catch {}
       }
     } else {
       if (!CONSUMER_SECTIONS.has(view)) {
+        viewRef.current = 'community-offers';
         setView('community-offers');
+        setTabCounts((current) => openCountTab(current, 'community-offers'));
         try { window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, 'community-offers'); } catch {}
       }
     }
     setTableOffset(0);
     resetTablePage();
-  }, [resetTablePage, view]);
+  }, [resetTablePage, section, view]);
 
   const handleViewChange = useCallback((nextView) => {
+    viewRef.current = nextView;
     setView(nextView);
+    setTabCounts((current) => openCountTab(current, nextView));
     try {
       window.localStorage.setItem(SHARING_VIEW_STORAGE_KEY, nextView);
     } catch {}
@@ -381,6 +422,12 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     setTableOffset(0);
     resetTablePage();
   }, [resetTablePage]);
+
+  const handleTabFocus = useCallback((event) => {
+    if (!event.currentTarget.contains(event.relatedTarget)) return;
+    const nextView = event.target.closest('[data-tab-value]')?.dataset.tabValue;
+    if (nextView && nextView !== viewRef.current) handleViewChange(nextView);
+  }, [handleViewChange]);
 
   useEffect(() => {
     if (!account) return undefined;
@@ -451,7 +498,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     setSmartSession(null);
     setAccount(null);
     setTablePage({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
-    setTableTotals({});
+    setTabCounts({ accountId: null, totals: {}, unread: {} });
     setUpstreams([]);
     setPersonalKeys([]);
   };
@@ -634,7 +681,12 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       resetTablePage();
     }
   };
-  const tabLabel = (label, tab) => `${label}${tableTotals[tab] === undefined ? '' : ` (${tableTotals[tab]})`}`;
+  const countBadge = (tab) => tabCounts.accountId === account.id && tabCounts.totals[tab] !== undefined
+    ? <Badge label={String(tabCounts.totals[tab])} variant={tabCounts.unread[tab] ? 'error' : 'neutral'} />
+    : undefined;
+  const sectionBadge = (tabs) => tabCounts.accountId === account.id && [...tabs].some((tab) => tabCounts.unread[tab])
+    ? <Badge label={t('newBadge')} variant="error" />
+    : undefined;
 
   return (
     <VStack gap={2}>
@@ -705,35 +757,43 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       <VStack gap={2}>
         <VStack paddingBlock={1}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-            <SegmentedControl
-              label={t('dashboardSection')}
-              value={section}
-              onChange={handleSectionChange}
-              size="lg"
-              layout="hug"
-            >
-              <SegmentedControlItem value="provider" label={t('forProviders')} />
-              <SegmentedControlItem value="consumer" label={t('forConsumers')} />
-            </SegmentedControl>
+            <HStack gap={1} vAlign="center" role="group" aria-label={t('dashboardSection')}>
+              <Button
+                label={t('forProviders')}
+                size="lg"
+                variant={section === 'provider' ? 'secondary' : 'ghost'}
+                aria-pressed={section === 'provider'}
+                endContent={sectionBadge(PROVIDER_SECTIONS)}
+                onClick={() => handleSectionChange('provider')}
+              />
+              <Button
+                label={t('forConsumers')}
+                size="lg"
+                variant={section === 'consumer' ? 'secondary' : 'ghost'}
+                aria-pressed={section === 'consumer'}
+                endContent={sectionBadge(CONSUMER_SECTIONS)}
+                onClick={() => handleSectionChange('consumer')}
+              />
+            </HStack>
           </HStack>
         </VStack>
 
         <VStack paddingBlock={2}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
           {section === 'provider' ? (
-            <SegmentedControl label={t('providerTabs')} value={view} onChange={handleViewChange} size="md" layout="hug">
-              <SegmentedControlItem value="my-offers" label={tabLabel(t('tabMyOffers'), 'my-offers')} />
-              <SegmentedControlItem value="quota-requests" label={tabLabel(t('tabQuotaRequests'), 'quota-requests')} />
-              <SegmentedControlItem value="approvals" label={tabLabel(t('tabApprovals'), 'approvals')} />
-              <SegmentedControlItem value="shared-by-me" label={tabLabel(t('tabSharedByMe'), 'shared-by-me')} />
-            </SegmentedControl>
+            <TabList aria-label={t('providerTabs')} value={view} onChange={handleViewChange} onFocus={handleTabFocus} size="md">
+              <Tab value="my-offers" label={t('tabMyOffers')} endContent={countBadge('my-offers')} />
+              <Tab value="quota-requests" label={t('tabQuotaRequests')} endContent={countBadge('quota-requests')} />
+              <Tab value="approvals" label={t('tabApprovals')} endContent={countBadge('approvals')} />
+              <Tab value="shared-by-me" label={t('tabSharedByMe')} endContent={countBadge('shared-by-me')} />
+            </TabList>
           ) : (
-            <SegmentedControl label={t('consumerTabs')} value={view} onChange={handleViewChange} size="md" layout="hug">
-              <SegmentedControlItem value="community-offers" label={tabLabel(t('tabCommunityOffers'), 'community-offers')} />
-              <SegmentedControlItem value="my-quota-requests" label={tabLabel(t('tabMyQuotaRequests'), 'my-quota-requests')} />
-              <SegmentedControlItem value="my-access" label={tabLabel(t('tabMyAccess'), 'my-access')} />
-              <SegmentedControlItem value="sent-requests" label={tabLabel(t('tabSentRequests'), 'sent-requests')} />
-            </SegmentedControl>
+            <TabList aria-label={t('consumerTabs')} value={view} onChange={handleViewChange} onFocus={handleTabFocus} size="md">
+              <Tab value="community-offers" label={t('tabCommunityOffers')} endContent={countBadge('community-offers')} />
+              <Tab value="my-quota-requests" label={t('tabMyQuotaRequests')} endContent={countBadge('my-quota-requests')} />
+              <Tab value="my-access" label={t('tabMyAccess')} endContent={countBadge('my-access')} />
+              <Tab value="sent-requests" label={t('tabSentRequests')} endContent={countBadge('sent-requests')} />
+            </TabList>
           )}
           <HStack gap={2} vAlign="center" wrap="wrap">
             <Switch
