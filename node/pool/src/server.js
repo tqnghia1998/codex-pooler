@@ -889,6 +889,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     sendJson(res, 201, { quotaRequest: productStore.createQuotaRequest(accountId, await body(req)) });
     return;
   }
+  if (req.method === 'POST' && resource === 'quota-requests' && id && action === 'grant') {
+    sendJson(res, 200, productStore.grantQuotaRequest(accountId, id, await body(req), store));
+    return;
+  }
   if (req.method === 'POST' && resource === 'quota-requests' && id && action === 'cancel') {
     sendJson(res, 200, { quotaRequest: productStore.cancelQuotaRequest(accountId, id) });
     return;

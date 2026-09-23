@@ -34,13 +34,15 @@ import { useLanguage } from './i18n.jsx';
 const SHARING_VIEWS = new Set([
   'community-offers',
   'my-offers',
+  'quota-requests',
+  'my-quota-requests',
   'sent-requests',
   'approvals',
   'my-access',
   'shared-by-me'
 ]);
-const PROVIDER_SECTIONS = new Set(['my-offers', 'approvals', 'shared-by-me']);
-const CONSUMER_SECTIONS = new Set(['community-offers', 'sent-requests', 'my-access']);
+const PROVIDER_SECTIONS = new Set(['my-offers', 'quota-requests', 'approvals', 'shared-by-me']);
+const CONSUMER_SECTIONS = new Set(['community-offers', 'my-quota-requests', 'sent-requests', 'my-access']);
 const SHARING_VIEW_STORAGE_KEY = 'codex_pool_sharing_view';
 const SHARING_SECTION_STORAGE_KEY = 'codex_pool_sharing_section';
 const SHARING_CARD_GRID_COLUMNS = { minWidth: 280, max: 3, repeat: 'fill' };
@@ -63,6 +65,8 @@ function offerProviderType(upstream) {
 const SHARING_LIST_CONFIG = {
   'community-offers': { resource: 'offers', key: 'offers', role: 'community' },
   'my-offers': { resource: 'offers', key: 'offers', role: 'mine' },
+  'quota-requests': { resource: 'quota-requests', key: 'quotaRequests' },
+  'my-quota-requests': { resource: 'quota-requests', key: 'quotaRequests', role: 'mine' },
   'sent-requests': { resource: 'tickets', key: 'tickets', role: 'sent' },
   approvals: { resource: 'tickets', key: 'tickets', role: 'received' },
   'my-access': { resource: 'sessions', key: 'sessions', role: 'consumer' },
@@ -108,6 +112,7 @@ const STATUS_LABEL_KEYS = {
   approved: 'statusApproved',
   rejected: 'statusRejected',
   cancelled: 'statusCancelled',
+  fulfilled: 'statusFulfilled',
   expired: 'statusExpired',
   exhausted: 'statusExhausted',
   revoked: 'statusRevoked'
@@ -167,6 +172,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     try { return window.localStorage.getItem('session'); } catch { return null; }
   });
   const [offerDialog, setOfferDialog] = useState(null);
+  const [quotaRequestDialog, setQuotaRequestDialog] = useState(null);
+  const [quotaGrantDialog, setQuotaGrantDialog] = useState(null);
   const [offerCloseTarget, setOfferCloseTarget] = useState(null);
   const [ticketDialog, setTicketDialog] = useState(null);
   const [sessionDialog, setSessionDialog] = useState(null);
@@ -611,6 +618,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const tableItems = tablePage.items;
   const communityOffers = view === 'community-offers' ? tableItems : [];
   const myOffers = view === 'my-offers' ? tableItems : [];
+  const quotaRequests = view === 'quota-requests' || view === 'my-quota-requests' ? tableItems : [];
   const sentTickets = view === 'sent-requests' ? tableItems : [];
   const receivedTickets = view === 'approvals' ? tableItems : [];
   const requestedSessions = view === 'my-access' ? tableItems : [];
@@ -715,12 +723,14 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           {section === 'provider' ? (
             <SegmentedControl label={t('providerTabs')} value={view} onChange={handleViewChange} size="md" layout="hug">
               <SegmentedControlItem value="my-offers" label={tabLabel(t('tabMyOffers'), 'my-offers')} />
+              <SegmentedControlItem value="quota-requests" label={tabLabel(t('tabQuotaRequests'), 'quota-requests')} />
               <SegmentedControlItem value="approvals" label={tabLabel(t('tabApprovals'), 'approvals')} />
               <SegmentedControlItem value="shared-by-me" label={tabLabel(t('tabSharedByMe'), 'shared-by-me')} />
             </SegmentedControl>
           ) : (
             <SegmentedControl label={t('consumerTabs')} value={view} onChange={handleViewChange} size="md" layout="hug">
               <SegmentedControlItem value="community-offers" label={tabLabel(t('tabCommunityOffers'), 'community-offers')} />
+              <SegmentedControlItem value="my-quota-requests" label={tabLabel(t('tabMyQuotaRequests'), 'my-quota-requests')} />
               <SegmentedControlItem value="my-access" label={tabLabel(t('tabMyAccess'), 'my-access')} />
               <SegmentedControlItem value="sent-requests" label={tabLabel(t('tabSentRequests'), 'sent-requests')} />
             </SegmentedControl>
@@ -761,6 +771,14 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
                   message: ''
                 });
               }} />
+            )}
+            {section === 'consumer' && (
+              <Button label={t('askForQuota')} variant="primary" onClick={() => setQuotaRequestDialog({
+                quotaDollars: 10,
+                expiresOn: '',
+                visibility: 'public',
+                allowedEmails: ''
+              })} />
             )}
           </HStack>
           </HStack>
@@ -812,6 +830,34 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             expiresOn: dateFromTimestamp(offer.expiresAt)
           })}
           onClose={setOfferCloseTarget}
+        />
+      )}
+      {(view === 'quota-requests' || view === 'my-quota-requests') && (
+        <QuotaRequestsView
+          quotaRequests={quotaRequests}
+          tablePage={sharingTable}
+          emailQuery={emailQuery}
+          emptyTitle={t('emptyQuotaRequestsTitle')}
+          emptyDescription={t('emptyQuotaRequestsDesc')}
+          offerableUpstreams={offerableUpstreams}
+          onCancel={(quotaRequest) => void mutate(
+            () => api(`/api/pool/quota-requests/${quotaRequest.id}/cancel`, { method: 'POST', body: '{}' }),
+            t('quotaRequestCancelled'),
+            `quota-request-cancel:${quotaRequest.id}`
+          )}
+          isActionLoading={isActionLoading}
+          onGrant={(quotaRequest) => {
+            const upstream = offerableUpstreams.find((item) => (
+              item.commitment?.offerableQuotaDollars == null
+              || item.commitment.offerableQuotaDollars >= quotaRequest.quotaDollars
+            )) || offerableUpstreams[0];
+            if (!upstream) return;
+            setQuotaGrantDialog({
+              quotaRequest,
+              upstreamId: upstream.id,
+              quotaDollars: quotaRequest.quotaDollars
+            });
+          }}
         />
       )}
       {view === 'sent-requests' && (
@@ -930,6 +976,41 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           setOfferDialog(null);
         }, value.offer ? t('offerUpdated') : t('offerPublished'))}
         onChange={setOfferDialog}
+      />
+      <QuotaRequestDialog
+        value={quotaRequestDialog}
+        onClose={() => setQuotaRequestDialog(null)}
+        onChange={setQuotaRequestDialog}
+        onSave={(value) => mutate(async () => {
+          await api('/api/pool/quota-requests', {
+            method: 'POST',
+            body: JSON.stringify({
+              quotaDollars: value.quotaDollars,
+              expiresAt: expiryTimestamp(value.expiresOn),
+              visibility: value.visibility || 'public',
+              allowedEmails: value.visibility === 'restricted'
+                ? (value.allowedEmails || '').split(',').map((email) => email.trim()).filter(Boolean)
+                : []
+            })
+          });
+          setQuotaRequestDialog(null);
+        }, t('quotaRequestPublished'))}
+      />
+      <QuotaGrantDialog
+        value={quotaGrantDialog}
+        offerableUpstreams={offerableUpstreams}
+        onClose={() => setQuotaGrantDialog(null)}
+        onChange={setQuotaGrantDialog}
+        onSave={(value) => mutate(async () => {
+          await api(`/api/pool/quota-requests/${value.quotaRequest.id}/grant`, {
+            method: 'POST',
+            body: JSON.stringify({
+              upstreamId: value.upstreamId,
+              quotaDollars: value.quotaDollars
+            })
+          });
+          setQuotaGrantDialog(null);
+        }, t('quotaRequestGranted'))}
       />
       <AisProjectDialog
         value={aisDialog}
@@ -1494,6 +1575,43 @@ function OffersView({ offers, emailQuery = '', emptyTitle, emptyDescription, onR
     }
   ];
   return <PaginatedSharingTable items={offers} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('offersTable')} tablePage={tablePage} />;
+}
+
+function QuotaRequestsView({ quotaRequests, emailQuery = '', emptyTitle, emptyDescription, onGrant, onCancel, tablePage, offerableUpstreams, isActionLoading }) {
+  const { t } = useLanguage();
+  const columns = [
+    { key: 'requester', header: t('requester'), width: proportional(2), renderCell: (quotaRequest) => <Text maxLines={1}>{accountLabel(quotaRequest.requester, t)}</Text> },
+    { key: 'needed', header: t('needed'), width: pixel(120), renderCell: (quotaRequest) => <Text weight="bold" maxLines={1}>${money(quotaRequest.quotaDollars)}</Text> },
+    {
+      key: 'visibility',
+      header: t('offerVisibility'),
+      width: proportional(1.5),
+      renderCell: (quotaRequest) => {
+        const restricted = quotaRequest.visibility === 'restricted';
+        const emails = quotaRequest.allowedEmails || [];
+        const badge = <Badge label={restricted ? t('visibilityBadgeRestricted', { count: quotaRequest.allowedEmailCount || 0 }) : t('visibilityBadgePublic')} variant={restricted ? 'amber' : 'neutral'} />;
+        return restricted && emails.length ? <Tooltip content={emails.join(', ')} placement="top">{badge}</Tooltip> : badge;
+      }
+    },
+    { key: 'expiry', header: t('expires'), width: proportional(1.5), renderCell: (quotaRequest) => <Text type="supporting" color="secondary" maxLines={1}>{quotaRequest.expiresAt ? dateTime(t, quotaRequest.expiresAt) : t('unavailable')}</Text> },
+    {
+      key: 'actions',
+      header: '',
+      width: pixel(150),
+      renderCell: (quotaRequest) => quotaRequest.status !== 'active' ? (
+        <Text type="supporting" color="secondary" maxLines={1}>{statusLabel(t, quotaRequest.status)}</Text>
+      ) : quotaRequest.isMine ? (
+        <HStack justify="end">
+          <Button label={t('cancelBtn')} size="sm" variant="secondary" isLoading={isActionLoading(`quota-request-cancel:${quotaRequest.id}`)} isDisabled={isActionLoading(`quota-request-cancel:${quotaRequest.id}`)} onClick={() => onCancel(quotaRequest)} />
+        </HStack>
+      ) : (
+        <HStack justify="end">
+          <Button label={t('grantQuotaBtn')} size="sm" variant="primary" isDisabled={offerableUpstreams.length === 0} onClick={() => onGrant(quotaRequest)} />
+        </HStack>
+      )
+    }
+  ];
+  return <PaginatedSharingTable items={quotaRequests} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('requestsTable')} tablePage={tablePage} />;
 }
 
 function renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading, t }) {
@@ -2156,6 +2274,117 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
             onSave={() => onSave(value)}
             saveLabel={value?.offer ? t('saveOfferBtn') : t('publishBtn')}
             isSaveDisabled={value?.quotaInputValid === false || (value?.visibility === 'restricted' && (!value?.allowedEmails || !value.allowedEmails.trim()))}
+          />
+        )}
+      />
+    </Dialog>
+  );
+}
+
+function QuotaRequestDialog({ value, onClose, onSave, onChange }) {
+  const { t } = useLanguage();
+  return (
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
+      <Layout
+        header={<DialogHeader title={t('askForQuota')} onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            {value && (
+              <VStack gap={3}>
+                <NumberInput
+                  label={t('neededQuotaUsd')}
+                  value={value.quotaDollars}
+                  onChange={(quotaDollars) => onChange((current) => ({ ...current, quotaDollars }))}
+                  onInput={(event) => onChange((current) => ({ ...current, quotaInputValid: event.currentTarget.validity.valid }))}
+                  min={0.01}
+                  step={0.01}
+                  isRequired
+                />
+                <DateInput
+                  label={t('expiresOn')}
+                  value={value.expiresOn || undefined}
+                  onChange={(expiresOn) => onChange({ ...value, expiresOn: expiresOn || '' })}
+                  min={todayDate()}
+                  isOptional
+                  hasClear
+                  width="100%"
+                />
+                <SegmentedControl
+                  label={t('offerVisibility')}
+                  value={value.visibility || 'public'}
+                  onChange={(visibility) => onChange({ ...value, visibility })}
+                >
+                  <SegmentedControlItem value="public" label={t('visibilityPublic')} />
+                  <SegmentedControlItem value="restricted" label={t('visibilityRestricted')} />
+                </SegmentedControl>
+                {value.visibility === 'restricted' && (
+                  <TextArea
+                    label={t('visibilityRestricted')}
+                    description={t('quotaRequestWhitelistHelp')}
+                    placeholder={t('visibilityWhitelistPlaceholder')}
+                    value={value.allowedEmails || ''}
+                    onChange={(allowedEmails) => onChange({ ...value, allowedEmails })}
+                    rows={3}
+                    hasSpellCheck={false}
+                    isRequired
+                  />
+                )}
+              </VStack>
+            )}
+          </LayoutContent>
+        )}
+        footer={(
+          <DialogFooter
+            onClose={onClose}
+            onSave={() => onSave(value)}
+            saveLabel={t('broadcastQuotaRequest')}
+            isSaveDisabled={value?.quotaInputValid === false || (value?.visibility === 'restricted' && (!value?.allowedEmails || !value.allowedEmails.trim()))}
+          />
+        )}
+      />
+    </Dialog>
+  );
+}
+
+function QuotaGrantDialog({ value, offerableUpstreams, onClose, onSave, onChange }) {
+  const { t } = useLanguage();
+  return (
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
+      <Layout
+        header={<DialogHeader title={t('grantQuotaTitle')} subtitle={value ? accountLabel(value.quotaRequest.requester, t) : undefined} onOpenChange={onClose} hasDivider />}
+        content={(
+          <LayoutContent>
+            {value && (
+              <VStack gap={3}>
+                <Selector
+                  label={t('shareSource')}
+                  value={value.upstreamId}
+                  options={offerableUpstreams.map((upstream) => ({
+                    value: upstream.id,
+                    label: `${OFFER_PROVIDER_TYPES.find(({ value: type }) => type === offerProviderType(upstream))?.label || 'Codex'} · ${upstream.email || upstream.name || upstream.id}`
+                  }))}
+                  onChange={(upstreamId) => onChange((current) => ({ ...current, upstreamId }))}
+                  width="100%"
+                />
+                <NumberInput
+                  label={t('grantedQuotaDollars')}
+                  value={value.quotaDollars}
+                  onChange={(quotaDollars) => onChange((current) => ({ ...current, quotaDollars }))}
+                  onInput={(event) => onChange((current) => ({ ...current, quotaInputValid: event.currentTarget.validity.valid }))}
+                  min={0.01}
+                  step={0.01}
+                  isRequired
+                />
+              </VStack>
+            )}
+          </LayoutContent>
+        )}
+        footer={(
+          <DialogFooter
+            onClose={onClose}
+            onSave={() => onSave(value)}
+            saveLabel={t('grantQuotaBtn')}
+            isSaveDisabled={value?.quotaInputValid === false || !offerableUpstreams.some((upstream) => upstream.id === value?.upstreamId)}
           />
         )}
       />

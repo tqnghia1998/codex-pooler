@@ -75,6 +75,7 @@ export class ProductStore {
         quota_micros INTEGER NOT NULL,
         message TEXT,
         has_grants INTEGER NOT NULL DEFAULT 0,
+        internal_only INTEGER NOT NULL DEFAULT 0,
         visibility TEXT NOT NULL DEFAULT 'public',
         allowed_emails TEXT,
         status TEXT NOT NULL,
@@ -156,6 +157,8 @@ export class ProductStore {
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         quota_micros INTEGER NOT NULL,
+        visibility TEXT NOT NULL DEFAULT 'public',
+        allowed_emails TEXT,
         status TEXT NOT NULL,
         expires_at TEXT,
         created_at TEXT NOT NULL,
@@ -279,6 +282,7 @@ export class ProductStore {
     addColumn(this.sqlite, 'sharing_offers', 'visibility', "TEXT NOT NULL DEFAULT 'public'");
     addColumn(this.sqlite, 'sharing_offers', 'allowed_emails', 'TEXT');
     addColumn(this.sqlite, 'sharing_offers', 'has_grants', 'INTEGER NOT NULL DEFAULT 0');
+    addColumn(this.sqlite, 'sharing_offers', 'internal_only', 'INTEGER NOT NULL DEFAULT 0');
     this.sqlite.exec(`
       UPDATE sharing_offers
       SET has_grants = 1
@@ -291,6 +295,8 @@ export class ProductStore {
     addColumn(this.sqlite, 'sharing_tickets', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'sharing_tickets', 'demand_request_id', 'TEXT');
     addColumn(this.sqlite, 'sharing_sessions', 'expires_at', 'TEXT');
+    addColumn(this.sqlite, 'quota_requests', 'visibility', "TEXT NOT NULL DEFAULT 'public'");
+    addColumn(this.sqlite, 'quota_requests', 'allowed_emails', 'TEXT');
 
     const personalColumns = this.sqlite.pragma('table_info(personal_api_keys)');
     const accountColumn = personalColumns.find(({ name }) => name === 'account_id');
@@ -946,6 +952,7 @@ export class ProductStore {
     const rows = this.sqlite.prepare(`
       SELECT sharing_offers.*, accounts.display_name AS provider_name, accounts.email AS provider_email
       FROM sharing_offers JOIN accounts ON accounts.id = sharing_offers.provider_account_id
+      WHERE sharing_offers.internal_only = 0
     `).all();
     const visibleRows = rows.filter((row) => canViewOffer(row, viewerAccountId, viewerEmail));
     const allocations = this.offerAllocations(visibleRows.map(({ id }) => id));
@@ -970,13 +977,14 @@ export class ProductStore {
     const viewerEmail = viewerAccount?.email?.toLowerCase() || '';
     const count = (sql, ...args) => this.sqlite.prepare(sql).get(...args).count;
     const communityRows = this.sqlite.prepare(
-      "SELECT * FROM sharing_offers WHERE provider_account_id != ? AND status = 'active'"
+      "SELECT * FROM sharing_offers WHERE provider_account_id != ? AND status = 'active' AND internal_only = 0"
     ).all(accountId);
     const visibleCommunityCount = communityRows.filter((row) => canViewOffer(row, accountId, viewerEmail)).length;
     return {
       'community-offers': visibleCommunityCount,
-      'my-offers': count("SELECT COUNT(*) AS count FROM sharing_offers WHERE provider_account_id = ? AND status = 'active'", accountId),
-      'quota-requests': count("SELECT COUNT(*) AS count FROM quota_requests WHERE status = 'active'"),
+      'my-offers': count("SELECT COUNT(*) AS count FROM sharing_offers WHERE provider_account_id = ? AND status = 'active' AND internal_only = 0", accountId),
+      'quota-requests': this.visibleQuotaRequests(accountId, viewerEmail, true).length,
+      'my-quota-requests': count("SELECT COUNT(*) AS count FROM quota_requests WHERE account_id = ? AND status = 'active'", accountId),
       'sent-requests': count("SELECT COUNT(*) AS count FROM sharing_tickets WHERE consumer_account_id = ? AND status = 'pending'", accountId),
       approvals: count("SELECT COUNT(*) AS count FROM sharing_tickets WHERE provider_account_id = ? AND status = 'pending'", accountId),
       'my-access': count("SELECT COUNT(*) AS count FROM sharing_sessions WHERE consumer_account_id = ? AND status NOT IN ('revoked', 'expired')", accountId),
@@ -998,16 +1006,18 @@ export class ProductStore {
     `, utcDate());
     const tickets = row(`
       SELECT COUNT(*) AS total,
-        COALESCE(SUM(status = 'approved'), 0) AS approved,
-        COALESCE(SUM(status = 'rejected'), 0) AS rejected,
-        COALESCE(SUM(status = 'pending'), 0) AS pending
+        COALESCE(SUM(sharing_tickets.status = 'approved'), 0) AS approved,
+        COALESCE(SUM(sharing_tickets.status = 'rejected'), 0) AS rejected,
+        COALESCE(SUM(sharing_tickets.status = 'pending'), 0) AS pending
       FROM sharing_tickets
+      JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
+      WHERE sharing_offers.internal_only = 0
     `);
     return {
       overview: {
         accounts: count('SELECT COUNT(*) AS count FROM accounts'),
         linkedProviders: count('SELECT COUNT(*) AS count FROM account_upstreams'),
-        activeOffers: count("SELECT COUNT(*) AS count FROM sharing_offers WHERE status = 'active'"),
+        activeOffers: count("SELECT COUNT(*) AS count FROM sharing_offers WHERE status = 'active' AND internal_only = 0"),
         activeSessions: count("SELECT COUNT(*) AS count FROM sharing_sessions WHERE status IN ('active', 'paused')"),
         pendingTickets: tickets.pending,
         activeQuotaRequests: count("SELECT COUNT(*) AS count FROM quota_requests WHERE status = 'active'")
@@ -1120,6 +1130,7 @@ export class ProductStore {
     const viewerEmail = viewerAccount?.email?.toLowerCase() || '';
     const conditions = [];
     const args = [];
+    conditions.push('sharing_offers.internal_only = 0');
     if (!options.includePast) conditions.push("sharing_offers.status = 'active'");
     if (options.role === 'mine') {
       conditions.push('sharing_offers.provider_account_id = ?');
@@ -1211,20 +1222,13 @@ export class ProductStore {
     }
     const id = randomUUID();
     const now = new Date();
-    const demand = this.sqlite.prepare(`
-      SELECT id
-      FROM quota_requests
-      WHERE account_id = ? AND status = 'active'
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(accountId);
     const expiry = offer.expires_at;
     this.sqlite.prepare(`
       INSERT INTO sharing_tickets
-      (id, offer_id, provider_account_id, consumer_account_id, demand_request_id,
+      (id, offer_id, provider_account_id, consumer_account_id,
        requested_micros, status, expires_at, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-    `).run(id, offerId, offer.provider_account_id, accountId, demand?.id || null, requestedMicros, expiry, now.toISOString());
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(id, offerId, offer.provider_account_id, accountId, requestedMicros, expiry, now.toISOString());
     this.event(accountId, 'ticket', id, 'created', { requestedMicros, expiresAt: expiry });
     this.notifyAccount(
       offer.provider_account_id,
@@ -1248,7 +1252,8 @@ export class ProductStore {
       JOIN accounts provider ON provider.id = sharing_tickets.provider_account_id
       JOIN accounts consumer ON consumer.id = sharing_tickets.consumer_account_id
       JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
-      WHERE sharing_tickets.provider_account_id = ? OR sharing_tickets.consumer_account_id = ?
+      WHERE sharing_offers.internal_only = 0
+        AND (sharing_tickets.provider_account_id = ? OR sharing_tickets.consumer_account_id = ?)
       ORDER BY sharing_tickets.created_at DESC
     `).all(accountId, accountId).map((row) => publicTicket(row, accountId, upstreamStore.getPublic(row.upstream_id)));
   }
@@ -1267,6 +1272,7 @@ export class ProductStore {
       conditions.push('(sharing_tickets.provider_account_id = ? OR sharing_tickets.consumer_account_id = ?)');
       args.push(accountId, accountId);
     }
+    conditions.push('sharing_offers.internal_only = 0');
     if (!options.includePast) conditions.push("sharing_tickets.status = 'pending'");
     if (options.query) {
       conditions.push('(instr(lower(provider.email), ?) > 0 OR instr(lower(consumer.email), ?) > 0)');
@@ -1303,7 +1309,7 @@ export class ProductStore {
       JOIN accounts provider ON provider.id = sharing_tickets.provider_account_id
       JOIN accounts consumer ON consumer.id = sharing_tickets.consumer_account_id
       JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
-      WHERE sharing_tickets.id = ?
+      WHERE sharing_tickets.id = ? AND sharing_offers.internal_only = 0
     `).get(id);
     if (!row || ![row.provider_account_id, row.consumer_account_id].includes(accountId)) throw notFound();
     return publicTicket(row, accountId, upstreamStore.getPublic(row.upstream_id));
@@ -1399,13 +1405,6 @@ export class ProductStore {
         this.sqlite.prepare("UPDATE sharing_tickets SET status = 'rejected', resolved_at = ? WHERE offer_id = ? AND id != ? AND status = 'pending'")
           .run(now.toISOString(), offer.id, id);
       }
-      if (ticket.demand_request_id) {
-        this.sqlite.prepare(`
-          UPDATE sharing_tickets
-          SET status = 'cancelled', resolved_at = ?
-          WHERE demand_request_id = ? AND id != ? AND status = 'pending'
-        `).run(now.toISOString(), ticket.demand_request_id, id);
-      }
       this.sqlite.prepare(`
         INSERT INTO sharing_sessions
         (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id,
@@ -1420,13 +1419,6 @@ export class ProductStore {
         INSERT INTO sharing_session_keys (id, session_id, key_hash, created_at)
         VALUES (?, ?, ?, ?)
       `).run(keyId, sessionId, hash(apiKey), now.toISOString());
-      if (ticket.demand_request_id) {
-        this.sqlite.prepare(`
-          UPDATE quota_requests
-          SET status = 'fulfilled', updated_at = ?
-          WHERE id = ? AND status = 'active'
-        `).run(now.toISOString(), ticket.demand_request_id);
-      }
       this.event(accountId, 'ticket', id, 'approved', { approvedMicros, sessionId, expiresAt });
       return sessionId;
     });
@@ -2147,18 +2139,28 @@ export class ProductStore {
 
   listQuotaRequests(viewerAccountId) {
     this.expireDue();
+    const viewerAccount = viewerAccountId ? this.account(viewerAccountId) : null;
+    const viewerEmail = viewerAccount?.email?.toLowerCase() || '';
     return this.sqlite.prepare(`
       SELECT quota_requests.*, accounts.email, accounts.display_name
       FROM quota_requests
       JOIN accounts ON accounts.id = quota_requests.account_id
       ORDER BY quota_requests.status = 'active' DESC, quota_requests.created_at DESC
-    `).all().map((row) => publicQuotaRequest(row, viewerAccountId));
+    `).all()
+      .filter((row) => canViewQuotaRequest(row, viewerAccountId, viewerEmail))
+      .map((row) => publicQuotaRequest(row, viewerAccountId));
   }
 
   listQuotaRequestsPage(viewerAccountId, options) {
     this.expireDue();
+    const viewerAccount = this.account(viewerAccountId);
+    const viewerEmail = viewerAccount?.email?.toLowerCase() || '';
     const conditions = [];
     const args = [];
+    if (options.role === 'mine') {
+      conditions.push('quota_requests.account_id = ?');
+      args.push(viewerAccountId);
+    }
     if (!options.includePast) conditions.push("quota_requests.status = 'active'");
     if (options.query) {
       conditions.push('instr(lower(accounts.email), ?) > 0');
@@ -2166,26 +2168,32 @@ export class ProductStore {
     }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
     const select = `FROM quota_requests JOIN accounts ON accounts.id = quota_requests.account_id ${where}`;
-    const totalItems = this.sqlite.prepare(`SELECT COUNT(*) AS count ${select}`).get(...args).count;
     const rows = this.sqlite.prepare(`
       SELECT quota_requests.*, accounts.email, accounts.display_name
       ${select}
       ORDER BY quota_requests.status = 'active' DESC, quota_requests.created_at DESC, quota_requests.id DESC
-      LIMIT ? OFFSET ?
-    `).all(...args, options.limit, options.offset);
+    `).all(...args).filter((row) => canViewQuotaRequest(row, viewerAccountId, viewerEmail));
+    const totalItems = rows.length;
+    const pagedRows = rows.slice(options.offset, options.offset + options.limit);
     return {
-      ...sharingListPage('quotaRequests', rows.map((row) => publicQuotaRequest(row, viewerAccountId)), totalItems, options),
+      ...sharingListPage('quotaRequests', pagedRows.map((row) => publicQuotaRequest(row, viewerAccountId)), totalItems, options),
       hasActiveOwnQuotaRequest: Boolean(this.sqlite.prepare(`
         SELECT 1 FROM quota_requests WHERE account_id = ? AND status = 'active'
       `).get(viewerAccountId))
     };
   }
 
-  createQuotaRequest(accountId, { quotaDollars, expiresAt } = {}) {
+  createQuotaRequest(accountId, { quotaDollars, expiresAt, visibility, allowedEmails } = {}) {
     this.requireAccount(accountId);
     this.expireDue(new Date(), { force: true });
     const now = new Date();
     const quotaMicros = dollarsToMicros(quotaDollars);
+    const requestVisibility = visibility === 'restricted' ? 'restricted' : 'public';
+    const cleanEmails = requestVisibility === 'restricted' ? parseAllowedEmails(allowedEmails) : [];
+    if (requestVisibility === 'restricted' && cleanEmails.length === 0) {
+      throw new Error('at least one valid email is required for restricted visibility');
+    }
+    const allowedEmailsJson = requestVisibility === 'restricted' ? JSON.stringify(cleanEmails) : null;
     const expiry = optionalFutureTime(expiresAt, now)
       || new Date(now.getTime() + OFFER_TTL_MS).toISOString();
     const apply = this.sqlite.transaction(() => {
@@ -2197,13 +2205,157 @@ export class ProductStore {
       const id = randomUUID();
       this.sqlite.prepare(`
         INSERT INTO quota_requests
-          (id, account_id, quota_micros, status, expires_at, created_at, updated_at)
-        VALUES (?, ?, ?, 'active', ?, ?, ?)
-      `).run(id, accountId, quotaMicros, expiry, now.toISOString(), now.toISOString());
-      this.event(accountId, 'quota_request', id, 'created', { quotaMicros, expiresAt: expiry });
+          (id, account_id, quota_micros, visibility, allowed_emails, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(id, accountId, quotaMicros, requestVisibility, allowedEmailsJson, expiry, now.toISOString(), now.toISOString());
+      this.event(accountId, 'quota_request', id, 'created', {
+        quotaMicros,
+        expiresAt: expiry,
+        visibility: requestVisibility
+      });
       return id;
     });
     return this.quotaRequest(apply(), accountId);
+  }
+
+  grantQuotaRequest(accountId, id, { upstreamId, quotaDollars } = {}, upstreamStore) {
+    this.expireDue(new Date(), { force: true });
+    let replacementRequestId = null;
+    const grant = this.sqlite.transaction(() => {
+      const request = this.sqlite.prepare('SELECT * FROM quota_requests WHERE id = ?').get(id);
+      if (!request) throw notFound();
+      if (request.status !== 'active') throw new Error('only active quota requests can be granted');
+      const provider = this.requireAccount(accountId);
+      const requester = this.requireAccount(request.account_id);
+      const providerEmail = provider.email?.toLowerCase() || '';
+      if (!canViewQuotaRequest(request, accountId, providerEmail)) throw forbidden('You are not authorized to grant this quota request');
+      if (request.account_id === accountId) throw new Error('requesters cannot grant their own quota request');
+      const upstream = upstreamStore.get(upstreamId);
+      if (!upstream || !this.accountOwnsUpstream(accountId, upstreamId)) throw notFound();
+      requireProviderQuota(upstream);
+      requireProviderSharing(this.providerSharingState(upstreamId));
+      const grantedMicros = quotaDollars === undefined ? request.quota_micros : dollarsToMicros(quotaDollars);
+      const commitment = this.providerCommitment(upstreamId, upstreamStore);
+      if (commitment.actualMicros !== null && grantedMicros > commitment.offerableMicros) {
+        throw new Error('granted quota exceeds the provider’s truly offerable quota');
+      }
+      const now = new Date();
+      const offerId = randomUUID();
+      const ticketId = randomUUID();
+      const sessionId = randomUUID();
+      const keyId = randomUUID();
+      const apiKey = `cp_share_${randomToken(32)}`;
+      const expiresAt = earliestExpiry(
+        request.expires_at,
+        sharingExpiry(null, upstream, now, SHARE_SESSION_TTL_MS)
+      );
+      this.sqlite.prepare(`
+        INSERT INTO sharing_offers
+          (id, provider_account_id, upstream_id, quota_micros, has_grants, internal_only, visibility,
+           allowed_emails, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 1, 1, 'restricted', ?, 'closed', ?, ?, ?)
+      `).run(
+        offerId,
+        accountId,
+        upstreamId,
+        grantedMicros,
+        JSON.stringify([requester.email.toLowerCase()]),
+        expiresAt,
+        now.toISOString(),
+        now.toISOString()
+      );
+      this.sqlite.prepare(`
+        INSERT INTO sharing_tickets
+          (id, offer_id, provider_account_id, consumer_account_id,
+           requested_micros, approved_micros, status, expires_at, created_at, resolved_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'approved', ?, ?, ?)
+      `).run(
+        ticketId,
+        offerId,
+        accountId,
+        request.account_id,
+        grantedMicros,
+        grantedMicros,
+        expiresAt,
+        now.toISOString(),
+        now.toISOString()
+      );
+      this.sqlite.prepare(`
+        INSERT INTO sharing_sessions
+          (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id,
+           granted_micros, consumed_micros, status, pending_key_cipher, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 'active', ?, ?, ?, ?)
+      `).run(
+        sessionId,
+        offerId,
+        ticketId,
+        accountId,
+        request.account_id,
+        upstreamId,
+        upstream.scopeId || 'default',
+        grantedMicros,
+        encrypt(apiKey, this.key),
+        expiresAt,
+        now.toISOString(),
+        now.toISOString()
+      );
+      this.sqlite.prepare(`
+        INSERT INTO sharing_session_keys (id, session_id, key_hash, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(keyId, sessionId, hash(apiKey), now.toISOString());
+      const remainingMicros = request.quota_micros - grantedMicros;
+      this.sqlite.prepare(`
+        UPDATE quota_requests
+        SET status = ?, updated_at = ?
+        WHERE id = ?
+      `).run('fulfilled', now.toISOString(), id);
+      if (remainingMicros > 0) {
+        replacementRequestId = randomUUID();
+        this.sqlite.prepare(`
+          INSERT INTO quota_requests
+            (id, account_id, quota_micros, visibility, allowed_emails, status, expires_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+        `).run(
+          replacementRequestId,
+          request.account_id,
+          remainingMicros,
+          request.visibility || 'public',
+          request.allowed_emails || null,
+          request.expires_at,
+          now.toISOString(),
+          now.toISOString()
+        );
+        this.event(accountId, 'quota_request', replacementRequestId, 'created', {
+          quotaMicros: remainingMicros,
+          expiresAt: request.expires_at || null,
+          visibility: request.visibility || 'public',
+          rolledOverFromQuotaRequestId: request.id
+        });
+      }
+      this.event(accountId, 'quota_request', id, 'granted', {
+        grantedMicros,
+        sessionId,
+        replacementRequestId
+      });
+      this.event(accountId, 'direct_grant', sessionId, 'created', {
+        quotaRequestId: id,
+        grantedMicros,
+        replacementRequestId
+      });
+      return sessionId;
+    });
+    const sessionId = grant();
+    this.notifyAccount(
+      this.sessionRow(sessionId).consumer_account_id,
+      'QuotaHub request granted',
+      'Your QuotaHub quota request was granted. A share session is ready to use.',
+      `quota-request:${id}:granted`
+    );
+    return {
+      session: this.session(sessionId, accountId, upstreamStore),
+      quotaRequest: this.quotaRequest(id, accountId),
+      replacementQuotaRequest: replacementRequestId ? this.quotaRequest(replacementRequestId, accountId) : null
+    };
   }
 
   cancelQuotaRequest(accountId, id) {
@@ -2226,7 +2378,19 @@ export class ProductStore {
       WHERE quota_requests.id = ?
     `).get(id);
     if (!row) throw notFound();
+    const viewerAccount = viewerAccountId ? this.account(viewerAccountId) : null;
+    if (!canViewQuotaRequest(row, viewerAccountId, viewerAccount?.email?.toLowerCase() || '')) throw notFound();
     return publicQuotaRequest(row, viewerAccountId);
+  }
+
+  visibleQuotaRequests(viewerAccountId, viewerEmail, activeOnly = false) {
+    const rows = this.sqlite.prepare(`
+      SELECT quota_requests.*, accounts.email, accounts.display_name
+      FROM quota_requests
+      JOIN accounts ON accounts.id = quota_requests.account_id
+      ${activeOnly ? "WHERE quota_requests.status = 'active'" : ''}
+    `).all();
+    return rows.filter((row) => canViewQuotaRequest(row, viewerAccountId, viewerEmail));
   }
 
   activity(subjectType, subjectId) {
@@ -2920,10 +3084,30 @@ function publicQuotaRequest(row, viewerAccountId) {
     quotaDollars: microsToDollars(row.quota_micros),
     status: row.status,
     isMine: row.account_id === viewerAccountId,
+    visibility: row.visibility || 'public',
+    allowedEmailCount: row.allowed_emails
+      ? (row._parsedAllowedEmails || parseJsonArray(row.allowed_emails)).length
+      : 0,
+    allowedEmails: row.account_id === viewerAccountId && row.allowed_emails
+      ? (row._parsedAllowedEmails || parseJsonArray(row.allowed_emails))
+      : null,
     expiresAt: row.expires_at || null,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
+}
+
+function canViewQuotaRequest(row, viewerAccountId, viewerEmail) {
+  if (viewerAccountId && row.account_id === viewerAccountId) return true;
+  if (!row.visibility || row.visibility === 'public') return true;
+  if (row.visibility === 'restricted') {
+    if (!viewerEmail) return false;
+    if (!row._parsedAllowedEmails) {
+      row._parsedAllowedEmails = parseJsonArray(row.allowed_emails);
+    }
+    return row._parsedAllowedEmails.includes(viewerEmail);
+  }
+  return false;
 }
 
 function emptyActivity() {

@@ -170,7 +170,8 @@ If every active provider session needs reauthentication, requests return
 `share_provider_reauth_required` until a provider reconnects.
 
 Offers, sessions, personal keys, and public quota requests expire. Pending
-tickets remain open until the source offer is closed or expires.
+tickets remain open until the source offer is closed or expires; direct grants
+do not resolve offer tickets.
 Offer and session expiry is bounded by a provider reset time when one is known.
 For Codex and Loop-backed Claude/AIS balances, creating or resizing a grant is
 rejected atomically when it would overcommit the stored provider balance. If a
@@ -197,11 +198,20 @@ account emails alongside aggregate totals the product already stores.
 
 ## Friend Requests
 
-A user who cannot find a suitable offer can post one public request for the
-amount they need. Posting a new request cancels their previous active request.
-Friends can use that amount and expiry to prefill a matching offer; the normal
-manual ticket approval flow still applies. Requests contain no payment,
-message, rating, or guarantee fields.
+A user who cannot find a suitable offer can post one request for the amount
+they need, either publicly or to an email allowlist. Posting a new request
+cancels their previous active request. Users can view and cancel their own
+active requests from the consumer dashboard. A provider who can see the request
+can grant it directly from one linked provider. A grant at or above the
+requested amount fulfills the request; a smaller grant fulfills the original
+and creates a replacement request for the remaining amount with the same
+visibility and expiry. Direct grants and offer-ticket approvals are independent:
+granting a request does not cancel offer tickets, and approving an offer ticket
+does not fulfill a quota request. Every grant atomically creates a share
+session and `cp_share_...` key. Requests contain no payment, message, rating,
+or guarantee fields.
+The admin request funnel counts offer tickets only; direct grants appear as
+separate `direct_grant/created` audit events.
 
 ## Email
 
@@ -274,6 +284,7 @@ POST   /api/pool/sessions/:id/rotate-key
 POST   /api/pool/sessions/:id/test-connection
 GET    /api/pool/quota-requests
 POST   /api/pool/quota-requests
+POST   /api/pool/quota-requests/:id/grant             { upstreamId, quotaDollars }
 POST   /api/pool/quota-requests/:id/cancel
 
 GET    /v1/usage
