@@ -220,19 +220,21 @@ separate `direct_grant/created` audit events.
 ## Community Activity Banner
 
 Signed-in members see a compact community banner above the leaderboard. It
-summarizes active requests and usable offers visible to that viewer, excluding
-their own posts and offers they already have a pending ticket for. Counts are
-unique people, not posts. Up to three names per category rotate once per minute;
-restricted posts never contribute names or counts for unauthorized viewers.
+summarizes active requests and usable offers visible to that viewer, including
+their own posts but excluding offers they already have a pending ticket for.
+Counts are unique people, not posts. Up to three names per category rotate
+once per minute; restricted posts never contribute names or counts for
+unauthorized viewers.
 The summary is independent of table searches and pagination. Requests appear
 on the left and offers on the right in equal-width columns, each with its own
 single-line marquee. If only one category is available, it fills the strip.
 
 The dashboard refreshes the summary with its five-second polling and after
-sharing actions. Names open the corresponding list filtered by email; the
-category action is an inline hyperlink that moves with the message and opens
-the whole list. Both reset pagination and past-data
-filters. Motion pauses on hover, keyboard focus, dialogs, or hidden tabs;
+sharing actions. Names open the corresponding list filtered by email (the
+viewer's own name opens their "My" tab); the category action is an inline
+hyperlink that moves with the message and opens the whole list. Both reset
+pagination and past-data filters. Motion pauses on hover, keyboard focus,
+dialogs, or hidden tabs;
 hovering one side does not stop the other. The narrow layout keeps both
 single-line marquees with compact category icons. Reduced-motion layouts use
 static single-line text with the action link first. Empty or failed summaries

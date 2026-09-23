@@ -31,7 +31,7 @@ function fixture(t) {
   return { store, product, account, provider, offer, activity };
 }
 
-test('community activity respects visibility, excludes self, and deduplicates providers', (t) => {
+test('community activity respects visibility, includes self, and deduplicates providers', (t) => {
   const f = fixture(t);
   const viewer = f.provider('viewer');
   const publicProvider = f.provider('public');
@@ -52,14 +52,27 @@ test('community activity respects visibility, excludes self, and deduplicates pr
   });
   const result = f.activity(viewer.owner);
   for (const group of Object.values(result)) {
-    assert.equal(group.totalPeople, 2);
-    assert.deepEqual(group.people.map(({ id }) => id).sort(), [publicProvider.owner.id, privateProvider.owner.id].sort());
+    assert.equal(group.totalPeople, 3);
+    assert.deepEqual(group.people.map(({ id }) => id).sort(), [viewer.owner.id, publicProvider.owner.id, privateProvider.owner.id].sort());
     for (const person of group.people) assert.deepEqual(Object.keys(person).sort(), ['displayName', 'email', 'id']);
   }
   const outsider = f.account('outsider');
   assert.equal(f.activity(outsider).requesting.totalPeople, 2);
   assert.equal(f.activity(outsider).sharing.totalPeople, 2);
   assert.throws(() => f.product.communityActivity('missing-account', f.store), /Not found/);
+});
+
+test('own activity remains visible when no one else is sharing or requesting', (t) => {
+  const f = fixture(t);
+  const viewer = f.provider('viewer');
+  f.offer(viewer, { visibility: 'restricted', allowedEmails: ['friend@example.com'] });
+  f.product.createQuotaRequest(viewer.owner.id, {
+    quotaDollars: 5, visibility: 'restricted', allowedEmails: ['friend@example.com']
+  });
+  for (const group of Object.values(f.activity(viewer.owner))) {
+    assert.equal(group.totalPeople, 1);
+    assert.deepEqual(group.people.map(({ id }) => id), [viewer.owner.id]);
+  }
 });
 
 test('community activity omits pending, paused, closed, unbacked, missing, and internal offers', (t) => {

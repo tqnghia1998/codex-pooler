@@ -992,7 +992,7 @@ export class ProductStore {
     this.expireDue();
     const timestamp = new Date().toISOString();
     const summarize = (accounts) => {
-      const people = [...new Map(accounts.filter(({ id }) => id !== accountId)
+      const people = [...new Map(accounts
         .map(({ id, displayName, email }) => [id, { id, displayName, email }])).values()]
         .sort((left, right) => left.id.localeCompare(right.id));
       // Rotate a bounded sample without coupling the banner to table pagination.

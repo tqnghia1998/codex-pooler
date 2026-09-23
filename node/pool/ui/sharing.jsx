@@ -416,6 +416,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   }, [resetTablePage, section, view]);
 
   const handleViewChange = useCallback((nextView) => {
+    if (nextView === viewRef.current || !SHARING_VIEWS.has(nextView)) return;
     viewRef.current = nextView;
     setView(nextView);
     setTabCounts((current) => openCountTab(current, nextView));
@@ -436,12 +437,15 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const navigateCommunity = useCallback((kind, email = '') => {
     setEmailQuery(email);
     setShowPastData(false);
-    handleViewChange(kind === 'requesting' ? 'quota-requests' : 'community-offers');
+    const isMine = email && email.toLowerCase() === account?.email?.toLowerCase();
+    handleViewChange(kind === 'requesting'
+      ? (isMine ? 'my-quota-requests' : 'quota-requests')
+      : (isMine ? 'my-offers' : 'community-offers'));
     requestAnimationFrame(() => {
       sharingDestination.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
       sharingDestination.current?.focus({ preventScroll: true });
     });
-  }, [handleViewChange, setEmailQuery]);
+  }, [account?.email, handleViewChange, setEmailQuery]);
 
   const handleTabFocus = useCallback((event) => {
     if (!event.currentTarget.contains(event.relatedTarget)) return;
