@@ -919,7 +919,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               ...(!value.offer ? { upstreamId: value.upstreamId } : {}),
               quotaDollars: value.quotaDollars,
               message: value.message || '',
-              expiresAt: expiryTimestamp(value.expiresOn),
+              ...(value.status === 'closed' ? {} : { expiresAt: expiryTimestamp(value.expiresOn) }),
               visibility: value.visibility || 'public',
               allowedEmails: value.visibility === 'restricted'
                 ? (value.allowedEmails || '').split(',').map((e) => e.trim()).filter(Boolean)
