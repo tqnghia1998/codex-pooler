@@ -555,6 +555,15 @@ test('creates one personal key that selects active consumer sessions and preserv
     sharingStore.pinPersonalResponse(access.personalKeyId, 'resp-personal', secondSession.id);
     assert.equal(sharingStore.personalShareSessionCandidates(access.personalKeyId, { responseId: 'resp-personal' })[0].shareSessionId, secondSession.id);
 
+    sharingStore.sqlite.prepare("UPDATE sharing_sessions SET consumed_micros = granted_micros, status = 'exhausted' WHERE id = ?")
+      .run(secondSession.id);
+    assert.deepEqual(
+      sharingStore.personalShareSessionCandidates(access.personalKeyId, { sessionId: 'window-1' })
+        .map(({ shareSessionId }) => shareSessionId),
+      [firstSession.id]
+    );
+    assert.deepEqual(sharingStore.personalShareSessionCandidates(access.personalKeyId, { responseId: 'resp-personal' }), []);
+
     const replacement = sharingStore.rotatePersonalKey(consumer.id);
     assert.match(replacement.apiKey, /^cp_personal_/);
     assert.equal(sharingStore.authenticateShareKey(apiKey), null);

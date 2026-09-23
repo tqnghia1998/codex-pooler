@@ -1834,7 +1834,7 @@ export class ProductStore {
     if (route) {
       const pinned = this.personalRouteSession(key.id, route, upstreamStore);
       if (pinned) return [pinned];
-      if (this.personalRouteExists(key.id, route)) return [];
+      if (responseId && this.personalRouteExists(key.id, route)) return [];
     }
     const sessions = this.activeConsumerSessions(key.account_id, upstreamStore);
     return orderPersonalSessions(sessions, key.last_session_id);
