@@ -217,7 +217,8 @@ or guarantee fields.
 The admin request funnel counts offer tickets only; direct grants appear as
 separate `direct_grant/created` audit events.
 
-The admin view separates Overview, Operations, Usage, Activity, and Data.
+The admin page shows Overview, Operations, Usage, Activity, and Data together
+in one scrollable view, with the language toggle beside the header actions.
 Operations lists linked providers with their current issue, sharing status,
 last observation, and active share/session record counts; it also shows
 aggregate email queue health without exposing message contents. Usage displays
@@ -227,7 +228,7 @@ reconstructed; the older aggregate usage totals cover retained sessions only.
 The approval rate divides approved tickets by reviewed (approved or rejected)
 tickets. Activity supports a bounded search across actor, action, entity type,
 and entity ID, with a 7-day, 30-day, or full retained-history filter. Event
-details and credential contents are not returned by analytics. The Data tab
+details and credential contents are not returned by analytics. The Data section
 shows collection counts before import and requires typing `IMPORT` to replace
 the listed collections.
 

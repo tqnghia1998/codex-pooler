@@ -5,10 +5,10 @@ import { Card } from '@astryxdesign/core/Card';
 import { EmptyState } from '@astryxdesign/core/EmptyState';
 import { Grid } from '@astryxdesign/core/Grid';
 import { Icon } from '@astryxdesign/core/Icon';
+import { IconButton } from '@astryxdesign/core/IconButton';
 import { Overlay } from '@astryxdesign/core/Overlay';
 import { Spinner } from '@astryxdesign/core/Spinner';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
-import { Tab, TabList, TabMenu } from '@astryxdesign/core/TabList';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Heading, Text } from '@astryxdesign/core/Text';
 import { TextInput } from '@astryxdesign/core/TextInput';
@@ -16,14 +16,13 @@ import { HStack, VStack } from '@astryxdesign/core/Layout';
 import { ArrowLeft, ChartNoAxesCombined, Download, RefreshCw, Search, Upload } from 'lucide-react';
 import { useLanguage } from './i18n.jsx';
 
-export function AdminAnalytics() {
+export function AdminAnalytics({ languageToggle }) {
   const { t, language } = useLanguage();
   const [analytics, setAnalytics] = useState(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [events, setEvents] = useState({ items: [], nextCursor: null });
-  const [tab, setTab] = useState('overview');
   const [eventSearch, setEventSearch] = useState('');
   const [eventQuery, setEventQuery] = useState('');
   const [eventDays, setEventDays] = useState('0');
@@ -125,128 +124,110 @@ export function AdminAnalytics() {
           <Text type="supporting" color="secondary">{t('adminSubtitle')}</Text>
           <Text type="supporting" color="secondary">{t('adminAsOf', { time: dateTime(analytics.sampledAt, language, t) })}</Text>
         </VStack>
-        <HStack gap={2} wrap="wrap">
-          <Button label={t('backToDashboard')} icon={<Icon icon={ArrowLeft} size="sm" />} variant="secondary" href="./" />
-          <Button label={t('refresh')} icon={<Icon icon={RefreshCw} size="sm" />} variant="primary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load()} />
+        <HStack gap={2} vAlign="center">
+          {compact
+            ? <IconButton label={t('backToDashboard')} tooltip={t('backToDashboard')} icon={<ArrowLeft size={16} />} size="sm" variant="secondary" href="./" />
+            : <Button label={t('backToDashboard')} icon={<Icon icon={ArrowLeft} size="sm" />} variant="secondary" href="./" />}
+          {compact
+            ? <IconButton label={t('refresh')} tooltip={t('refresh')} icon={<RefreshCw size={16} />} size="sm" variant="primary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load()} />
+            : <Button label={t('refresh')} icon={<Icon icon={RefreshCw} size="sm" />} variant="primary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load()} />}
+          {languageToggle}
         </HStack>
       </HStack>
       {error && <Banner title={t('adminRefreshFailed')} description={error} status="warning" />}
 
-      <TabList value={tab} onChange={setTab} aria-label={t('adminViews')}>
-        <Tab value="overview" label={t('adminOverview')} />
-        <Tab value="operations" label={t('adminOperations')} />
-        {compact
-          ? <TabMenu label={t('adminMore')} options={[
-            { value: 'usage', label: t('adminUsage') },
-            { value: 'activity', label: t('adminActivity') },
-            { value: 'data', label: t('adminDataTab') }
-          ]} />
-          : <>
-            <Tab value="usage" label={t('adminUsage')} />
-            <Tab value="activity" label={t('adminActivity')} />
-            <Tab value="data" label={t('adminDataTitle')} />
-          </>}
-      </TabList>
+      <Heading level={2}>{t('adminOverview')}</Heading>
+      <MetricGrid items={[
+        [t('adminMembers'), overview.accounts],
+        [t('adminLinkedProviders'), overview.linkedProviders],
+        [t('adminActiveOffers'), overview.activeOffers],
+        [t('adminActiveSessions'), overview.activeSessions],
+        [t('adminPendingApprovals'), overview.pendingTickets],
+        [t('adminOpenRequests'), overview.activeQuotaRequests]
+      ]} />
+      <Grid columns={{ minWidth: 280, max: 3, repeat: 'fill' }} gap={2}>
+        <InsightCard title={t('adminUsage')} rows={[
+          [t('adminSettledUsage'), `$${money(usage.settledMicros)}`],
+          [t('adminTodayUtc'), `$${money(usage.todayMicros)}`],
+          [t('adminRequests'), number(usage.requests)],
+          [t('adminSuccessRate'), successRate]
+        ]} />
+        <InsightCard title={t('adminRequestFunnel')} rows={[
+          [t('adminTotalRequests'), number(tickets.total)],
+          [t('adminApproved'), number(tickets.approved)],
+          [t('adminRejected'), number(tickets.rejected)],
+          [t('adminPendingApprovals'), number(tickets.pending)],
+          [t('adminApprovalRate'), approvalRate]
+        ]} />
+        <InsightCard title={t('adminProviderHealth')} rows={[
+          [t('adminSharingActive'), number(providers.sharingActive)],
+          [t('adminSharingPaused'), number(providers.sharingPaused)],
+          [t('adminUnavailableProviders'), number(providers.unavailable)],
+          [t('adminEmailPending'), number(analytics.email.pending)]
+        ]} />
+      </Grid>
+      <Text type="supporting" color="secondary">{t('adminMetricScope')}</Text>
 
-      {tab === 'overview' && (
-        <>
-          <MetricGrid items={[
-            [t('adminMembers'), overview.accounts],
-            [t('adminLinkedProviders'), overview.linkedProviders],
-            [t('adminActiveOffers'), overview.activeOffers],
-            [t('adminActiveSessions'), overview.activeSessions],
-            [t('adminPendingApprovals'), overview.pendingTickets],
-            [t('adminOpenRequests'), overview.activeQuotaRequests]
-          ]} />
-          <Grid columns={{ minWidth: 280, max: 3, repeat: 'fill' }} gap={2}>
-            <InsightCard title={t('adminUsage')} rows={[
-              [t('adminSettledUsage'), `$${money(usage.settledMicros)}`],
-              [t('adminTodayUtc'), `$${money(usage.todayMicros)}`],
-              [t('adminRequests'), number(usage.requests)],
-              [t('adminSuccessRate'), successRate]
-            ]} />
-            <InsightCard title={t('adminRequestFunnel')} rows={[
-              [t('adminTotalRequests'), number(tickets.total)],
-              [t('adminApproved'), number(tickets.approved)],
-              [t('adminRejected'), number(tickets.rejected)],
-              [t('adminPendingApprovals'), number(tickets.pending)],
-              [t('adminApprovalRate'), approvalRate]
-            ]} />
-            <InsightCard title={t('adminProviderHealth')} rows={[
-              [t('adminSharingActive'), number(providers.sharingActive)],
-              [t('adminSharingPaused'), number(providers.sharingPaused)],
-              [t('adminUnavailableProviders'), number(providers.unavailable)],
-              [t('adminEmailPending'), number(analytics.email.pending)]
-            ]} />
-          </Grid>
-          <Text type="supporting" color="secondary">{t('adminMetricScope')}</Text>
-        </>
-      )}
+      <Heading level={2}>{t('adminOperations')}</Heading>
+      <MetricGrid items={[
+        [t('adminUnavailableProviders'), providers.unavailable],
+        [t('adminSharingPaused'), providers.sharingPaused],
+        [t('adminEmailPending'), analytics.email.pending],
+        [t('adminEmailFailed'), analytics.email.failed]
+      ]} />
+      <InsightCard title={t('adminEmailDelivery')} rows={[
+        [t('adminEmailState'), t(analytics.email.enabled ? 'adminEnabled' : 'adminDisabled')],
+        [t('adminOldestPending'), analytics.email.oldestPendingAt ? dateTime(analytics.email.oldestPendingAt, language, t) : t('adminNone')],
+        [t('adminNextAttempt'), analytics.email.nextAttemptAt ? dateTime(analytics.email.nextAttemptAt, language, t) : t('adminNone')]
+      ]} />
+      <AnalyticsTable title={t('adminProviderHealth')} items={providers.details} columns={providerColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminNoProviders')} />
 
-      {tab === 'operations' && (
-        <>
-          <MetricGrid items={[
-            [t('adminUnavailableProviders'), providers.unavailable],
-            [t('adminSharingPaused'), providers.sharingPaused],
-            [t('adminEmailPending'), analytics.email.pending],
-            [t('adminEmailFailed'), analytics.email.failed]
-          ]} />
-          <InsightCard title={t('adminEmailDelivery')} rows={[
-            [t('adminEmailState'), t(analytics.email.enabled ? 'adminEnabled' : 'adminDisabled')],
-            [t('adminOldestPending'), analytics.email.oldestPendingAt ? dateTime(analytics.email.oldestPendingAt, language, t) : t('adminNone')],
-            [t('adminNextAttempt'), analytics.email.nextAttemptAt ? dateTime(analytics.email.nextAttemptAt, language, t) : t('adminNone')]
-          ]} />
-          <AnalyticsTable title={t('adminProviderHealth')} items={providers.details} columns={providerColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminNoProviders')} />
-        </>
-      )}
+      <VStack gap={2}>
+        <HStack justify="between" vAlign="center" wrap="wrap" gap={2}>
+          <Heading level={2}>{t('adminUsage')}</Heading>
+          <SegmentedControl label={t('adminUsageWindow')} value={usageDays} onChange={setUsageDays} size="sm">
+            <SegmentedControlItem value="7" label={t('adminSevenDays')} />
+            <SegmentedControlItem value="30" label={t('adminThirtyDays')} />
+          </SegmentedControl>
+        </HStack>
+        <Text type="supporting" color="secondary">{t('adminUsageTrackingNote')}</Text>
+      </VStack>
+      <AnalyticsTable title={t('adminDailyUsage')} items={dailyUsage} columns={dailyColumns} idKey="day" emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminUsageEmpty')} />
+      <Grid columns={{ minWidth: 360, max: 2, repeat: 'fill' }} gap={2}>
+        <AnalyticsTable title={t('adminTopProviders')} items={topProviders} columns={leaderColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminTopProvidersEmpty')} />
+        <AnalyticsTable title={t('adminTopConsumers')} items={topConsumers} columns={leaderColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminTopConsumersEmpty')} />
+      </Grid>
 
-      {tab === 'usage' && (
-        <>
-          <HStack justify="between" vAlign="center" wrap="wrap" gap={2}>
-            <Heading level={2}>{t('adminDailyUsage')}</Heading>
-            <SegmentedControl label={t('adminUsageWindow')} value={usageDays} onChange={setUsageDays} size="sm">
-              <SegmentedControlItem value="7" label={t('adminSevenDays')} />
-              <SegmentedControlItem value="30" label={t('adminThirtyDays')} />
-            </SegmentedControl>
+      <Heading level={2}>{t('adminActivity')}</Heading>
+      <HStack gap={2} wrap="wrap" vAlign="end">
+        <TextInput label={t('adminSearchEvents')} value={eventSearch} onChange={setEventSearch} width={300}
+          onKeyDown={(event) => { if (event.key === 'Enter') setEventQuery(eventSearch.trim()); }} />
+        <Button label={t('adminSearch')} icon={<Icon icon={Search} size="sm" />} variant="secondary"
+          onClick={() => eventQuery === eventSearch.trim() ? void load() : setEventQuery(eventSearch.trim())} />
+        <SegmentedControl label={t('adminActivityWindow')} value={eventDays} onChange={setEventDays} size="sm">
+          <SegmentedControlItem value="0" label={t('adminAll')} />
+          <SegmentedControlItem value="7" label={t('adminSevenDays')} />
+          <SegmentedControlItem value="30" label={t('adminThirtyDays')} />
+        </SegmentedControl>
+      </HStack>
+      <AnalyticsTable
+        title={t('adminRecentActivity')}
+        items={events.items}
+        columns={eventColumns}
+        emptyTitle={t('adminNoDataYet')}
+        emptyDescription={t('adminRecentActivityEmpty')}
+        footer={events.nextCursor && (
+          <HStack justify="center">
+            <Button label={t('adminLoadMore')} variant="secondary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load({ eventCursor: events.nextCursor, appendEvents: true })} />
           </HStack>
-          <Text type="supporting" color="secondary">{t('adminUsageTrackingNote')}</Text>
-          <AnalyticsTable title={t('adminDailyUsage')} items={dailyUsage} columns={dailyColumns} idKey="day" emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminUsageEmpty')} />
-          <Grid columns={{ minWidth: 360, max: 2, repeat: 'fill' }} gap={2}>
-            <AnalyticsTable title={t('adminTopProviders')} items={topProviders} columns={leaderColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminTopProvidersEmpty')} />
-            <AnalyticsTable title={t('adminTopConsumers')} items={topConsumers} columns={leaderColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminTopConsumersEmpty')} />
-          </Grid>
-        </>
-      )}
+        )}
+      />
 
-      {tab === 'activity' && (
-        <>
-          <HStack gap={2} wrap="wrap" vAlign="end">
-            <TextInput label={t('adminSearchEvents')} value={eventSearch} onChange={setEventSearch} width={300}
-              onKeyDown={(event) => { if (event.key === 'Enter') setEventQuery(eventSearch.trim()); }} />
-            <Button label={t('adminSearch')} icon={<Icon icon={Search} size="sm" />} variant="secondary"
-              onClick={() => eventQuery === eventSearch.trim() ? void load() : setEventQuery(eventSearch.trim())} />
-            <SegmentedControl label={t('adminActivityWindow')} value={eventDays} onChange={setEventDays} size="sm">
-              <SegmentedControlItem value="0" label={t('adminAll')} />
-              <SegmentedControlItem value="7" label={t('adminSevenDays')} />
-              <SegmentedControlItem value="30" label={t('adminThirtyDays')} />
-            </SegmentedControl>
-          </HStack>
-          <AnalyticsTable
-            title={t('adminRecentActivity')}
-            items={events.items}
-            columns={eventColumns}
-            emptyTitle={t('adminNoDataYet')}
-            emptyDescription={t('adminRecentActivityEmpty')}
-            footer={events.nextCursor && (
-              <HStack justify="center">
-                <Button label={t('adminLoadMore')} variant="secondary" isLoading={refreshing} isDisabled={refreshing} onClick={() => void load({ eventCursor: events.nextCursor, appendEvents: true })} />
-              </HStack>
-            )}
-          />
-        </>
-      )}
-
-      {tab === 'data' && <DataPortabilityCard backup={analytics.backup} onImported={() => void load()} />}
+      <HStack gap={2} vAlign="center">
+        <Icon icon={Download} size="lg" color="accent" />
+        <Heading level={2}>{t('adminDataTitle')}</Heading>
+      </HStack>
+      <DataPortabilityCard backup={analytics.backup} onImported={() => void load()} />
     </VStack>
   );
 }
@@ -328,10 +309,6 @@ function DataPortabilityCard({ backup, onImported }) {
   return (
     <Card padding={3}>
       <VStack gap={2}>
-        <HStack gap={2} vAlign="center">
-          <Icon icon={Download} size="lg" color="accent" />
-          <Heading level={3}>{t('adminDataTitle')}</Heading>
-        </HStack>
         <Text type="supporting" color="secondary">{t('adminDataDesc')}</Text>
         <Text type="supporting" color="secondary">{backupStatusText(backup, language, t)}</Text>
         {backup?.lastFailureAt && <Banner title={t('adminBackupFailed', { time: dateTime(backup.lastFailureAt, language, t) })} status="warning" />}
