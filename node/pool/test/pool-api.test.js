@@ -870,7 +870,7 @@ test('sharing API requires account sessions and CSRF while offers stay public to
         body: JSON.stringify({ offerId })
       });
       assert.equal(result.response.status, 400);
-      assert.match(result.body.error.message, /pending ticket already exists/);
+      assert.match(result.body.error.message, /pending request for this share/);
 
       result = await request(base, `/api/pool/tickets/${ticketId}/approve`, providerSession, {
         method: 'POST',
@@ -1747,7 +1747,7 @@ test('provider controls, named keys, and friend quota requests are available thr
         body: JSON.stringify({ quotaDollars: 4, message: 'x'.repeat(501) })
       });
       assert.equal(result.response.status, 400);
-      assert.match(result.body.error.message, /quota request message must be 500 characters or fewer/);
+      assert.match(result.body.error.message, /community request message must be 500 characters or fewer/);
 
       result = await request(base, '/api/pool/quota-requests', consumerSession, {
         method: 'POST',

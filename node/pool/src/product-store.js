@@ -792,7 +792,7 @@ export class ProductStore {
       this.notifyOfferParticipants(row.id, 'Quota offer expired', 'A QuotaHub offer expired without being approved.', `offer:${row.id}:expired`);
     }
     for (const row of expired.tickets) {
-      this.notifyTicketParticipants(row.id, 'Quota request expired', 'A pending QuotaHub request expired.', `ticket:${row.id}:expired`);
+      this.notifyTicketParticipants(row.id, 'Share request expired', 'A pending request for a share expired.', `ticket:${row.id}:expired`);
     }
     for (const row of expired.sessions) {
       this.notifySessionParticipants(row.id, 'Share session expired', 'A QuotaHub session reached its expiration time.', `session:${row.id}:expired`);
@@ -1324,10 +1324,10 @@ export class ProductStore {
   createTicket(accountId, { offerId }, upstreamStore) {
     this.expireDue(new Date(), { force: true });
     const offer = this.requireOffer(offerId);
-    if (offer.status !== 'active') throw new Error('offer is not accepting tickets');
+    if (offer.status !== 'active') throw new Error('this share is no longer accepting requests');
     const consumer = this.requireAccount(accountId);
     const consumerEmail = consumer.email?.toLowerCase() || '';
-    if (!canViewOffer(offer, accountId, consumerEmail)) throw forbidden('You are not authorized to view or request this offer');
+    if (!canViewOffer(offer, accountId, consumerEmail)) throw forbidden('You are not authorized to view or request this share');
     const upstream = upstreamStore.get(offer.upstream_id);
     if (!upstream) throw notFound();
     requireProviderQuota(upstream);
@@ -1337,11 +1337,11 @@ export class ProductStore {
     if (commitment.underfundedMicros > 0 || (commitment.offerBacking.get(offer.id) ?? offer.quota_micros) < offer.quota_micros) {
       throw new Error('offer is underfunded by the provider’s current quota');
     }
-    if (offer.provider_account_id === accountId) throw new Error('providers cannot request their own offer');
+    if (offer.provider_account_id === accountId) throw new Error('you cannot request your own share');
     const requestedMicros = Math.max(0, offer.quota_micros - this.offerAllocatedMicros(offer.id));
-    if (!requestedMicros) throw new Error('offer has no shareable quota remaining');
+    if (!requestedMicros) throw new Error('this share has no quota remaining');
     if (this.sqlite.prepare("SELECT 1 FROM sharing_tickets WHERE offer_id = ? AND consumer_account_id = ? AND status = 'pending'").get(offerId, accountId)) {
-      throw new Error('a pending ticket already exists for this offer');
+      throw new Error('you already have a pending request for this share');
     }
     const id = randomUUID();
     const now = new Date();
@@ -1355,8 +1355,8 @@ export class ProductStore {
     this.event(accountId, 'ticket', id, 'created', { requestedMicros, expiresAt: expiry });
     this.notifyAccount(
       offer.provider_account_id,
-      'New QuotaHub request',
-      'A friend requested your offered Codex quota. Open QuotaHub to approve or reject it.',
+      'New share request',
+      'Someone requested quota from your published share. Open QuotaHub to approve or reject the request.',
       `ticket:${id}:created`
     );
     return this.ticket(id, accountId, upstreamStore);
@@ -1442,10 +1442,10 @@ export class ProductStore {
     this.expireDue(new Date(), { force: true });
     const row = this.requireTicket(id);
     if (row.consumer_account_id !== accountId) throw forbidden();
-    if (row.status !== 'pending') throw new Error('only pending tickets can be cancelled');
+    if (row.status !== 'pending') throw new Error('only pending share requests can be cancelled');
     this.resolveTicket(row, 'cancelled');
     this.event(accountId, 'ticket', id, 'cancelled', {});
-    this.notifyTicketParticipants(id, 'QuotaHub request cancelled', 'A pending QuotaHub request was cancelled.', `ticket:${id}:cancelled`);
+    this.notifyTicketParticipants(id, 'Share request cancelled', 'A pending request for a share was cancelled.', `ticket:${id}:cancelled`);
     return this.ticket(id, accountId, upstreamStore);
   }
 
@@ -1453,10 +1453,10 @@ export class ProductStore {
     this.expireDue(new Date(), { force: true });
     const row = this.requireTicket(id);
     if (row.provider_account_id !== accountId) throw forbidden();
-    if (row.status !== 'pending') throw new Error('only pending tickets can be rejected');
+    if (row.status !== 'pending') throw new Error('only pending share requests can be rejected');
     this.resolveTicket(row, 'rejected');
     this.event(accountId, 'ticket', id, 'rejected', {});
-    this.notifyTicketParticipants(id, 'QuotaHub request rejected', 'A QuotaHub request was rejected. The offer is available to request again if it remains active.', `ticket:${id}:rejected`);
+    this.notifyTicketParticipants(id, 'Share request rejected', 'A request for a share was rejected. The share can be requested again if it remains active.', `ticket:${id}:rejected`);
     return this.ticket(id, accountId, upstreamStore);
   }
 
@@ -1466,7 +1466,7 @@ export class ProductStore {
     const approve = this.sqlite.transaction(() => {
       const ticket = this.requireTicket(id);
       if (ticket.provider_account_id !== accountId) throw forbidden();
-      if (ticket.status !== 'pending') throw new Error('only pending tickets can be approved');
+      if (ticket.status !== 'pending') throw new Error('only pending share requests can be approved');
       const offer = this.requireOffer(ticket.offer_id);
       if (offer.status !== 'active') throw new Error('offer is not active');
       const upstream = upstreamStore.get(offer.upstream_id);
@@ -1547,7 +1547,7 @@ export class ProductStore {
     });
     const sessionId = approve();
     if (replacementOfferId) this.notifyDemandForOffer(replacementOfferId, upstreamStore);
-    this.notifyTicketParticipants(id, 'QuotaHub request approved', 'Your QuotaHub request was approved. A share session is ready to use.', `ticket:${id}:approved`);
+    this.notifyTicketParticipants(id, 'Share request approved', 'A request for a share was approved. A share session is ready to use.', `ticket:${id}:approved`);
     return this.session(sessionId, accountId, upstreamStore);
   }
 
@@ -2311,7 +2311,7 @@ export class ProductStore {
     this.expireDue(new Date(), { force: true });
     const now = new Date();
     const quotaMicros = dollarsToMicros(quotaDollars);
-    const requestMessage = cleanSharingMessage(message, 'quota request');
+    const requestMessage = cleanSharingMessage(message, 'community request');
     const requestVisibility = visibility === 'restricted' ? 'restricted' : 'public';
     const cleanEmails = requestVisibility === 'restricted' ? parseAllowedEmails(allowedEmails) : [];
     if (requestVisibility === 'restricted' && cleanEmails.length === 0) {
@@ -2472,8 +2472,8 @@ export class ProductStore {
     const sessionId = grant();
     this.notifyAccount(
       this.sessionRow(sessionId).consumer_account_id,
-      'QuotaHub request granted',
-      'Your QuotaHub quota request was granted. A share session is ready to use.',
+      'Community request granted',
+      'A provider granted your community quota request. A share session is ready to use.',
       `quota-request:${id}:granted`
     );
     return {

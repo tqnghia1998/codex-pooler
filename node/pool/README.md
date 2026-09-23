@@ -138,9 +138,9 @@ credentials and closes related offers and share sessions.
    and an optional message visible to members who can view the offer.
    Offers are checked against the provider's current stored balance. Claude and
    AIS balances are approximately one hour delayed when supplied by Loop.
-2. A consumer requests a dollar quota through a ticket.
-3. The provider approves the request, changes the approved amount, or rejects
-   it. A partial approval closes the original offer, creates a replacement
+2. A consumer sends a share request (`ticket` in the API) for a dollar quota.
+3. The provider approves the share request, changes the approved amount, or
+   rejects it. A partial approval closes the original offer, creates a replacement
    offer for the remaining quota, and moves other pending tickets to it.
 4. Approval atomically creates a share session and a `cp_share_...` key.
 5. The consumer can instead reveal one `cp_personal_...` key that routes each
@@ -197,23 +197,28 @@ per request.
 Provider and consumer rankings are available only in admin analytics; the
 member dashboard does not show community leaderboards.
 
-## Friend Requests
+## Community Requests and Share Requests
 
-A user who cannot find a suitable offer can post one request for the amount
-they need, either publicly or to an email allowlist. An optional message (up to
-500 characters) is visible to members who can view the request. Posting a new
-request cancels their previous active request. Users can view and cancel their own
+A community request asks providers for quota without selecting a specific share;
+the provider can grant it directly. A share request is sent against a specific
+published share and must be approved by that share's provider. The provider
+dashboard separates community requests from requests for the provider's shares;
+the consumer dashboard separates posted requests from requests sent for shares.
+
+A user who cannot find a suitable share can post one community request for the
+amount they need, either publicly or to an email allowlist. An optional message
+(up to 500 characters) is visible to members who can view the request. Posting
+a new request cancels their previous active request. Users can view and cancel their own
 active requests from the consumer dashboard. A provider who can see the request
 can grant it directly from one linked provider. A grant at or above the
 requested amount fulfills the request; a smaller grant fulfills the original
 and creates a replacement request for the remaining amount with the same
-message, visibility, and expiry. Direct grants and offer-ticket approvals are
-independent:
-granting a request does not cancel offer tickets, and approving an offer ticket
-does not fulfill a quota request. Every grant atomically creates a share
-session and `cp_share_...` key. Requests contain no payment, rating,
-or guarantee fields.
-The admin request funnel counts offer tickets only; direct grants appear as
+message, visibility, and expiry. Direct grants and share-request approvals are
+independent: granting a community request does not cancel share requests, and
+approving a share request does not fulfill a community request. Every grant
+atomically creates a share session and `cp_share_...` key. Requests contain no
+payment, rating, or guarantee fields.
+The admin share-request funnel excludes direct grants, which appear as
 separate `direct_grant/created` audit events.
 
 The admin page shows Overview, Operations, Usage, Activity, and Data together
@@ -265,7 +270,7 @@ configured, it sends them in the background and retries failures with bounded
 backoff. Without SMTP, email notifications are skipped and pending outbox
 entries are removed. There is no in-app notification inbox.
 
-Email events cover ticket creation and resolution, session expiry and
+Email events cover share-request creation and resolution, session expiry and
 revocation, key replacement and revocation, provider pause/resume,
 provider-unavailable/recovered/reset transitions, and session usage crossing
 80%, 95%, or 100%. Email delivery uses the account email obtained from Codex

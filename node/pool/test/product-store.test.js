@@ -472,11 +472,11 @@ test('migrates and validates optional quota request messages', () => {
     assert.equal(sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 'x'.repeat(500) }).message.length, 500);
     assert.throws(
       () => sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 'x'.repeat(501) }),
-      /quota request message must be 500 characters or fewer/
+      /community request message must be 500 characters or fewer/
     );
     assert.throws(
       () => sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 42 }),
-      /quota request message must be text/
+      /community request message must be text/
     );
     assert.equal(sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: '   ' }).message, null);
   } finally {
@@ -592,6 +592,32 @@ test('replacement offer notifications skip consumers with migrated pending ticke
       ORDER BY account_id
     `).all().map(({ account_id }) => account_id);
     assert.deepEqual(availabilityRecipients, [availableConsumer.id]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('email notifications distinguish share requests from community requests', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-request-emails-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'request-emails', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'email-provider@example.com');
+    const consumer = account(sharingStore, 'email-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    sharingStore.setEmailNotificationsEnabled(true);
+    upstreamStore.setQuota(upstream.id, { remainingDollars: 20, remainingPercent: 100, observedAt: new Date().toISOString() });
+
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id }, upstreamStore);
+    assert.ok(sharingStore.pendingEmails().some(({ subject }) => subject === 'New share request'));
+    sharingStore.approveTicket(provider.id, ticket.id, {}, upstreamStore);
+    assert.ok(sharingStore.pendingEmails().some(({ subject }) => subject === 'Share request approved'));
+
+    const request = sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 3 });
+    sharingStore.grantQuotaRequest(provider.id, request.id, { upstreamId: upstream.id }, upstreamStore);
+    assert.ok(sharingStore.pendingEmails().some(({ subject }) => subject === 'Community request granted'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

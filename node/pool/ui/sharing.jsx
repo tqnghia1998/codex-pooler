@@ -904,8 +904,8 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           quotaRequests={quotaRequests}
           tablePage={sharingTable}
           emailQuery={emailQuery}
-          emptyTitle={t('emptyQuotaRequestsTitle')}
-          emptyDescription={t('emptyQuotaRequestsDesc')}
+          emptyTitle={t(view === 'my-quota-requests' ? 'emptyMyQuotaRequestsTitle' : 'emptyQuotaRequestsTitle')}
+          emptyDescription={t(view === 'my-quota-requests' ? 'emptyMyQuotaRequestsDesc' : 'emptyQuotaRequestsDesc')}
           offerableUpstreams={offerableUpstreams}
           onCancel={(quotaRequest) => void mutate(
             () => api(`/api/pool/quota-requests/${quotaRequest.id}/cancel`, { method: 'POST', body: '{}' }),
@@ -1688,7 +1688,7 @@ function QuotaRequestsView({ quotaRequests, emailQuery = '', emptyTitle, emptyDe
       )
     }
   ];
-  return <PaginatedSharingTable items={quotaRequests} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('requestsTable')} tablePage={tablePage} />;
+  return <PaginatedSharingTable items={quotaRequests} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('communityRequestsTable')} tablePage={tablePage} />;
 }
 
 function renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading, t }) {
@@ -1786,7 +1786,7 @@ function TicketsView({ tickets, emailQuery = '', emptyTitle, emptyDescription, o
       )
     }
   ];
-  return <PaginatedSharingTable items={tickets} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('requestsTable')} tablePage={tablePage} />;
+  return <PaginatedSharingTable items={tickets} columns={columns} emailQuery={emailQuery} emptyTitle={emptyTitle} emptyDescription={emptyDescription} tableLabel={t('shareRequestsTable')} tablePage={tablePage} />;
 }
 
 function SessionsView({
