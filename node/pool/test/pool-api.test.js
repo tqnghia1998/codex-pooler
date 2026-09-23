@@ -802,6 +802,7 @@ test('sharing API requires account sessions and CSRF while offers stay public to
         'community-offers': 1,
         'my-offers': 0,
         'quota-requests': 0,
+        'my-quota-requests': 0,
         'sent-requests': 0,
         approvals: 0,
         'my-access': 0,
@@ -1632,6 +1633,132 @@ test('provider controls, named keys, and friend quota requests are available thr
         method: 'POST',
         body: '{}'
       });
+
+      result = await request(base, '/api/pool/quota-requests', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({
+          quotaDollars: 4,
+          visibility: 'restricted',
+          allowedEmails: ['reliability-provider@example.com']
+        })
+      });
+      assert.equal(result.response.status, 201);
+      assert.equal(result.body.quotaRequest.visibility, 'restricted');
+      assert.deepEqual(result.body.quotaRequest.allowedEmails, ['reliability-provider@example.com']);
+      const restrictedQuotaRequestId = result.body.quotaRequest.id;
+
+      result = await request(base, '/api/pool/quota-requests', providerSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.quotaRequests.some((quotaRequest) => quotaRequest.id === restrictedQuotaRequestId), true);
+
+      result = await request(base, '/api/pool/quota-requests', otherSession);
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.quotaRequests.some((quotaRequest) => quotaRequest.id === restrictedQuotaRequestId), false);
+
+      result = await request(base, '/api/pool/quota-requests?role=mine&includePast=false', consumerSession);
+      assert.equal(result.response.status, 200);
+      assert.deepEqual(result.body.quotaRequests.map(({ id }) => id), [restrictedQuotaRequestId]);
+      assert.equal(result.body.totalItems, 1);
+      assert.equal((await request(base, '/api/pool/quota-requests?role=mine', providerSession)).body.totalItems, 0);
+      assert.equal((await request(base, '/api/pool/sharing-counts', consumerSession)).body.counts['my-quota-requests'], 1);
+
+      result = await request(base, '/api/pool/offers', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 2 })
+      });
+      assert.equal(result.response.status, 201);
+      const pendingOfferId = result.body.offer.id;
+      result = await request(base, '/api/pool/tickets', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({ offerId: pendingOfferId })
+      });
+      assert.equal(result.response.status, 201);
+      const pendingTicketId = result.body.ticket.id;
+      assert.equal(sharingStore.sqlite.prepare('SELECT demand_request_id FROM sharing_tickets WHERE id = ?').get(pendingTicketId).demand_request_id, null);
+      sharingStore.sqlite.prepare('UPDATE sharing_tickets SET demand_request_id = ? WHERE id = ?')
+        .run(restrictedQuotaRequestId, pendingTicketId);
+      const ticketFunnelBeforeGrant = sharingStore.adminAnalytics().tickets;
+
+      result = await request(base, `/api/pool/quota-requests/${restrictedQuotaRequestId}/grant`, providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 1.5 })
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.session.grantedQuotaDollars, 1.5);
+      assert.equal(result.body.quotaRequest.status, 'fulfilled');
+      assert.equal(result.body.replacementQuotaRequest.quotaDollars, 2.5);
+      assert.equal(result.body.replacementQuotaRequest.visibility, 'restricted');
+      assert.deepEqual(sharingStore.adminAnalytics().tickets, ticketFunnelBeforeGrant);
+      const directGrantEvent = sharingStore.sqlite.prepare(`
+        SELECT actor_account_id, detail_json
+        FROM sharing_events
+        WHERE entity_type = 'direct_grant' AND entity_id = ? AND action = 'created'
+      `).get(result.body.session.id);
+      assert.equal(directGrantEvent.actor_account_id, provider.id);
+      assert.deepEqual(JSON.parse(directGrantEvent.detail_json), {
+        quotaRequestId: restrictedQuotaRequestId,
+        grantedMicros: 1_500_000,
+        replacementRequestId: result.body.replacementQuotaRequest.id
+      });
+      assert.equal(sharingStore.adminAnalytics().recentEvents.some((event) => (
+        event.entityType === 'direct_grant' && event.action === 'created'
+      )), true);
+      const replacementRequestId = result.body.replacementQuotaRequest.id;
+      assert.equal(sharingStore.sqlite.prepare('SELECT status FROM sharing_tickets WHERE id = ?').get(pendingTicketId).status, 'pending');
+      assert.equal(sharingStore.sqlite.prepare(`
+        SELECT sharing_tickets.demand_request_id
+        FROM sharing_tickets JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
+        WHERE sharing_offers.internal_only = 1
+      `).get().demand_request_id, null);
+
+      result = await request(base, '/api/pool/offers', providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 1 })
+      });
+      assert.equal(result.response.status, 201);
+      result = await request(base, '/api/pool/tickets', consumerSession, {
+        method: 'POST',
+        body: JSON.stringify({ offerId: result.body.offer.id })
+      });
+      assert.equal(result.response.status, 201);
+      const siblingTicketId = result.body.ticket.id;
+      sharingStore.sqlite.prepare('UPDATE sharing_tickets SET demand_request_id = ? WHERE id IN (?, ?)')
+        .run(replacementRequestId, pendingTicketId, siblingTicketId);
+      result = await request(base, `/api/pool/tickets/${pendingTicketId}/approve`, providerSession, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(sharingStore.sqlite.prepare('SELECT status FROM sharing_tickets WHERE id = ?').get(siblingTicketId).status, 'pending');
+      assert.equal(sharingStore.quotaRequest(replacementRequestId, consumer.id).status, 'active');
+      assert.equal(sharingStore.listSessions(consumer.id, store).length, 2);
+      assert.deepEqual(sharingStore.adminAnalytics().tickets, {
+        ...ticketFunnelBeforeGrant,
+        total: ticketFunnelBeforeGrant.total + 1,
+        approved: ticketFunnelBeforeGrant.approved + 1
+      });
+      assert.equal(sharingStore.sqlite.prepare(
+        'SELECT COUNT(*) AS count FROM sharing_offers WHERE internal_only = 1'
+      ).get().count, 1);
+      assert.equal(sharingStore.listOffers(provider.id, store).some((offer) => offer.internalOnly), false);
+
+      result = await request(base, '/api/pool/quota-requests?role=mine&includePast=false', consumerSession);
+      assert.deepEqual(result.body.quotaRequests.map(({ id }) => id), [replacementRequestId]);
+      result = await request(base, `/api/pool/quota-requests/${replacementRequestId}/grant`, providerSession, {
+        method: 'POST',
+        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 3 })
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.session.grantedQuotaDollars, 3);
+      assert.equal(result.body.quotaRequest.status, 'fulfilled');
+      assert.equal(result.body.replacementQuotaRequest, null);
+      assert.deepEqual(sharingStore.adminAnalytics().tickets, {
+        ...ticketFunnelBeforeGrant,
+        total: ticketFunnelBeforeGrant.total + 1,
+        approved: ticketFunnelBeforeGrant.approved + 1
+      });
+      assert.equal(sharingStore.sqlite.prepare('SELECT status FROM sharing_tickets WHERE id = ?').get(siblingTicketId).status, 'pending');
+
       result = await request(base, '/api/pool/offers', providerSession, {
         method: 'POST',
         body: JSON.stringify({
