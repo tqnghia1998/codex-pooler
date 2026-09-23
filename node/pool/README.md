@@ -80,11 +80,10 @@ The paste dialog accepts raw JSON and JSON surrounded by standalone Markdown
 code-fence lines. When Codex rotates an enterprise SSO subject, an import with
 the same email lands on the same account and refreshes the linked credential.
 
-Provider tokens are never included in ordinary browser account or upstream
-responses and are never placed in `localStorage`. The signed-in owner can
-explicitly reveal the current credential export from a linked provider card.
-Browser sessions use opaque cookies and mutating management requests
-require a session-bound CSRF token.
+Provider tokens are never included in browser account or upstream responses
+and are never placed in `localStorage`. Linked provider credentials cannot be
+viewed or exported by a signed-in member. Browser sessions use opaque cookies
+and mutating management requests require a session-bound CSRF token.
 
 QuotaHub account sessions are permanent until logout or revocation. The
 browser cookies are issued with a ten-year lifetime; clearing cookies still
@@ -127,11 +126,10 @@ external consumption within the delay window can make the actual balance lower. 
 updates Codex quota and, when configured, Claude and AIS monthly balances. Use
 **Add AIS project** and its **How to get AIS project** guide to retrieve
 `project_id` and `api_key` from Compass.
-Every linked-provider overview shows one informational delayed-estimate notice:
-Codex, Claude, and AIS values can all lag their live provider quota. The
-publish-offer form intentionally does not repeat that notice. Unlinking a
-provider removes its saved credentials and closes related offers and share
-sessions.
+Linked-provider percentage bars have a help icon explaining that Codex,
+Claude, and AIS estimates can lag their live provider quota. Unknown-quota
+cards retain their own explanation. Unlinking a provider removes its saved
+credentials and closes related offers and share sessions.
 
 ## Sharing Flow
 
@@ -287,7 +285,6 @@ POST   /api/pool/upstreams/claude                   { token|accessToken|authJson
 POST   /api/pool/upstreams/ais                      { projectId, projectKey }
 PATCH  /api/pool/upstreams/:id                      AIS: { projectId, projectKey? }; Claude: { token|accessToken|authJson }
 DELETE /api/pool/upstreams/:id                      removes credentials; revokes related offers and sessions
-GET    /api/pool/upstreams/credentials
 POST   /api/pool/upstreams/:id/refresh-quota        Codex quota or optional delayed Claude/AIS observation
 POST   /api/pool/upstreams/:id/test-connection
 GET    /api/pool/providers/:id

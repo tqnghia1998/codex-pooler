@@ -6,7 +6,6 @@ import { fileURLToPath } from 'node:url';
 import { Store } from '../../src/store.js';
 import {
   deriveClaudeAccountId,
-  exportUpstreamCredentials,
   parseClaudeAuthJson,
   claudeOAuthInputError,
   isSupportedClaudeOAuthUpstream,
@@ -743,19 +742,6 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
       throw new HttpError(400, 'invalid_request', `Import failed: ${error.message}`);
     }
     sendJson(res, 200, { imported });
-    return;
-  }
-  if (req.method === 'GET' && resource === 'upstreams' && id === 'credentials' && parts.length === 4) {
-    const credentials = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-      .flatMap(({ upstreamId }) => {
-        const upstream = store.get(upstreamId);
-        return upstream ? [{
-          id: upstream.id,
-          name: upstream.email || upstream.name,
-          credentials: exportUpstreamCredentials(upstream, store.credentials(upstream.id))
-        }] : [];
-      });
-    sendJson(res, 200, { credentials });
     return;
   }
   if (req.method === 'POST' && resource === 'upstreams' && id && action === 'refresh-quota') {

@@ -384,48 +384,32 @@ test('auth.json sign-in imports credentials and returns only public account data
   }
 });
 
-test('an account can reveal credentials only for its linked Codex upstreams', async () => {
+test('members cannot export linked provider credentials', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-share-credentials-api-'));
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
     const first = account(sharingStore, 'credentials-first');
-    const second = account(sharingStore, 'credentials-second');
     const firstUpstream = store.create({ type: 'codex', authJson: authJson({
       subject: 'credentials-first',
       email: 'first@example.com',
       accountId: 'first-account',
       refreshToken: 'first-refresh'
     }) });
-    const secondUpstream = store.create({ type: 'codex', authJson: authJson({
-      subject: 'credentials-second',
-      email: 'second@example.com',
-      accountId: 'second-account',
-      refreshToken: 'second-refresh'
-    }) });
     sharingStore.linkUpstream(first.id, firstUpstream.id);
-    sharingStore.linkUpstream(second.id, secondUpstream.id);
     const firstSession = sharingStore.createAccountSession(first.id);
     const server = createServer(createApp({ store, productStore: sharingStore }));
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
-      const revealed = await request(base, '/api/pool/upstreams/credentials', firstSession, { csrf: false });
-      assert.equal(revealed.response.status, 200);
-      assert.deepEqual(revealed.body.credentials, [{
-        id: firstUpstream.id,
-        name: 'first@example.com',
-        credentials: {
-          auth_mode: 'chatgpt',
-          OPENAI_API_KEY: null,
-          tokens: {
-            id_token: store.credentials(firstUpstream.id).idToken,
-            access_token: store.credentials(firstUpstream.id).accessToken,
-            refresh_token: 'first-refresh',
-            account_id: 'first-account'
-          }
-        }
-      }]);
+      const denied = await request(base, '/api/pool/upstreams/credentials', firstSession, { csrf: false });
+      assert.equal(denied.response.status, 404);
+      assert.equal(denied.body.error.code, 'not_found');
+      assert.equal(JSON.stringify(denied.body).includes('first-refresh'), false);
+      const upstreams = await request(base, '/api/pool/upstreams', firstSession, { csrf: false });
+      assert.equal(upstreams.response.status, 200);
+      assert.equal(upstreams.body.upstreams.length, 1);
+      assert.equal(JSON.stringify(upstreams.body).includes('first-refresh'), false);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

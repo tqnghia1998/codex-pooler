@@ -28,7 +28,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
-import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling, Trophy, Unplug } from 'lucide-react';
+import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, RefreshCw, Scaling, Trophy, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { CommunityBanner } from './CommunityBanner.jsx';
 import { useLanguage } from './i18n.jsx';
@@ -193,7 +193,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [ticketDialog, setTicketDialog] = useState(null);
   const [sessionDialog, setSessionDialog] = useState(null);
   const [keyDialog, setKeyDialog] = useState(null);
-  const [credentialsDialog, setCredentialsDialog] = useState(null);
   const [personalKeys, setPersonalKeys] = useState([]);
   const [personalKeyDialog, setPersonalKeyDialog] = useState(null);
   const [personalKeyRevokeTarget, setPersonalKeyRevokeTarget] = useState(null);
@@ -555,22 +554,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     }
   };
 
-  const revealCredentials = async () => {
-    try {
-      const data = await api('/api/pool/upstreams/credentials');
-      if (!data.credentials?.length) {
-        onNotice(t('noProviderCredentials'), true);
-        return;
-      }
-      setCredentialsDialog({
-        entries: data.credentials,
-        selectedId: data.credentials[0].id
-      });
-    } catch (nextError) {
-      onNotice(nextError.message, true);
-    }
-  };
-
   const testConnection = async (upstream) => {
     setTestingUpstreamId(upstream.id);
     try {
@@ -718,15 +701,11 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       />
       <LeaderboardView />
 
-      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-        <VStack gap={1}>
-          <HStack gap={2} vAlign="center" wrap="wrap">
-            <Heading level={2}>{t('quotaSharing')}</Heading>
-            <Badge label={accountLabel(account, t)} variant="neutral" />
-          </HStack>
-        </VStack>
-        <HStack gap={1} wrap="wrap">
-          <Button label={t('signOut')} variant="secondary" onClick={() => void logout()} />
+      <HStack gap={2} vAlign="center" wrap="wrap">
+        <Heading level={2}>{t('quotaSharing')}</Heading>
+        <HStack gap={1} vAlign="center">
+          <Badge label={accountLabel(account, t)} variant="neutral" />
+          <IconButton label={t('signOut')} tooltip={t('signOut')} icon={<LogOut size={16} />} size="sm" variant="secondary" onClick={() => void logout()} />
         </HStack>
       </HStack>
 
@@ -749,7 +728,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               oauthToken: '',
               authJson: ''
             })}
-            onRevealCredentials={() => void revealCredentials()}
             onTestConnection={(upstream) => void testConnection(upstream)}
             testingUpstreamId={testingUpstreamId}
             onToggleSharing={(upstream) => void mutate(
@@ -1179,12 +1157,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         }, sessionDialog?.mode === 'add' ? t('sessionQuotaAdded') : t('sessionUpdated'))}
       />
       <KeyDialog value={keyDialog} onClose={() => setKeyDialog(null)} onNotice={onNotice} />
-      <CredentialsDialog
-        value={credentialsDialog}
-        onClose={() => setCredentialsDialog(null)}
-        onChange={setCredentialsDialog}
-        onNotice={onNotice}
-      />
       <AuthJsonLoginDialog
         isOpen={authJsonDialog}
         value={authJson}
@@ -1300,7 +1272,6 @@ function QuotaOverview({
   onEditAis,
   onAddClaude,
   onEditClaude,
-  onRevealCredentials,
   onTestConnection,
   testingUpstreamId,
   onToggleSharing,
@@ -1342,15 +1313,9 @@ function QuotaOverview({
             <Button label={t('linkCodex')} size="sm" variant="secondary" isDisabled={linkedTypes.has('codex')} onClick={onImportAuthJson} />
             <Button label={t('linkClaude')} size="sm" variant="secondary" isDisabled={linkedTypes.has('claude')} onClick={onAddClaude} />
             <Button label={t('linkAis')} size="sm" variant="secondary" isDisabled={linkedTypes.has('ais')} onClick={onAddAis} />
-            <Button label={t('credentials')} size="sm" variant="ghost" onClick={onRevealCredentials} />
-            <Button label={t('refreshQuota')} size="sm" variant="ghost" isLoading={isRefreshing} onClick={onRefresh} />
+            <IconButton label={t('refreshQuota')} tooltip={t('refreshQuota')} icon={<RefreshCw size={16} />} size="sm" variant="ghost" isLoading={isRefreshing} isDisabled={isRefreshing} onClick={onRefresh} />
           </HStack>
         </HStack>
-        <Banner
-          title={t('delayedQuotaWarningTitle')}
-          description={t('delayedQuotaWarningDescription')}
-          status="info"
-        />
         <Grid columns={PROVIDER_CARD_GRID_COLUMNS} gap={2}>
           {orderedUpstreams.map((upstream) => (
             <QuotaCard
@@ -1493,13 +1458,24 @@ function QuotaCard({ upstream, onImportAuthJson, onTestConnection, isTestingConn
             <Text weight="bold" maxLines={1}>{quotaRemaining(t, quota)}</Text>
           )}
           {!hasUnknownQuota && percentage !== null && (
-            <ProgressBar
-              label={t('providerQuotaRemaining')}
-              isLabelHidden
-              value={percentage}
-              max={100}
-              variant={quotaProgressVariant(percentage)}
-            />
+            <HStack gap={1} vAlign="center">
+              <StackItem size="fill">
+                <ProgressBar
+                  label={t('providerQuotaRemaining')}
+                  isLabelHidden
+                  value={percentage}
+                  max={100}
+                  variant={quotaProgressVariant(percentage)}
+                />
+              </StackItem>
+              <IconButton
+                label={t('quotaEstimateInfo')}
+                tooltip={t('quotaEstimateExplanation')}
+                icon={<CircleHelp size={16} />}
+                size="sm"
+                variant="ghost"
+              />
+            </HStack>
           )}
           <Text type="supporting" color="secondary" maxLines={1}>
             {hasUnknownQuota ? advisoryQuotaSummary(t, advisoryQuota, dedicatedAppName) : quotaTiming(t, quota)}
@@ -2670,46 +2646,6 @@ function KeyDialog({ value, onClose, onNotice }) {
               <Button label={t('copy')} variant="primary" onClick={async () => {
                 await navigator.clipboard.writeText(value.apiKey);
                 onNotice(t('apiKeyCopied'));
-              }} />
-              <Button label={t('done')} variant="secondary" onClick={onClose} />
-            </HStack>
-          </LayoutFooter>
-        )}
-      />
-    </Dialog>
-  );
-}
-
-function CredentialsDialog({ value, onClose, onChange, onNotice }) {
-  const { t } = useLanguage();
-  const selected = value?.entries.find((entry) => entry.id === value.selectedId);
-  return (
-    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} width={640}>
-      <Layout
-        header={<DialogHeader title={t('currentCredentials')} subtitle={selected?.name} onOpenChange={onClose} hasDivider />}
-        content={(
-          <LayoutContent>
-            <VStack gap={3}>
-              <Banner title={t('providerCredentials')} description={t('providerCredentialsDesc')} status="warning" />
-              {value?.entries.length > 1 && (
-                <Selector
-                  label={t('provider')}
-                  options={value.entries.map((entry) => ({ value: entry.id, label: entry.name }))}
-                  value={value.selectedId}
-                  onChange={(selectedId) => onChange({ ...value, selectedId })}
-                  width="100%"
-                />
-              )}
-              <TextArea label={t('credentialData')} value={selected ? JSON.stringify(selected.credentials, null, 2) : ''} rows={20} isReadOnly hasSpellCheck={false} />
-            </VStack>
-          </LayoutContent>
-        )}
-        footer={(
-          <LayoutFooter hasDivider>
-            <HStack justify="end" gap={2}>
-              <Button label={t('copy')} variant="primary" onClick={async () => {
-                await navigator.clipboard.writeText(JSON.stringify(selected.credentials, null, 2));
-                onNotice(t('credentialsCopied'));
               }} />
               <Button label={t('done')} variant="secondary" onClick={onClose} />
             </HStack>

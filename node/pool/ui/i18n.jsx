@@ -88,7 +88,6 @@ const DICTIONARY = {
     'linkCodex': 'Link Codex',
     'linkClaude': 'Link Claude',
     'linkAis': 'Link AIS',
-    'credentials': 'Credentials',
     'refreshQuota': 'Refresh quota',
     'reconnect': 'Reconnect',
     'updateToken': 'Update token',
@@ -115,8 +114,8 @@ const DICTIONARY = {
     'dataThroughAt': 'estimated through {date}',
     'approximatelyOneHourDelayed': 'approximately 1 hour delayed',
     'delayedByHours': 'about {hours} hours delayed',
-    'delayedQuotaWarningTitle': 'Delayed quota estimate',
-    'delayedQuotaWarningDescription': 'Quota estimates for Codex, Claude, and AIS are not real-time. The provider’s live quota remains authoritative and can still limit requests.',
+    'quotaEstimateInfo': 'About quota estimates',
+    'quotaEstimateExplanation': 'Quota estimates for Codex, Claude, and AIS are not real-time. The provider’s live quota remains authoritative and can still limit requests.',
     'externalQuotaNotice': 'External quota notice',
     'claudeDedicatedApp': 'Claude Desktop or Anthropic Console',
     'aisDedicatedApp': 'AIS Switch',
@@ -162,7 +161,6 @@ const DICTIONARY = {
     'codexQuotaRefreshed': 'Codex quota refreshed',
     'quotaDataRefreshed': 'Quota data refreshed',
     'delayedQuotaUnavailable': 'Delayed Claude and AIS quota data is not configured',
-    'noProviderCredentials': 'No linked provider credentials found',
     'connectionSuccess': 'Connected through {endpoint} with {model} in {latency} ms{answer}',
     'connectionAnswer': " with answer '{answer}'",
 
@@ -376,13 +374,6 @@ const DICTIONARY = {
     'copy': 'Copy',
     'apiKeyCopied': 'API key copied',
 
-    // Credentials dialog
-    'currentCredentials': 'Current credentials',
-    'providerCredentials': 'Provider credentials',
-    'providerCredentialsDesc': 'This is the current credential data for your linked provider.',
-    'credentialData': 'Credential data',
-    'credentialsCopied': 'Credentials copied',
-
     // Helpers
     'unknownAccount': 'Unknown account',
     'quotaNotRefreshed': 'Quota has not been refreshed',
@@ -535,7 +526,6 @@ const DICTIONARY = {
     'linkCodex': '绑定 Codex',
     'linkClaude': '绑定 Claude',
     'linkAis': '绑定 AIS',
-    'credentials': '凭证导出',
     'refreshQuota': '刷新额度',
     'reconnect': '重新连接',
     'updateToken': '更新 Token',
@@ -562,8 +552,8 @@ const DICTIONARY = {
     'dataThroughAt': '预计数据截至 {date}',
     'approximatelyOneHourDelayed': '数据约延迟 1 小时',
     'delayedByHours': '数据约延迟 {hours} 小时',
-    'delayedQuotaWarningTitle': '延迟额度估算',
-    'delayedQuotaWarningDescription': 'Codex、Claude 和 AIS 的额度估算不是实时数据。提供方的实时额度仍为准，并可能继续限制请求。',
+    'quotaEstimateInfo': '额度估算说明',
+    'quotaEstimateExplanation': 'Codex、Claude 和 AIS 的额度估算不是实时数据。提供方的实时额度仍为准，并可能继续限制请求。',
     'externalQuotaNotice': '外部额度说明',
     'claudeDedicatedApp': 'Claude Desktop 或 Anthropic Console',
     'aisDedicatedApp': 'AIS Switch',
@@ -609,7 +599,6 @@ const DICTIONARY = {
     'codexQuotaRefreshed': 'Codex 额度已刷新',
     'quotaDataRefreshed': '额度数据已刷新',
     'delayedQuotaUnavailable': '尚未配置 Claude 与 AIS 延迟额度数据',
-    'noProviderCredentials': '未找到已绑定提供方的凭证',
     'connectionSuccess': '已通过 {endpoint} 连接，模型 {model}，耗时 {latency} 毫秒{answer}',
     'connectionAnswer': "，应答 '{answer}'",
 
@@ -822,13 +811,6 @@ const DICTIONARY = {
     'noModelsAvailable': '暂无可用模型。',
     'copy': '复制',
     'apiKeyCopied': 'API 密钥已复制',
-
-    // Credentials dialog
-    'currentCredentials': '当前凭证',
-    'providerCredentials': '提供方凭证',
-    'providerCredentialsDesc': '这是您已绑定提供方的当前凭证数据。',
-    'credentialData': '凭证数据',
-    'credentialsCopied': '凭证已复制',
 
     // Helpers
     'unknownAccount': '未知账户',
