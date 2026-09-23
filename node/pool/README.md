@@ -221,7 +221,11 @@ The admin page shows Overview, Operations, Usage, Activity, and Data together
 in one scrollable view, with the language toggle beside the header actions.
 Operations lists linked providers with their current issue, sharing status,
 last observation, and active share/session record counts; it also shows
-aggregate email queue health without exposing message contents. Usage displays
+aggregate email queue health without exposing message contents. It lists every
+retained sharing session, including direct grants and ended sessions, with the
+provider, recipient, and unspent/granted session quota. The unspent amount is
+the grant minus settled usage, not a live provider balance or a guarantee that
+an ended session is usable. Usage displays
 UTC daily session request, success, failure, and settled-usage totals recorded
 from this version onward for up to 90 days. Earlier daily history cannot be
 reconstructed; the older aggregate usage totals cover retained sessions only.

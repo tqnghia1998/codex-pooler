@@ -570,6 +570,18 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       VALUES ('admin-session', 'admin-offer', 'admin-ticket', ?, ?, 'admin-upstream', 'default', 5000000, 2500000, 'active', NULL, ?, ?)
     `).run(admin.id, member.id, now, now);
     sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, internal_only, status, created_at, updated_at)
+      VALUES ('admin-direct-offer', ?, 'admin-upstream', 5000000, 1, 'closed', ?, ?)
+    `).run(admin.id, now, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_tickets (id, offer_id, provider_account_id, consumer_account_id, requested_micros, approved_micros, status, created_at)
+      VALUES ('admin-direct-ticket', 'admin-direct-offer', ?, ?, 5000000, 5000000, 'approved', ?)
+    `).run(admin.id, member.id, now);
+    sharingStore.sqlite.prepare(`
+      INSERT INTO sharing_sessions (id, offer_id, ticket_id, provider_account_id, consumer_account_id, upstream_id, scope_id, granted_micros, consumed_micros, status, created_at, updated_at)
+      VALUES ('admin-direct-session', 'admin-direct-offer', 'admin-direct-ticket', ?, ?, 'admin-upstream', 'default', 5000000, 6000000, 'revoked', ?, ?)
+    `).run(admin.id, member.id, now, now);
+    sharingStore.sqlite.prepare(`
       INSERT INTO sharing_activity (subject_type, subject_id, request_count, success_count, total_micros, today_date, today_micros, last_used_at, last_success_at, models_json, failures_json)
       VALUES ('session', 'admin-session', 1, 1, 1000000, ?, 1000000, ?, ?, '[]', '[]'),
         ('session', 'old-session', 1, 1, 2000000, ?, 2000000, ?, ?, '[]', '[]')
@@ -601,6 +613,7 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       assert.deepEqual(nextEvents.body.analytics.recentEvents.map(({ id }) => id), ['pagination-01']);
       assert.equal(nextEvents.body.analytics.nextEventCursor, null);
       assert.equal(nextEvents.body.analytics.overview, undefined);
+      assert.equal(nextEvents.body.analytics.sessions, undefined);
       const matching = await request(base, '/api/pool/admin/analytics?q=pagination-03', adminSession);
       assert.deepEqual(matching.body.analytics.recentEvents.map(({ entityId }) => entityId), ['pagination-03']);
       const none = await request(base, '/api/pool/admin/analytics?q=missing&days=7', adminSession);
@@ -611,11 +624,15 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       assert.equal(analytics.body.analytics.overview.accounts, 2);
       assert.equal(analytics.body.analytics.usage.todayMicros, 1000000);
       assert.deepEqual(analytics.body.analytics.backup, backup);
+      assert.deepEqual(analytics.body.analytics.sessions, [
+        { id: 'admin-session', providerEmail: admin.email, consumerEmail: member.email, remainingMicros: 2500000, grantedMicros: 5000000 },
+        { id: 'admin-direct-session', providerEmail: admin.email, consumerEmail: member.email, remainingMicros: 0, grantedMicros: 5000000 }
+      ]);
       assert.deepEqual(analytics.body.analytics.topProviders[0], {
-        id: 'quangnghia.trinh@shopee.com', email: 'quangnghia.trinh@shopee.com', sessionCount: 1, consumedMicros: 2500000
+        id: 'quangnghia.trinh@shopee.com', email: 'quangnghia.trinh@shopee.com', sessionCount: 2, consumedMicros: 8500000
       });
       assert.deepEqual(analytics.body.analytics.topConsumers[0], {
-        id: 'member@example.com', email: 'member@example.com', sessionCount: 1, consumedMicros: 2500000
+        id: 'member@example.com', email: 'member@example.com', sessionCount: 2, consumedMicros: 8500000
       });
       assert.equal((await fetch(`${base}/admin`, { headers: authHeaders(adminSession) })).status, 200);
     } finally {

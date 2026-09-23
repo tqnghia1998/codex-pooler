@@ -1133,6 +1133,15 @@ export class ProductStore {
         unavailable: providerDetails.filter((provider) => provider.issueCode).length,
         details: providerDetails
       },
+      sessions: this.sqlite.prepare(`
+        SELECT sharing_sessions.id, provider.email AS providerEmail, consumer.email AS consumerEmail,
+          MAX(0, sharing_sessions.granted_micros - sharing_sessions.consumed_micros) AS remainingMicros,
+          sharing_sessions.granted_micros AS grantedMicros
+        FROM sharing_sessions
+        JOIN accounts provider ON provider.id = sharing_sessions.provider_account_id
+        JOIN accounts consumer ON consumer.id = sharing_sessions.consumer_account_id
+        ORDER BY sharing_sessions.created_at DESC, sharing_sessions.id DESC
+      `).all(),
       email: {
         enabled: this.emailNotificationsEnabled,
         pending: email.pending || 0,

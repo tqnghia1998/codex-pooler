@@ -105,6 +105,11 @@ export function AdminAnalytics({ languageToggle }) {
     { key: 'sessions', header: t('sessionsCol'), width: pixel(85), renderCell: (provider) => <Text>{provider.sessions}</Text> },
     { key: 'observed', header: t('adminObserved'), width: pixel(180), renderCell: (provider) => <Text type="supporting">{provider.observedAt ? dateTime(provider.observedAt, language, t) : t('adminNotObserved')}</Text> }
   ];
+  const sessionColumns = [
+    { key: 'provider', header: t('adminSharingFrom'), width: proportional(2), renderCell: (session) => <Text maxLines={1}>{session.providerEmail}</Text> },
+    { key: 'consumer', header: t('adminSharingTo'), width: proportional(2), renderCell: (session) => <Text maxLines={1}>{session.consumerEmail}</Text> },
+    { key: 'quota', header: t('adminQuotaLeftTotal'), width: pixel(180), renderCell: (session) => <Text>${money(session.remainingMicros)} / ${money(session.grantedMicros)}</Text> }
+  ];
   const dailyColumns = [
     { key: 'day', header: t('whenCol'), width: proportional(1.5), renderCell: (day) => <Text>{day.day}</Text> },
     { key: 'requests', header: t('adminRequests'), width: proportional(1), renderCell: (day) => <Text>{number(day.requests)}</Text> },
@@ -181,6 +186,31 @@ export function AdminAnalytics({ languageToggle }) {
         [t('adminNextAttempt'), analytics.email.nextAttemptAt ? dateTime(analytics.email.nextAttemptAt, language, t) : t('adminNone')]
       ]} />
       <AnalyticsTable title={t('adminProviderHealth')} items={providers.details} columns={providerColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminNoProviders')} />
+      {compact && analytics.sessions.length
+        ? (
+          <VStack gap={2}>
+            <Heading level={3}>{t('adminSharingSessions')}</Heading>
+            {analytics.sessions.map((session) => (
+              <Card key={session.id} padding={3}>
+                <VStack gap={2}>
+                  <VStack gap={1}>
+                    <Text type="supporting" color="secondary">{t('adminSharingFrom')}</Text>
+                    <Text>{session.providerEmail}</Text>
+                  </VStack>
+                  <VStack gap={1}>
+                    <Text type="supporting" color="secondary">{t('adminSharingTo')}</Text>
+                    <Text>{session.consumerEmail}</Text>
+                  </VStack>
+                  <HStack justify="between" gap={2}>
+                    <Text type="supporting" color="secondary">{t('adminQuotaLeftTotal')}</Text>
+                    <Text weight="bold">${money(session.remainingMicros)} / ${money(session.grantedMicros)}</Text>
+                  </HStack>
+                </VStack>
+              </Card>
+            ))}
+          </VStack>
+        )
+        : <AnalyticsTable title={t('adminSharingSessions')} items={analytics.sessions} columns={sessionColumns} emptyTitle={t('adminNoDataYet')} emptyDescription={t('adminNoSessions')} />}
 
       <VStack gap={2}>
         <HStack justify="between" vAlign="center" wrap="wrap" gap={2}>
