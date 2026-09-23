@@ -73,7 +73,7 @@ test('matches CPA native Claude fingerprint preservation and stabilization rules
   });
   const req = {
     headers: {
-      'user-agent': 'claude-cli/2.1.220 (external, claude-vscode, agent-sdk/0.3.220)',
+      'user-agent': 'claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.220)',
       'x-app': 'cli',
       'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
       'x-claude-code-session-id': sessionId,

@@ -1420,6 +1420,7 @@ test('ports CPA Claude OAuth body transformations and dynamic headers', () => {
   assert.equal(Object.hasOwn(prepared, 'top_p'), false);
   assert.deepEqual(prepared.context_management, { edits: [{ type: 'clear_thinking_20251015', keep: 'all' }] });
   assert.equal(prepared.max_tokens, 1024);
+  assert.match(prepared.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.280\./);
   assert.match(prepared.system[0].text, /cch=(?!00000;)[0-9a-f]{5};/);
   assert.match(prepared.system[0].text, /cc_workload=workspace;/);
   assert.equal(prepared.system[1].cache_control.ttl, '1h');
@@ -1433,6 +1434,7 @@ test('ports CPA Claude OAuth body transformations and dynamic headers', () => {
     requestedBetas: claudeRequestedBetas({ req, body })
   });
   const betaList = headers['anthropic-beta'].split(',');
+  assert.equal(headers['user-agent'], 'claude-cli/2.1.280 (external, cli)');
   assert.deepEqual(betaList.slice(0, 3), ['claude-code-20250219', 'oauth-2025-04-20', 'context-1m-2025-08-07']);
   for (const beta of ['advisor-tool-2026-03-01', 'advanced-tool-use-2025-11-20', 'fast-mode-2026-02-01', 'extended-cache-ttl-2025-04-11', 'structured-outputs-2025-12-15']) assert.ok(betaList.includes(beta), beta);
   assert.equal(headers['x-claude-code-agent-id'], 'agent-1');
@@ -1794,6 +1796,7 @@ test('preserves confirmed native Claude Code OAuth request shape', () => {
     sessionId
   });
   assert.equal(headers['anthropic-beta'], 'claude-code-20250219,oauth-2025-04-20,custom-native-beta,extended-cache-ttl-2025-04-11');
+  assert.equal(headers['user-agent'], 'claude-cli/2.1.220 (external, cli, agent-sdk/0.1.0)');
 });
 
 test('aliases OAuth custom tools upstream and restores tool-use names', async () => {

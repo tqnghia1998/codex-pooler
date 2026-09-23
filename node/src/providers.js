@@ -5,6 +5,7 @@ import { fetchClaudeUsage } from './claude-oauth.js';
 import { claudeRequestHeaders, prepareClaudeRequestBody } from './claude-protocol.js';
 import { decodeClaudeResponse } from './upstream-response.js';
 import { claudeProxyDispatcher } from './claude-transport.js';
+import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
 
 const CODEX_PATHS = ['/backend-api/wham/usage', '/backend-api/codex/usage', '/api/codex/usage'];
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
@@ -185,7 +186,7 @@ async function fetchClaudeQuotaFromMessages(upstream, accessToken, fetchImpl) {
     headers: {
       'anthropic-version': '2023-06-01',
       'anthropic-beta': 'claude-code-20250219,oauth-2025-04-20',
-      'user-agent': 'claude-cli/2.1.220 (external, cli)',
+      'user-agent': `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`,
       'x-app': 'cli',
       'x-claude-code-session-id': sessionId
     }

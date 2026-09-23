@@ -6,6 +6,7 @@ import { HttpError } from './http-ingress.js';
 import { claudeCredentialKind, claudeMetadataModelConfigs, claudeMetadataModelPrefix, deriveClaudeAccountId, isClaudeOAuthToken, isClaudeOAuthUpstream } from './domain.js';
 import { applyClaudePayloadConfig } from './claude-payload.js';
 import { cacheClaudeThinkingReplay, clearClaudeThinkingReplay, getClaudeThinkingReplay, restoreClaudeThinkingReplay } from './claude-thinking-replay.js';
+import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
 
 const CLAUDE_CODE_BETA = 'claude-code-20250219';
 const CLAUDE_OAUTH_BETA = 'oauth-2025-04-20';
@@ -203,7 +204,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
   if (nativeClient) {
     prepared = applyPayloadConfig(prepared);
     sanitizeClaudeMessageHistory(prepared, { preserveEmptyThinking: modelAlias?.isCompat === true });
-    ensureClaudeNativeBillingHeader(prepared, claudeConfig);
+    ensureClaudeNativeBillingHeader(prepared, claudeConfig, req);
     Object.defineProperty(prepared, CLAUDE_TOOL_ALIASES, { value: aliases, enumerable: false });
     return attachClaudeModelAlias(attachClaudeRequestProfile(signClaudeOAuthBody(prepared), nativeClient, helperProfile), modelAlias);
   }
@@ -1193,7 +1194,7 @@ function claudeHeaderDefaults(claudeConfig) {
     return typeof value === 'string' && value.trim() ? value.trim() : fallback;
   };
   return {
-    userAgent: read('userAgent', 'user-agent', 'claude-cli/2.1.220 (external, cli)'),
+    userAgent: read('userAgent', 'user-agent', `claude-cli/${CLAUDE_CODE_VERSION} (external, cli)`),
     packageVersion: read('packageVersion', 'package-version', '0.94.0'),
     runtimeVersion: read('runtimeVersion', 'runtime-version', 'v26.3.0'),
     os: read('os', 'os', 'MacOS'),
@@ -1274,7 +1275,7 @@ function compareClaudeCliVersions(left, right) {
 function claudeDefaultVersion(claudeConfig) {
   const userAgent = claudeHeaderDefaults(claudeConfig).userAgent;
   const match = /claude-cli\/(\d+\.\d+\.\d+)/i.exec(userAgent);
-  return match?.[1] || '2.1.220';
+  return match?.[1] || CLAUDE_CODE_VERSION;
 }
 
 function claudeCloakSettings(upstream, claudeConfig = null) {
@@ -1640,7 +1641,8 @@ function shapeClaudeOAuthBody(body, upstream = null, cchSigning = true, claudeCo
   const messageText = claudeBillingFingerprintMessageText(body);
   const workload = typeof body.__claudeWorkload === 'string' && body.__claudeWorkload ? ` cc_workload=${body.__claudeWorkload};` : '';
   delete body.__claudeWorkload;
-  const billing = `x-anthropic-billing-header: cc_version=${claudeDefaultVersion(claudeConfig)}.${claudeFingerprint(messageText)}; cc_entrypoint=cli;${cchSigning ? ' cch=00000;' : ''}${workload}`;
+  const version = claudeDefaultVersion(claudeConfig);
+  const billing = `x-anthropic-billing-header: cc_version=${version}.${claudeFingerprint(messageText, version)}; cc_entrypoint=cli;${cchSigning ? ' cch=00000;' : ''}${workload}`;
   const originalSystem = body.system;
   const shaped = {
     ...body,
@@ -1658,11 +1660,12 @@ function shapeClaudeOAuthBody(body, upstream = null, cchSigning = true, claudeCo
   return cchSigning && sign ? signClaudeOAuthBody(shaped) : shaped;
 }
 
-function ensureClaudeNativeBillingHeader(body, claudeConfig = null) {
+function ensureClaudeNativeBillingHeader(body, claudeConfig = null, req = null) {
   if (body.system === undefined || body.system === null) return body;
   const existing = typeof body.system === 'string' ? [{ type: 'text', text: body.system }] : body.system;
   if (!Array.isArray(existing) || existing.some((block) => plainObject(block) && typeof block.text === 'string' && block.text.startsWith('x-anthropic-billing-header:'))) return body;
-  const billing = `x-anthropic-billing-header: cc_version=${claudeDefaultVersion(claudeConfig)}.${claudeFingerprint(claudeBillingFingerprintMessageText(body))}; cc_entrypoint=cli; cch=00000;`;
+  const version = /^claude-cli\/(\d+\.\d+\.\d+) /.exec(safeHeader(req, 'user-agent'))?.[1] || claudeDefaultVersion(claudeConfig);
+  const billing = `x-anthropic-billing-header: cc_version=${version}.${claudeFingerprint(claudeBillingFingerprintMessageText(body), version)}; cc_entrypoint=cli; cch=00000;`;
   body.system = [{ type: 'text', text: billing }, ...existing];
   return body;
 }
@@ -1684,10 +1687,10 @@ function claudeBillingFingerprintMessageText(body) {
   return messageText;
 }
 
-function claudeFingerprint(messageText) {
+function claudeFingerprint(messageText, version) {
   const characters = Array.from(messageText);
   const selected = [4, 7, 20].map((index) => characters[index] || '0').join('');
-  return createHash('sha256').update(`59cf53e54c78${selected}2.1.220`).digest('hex').slice(0, 3);
+  return createHash('sha256').update(`59cf53e54c78${selected}${version}`).digest('hex').slice(0, 3);
 }
 
 function appendClaudeCallerSystemMessage(body, originalSystem) {
