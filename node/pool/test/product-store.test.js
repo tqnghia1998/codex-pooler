@@ -288,6 +288,7 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     const offer = sharingStore.createOffer(provider.id, {
       upstreamId: upstream.id,
       quotaDollars: 10,
+      message: 'Here is my spare quota. Feel free to request it.',
       visibility: 'restricted',
       allowedEmails: [first.email, second.email, third.email]
     }, upstreamStore);
@@ -316,6 +317,7 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     assert.equal(replacementOffer.canEdit, true);
     assert.equal(replacementOffer.canClose, false);
     assert.equal(replacementOffer.expiresAt, offer.expiresAt);
+    assert.equal(replacementOffer.message, 'Here is my spare quota. Feel free to request it.');
     const replacementCreatedEvent = sharingStore.sqlite.prepare(`
       SELECT detail_json
       FROM sharing_events
@@ -367,6 +369,39 @@ test('approves tickets atomically and enforces session capacity with repeatable 
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).status, 'active');
     sharingStore.updateSession(provider.id, session.id, { quotaDollars: 11 }, upstreamStore);
     assert.equal(sharingStore.session(session.id, first.id, upstreamStore).grantedQuotaDollars, 11);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normalizes, updates, and bounds offer messages', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-offer-messages-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'offer-message', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'offer-message-provider@example.com');
+    const consumer = account(sharingStore, 'offer-message-consumer@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+
+    const offer = sharingStore.createOffer(provider.id, {
+      upstreamId: upstream.id,
+      quotaDollars: 5,
+      message: '  Spare quota available.\r\nRequest anytime.  '
+    }, upstreamStore);
+    assert.equal(offer.message, 'Spare quota available.\nRequest anytime.');
+    assert.equal(sharingStore.listOffers(consumer.id, upstreamStore)[0].message, 'Spare quota available.\nRequest anytime.');
+
+    const updated = sharingStore.updateOffer(provider.id, offer.id, { message: '' }, upstreamStore);
+    assert.equal(updated.message, null);
+    assert.throws(
+      () => sharingStore.updateOffer(provider.id, offer.id, { message: 'x'.repeat(501) }, upstreamStore),
+      /500 characters or fewer/
+    );
+    assert.throws(
+      () => sharingStore.updateOffer(provider.id, offer.id, { message: 42 }, upstreamStore),
+      /must be text/
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

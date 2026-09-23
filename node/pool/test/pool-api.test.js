@@ -766,14 +766,27 @@ test('sharing API requires account sessions and CSRF while offers stay public to
 
       result = await request(base, '/api/pool/offers', providerSession, {
         method: 'POST',
-        body: JSON.stringify({ upstreamId: upstream.id, quotaDollars: 10 })
+        body: JSON.stringify({
+          upstreamId: upstream.id,
+          quotaDollars: 10,
+          message: 'Here is my spare quota. Feel free to request it.'
+        })
       });
       assert.equal(result.response.status, 201);
       const offerId = result.body.offer.id;
+      assert.equal(result.body.offer.message, 'Here is my spare quota. Feel free to request it.');
 
       result = await request(base, '/api/pool/offers', consumerSession);
       assert.equal(result.response.status, 200);
       assert.equal(result.body.offers[0].id, offerId);
+      assert.equal(result.body.offers[0].message, 'Here is my spare quota. Feel free to request it.');
+
+      result = await request(base, `/api/pool/offers/${offerId}`, providerSession, {
+        method: 'PATCH',
+        body: JSON.stringify({ message: 'Updated spare quota note.' })
+      });
+      assert.equal(result.response.status, 200);
+      assert.equal(result.body.offer.message, 'Updated spare quota note.');
 
       result = await request(base, '/api/pool/offers?limit=1&offset=0&includePast=false&role=community&q=provider%40example.com', consumerSession);
       assert.equal(result.response.status, 200);
@@ -826,6 +839,7 @@ test('sharing API requires account sessions and CSRF while offers stay public to
       assert.notEqual(replacementOffer.id, offerId);
       assert.equal(replacementOffer.quotaDollars, 7);
       assert.equal(replacementOffer.availableDollars, 7);
+      assert.equal(replacementOffer.message, 'Updated spare quota note.');
       const closedOffer = result.body.offers.find((offer) => offer.id === offerId);
       assert.equal(closedOffer.status, 'closed');
       assert.equal(closedOffer.isUsable, false);

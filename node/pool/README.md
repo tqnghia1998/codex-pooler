@@ -132,7 +132,8 @@ sessions.
 ## Sharing Flow
 
 1. A provider publishes an offer for one imported Codex account, linked Claude
-   account, or added AIS project and a dollar amount they are willing to share.
+   account, or added AIS project, a dollar amount they are willing to share,
+   and an optional message visible to members who can view the offer.
    Offers are checked against the provider's current stored balance. Claude and
    AIS balances are approximately one hour delayed when supplied by Loop.
 2. A consumer requests a dollar quota through a ticket.
