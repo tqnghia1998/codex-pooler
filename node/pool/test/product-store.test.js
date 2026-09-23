@@ -407,6 +407,27 @@ test('normalizes, updates, and bounds offer messages', () => {
   }
 });
 
+test('closes an offer without revalidating a stale submitted expiration', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-close-offer-expiry-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const upstream = upstreamStore.create({ type: 'compass', projectId: 'close-offer-expiry', projectKey: 'secret' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'close-offer-expiry-provider@example.com');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 5 }, upstreamStore);
+    const closed = sharingStore.updateOffer(provider.id, offer.id, {
+      status: 'closed',
+      expiresAt: new Date(Date.now() - 60_000).toISOString()
+    }, upstreamStore);
+
+    assert.equal(closed.status, 'closed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('reopens only closed offers that never created grants', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-offer-reopen-'));
   try {

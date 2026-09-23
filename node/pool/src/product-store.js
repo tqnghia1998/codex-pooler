@@ -919,7 +919,9 @@ export class ProductStore {
       }
     }
     const now = new Date();
-    const expiry = input.expiresAt === undefined
+    // Closing only changes availability. Preserve an already elapsed expiry instead
+    // of rejecting the close because a stale edit form submitted that date.
+    const expiry = status === 'closed' || input.expiresAt === undefined
       ? row.expires_at
       : sharingExpiry(input.expiresAt, upstream, now, OFFER_TTL_MS);
     this.sqlite.prepare(`
