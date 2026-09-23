@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_SOURCE_URL = 'https://icoretech.github.io/openai-json-pricing/pricing.json';
 const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
-const DEFAULT_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
 const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', flex: 'flex', fast: 'priority' });
 const OPTIONAL_TIER_MAP = Object.freeze({ ultrafast: 'ultrafast' });
 const BUCKETS = ['default', 'long_context'];

@@ -966,7 +966,7 @@ test('a provider can test only its own linked Codex connection', async () => {
       });
       assert.equal(result.response.status, 200);
       assert.equal(result.body.connection.endpoint, '/v1/responses');
-      assert.equal(result.body.connection.model, 'gpt-5.6-luna');
+      assert.equal(result.body.connection.model, 'gpt-6-luna');
       assert.equal(result.body.connection.answer, 'The current time is now.');
 
       const providerRequest = calls.find(({ path }) => path === '/backend-api/codex/responses');
