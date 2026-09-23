@@ -300,15 +300,15 @@ test('routes by model preference, explicit type, and explicit upstream ID', asyn
   const { server, base } = await runningServer(store, fetchImpl);
   try {
     assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' })).response.status, 200);
-    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5', input: 'hi' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' })).response.status, 200);
     assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-upstream-type': 'compass' })).response.status, 200);
-    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5', input: 'hi' }, { 'x-upstream-id': codex.id })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' }, { 'x-upstream-id': codex.id })).response.status, 200);
     assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-codex-session-id': 'model-switch-session' })).response.status, 200);
-    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5', input: 'hi' }, { 'x-codex-session-id': 'model-switch-session' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' }, { 'x-codex-session-id': 'model-switch-session' })).response.status, 200);
     assert.deepEqual(urls.map((url) => new URL(url).host), ['chatgpt.com', 'compass.llm.shopee.io', 'compass.llm.shopee.io', 'chatgpt.com', 'chatgpt.com', 'chatgpt.com']);
     const invalid = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-upstream-id': 'missing' });
     assert.equal(invalid.response.status, 503);
-    const wrongMessages = await request(base, '/v1/messages', { model: 'claude-fable-5', messages: [] }, { 'x-upstream-id': codex.id });
+    const wrongMessages = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-id': codex.id });
     assert.equal(wrongMessages.response.status, 503);
     assert.equal(urls.length, 6);
   } finally {
@@ -525,7 +525,7 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
   const calls = [];
   const fetchImpl = async (url, options) => {
     calls.push({ url, options, body: JSON.parse(options.body) });
-    return new Response(JSON.stringify({ id: 'compass-1', model: 'claude-fable-5', content: [{ type: 'text', text: 'hello' }], usage: { price_cost_usd: 1 } }), {
+    return new Response(JSON.stringify({ id: 'compass-1', model: 'claude-fable-5-1', content: [{ type: 'text', text: 'hello' }], usage: { price_cost_usd: 1 } }), {
       status: 200,
       headers: { 'content-type': 'application/json' }
     });
@@ -537,8 +537,8 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
   try {
     for (const path of ['/v1/chat/completions', '/v1/responses', '/v1/messages']) {
       const payload = path === '/v1/responses'
-        ? { model: 'claude-fable-5', input: 'hello' }
-        : { model: 'claude-fable-5', messages: [{ role: 'user', content: 'hello' }] };
+        ? { model: 'claude-fable-5-1', input: 'hello' }
+        : { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hello' }] };
       const response = await request(base, path, payload, { 'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01' });
       assert.equal(response.response.status, 200);
     }
@@ -698,11 +698,11 @@ test('redacts provider 5xx bodies, passes valid Anthropic 4xx, and rejects faile
   };
   const { server, base } = await runningServer(store, fetchImpl);
   try {
-    let result = await request(base, '/v1/messages', { model: 'claude-fable-5', messages: [] }, { 'x-upstream-type': 'compass' });
+    let result = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-type': 'compass' });
     assert.equal(result.response.status, 502);
     assert.equal(JSON.stringify(result.body).includes('provider-internal-secret'), false);
     mode = 'compass-400';
-    result = await request(base, '/v1/messages', { model: 'claude-fable-5', messages: [] }, { 'x-upstream-type': 'compass' });
+    result = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-type': 'compass' });
     assert.equal(result.response.status, 400);
     assert.equal(result.body.error.message, 'bad request');
     mode = 'codex-failed';
@@ -1176,13 +1176,13 @@ test('validates Compass Anthropic negotiation headers before dispatch', async ()
   });
   try {
     const invalidVersion = await request(base, '/v1/messages', {
-      model: 'claude-fable-5', messages: [], max_tokens: 16
+      model: 'claude-fable-5-1', messages: [], max_tokens: 16
     }, { 'anthropic-version': '2026-02-30' });
     assert.equal(invalidVersion.response.status, 400);
     assert.equal(invalidVersion.body.type, 'error');
 
     const invalidBeta = await request(base, '/v1/messages', {
-      model: 'claude-fable-5', messages: [], max_tokens: 16
+      model: 'claude-fable-5-1', messages: [], max_tokens: 16
     }, { 'anthropic-beta': 'valid-beta,bad beta' });
     assert.equal(invalidBeta.response.status, 400);
     assert.equal(invalidBeta.body.type, 'error');
@@ -1243,7 +1243,7 @@ test('settles the latest reported Compass streaming cost', async () => {
   try {
     const response = await fetch(base + '/v1/messages', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'claude-fable-5', messages: [{ role: 'user', content: 'hello' }], stream: true })
+      body: JSON.stringify({ model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hello' }], stream: true })
     });
     assert.equal(response.status, 200);
     await response.text();

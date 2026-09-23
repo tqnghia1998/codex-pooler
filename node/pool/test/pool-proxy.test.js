@@ -103,6 +103,45 @@ test('share keys hard-pin one upstream and exhaust after settled usage', async (
   }
 });
 
+test('share keys settle GPT-6 usage from the local pricing snapshot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-gpt-6-pricing-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'codex', authJson: JSON.stringify({ tokens: {
+      access_token: jwt({ email: 'gpt-6-pricing@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'gpt-6-pricing' } }),
+      id_token: jwt({ email: 'gpt-6-pricing@example.com' })
+    }}) });
+    store.setCap(upstream.id, { capDollars: 100 });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'gpt-6-pricing-provider');
+    const consumer = account(sharingStore, 'gpt-6-pricing-consumer');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const offer = sharingStore.createOffer(provider.id, { upstreamId: upstream.id, quotaDollars: 1 }, store);
+    const ticket = sharingStore.createTicket(consumer.id, { offerId: offer.id, quotaDollars: 1 }, store);
+    const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
+    const { apiKey } = sharingStore.revealSessionKey(consumer.id, session.id);
+    const app = await running(store, sharingStore, async () => new Response(JSON.stringify({
+      id: 'resp-gpt-6-priced',
+      model: 'gpt-6-luna',
+      output: [],
+      usage: { input_tokens: 1_000, output_tokens: 100 }
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    try {
+      const response = await fetch(`${app.base}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ model: 'gpt-6-luna', input: 'hello' })
+      });
+      assert.equal(response.status, 200);
+      assert.equal(sharingStore.session(session.id, consumer.id, store).consumedQuotaDollars, 0.00015);
+    } finally {
+      await app.close();
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('personal-key SSE requests honor QuotaHub bootstrap buffering before failover', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-bootstrap-failover-'));
   try {
@@ -244,12 +283,14 @@ test('shared Claude requests apply Pool runtime configuration', async () => {
     const session = sharingStore.approveTicket(provider.id, ticket.id, {}, store);
     const { apiKey } = sharingStore.revealSessionKey(consumer.id, session.id);
     let requestHeaders = null;
+    let requestBody = null;
     const app = await running(store, sharingStore, async (url, options) => {
       assert.equal(new URL(url).pathname, '/v1/messages');
       requestHeaders = options.headers;
+      requestBody = JSON.parse(options.body);
       return new Response(JSON.stringify({
         id: 'msg-pool-runtime',
-        model: 'claude-sonnet-5',
+        model: 'claude-fable-5-1',
         content: [{ type: 'text', text: 'configured' }],
         usage: { price_cost_usd: 0.01 }
       }), { status: 200, headers: { 'content-type': 'application/json' } });
@@ -267,13 +308,14 @@ test('shared Claude requests apply Pool runtime configuration', async () => {
           'anthropic-version': '2023-06-01'
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-5',
+          model: 'claude-fable-5-1',
           max_tokens: 32,
           messages: [{ role: 'user', content: 'hello' }]
         })
       });
       assert.equal(response.status, 200);
       assert.equal(requestHeaders['user-agent'], 'claude-cli/9.9.9 (external, cli)');
+      assert.equal(requestBody.model, 'claude-fable-5-1');
     } finally {
       await app.close();
     }
@@ -316,6 +358,9 @@ test('share keys expose only the granted provider model catalog', async () => {
       assert.equal(response.status, 200);
       const ids = (await response.json()).data.map((model) => model.id);
       assert.equal(ids.includes('gpt-provider-only'), true);
+      assert.equal(ids.includes('gpt-6-astra'), true);
+      assert.equal(ids.includes('gpt-6-sol'), true);
+      assert.equal(ids.includes('gpt-6-luna'), true);
       assert.equal(ids.includes('claude-sonnet-5'), false);
     } finally {
       await app.close();

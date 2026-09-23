@@ -96,7 +96,7 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
     ]) {
       mode = nextMode;
       const payload = path.includes('chat')
-        ? { model: 'claude-fable-5', messages: [{ role: 'user', content: 'hi' }] }
+        ? { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hi' }] }
         : { model: 'gpt-5.6-sol', input: 'hi' };
       const result = await post(base, path, payload, { 'x-upstream-type': type });
       assert.equal(result.response.status, expectedStatus, nextMode);
@@ -107,7 +107,7 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
     }
 
     mode = 'anthropic-valid';
-    const anthropic = await post(base, '/v1/messages', { model: 'claude-fable-5', messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }, { 'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01' });
+    const anthropic = await post(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hi' }], max_tokens: 16 }, { 'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01' });
     assert.equal(anthropic.response.status, 400);
     assert.deepEqual(anthropic.body, { type: 'error', error: { type: 'invalid_request_error', message: 'safe Anthropic client detail' } });
     assert.equal(anthropic.response.headers.get('anthropic-ratelimit-requests-limit'), '10');

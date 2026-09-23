@@ -12,7 +12,8 @@ const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheW
 ));
 
 const ANTHROPIC_PRICES = [
-  ['claude-opus-5', 5, 25, 6.25, 0.5], ['claude-opus-4-8', 5, 25, 6.25, 0.5], ['claude-opus-4-7', 5, 25, 6.25, 0.5], ['claude-opus-4-6', 5, 25, 6.25, 0.5], ['claude-opus-4-5', 5, 25, 6.25, 0.5],
+  ['claude-fable-5-1', 10, 50, 12.5, 0.25],
+  ['claude-opus-5-5', 4, 20, 5, 0.2], ['claude-opus-5', 5, 25, 6.25, 0.5], ['claude-opus-4-8', 5, 25, 6.25, 0.5], ['claude-opus-4-7', 5, 25, 6.25, 0.5], ['claude-opus-4-6', 5, 25, 6.25, 0.5], ['claude-opus-4-5', 5, 25, 6.25, 0.5],
   ['claude-opus-4-1', 15, 75, 18.75, 1.5], ['claude-opus-4', 15, 75, 18.75, 1.5],
   ['claude-sonnet-4-6', 3, 15, 3.75, 0.3], ['claude-sonnet-4-5', 3, 15, 3.75, 0.3], ['claude-sonnet-4', 3, 15, 3.75, 0.3],
   ['claude-haiku-4-5', 1, 5, 1.25, 0.1], ['claude-haiku-3-5', 0.8, 4, 1, 0.08],

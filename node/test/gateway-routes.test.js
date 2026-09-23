@@ -74,8 +74,8 @@ test('discovers and caches Codex models while preserving the static fallback', a
     const response = await gatewayFetch(base, '/v1/models');
     assert.equal(response.status, 200);
     assert.deepEqual((await response.json()).data.map((model) => model.id), [
-      'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
-      'claude-fable-5', 'claude-opus-5', 'claude-sonnet-5', 'glm-5.3-flash', 'kimi-k3',
+      'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+      'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'glm-5.3-flash', 'kimi-k3',
       'gpt-new-live'
     ]);
     const backend = await gatewayFetch(base, '/backend-api/codex/models');

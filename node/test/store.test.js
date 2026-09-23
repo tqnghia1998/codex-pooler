@@ -437,21 +437,21 @@ test('Claude model-scoped cooldown blocks only the rejected model', () => {
       authJson: JSON.stringify({ access_token: 'sk-ant-oat-store-test', email: 'claude@example.com' })
     });
     store.setCap(upstream.id, { capDollars: 100 });
-    const fable = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5' }, now);
+    const fable = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5-1' }, now);
     store.settleUpstreamAttempt(upstream.id, fable, {
-      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5', retryAfter: '120'
+      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5-1', retryAfter: '120'
     }, now);
 
     assert.equal(store.get(upstream.id).health, undefined);
-    assert.equal(store.get(upstream.id).modelHealth['claude-fable-5'].nextEligibleAt, new Date(now + 120_000).toISOString());
-    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5', now }).map(({ id }) => id), []);
-    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5(8192)', now }).map(({ id }) => id), []);
+    assert.equal(store.get(upstream.id).modelHealth['claude-fable-5-1'].nextEligibleAt, new Date(now + 120_000).toISOString());
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5-1', now }).map(({ id }) => id), []);
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5-1(8192)', now }).map(({ id }) => id), []);
     assert.deepEqual(store.candidatePlan({ model: 'claude-opus-5', now }).map(({ id }) => id), [upstream.id]);
-    assert.equal(store.candidatePlanDetails({ model: 'claude-fable-5', now }).diagnostics.exclusions[0].code, 'upstream_model_cooldown');
-    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5', ignoreQuotaCooldown: true, now }).map(({ id }) => id), [upstream.id]);
-    const retry = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5', ignoreQuotaCooldown: true }, now);
+    assert.equal(store.candidatePlanDetails({ model: 'claude-fable-5-1', now }).diagnostics.exclusions[0].code, 'upstream_model_cooldown');
+    assert.deepEqual(store.candidatePlan({ model: 'claude-fable-5-1', ignoreQuotaCooldown: true, now }).map(({ id }) => id), [upstream.id]);
+    const retry = store.beginUpstreamAttempt(upstream.id, { routeClass: 'proxy_http', model: 'claude-fable-5-1', ignoreQuotaCooldown: true }, now);
     store.settleUpstreamAttempt(upstream.id, retry, {
-      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5', retryAfter: '120'
+      class: 'neutral', retryable: true, modelScoped: true, model: 'claude-fable-5-1', retryAfter: '120'
     }, now);
     assert.equal(store.get(upstream.id).modelHealth, undefined);
 

@@ -266,7 +266,7 @@ test('selects image host models from the chosen account and falls back only when
     assert.equal(await catalog.imageModel(upstreams[0].id, { fetchImpl }), 'gpt-image-host');
     assert.equal(await catalog.imageModel(upstreams[1].id, { fetchImpl }), null);
     catalog.invalidate(upstreams[0].id);
-    assert.equal(await catalog.imageModel(upstreams[0].id, { fetchImpl: async () => { throw new Error('offline'); } }), 'gpt-5.6-sol');
+    assert.equal(await catalog.imageModel(upstreams[0].id, { fetchImpl: async () => { throw new Error('offline'); } }), 'gpt-6-astra');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

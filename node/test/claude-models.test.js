@@ -10,7 +10,7 @@ test('serves Claude Code model-list shape and reverses CPA cloaked IDs', () => {
   assert.ok(response.data.every((model) => model.type === 'model' && model.display_name));
 
   const source = 'team-model';
-  const listed = response.data.find((model) => model.id.startsWith('claude-fable-5-dd-'));
+  const listed = response.data.find((model) => model.id.startsWith('claude-fable-5-1-dd-'));
   assert.ok(listed);
   assert.equal(resolveClaudeModelListId(listed.id), source);
   assert.equal(resolveClaudeModelListId(`${listed.id}(8192)`), `${source}(8192)`);

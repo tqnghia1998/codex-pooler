@@ -1,6 +1,6 @@
 import { claudeMetadataModelConfigs, claudeMetadataModelExcluded, isClaudeOAuthUpstream, STATIC_MODEL_CATALOG } from './domain.js';
 
-const CLAUDE_LIST_PREFIX = 'claude-fable-5-dd-';
+const CLAUDE_LIST_PREFIX = 'claude-fable-5-1-dd-';
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const DEFAULT_MAX_INPUT_TOKENS = 200_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 8_192;
