@@ -957,7 +957,7 @@ export class ProductStore {
     return this.offer(id, accountId, upstreamStore);
   }
 
-  listOffers(viewerAccountId, upstreamStore) {
+  listOffers(viewerAccountId, upstreamStore, { activeOnly = false } = {}) {
     this.expireDue();
     const viewerAccount = viewerAccountId ? this.account(viewerAccountId) : null;
     const viewerEmail = viewerAccount?.email?.toLowerCase() || '';
@@ -966,6 +966,7 @@ export class ProductStore {
       SELECT sharing_offers.*, accounts.display_name AS provider_name, accounts.email AS provider_email
       FROM sharing_offers JOIN accounts ON accounts.id = sharing_offers.provider_account_id
       WHERE sharing_offers.internal_only = 0
+      ${activeOnly ? "AND sharing_offers.status = 'active'" : ''}
     `).all();
     const visibleRows = rows.filter((row) => canViewOffer(row, viewerAccountId, viewerEmail));
     const allocations = this.offerAllocations(visibleRows.map(({ id }) => id));
@@ -982,6 +983,35 @@ export class ProductStore {
       })];
     });
     return offers.sort(compareOffers);
+  }
+
+  communityActivity(accountId, upstreamStore, { now = Date.now() } = {}) {
+    const viewer = this.requireAccount(accountId);
+    this.expireDue();
+    const timestamp = new Date().toISOString();
+    const summarize = (accounts) => {
+      const people = [...new Map(accounts.filter(({ id }) => id !== accountId)
+        .map(({ id, displayName, email }) => [id, { id, displayName, email }])).values()]
+        .sort((left, right) => left.id.localeCompare(right.id));
+      // Rotate a bounded sample without coupling the banner to table pagination.
+      const offset = people.length > 3 ? Math.floor(now / 60_000) * 3 % people.length : 0;
+      return {
+        totalPeople: people.length,
+        people: Array.from({ length: Math.min(3, people.length) }, (_, index) => people[(offset + index) % people.length])
+      };
+    };
+    const pendingOffers = new Set(this.sqlite.prepare(
+      "SELECT offer_id FROM sharing_tickets WHERE consumer_account_id = ? AND status = 'pending'"
+    ).all(accountId).map(({ offer_id }) => offer_id));
+    return {
+      requesting: summarize(this.visibleQuotaRequests(accountId, viewer.email.toLowerCase(), true)
+        .filter((row) => !row.expires_at || row.expires_at > timestamp)
+        .map((row) => publicQuotaRequest(row, accountId).requester)),
+      sharing: summarize(this.listOffers(accountId, upstreamStore, { activeOnly: true })
+        .filter((offer) => offer.isUsable && offer.availableDollars > 0
+          && (!offer.expiresAt || offer.expiresAt > timestamp) && !pendingOffers.has(offer.id))
+        .map((offer) => offer.provider))
+    };
   }
 
   sharingCounts(accountId) {

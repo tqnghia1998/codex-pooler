@@ -23,6 +23,16 @@ const DICTIONARY = {
     'confirm': 'Confirm',
     'retry': 'Try again',
     'loadingWorkspace': 'Loading sharing workspace',
+    'communityActivity': 'Community activity',
+    'communityRequests': 'Requests',
+    'communityOffers': 'Offers',
+    'communityHelp': 'Go help them!',
+    'communityExplore': 'Check them out!',
+    'communityOthers': ', and {count} more',
+    'communityRequestSingular': 'is requesting quota.',
+    'communityRequestPlural': 'are requesting quota.',
+    'communityShareSingular': 'is sharing quota.',
+    'communitySharePlural': 'are sharing quota.',
 
     // Hero / Auth
     'quotaSharing': 'Quota sharing',
@@ -441,6 +451,16 @@ const DICTIONARY = {
     'adminImportFailed': 'Import failed'
   },
   zh: {
+    'communityActivity': '社区动态',
+    'communityRequests': '求助',
+    'communityOffers': '分享',
+    'communityHelp': '去帮帮他们！',
+    'communityExplore': '去看看！',
+    'communityOthers': '，以及其他 {count} 人',
+    'communityRequestSingular': '正在申请配额。',
+    'communityRequestPlural': '正在申请配额。',
+    'communityShareSingular': '正在分享配额。',
+    'communitySharePlural': '正在分享配额。',
     // Top Bar & Navigation
     'userGuide': '使用指南',
     'languageSwitchLabel': '切换语言',

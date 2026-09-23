@@ -30,6 +30,7 @@ import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
 import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, Scaling, Trophy, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
+import { CommunityBanner } from './CommunityBanner.jsx';
 import { useLanguage } from './i18n.jsx';
 import { isCountStorageEvent, openCountTab, reconcileTabCounts, SHARING_COUNTS_STORAGE_KEY } from './tab-counts.js';
 
@@ -169,6 +170,9 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const { t } = useLanguage();
   const api = useSharingApi();
   const [account, setAccount] = useState(null);
+  const [communityActivity, setCommunityActivity] = useState(null);
+  const activityRequestVersion = useRef(0);
+  const sharingDestination = useRef(null);
   const [view, setView] = useState(initialSharingView);
   const viewRef = useRef(view);
   const [section, setSection] = useState(() => initialSharingSection(initialSharingView()));
@@ -218,6 +222,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   }, []);
 
   const load = useCallback(async ({ background = false } = {}) => {
+    const activityVersion = ++activityRequestVersion.current;
     if (!background) setLoading(true);
     let accountId;
     try {
@@ -225,6 +230,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       accountId = me.account.id;
       setAccount(me.account);
     } catch (nextError) {
+      if (activityVersion === activityRequestVersion.current) setCommunityActivity(null);
       if (nextError.status === 401) {
         setAccount(null);
       } else if (!background) onNotice(nextError.message, true);
@@ -232,10 +238,14 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       return;
     }
     try {
-      const [upstreamData, personalKeyData] = await Promise.all([
+      const [upstreamData, personalKeyData, activityData] = await Promise.all([
         api('/api/pool/upstreams'),
-        api('/api/pool/personal-keys')
+        api('/api/pool/personal-keys'),
+        api('/api/pool/community-activity').catch(() => null)
       ]);
+      if (activityVersion === activityRequestVersion.current) {
+        setCommunityActivity(activityData ? { accountId, ...activityData } : null);
+      }
       setUpstreams(upstreamData.upstreams || []);
       setPersonalKeys(personalKeyData.personalKeys || []);
       try {
@@ -254,6 +264,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         if (!background) onNotice(countError.message, true);
       }
     } catch (nextError) {
+      if (activityVersion === activityRequestVersion.current) setCommunityActivity(null);
       if (!background) onNotice(nextError.message, true);
     } finally {
       if (!background) setLoading(false);
@@ -422,6 +433,16 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
     setTableOffset(0);
     resetTablePage();
   }, [resetTablePage]);
+
+  const navigateCommunity = useCallback((kind, email = '') => {
+    setEmailQuery(email);
+    setShowPastData(false);
+    handleViewChange(kind === 'requesting' ? 'quota-requests' : 'community-offers');
+    requestAnimationFrame(() => {
+      sharingDestination.current?.scrollIntoView({ block: 'start', behavior: 'instant' });
+      sharingDestination.current?.focus({ preventScroll: true });
+    });
+  }, [handleViewChange, setEmailQuery]);
 
   const handleTabFocus = useCallback((event) => {
     if (!event.currentTarget.contains(event.relatedTarget)) return;
@@ -690,6 +711,11 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   return (
     <VStack gap={2}>
+      <CommunityBanner
+        key={account.id}
+        activity={communityActivity?.accountId === account.id ? communityActivity : null}
+        onNavigate={navigateCommunity}
+      />
       <LeaderboardView />
 
       <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
@@ -754,7 +780,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           isActionLoading={isActionLoading}
         />
       </Grid>
-      <VStack gap={2}>
+      <VStack gap={2} id="community-sharing" ref={sharingDestination} tabIndex={-1}>
         <VStack paddingBlock={1}>
           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
             <HStack gap={1} vAlign="center" role="group" aria-label={t('dashboardSection')}>

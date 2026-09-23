@@ -711,6 +711,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     sendJson(res, 200, { counts: productStore.sharingCounts(accountId) });
     return;
   }
+  if (req.method === 'GET' && resource === 'community-activity' && parts.length === 3) {
+    sendJson(res, 200, productStore.communityActivity(accountId, store));
+    return;
+  }
   if (req.method === 'GET' && resource === 'leaderboard' && parts.length === 3) {
     sendJson(res, 200, { leaderboard: productStore.communityLeaderboard() });
     return;
