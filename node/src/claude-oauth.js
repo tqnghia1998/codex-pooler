@@ -11,16 +11,11 @@ import {
 import { parseClaudeAuthJson } from './domain.js';
 import { decodeClaudeResponse } from './upstream-response.js';
 import { claudeProxyDispatcher } from './claude-transport.js';
+import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
 
 const PENDING_LOGIN_TTL_MS = 10 * 60_000;
 const MAX_PENDING_LOGINS = 1_024;
 const OAUTH_REQUEST_TIMEOUT_MS = 30_000;
-const DEFAULT_CLAUDE_CODE_VERSION = '2.1.260';
-const configuredClaudeCodeVersion = process.env.CODEX_POOLER_CLAUDE_CODE_VERSION;
-const CLAUDE_CODE_VERSION = /^\d+\.\d+\.\d+$/.test(configuredClaudeCodeVersion || '')
-  ? configuredClaudeCodeVersion
-  : DEFAULT_CLAUDE_CODE_VERSION;
-
 export class ClaudeOAuthBroker {
   constructor({ store, fetchImpl = globalThis.fetch, proxyUrl = '' } = {}) {
     this.store = store;

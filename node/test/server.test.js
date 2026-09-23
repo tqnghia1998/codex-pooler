@@ -90,7 +90,7 @@ test('hydrates Claude OAuth profile metadata on create and manual refresh', asyn
     assert.equal(usageCalls[0].url, CLAUDE_OAUTH_USAGE_URL);
     assert.equal(usageCalls[0].options.headers.authorization, 'Bearer sk-ant-oat-profile-create');
     assert.equal(usageCalls[0].options.headers['anthropic-beta'], 'oauth-2025-04-20');
-    assert.equal(usageCalls[0].options.headers['user-agent'], 'claude-code/2.1.260');
+    assert.equal(usageCalls[0].options.headers['user-agent'], 'claude-code/2.1.280');
 
     const automatic = await request(base, '/api/upstreams/refresh-quota?force=false', { method: 'POST' });
     assert.equal(automatic.response.status, 200);
@@ -172,6 +172,7 @@ test('falls back to Claude Messages quota headers when OAuth usage scope is insu
     assert.match(probe.options.headers['anthropic-beta'], /claude-code-20250219/);
     assert.match(probe.options.headers['anthropic-beta'], /oauth-2025-04-20/);
     assert.equal(probe.options.headers['x-app'], 'cli');
+    assert.equal(probe.options.headers['user-agent'], 'claude-cli/2.1.280 (external, cli)');
     const probeBody = JSON.parse(probe.options.body);
     assert.equal(probeBody.model, 'claude-sonnet-4-6');
     assert.equal(probeBody.max_tokens, 1);
@@ -179,7 +180,7 @@ test('falls back to Claude Messages quota headers when OAuth usage scope is insu
     assert.equal(probeBody.messages[0].content.at(-1).text, '.');
     assert.equal(probeBody.diagnostics, undefined);
     assert.match(probeBody.metadata.user_id, /"device_id":"[a-f0-9]{64}"/);
-    assert.match(probeBody.system[0].text, /^x-anthropic-billing-header:/);
+    assert.match(probeBody.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.280\./);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
