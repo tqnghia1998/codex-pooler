@@ -1015,7 +1015,10 @@ test('recovers after a public WebSocket handshake failure without replaying the 
   try {
     const messages = await new Promise((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
-        headers: { authorization: `Bearer ${API_KEY}` }
+        headers: {
+          authorization: `Bearer ${API_KEY}`,
+          'x-codex-session-id': 'ws-provider-4xx-session'
+        }
       });
       const received = [];
       client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'failed-turn' })));
@@ -1995,6 +1998,62 @@ test('closes oversized public WebSocket frames with code 1009', async () => {
   } finally {
     relay.close();
     await close(gateway);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects upstream public WebSocket 4xx refusals as sanitized error events', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-provider-4xx-'));
+  const { store } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => socket.once('message', () => {
+    socket.send(JSON.stringify({
+      type: 'error',
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        code: 'unsupported_parameter',
+        message: 'provider request details must not leak'
+      }
+    }));
+  }));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store,
+    apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const message = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'invalid' })));
+      client.once('message', (data) => {
+        client.close();
+        resolve(JSON.parse(data));
+      });
+      client.once('error', reject);
+    });
+    assert.deepEqual(message, {
+      type: 'error',
+      status: 400,
+      error: {
+        type: 'invalid_request_error',
+        code: 'upstream_status',
+        message: 'Upstream rejected the request',
+        param: null
+      },
+      sequence_number: 0
+    });
+    assert.equal(store.sessionUpstream('ws-provider-4xx-session'), null);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
     rmSync(dir, { recursive: true, force: true });
   }
 });

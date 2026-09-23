@@ -3103,7 +3103,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         publicGenerate = generate;
         publicPayload = payload;
         publicUsage = null;
-        publicState = createPublicResponsesState(customToolNamespaces(payload.tools));
+        publicState = createPublicResponsesState(customToolNamespaces(payload.tools), { websocket: true });
         retriedTurn = false;
         publicCompatibilityRetries = 0;
         activeFrame = { data: upstreamFrame, isBinary: false };
@@ -3523,8 +3523,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         if (!events.length) return;
         publicOutput = true;
         publicUsage = mergeUsage(publicUsage, extractUsage(frame));
-        const terminal = events.find((event) => ['response.completed', 'response.incomplete', 'response.failed'].includes(event.type));
-        if (sessionId && req.proxyAuth?.kind !== 'personal_share' && !terminal?.type?.endsWith('failed')) {
+        const terminal = events.find((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type));
+        if (sessionId && req.proxyAuth?.kind !== 'personal_share' && !['response.failed', 'error'].includes(terminal?.type)) {
           store.pinSession(sessionId, connectionUpstream.id, scopeId, requestAccounting(req).apiKeyId);
         }
         for (const event of events) {
@@ -3535,7 +3535,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         if (!terminal) return;
         publicTurnActive = false;
         activeFrame = null;
-        if (terminal.type === 'response.failed') {
+        if (['response.failed', 'error'].includes(terminal.type)) {
           const outcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
           settlePublicAdmission(outcome);
           releasePublicAttempt(outcome.errorCode || 'upstream_response_failed');

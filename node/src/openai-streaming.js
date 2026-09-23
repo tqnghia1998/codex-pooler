@@ -84,12 +84,12 @@ export function retryableFirstSseEvent(event) {
   return RETRY_CODES.has(string(error.code) || string(error.type) || incompleteReason(event));
 }
 
-export function createPublicResponsesState(customToolNamespaces = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces }; }
+export function createPublicResponsesState(customToolNamespaces = {}, { websocket = false } = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces, websocket }; }
 
 export function normalizePublicResponsesEvent(source, state) {
   if (state.terminal || !plain(source)) return [];
   const event = canonical(source);
-  if (!event || event.type.startsWith('codex.')) return [];
+  if (!event || !publicResponsesEventType(event.type)) return [];
   const terminal = terminalKind(event);
   const result = [];
   if ((terminal === 'completed' || terminal === 'incomplete') && state.visible) {
@@ -101,7 +101,7 @@ export function normalizePublicResponsesEvent(source, state) {
     state.terminal = true;
     return [...result, encode(failed({}, 'response_sequence_exhausted'), MAX_SEQUENCE)];
   }
-  const projected = terminal === 'failed' ? failed(event) : project(event, terminal, state.customToolNamespaces);
+  const projected = terminal === 'failed' ? (state.websocket ? publicWebSocketError(event) : null) || failed(event) : project(event, terminal, state.customToolNamespaces);
   repairItem(projected, state.customToolNamespaces);
   state.sequence = sequence;
   result.push(encode(projected, sequence));
@@ -176,6 +176,9 @@ function canonical(event) {
   }
   return typeof event.type === 'string' ? event : null;
 }
+function publicResponsesEventType(type) {
+  return type === 'error' || type === 'keepalive' || type.startsWith('response.');
+}
 function terminalKind(event) {
   if (event.type === 'response.failed' || event.type === 'error' || failedIncomplete(event)) return 'failed';
   if (event.type === 'response.completed' && plain(event.response) && (event.response.status === undefined || event.response.status === 'completed')) return 'completed';
@@ -186,6 +189,22 @@ function nextSequence(incoming, state, terminal) { const value = Number.isSafeIn
 function synthetic(state) { state.sequence += 1; return state.sequence; }
 function project(event, terminal, namespaces) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index }, namespaces)); return value; }
 function failed(event, reason = '') { const response = plain(event.response) ? event.response : {}; const usage = safeUsage(response.usage || event.usage); return { type: 'response.failed', response: { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'failed', error: safeError(event), ...(reason || incompleteReason(event) ? { incomplete_details: { reason: reason || incompleteReason(event) } } : {}), model: 'unknown', output: [], output_text: '', instructions: null, metadata: null, ...(usage ? { usage } : {}), temperature: null, top_p: null, parallel_tool_calls: false, tool_choice: 'auto', tools: [] } }; }
+function publicWebSocketError(event) {
+  const status = integer(event?.status) ?? integer(event?.status_code) ?? integer(event?.error?.status) ?? integer(event?.response?.error?.status);
+  const error = event?.error || event?.response?.error || {};
+  const code = string(error.code) || string(error.type);
+  if (event?.type !== 'error' || status === null || status < 400 || status >= 500 || status === 429 || ['websocket_connection_limit_reached', 'previous_response_not_found'].includes(code)) return null;
+  return {
+    type: 'error',
+    status,
+    error: publicMisalignmentError(event) || {
+      type: 'invalid_request_error',
+      code: 'upstream_status',
+      message: 'Upstream rejected the request',
+      param: null
+    }
+  };
+}
 function safeError(event) { return publicMisalignmentError(event) || { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null }; }
 function safeUsage(usage) { if (!plain(usage)) return null; const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0; const input = number(usage.input_tokens ?? usage.prompt_tokens); const output = number(usage.output_tokens ?? usage.completion_tokens); return { input_tokens: input, output_tokens: output, total_tokens: Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens : input + output }; }
 function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; if (item.type === 'custom_tool_call' && (item.namespace === undefined || item.namespace === null) && namespaces[item.name]) item.namespace = namespaces[item.name]; if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
