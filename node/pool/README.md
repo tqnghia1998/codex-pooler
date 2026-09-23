@@ -194,9 +194,8 @@ so each device or client can be rotated or revoked independently. The dashboard
 stores only privacy-safe activity totals: request and success counts, spend, and
 last use. It never stores prompts, responses, models, failure history, or a row
 per request.
-The dashboard also shows the top ten community providers to signed-in members,
-ranked by settled session usage with account emails and aggregate totals. The
-admin analytics view retains both provider and consumer rankings.
+Provider and consumer rankings are available only in admin analytics; the
+member dashboard does not show community leaderboards.
 
 ## Friend Requests
 
@@ -238,7 +237,7 @@ the listed collections.
 
 ## Community Activity Banner
 
-Signed-in members see a compact community banner above the leaderboard. It
+Signed-in members see a compact community banner above the dashboard. It
 summarizes active requests and usable offers visible to that viewer, including
 their own posts but excluding offers they already have a pending ticket for.
 Counts are unique people, not posts. Up to three names per category rotate
@@ -291,7 +290,7 @@ POST   /auth/logout
 
 GET    /api/pool/me
 GET    /api/pool/community-activity              # viewer-visible unique people, bounded rotating samples
-GET    /api/pool/leaderboard                    # top providers/consumers by settled usage, with account emails
+GET    /api/pool/leaderboard                    # admin only; settled-usage rankings with account emails
 GET    /api/pool/admin/analytics                 # quangnghia.trinh@shopee.com only; recent events use eventCursor
 GET    /api/pool/admin/export                    # admin only; full JSON snapshot (gateway records + all product tables)
 POST   /api/pool/admin/import                    # admin only; restore from an export file, replacing the collections it contains

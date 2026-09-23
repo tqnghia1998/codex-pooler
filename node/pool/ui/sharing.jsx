@@ -20,7 +20,6 @@ import { Pagination } from '@astryxdesign/core/Pagination';
 import { ProgressBar } from '@astryxdesign/core/ProgressBar';
 import { SegmentedControl, SegmentedControlItem } from '@astryxdesign/core/SegmentedControl';
 import { Selector } from '@astryxdesign/core/Selector';
-import { Spinner } from '@astryxdesign/core/Spinner';
 import { Switch } from '@astryxdesign/core/Switch';
 import { Tab, TabList } from '@astryxdesign/core/TabList';
 import { TextArea } from '@astryxdesign/core/TextArea';
@@ -28,7 +27,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
-import { Ban, CircleHelp, Eye, HandHeart, KeyRound, LogOut, Pause, Play, PlugZap, Plus, RefreshCw, Scaling, Store, Trophy, Unplug } from 'lucide-react';
+import { Ban, CircleHelp, Eye, HandHeart, KeyRound, LogOut, Pause, Play, PlugZap, Plus, RefreshCw, Scaling, Store, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { CommunityBanner } from './CommunityBanner.jsx';
 import { useLanguage } from './i18n.jsx';
@@ -735,8 +734,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
         activity={communityActivity?.accountId === account.id ? communityActivity : null}
         onNavigate={navigateCommunity}
       />
-      <LeaderboardView />
-
       <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
         <GridSpan columns={2}>
           <QuotaOverview
@@ -1727,95 +1724,6 @@ function renderOfferAction(offer, { onEdit, onClose, onRequest, isActionLoading,
       isDisabled={offer.status !== 'active' || !offer.isUsable || offer.availableDollars <= 0 || isActionLoading(actionKey)}
       onClick={() => void onRequest(offer)}
     />
-  );
-}
-
-function LeaderboardView() {
-  const { t } = useLanguage();
-  const api = useSharingApi();
-  const [leaderboard, setLeaderboard] = useState(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
-  const requestVersion = useRef(0);
-
-  const load = useCallback(async () => {
-    const version = ++requestVersion.current;
-    setLoading(true);
-    try {
-      const data = await api('/api/pool/leaderboard');
-      if (version !== requestVersion.current) return;
-      setLeaderboard(data.leaderboard);
-      setError('');
-    } catch (nextError) {
-      if (version !== requestVersion.current) return;
-      setError(nextError.message);
-    } finally {
-      if (version !== requestVersion.current) return;
-      setLoading(false);
-    }
-  }, [api]);
-
-  useEffect(() => { void load(); }, [load]);
-
-  if (loading && !leaderboard) {
-    return (
-      <Card padding={3}>
-        <HStack gap={2} vAlign="center">
-          <Spinner size="sm" aria-label={t('leaderboardLoading')} />
-          <Text type="supporting" color="secondary">{t('leaderboardLoading')}</Text>
-        </HStack>
-      </Card>
-    );
-  }
-
-  if (!leaderboard) {
-    return (
-      <Card padding={3}>
-        <VStack gap={2} hAlign="center">
-          <EmptyState title={t('leaderboardUnavailableTitle')} description={error || t('leaderboardUnavailableDesc')} />
-          <Button label={t('retry')} variant="secondary" onClick={() => void load()} />
-        </VStack>
-      </Card>
-    );
-  }
-
-  const columns = [
-    { key: 'rank', header: t('leaderboardRank'), width: pixel(60), renderCell: (leader) => <Text>{leader.rank}</Text> },
-    {
-      key: 'account',
-      header: t('accountCol'),
-      width: proportional(2),
-      renderCell: (leader) => <Text maxLines={1}>{leader.email}</Text>
-    },
-    { key: 'sessions', header: t('sessionsCol'), width: pixel(90), renderCell: (leader) => <Text>{leader.sessionCount}</Text> },
-    {
-      key: 'settled',
-      header: t('leaderboardSettledUsage'),
-      width: pixel(140),
-      renderCell: (leader) => <Text>${money(leader.consumedMicros / 1_000_000)}</Text>
-    }
-  ];
-
-  return (
-    <Card variant="muted" padding={0}>
-      <VStack gap={2} padding={3}>
-        <VStack gap={1}>
-          <HStack gap={2} vAlign="center">
-            <Icon icon={Trophy} size="lg" color="accent" />
-            <Heading level={2}>{t('tabLeaderboard')}</Heading>
-          </HStack>
-          <Text type="supporting" color="secondary">{t('leaderboardSubtitle')}</Text>
-        </VStack>
-        {leaderboard.topProviders.length ? (
-          <Grid columns={{ minWidth: 320, repeat: 'fit' }} gap={2}>
-            <Table data={leaderboard.topProviders.slice(0, 5)} columns={columns} idKey="rank" textOverflow="truncate" />
-            {leaderboard.topProviders.length > 5 && (
-              <Table data={leaderboard.topProviders.slice(5, 10)} columns={columns} idKey="rank" textOverflow="truncate" />
-            )}
-          </Grid>
-        ) : <EmptyState title={t('adminNoDataYet')} description={t('leaderboardProvidersEmpty')} />}
-      </VStack>
-    </Card>
   );
 }
 

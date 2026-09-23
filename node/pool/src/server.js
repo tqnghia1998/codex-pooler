@@ -716,6 +716,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     return;
   }
   if (req.method === 'GET' && resource === 'leaderboard' && parts.length === 3) {
+    requireAdmin(auth.account);
     sendJson(res, 200, { leaderboard: productStore.communityLeaderboard() });
     return;
   }

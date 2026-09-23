@@ -643,15 +643,17 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
   }
 });
 
-test('signed-in members can read a community leaderboard with account emails', async () => {
+test('only administrators can read a community leaderboard with account emails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-leaderboard-api-'));
   try {
     const store = new Store(dir);
     const sharingStore = new ProductStore(dir);
     const provider = account(sharingStore, 'provider');
     const consumer = account(sharingStore, 'consumer');
+    const admin = sharingStore.upsertAccount({ email: 'quangnghia.trinh@shopee.com', name: 'Admin' });
     const providerSession = sharingStore.createAccountSession(provider.id);
     const consumerSession = sharingStore.createAccountSession(consumer.id);
+    const adminSession = sharingStore.createAccountSession(admin.id);
     const now = new Date().toISOString();
     sharingStore.sqlite.prepare(`
       INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
@@ -670,7 +672,9 @@ test('signed-in members can read a community leaderboard with account emails', a
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
       assert.equal((await fetch(`${base}/api/pool/leaderboard`)).status, 401);
-      const result = await request(base, '/api/pool/leaderboard', consumerSession);
+      assert.equal((await request(base, '/api/pool/leaderboard', consumerSession)).response.status, 403);
+      assert.equal((await request(base, '/api/pool/leaderboard', providerSession)).response.status, 403);
+      const result = await request(base, '/api/pool/leaderboard', adminSession);
       assert.equal(result.response.status, 200);
       assert.deepEqual(result.body.leaderboard.topProviders, [{
         rank: 1,
@@ -686,7 +690,6 @@ test('signed-in members can read a community leaderboard with account emails', a
       }]);
       assert.equal(result.body.leaderboard.topProviders[0].id, undefined);
       assert.equal(result.body.leaderboard.topProviders[0].displayName, undefined);
-      assert.equal((await fetch(`${base}/api/pool/leaderboard`, { headers: authHeaders(providerSession) })).status, 200);
 
       const addOffer = sharingStore.sqlite.prepare(`
         INSERT INTO sharing_offers (id, provider_account_id, upstream_id, quota_micros, status, expires_at, created_at, updated_at)
@@ -707,7 +710,7 @@ test('signed-in members can read a community leaderboard with account emails', a
         addTicket.run(`${name}-ticket`, `${name}-offer`, leader.id, consumer.id, now, now);
         addSession.run(`${name}-session`, `${name}-offer`, `${name}-ticket`, leader.id, consumer.id, index * 1000000, now, now);
       }
-      const ranked = await request(base, '/api/pool/leaderboard', consumerSession);
+      const ranked = await request(base, '/api/pool/leaderboard', adminSession);
       assert.deepEqual(ranked.body.leaderboard.topProviders.map(({ rank, email }) => ({ rank, email })), [
         ...Array.from({ length: 9 }, (_, index) => ({
           rank: index + 1,
