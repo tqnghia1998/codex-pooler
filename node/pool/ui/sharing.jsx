@@ -1286,6 +1286,7 @@ function QuotaOverview({
   const orderedUpstreams = useMemo(() => (
     [...upstreams].sort((left, right) => upstreamProviderRank(left) - upstreamProviderRank(right))
   ), [upstreams]);
+  const linkedTypes = new Set(upstreams.map(offerProviderType));
   if (!upstreams.length) {
     return (
       <Card variant="muted" padding={3}>
@@ -1295,9 +1296,9 @@ function QuotaOverview({
             <Text type="supporting" color="secondary" maxLines={1}>{t('noShareProviderDesc')}</Text>
           </VStack>
           <HStack justify="center" gap={1} wrap="wrap">
-            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onImportAuthJson} />
-            <Button label={t('linkClaude')} size="sm" variant="secondary" onClick={onAddClaude} />
-            <Button label={t('linkAis')} size="sm" variant="secondary" onClick={onAddAis} />
+            <Button label={t('linkCodex')} size="sm" variant="secondary" isDisabled={linkedTypes.has('codex')} onClick={onImportAuthJson} />
+            <Button label={t('linkClaude')} size="sm" variant="secondary" isDisabled={linkedTypes.has('claude')} onClick={onAddClaude} />
+            <Button label={t('linkAis')} size="sm" variant="secondary" isDisabled={linkedTypes.has('ais')} onClick={onAddAis} />
           </HStack>
         </VStack>
       </Card>
@@ -1312,9 +1313,9 @@ function QuotaOverview({
             <Text type="supporting" color="secondary" maxLines={1}>{t('shareProvidersDesc')}</Text>
           </VStack>
           <HStack gap={2} wrap="wrap">
-            <Button label={t('linkCodex')} size="sm" variant="secondary" onClick={onImportAuthJson} />
-            <Button label={t('linkClaude')} size="sm" variant="secondary" onClick={onAddClaude} />
-            <Button label={t('linkAis')} size="sm" variant="secondary" onClick={onAddAis} />
+            <Button label={t('linkCodex')} size="sm" variant="secondary" isDisabled={linkedTypes.has('codex')} onClick={onImportAuthJson} />
+            <Button label={t('linkClaude')} size="sm" variant="secondary" isDisabled={linkedTypes.has('claude')} onClick={onAddClaude} />
+            <Button label={t('linkAis')} size="sm" variant="secondary" isDisabled={linkedTypes.has('ais')} onClick={onAddAis} />
             <Button label={t('credentials')} size="sm" variant="ghost" onClick={onRevealCredentials} />
             <Button label={t('refreshQuota')} size="sm" variant="ghost" isLoading={isRefreshing} onClick={onRefresh} />
           </HStack>

@@ -13,6 +13,7 @@ export class CodexAuthImporter {
     if (!parsed.email) throw new Error('Codex auth JSON is missing an email');
     const account = this.sharingStore.upsertAccount({ email: parsed.email, name: poolDisplayName(parsed.email) });
     let upstream = this.matchOwnedUpstream(account.id, parsed);
+    this.sharingStore.requireProviderSlot(account.id, this.upstreamStore, 'codex', upstream?.id);
     if (upstream) {
       upstream = this.upstreamStore.update(upstream.id, { authJson: normalizedAuthJson });
     } else {
@@ -25,7 +26,7 @@ export class CodexAuthImporter {
       this.upstreamStore.setCap(upstream.id, { capDollars: 1_000_000 });
     }
     const stored = this.upstreamStore.get(upstream.id);
-    this.sharingStore.linkUpstream(account.id, upstream.id, stored?.scopeId || 'default');
+    this.sharingStore.linkUpstream(account.id, upstream.id, stored?.scopeId || 'default', this.upstreamStore);
     return { account, upstream };
   }
 

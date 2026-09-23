@@ -179,6 +179,33 @@ test('does not transfer a linked upstream between product accounts', () => {
   }
 });
 
+test('enforces one link per provider type while preserving existing links', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-provider-type-slot-'));
+  try {
+    const upstreamStore = new Store(dir);
+    const sharingStore = new ProductStore(dir);
+    const owner = account(sharingStore, 'provider-slot@example.com');
+    const first = upstreamStore.create({ type: 'compass', quotaSource: 'ais', projectId: 'first-project', projectKey: 'first-key' });
+    const second = upstreamStore.create({ type: 'compass', quotaSource: 'ais', projectId: 'second-project', projectKey: 'second-key' });
+    const third = upstreamStore.create({ type: 'compass', quotaSource: 'ais', projectId: 'third-project', projectKey: 'third-key' });
+    const codex = upstreamStore.create({ type: 'codex', accessToken: 'codex-provider-slot' });
+
+    sharingStore.linkUpstream(owner.id, first.id);
+    sharingStore.linkUpstream(owner.id, second.id);
+    sharingStore.linkUpstream(owner.id, second.id, 'default', upstreamStore);
+    assert.throws(
+      () => sharingStore.linkUpstream(owner.id, third.id, 'default', upstreamStore),
+      (error) => error.statusCode === 409 && /one AIS provider/.test(error.message)
+    );
+    sharingStore.linkUpstream(owner.id, codex.id, 'default', upstreamStore);
+    assert.deepEqual(sharingStore.listAccountUpstreamLinks(owner.id).map(({ upstreamId }) => upstreamId), [
+      first.id, second.id, codex.id
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('canonicalizes duplicate provider identities using current sharing activity', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-canonical-upstreams-'));
   try {

@@ -437,12 +437,25 @@ export class ProductStore {
     return row ? publicAccount(row) : null;
   }
 
-  linkUpstream(accountId, upstreamId, scopeId = 'default') {
+  requireProviderSlot(accountId, upstreamStore, providerType, upstreamId = null) {
+    const label = { codex: 'Codex', claude: 'Claude', ais: 'AIS' }[providerType];
+    if (!label) return;
+    const links = this.listAccountUpstreamLinks(accountId);
+    if (upstreamId && links.some((link) => link.upstreamId === upstreamId)) return;
+    if (links.some((link) => providerTypeForUpstream(upstreamStore.get(link.upstreamId)) === providerType)) {
+      throw Object.assign(new Error(`Only one ${label} provider can be linked per QuotaHub account`), { statusCode: 409 });
+    }
+  }
+
+  linkUpstream(accountId, upstreamId, scopeId = 'default', upstreamStore = null) {
     const link = this.sqlite.transaction(() => {
       this.requireAccount(accountId);
       const existing = this.sqlite.prepare('SELECT account_id, link_order FROM account_upstreams WHERE upstream_id = ?').get(upstreamId);
       if (existing && existing.account_id !== accountId) {
         throw Object.assign(new Error('Codex account is already linked to another QuotaHub account'), { statusCode: 409 });
+      }
+      if (upstreamStore) {
+        this.requireProviderSlot(accountId, upstreamStore, providerTypeForUpstream(upstreamStore.get(upstreamId)), upstreamId);
       }
       const now = new Date().toISOString();
       const linkOrder = existing?.link_order || this.sqlite.prepare('SELECT COALESCE(MAX(link_order), 0) + 1 AS value FROM account_upstreams WHERE account_id = ?').get(accountId).value;
@@ -3273,6 +3286,12 @@ function upstreamIdentityKey(upstream) {
     const projectId = String(upstream.projectId || '').trim();
     return projectId ? `ais:${projectId}` : null;
   }
+  return null;
+}
+
+function providerTypeForUpstream(upstream) {
+  if (upstream?.type === 'codex' || upstream?.type === 'claude') return upstream.type;
+  if (upstream?.quotaSource === 'ais' || upstream?.quotaSource === 'aiswitch') return 'ais';
   return null;
 }
 

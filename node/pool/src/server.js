@@ -9,7 +9,8 @@ import {
   exportUpstreamCredentials,
   parseClaudeAuthJson,
   claudeOAuthInputError,
-  isSupportedClaudeOAuthUpstream
+  isSupportedClaudeOAuthUpstream,
+  text
 } from '../../src/domain.js';
 import { claudeConfigFromEnv, normalizeClaudeConfig } from '../../src/claude-config.js';
 import { ensureClaudeCredentialIdentity } from '../../src/claude-protocol.js';
@@ -510,6 +511,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
       accessToken: parsedAuth.accessToken,
       projectKey: parsedAuth.projectKey
     });
+    productStore.requireProviderSlot(accountId, store, 'claude', existing?.id);
     const created = !existing;
     const upstream = existing
       ? store.update(existing.id, { authJson })
@@ -534,7 +536,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
           logger?.warn?.(`[pool] Advisory Claude identity lookup failed for ${upstream.id}: ${error?.message || error}`);
         }
       }
-      productStore.linkUpstream(accountId, upstream.id);
+      productStore.linkUpstream(accountId, upstream.id, 'default', store);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
       const latest = store.get(upstream.id) || upstream;
       sendJson(res, 201, {
@@ -556,11 +558,16 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
   }
   if (req.method === 'POST' && resource === 'upstreams' && (id === 'ais' || id === 'aiswitch') && parts.length === 4) {
     const input = await body(req);
+    if (!text(input.projectId)) throw new HttpError(400, 'invalid_request', 'projectId is required');
     const existing = productStore.findOwnedUpstreamByIdentity(accountId, store, {
       type: 'compass',
       quotaSource: 'ais',
       projectId: input.projectId
     });
+    if (!existing && !text(input.projectKey)) {
+      throw new HttpError(400, 'invalid_request', 'projectKey is required');
+    }
+    productStore.requireProviderSlot(accountId, store, 'ais', existing?.id);
     const created = !existing;
     const upstream = existing
       ? store.update(existing.id, {
@@ -575,7 +582,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         projectKey: input.projectKey
       }, { allowDuplicateIdentity: true });
     try {
-      productStore.linkUpstream(accountId, upstream.id);
+      productStore.linkUpstream(accountId, upstream.id, 'default', store);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
       sendJson(res, 201, {
         upstream: {

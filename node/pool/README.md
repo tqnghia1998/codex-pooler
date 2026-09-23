@@ -114,7 +114,11 @@ token-refresh failure, or has exhausted its provider quota.
 
 Users can also link Claude with a Claude CLI setup token or supported OAuth
 credential JSON, or add an AIS project by entering its project ID and project
-key. Claude cards use the signed-in QuotaHub email because setup tokens may not
+key. Each account can link at most one provider of each type (Codex, Claude,
+and AIS). Reimporting or updating the linked provider refreshes its credentials;
+unlink it before linking a different provider of the same type. Existing
+additional links remain accessible, but no new link of that type can be added.
+Claude cards use the signed-in QuotaHub email because setup tokens may not
 have permission to read a Claude profile. Claude and AIS use the delayed monthly
 balance when the integration has data for the provider email. That balance caps
 new offers and sessions and marks the provider unavailable at zero, just like a

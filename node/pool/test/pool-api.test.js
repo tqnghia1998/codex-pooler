@@ -515,6 +515,17 @@ test('multiple browser sessions for one QuotaHub account remain valid after anot
         assert.equal(response.status, 200);
         assert.equal((await response.json()).account.id, account.id);
       }
+
+      const otherCodex = await fetch(`${base}/auth/codex/import`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ authJson: authJson({ subject: 'other-browser-account', email: 'same@example.com', accountId: 'other-account' }) })
+      });
+      assert.equal(otherCodex.status, 409);
+      assert.match((await otherCodex.json()).error.message, /one Codex provider/);
+      assert.equal(store.list().length, 1);
+      assert.equal(sharingStore.listAccountUpstreamLinks(account.id).length, 1);
+      assert.equal(setCookies(otherCodex).length, 0);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1201,6 +1212,14 @@ test('providers can unlink and relink duplicate Claude and AIS credentials indep
       assert.equal(repeatedClaude.response.status, 201);
       assert.equal(repeatedClaude.body.upstream.id, firstClaude.body.upstream.id);
 
+      const otherClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ authJson: claudeAuthJson.replace('shared-setup-token', 'other-setup-token') })
+      });
+      assert.equal(otherClaude.response.status, 409);
+      assert.match(otherClaude.body.error.message, /one Claude provider/);
+      assert.equal(store.list().filter((upstream) => upstream.type === 'claude').length, 2);
+
       const removedClaude = await request(base, `/api/pool/upstreams/${firstClaude.body.upstream.id}`, firstSession, {
         method: 'DELETE',
         body: '{}'
@@ -1233,6 +1252,14 @@ test('providers can unlink and relink duplicate Claude and AIS credentials indep
       });
       assert.equal(repeatedAis.response.status, 201);
       assert.equal(repeatedAis.body.upstream.id, firstAis.body.upstream.id);
+
+      const otherAis = await request(base, '/api/pool/upstreams/ais', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ projectId: 'other-ais-project', projectKey: 'other-ais-key' })
+      });
+      assert.equal(otherAis.response.status, 409);
+      assert.match(otherAis.body.error.message, /one AIS provider/);
+      assert.equal(store.list().filter((upstream) => upstream.quotaSource === 'ais').length, 2);
 
       const removedAis = await request(base, `/api/pool/upstreams/${firstAis.body.upstream.id}`, firstSession, {
         method: 'DELETE',
@@ -1315,6 +1342,18 @@ test('an owner can add an AIS project without a local quota estimate', async () 
         body: JSON.stringify({ projectId: 'invalid-ais-project' })
       });
       assert.equal(rejected.response.status, 400);
+      assert.match(rejected.body.error.message, /projectKey is required/);
+      for (const invalid of [
+        { projectKey: 'valid-key' },
+        { projectId: 'invalid-ais-project', projectKey: 42 }
+      ]) {
+        const invalidProject = await request(base, '/api/pool/upstreams/ais', providerSession, {
+          method: 'POST',
+          body: JSON.stringify(invalid)
+        });
+        assert.equal(invalidProject.response.status, 400);
+        assert.match(invalidProject.body.error.message, /projectId is required|projectKey is required/);
+      }
       assert.deepEqual(sharingStore.listAccountUpstreamLinks(provider.id).map((link) => link.upstreamId), [upstream.id]);
       assert.equal(store.list().length, 1);
     } finally {

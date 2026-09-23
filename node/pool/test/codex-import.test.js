@@ -105,7 +105,7 @@ test('auth.json import signs into the same account and replaces stored credentia
   }
 });
 
-test('one QuotaHub account can link multiple Codex accounts without replacing either credential', () => {
+test('one QuotaHub account can refresh its Codex link but cannot import a second Codex account', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-multiple-codex-providers-'));
   try {
     const upstreamStore = new Store(dir);
@@ -113,15 +113,16 @@ test('one QuotaHub account can link multiple Codex accounts without replacing ei
     const importer = new CodexAuthImporter({ sharingStore, upstreamStore });
 
     const first = importer.importAuthJson(authJson({ accountId: 'first-codex-account', refreshToken: 'first-refresh' }));
-    const second = importer.importAuthJson(authJson({ accountId: 'second-codex-account', refreshToken: 'second-refresh' }));
+    assert.throws(
+      () => importer.importAuthJson(authJson({ accountId: 'second-codex-account', refreshToken: 'second-refresh' })),
+      (error) => error.statusCode === 409 && /one Codex provider/.test(error.message)
+    );
     const repeatedFirst = importer.importAuthJson(authJson({ accountId: 'first-codex-account', refreshToken: 'rotated-first-refresh' }));
 
-    assert.equal(second.account.id, first.account.id);
-    assert.notEqual(second.upstream.id, first.upstream.id);
     assert.equal(repeatedFirst.upstream.id, first.upstream.id);
-    assert.equal(upstreamStore.list().length, 2);
+    assert.equal(upstreamStore.list().length, 1);
+    assert.equal(sharingStore.listAccountUpstreamLinks(first.account.id).length, 1);
     assert.equal(upstreamStore.credentials(first.upstream.id).refreshToken, 'rotated-first-refresh');
-    assert.equal(upstreamStore.credentials(second.upstream.id).refreshToken, 'second-refresh');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
