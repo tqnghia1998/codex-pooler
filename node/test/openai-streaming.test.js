@@ -65,6 +65,67 @@ test('projects failed terminals without provider fields and latches', () => {
   assert.equal(normalizePublicResponsesEvent({ type: 'response.output_text.delta', delta: 'late' }, state).length, 0);
 });
 
+test('drops backend-only public Responses events before sequencing', () => {
+  const state = createPublicResponsesState();
+  assert.deepEqual(normalizePublicResponsesEvent({ type: 'responsesapi.websocket_timing', duration_ms: 1 }, state), []);
+  assert.deepEqual(normalizePublicResponsesEvent({ type: 'codex.rate_limits', limits: [] }, state), []);
+  const [chunk] = normalizePublicResponsesEvent({ type: 'response.output_text.delta', delta: 'visible' }, state);
+  assert.equal(decode(chunk).sequence_number, 0);
+});
+
+test('projects provider WebSocket 4xx terminals as public error events', () => {
+  const [chunk] = normalizePublicResponsesEvent({
+    type: 'error',
+    status: 400,
+    error: { type: 'invalid_request_error', code: 'unsupported_parameter', message: 'provider details must not leak' }
+  }, createPublicResponsesState({}, { websocket: true }));
+  assert.deepEqual(decode(chunk), {
+    type: 'error',
+    status: 400,
+    error: {
+      type: 'invalid_request_error',
+      code: 'upstream_status',
+      message: 'Upstream rejected the request',
+      param: null
+    },
+    sequence_number: 0
+  });
+});
+
+test('preserves SSE failure projection for provider 4xx terminals', () => {
+  const [chunk] = normalizePublicResponsesEvent({
+    type: 'error',
+    status: 400,
+    error: { type: 'invalid_request_error', code: 'unsupported_parameter', message: 'provider details must not leak' }
+  }, createPublicResponsesState());
+  assert.deepEqual(decode(chunk), {
+    type: 'response.failed',
+    response: {
+      id: 'resp_failed',
+      object: 'response',
+      created_at: 0,
+      status: 'failed',
+      error: {
+        type: 'server_error',
+        code: 'server_error',
+        message: 'upstream request failed',
+        param: null
+      },
+      model: 'unknown',
+      output: [],
+      output_text: '',
+      instructions: null,
+      metadata: null,
+      temperature: null,
+      top_p: null,
+      parallel_tool_calls: false,
+      tool_choice: 'auto',
+      tools: []
+    },
+    sequence_number: 0
+  });
+});
+
 test('projects policy failures with only the stable public contract', () => {
   const result = decode(normalizePublicResponsesEvent({
     type: 'response.failed',
