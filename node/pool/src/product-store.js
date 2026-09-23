@@ -5,7 +5,7 @@ import Database from 'better-sqlite3';
 import { offerExceedsProviderQuota, providerIssue } from './provider-availability.js';
 
 const OFFER_TTL_MS = 7 * 24 * 60 * 60 * 1_000;
-const OFFER_MESSAGE_MAX_LENGTH = 500;
+const SHARING_MESSAGE_MAX_LENGTH = 500;
 const SHARE_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const RESERVATION_TTL_MS = 2 * 60 * 60 * 1_000;
 const SETTLED_ATTEMPT_LIMIT = 100;
@@ -157,6 +157,7 @@ export class ProductStore {
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
         quota_micros INTEGER NOT NULL,
+        message TEXT,
         visibility TEXT NOT NULL DEFAULT 'public',
         allowed_emails TEXT,
         status TEXT NOT NULL,
@@ -256,7 +257,7 @@ export class ProductStore {
     this.sqlite.prepare(`
       UPDATE account_sessions
       SET revoked_at = COALESCE(revoked_at, ?)
-      WHERE auth_source IN ('legacy', 'codex')
+      WHERE auth_source IN ('legacy', 'codex', 'device')
     `).run(new Date().toISOString());
   }
 
@@ -297,6 +298,7 @@ export class ProductStore {
     addColumn(this.sqlite, 'sharing_sessions', 'expires_at', 'TEXT');
     addColumn(this.sqlite, 'quota_requests', 'visibility', "TEXT NOT NULL DEFAULT 'public'");
     addColumn(this.sqlite, 'quota_requests', 'allowed_emails', 'TEXT');
+    addColumn(this.sqlite, 'quota_requests', 'message', 'TEXT');
 
     const personalColumns = this.sqlite.pragma('table_info(personal_api_keys)');
     const accountColumn = personalColumns.find(({ name }) => name === 'account_id');
@@ -881,7 +883,7 @@ export class ProductStore {
       throw new Error('at least one valid email is required for restricted visibility');
     }
     const allowedEmailsJson = offerVisibility === 'restricted' ? JSON.stringify(cleanEmails) : null;
-    const offerMessage = cleanOfferMessage(message);
+    const offerMessage = cleanSharingMessage(message, 'offer');
     const expiry = sharingExpiry(expiresAt, upstream, now, OFFER_TTL_MS);
     this.sqlite.prepare(`
       INSERT INTO sharing_offers
@@ -924,7 +926,7 @@ export class ProductStore {
       throw new Error('offer exceeds the provider’s truly offerable quota');
     }
     const visibility = input.visibility ?? row.visibility ?? 'public';
-    const message = input.message === undefined ? row.message : cleanOfferMessage(input.message);
+    const message = input.message === undefined ? row.message : cleanSharingMessage(input.message, 'offer');
     let allowedEmailsJson = row.allowed_emails;
     if (input.allowedEmails !== undefined || input.visibility !== undefined) {
       if (visibility === 'restricted') {
@@ -1224,7 +1226,7 @@ export class ProductStore {
     const row = this.sqlite.prepare(`
       SELECT sharing_offers.*, accounts.display_name AS provider_name, accounts.email AS provider_email
       FROM sharing_offers JOIN accounts ON accounts.id = sharing_offers.provider_account_id
-      WHERE sharing_offers.id = ?
+      WHERE sharing_offers.id = ? AND sharing_offers.internal_only = 0
     `).get(id);
     if (!row) throw notFound();
     const viewerAccount = viewerAccountId ? this.account(viewerAccountId) : null;
@@ -2226,11 +2228,12 @@ export class ProductStore {
     };
   }
 
-  createQuotaRequest(accountId, { quotaDollars, expiresAt, visibility, allowedEmails } = {}) {
+  createQuotaRequest(accountId, { quotaDollars, expiresAt, visibility, allowedEmails, message } = {}) {
     this.requireAccount(accountId);
     this.expireDue(new Date(), { force: true });
     const now = new Date();
     const quotaMicros = dollarsToMicros(quotaDollars);
+    const requestMessage = cleanSharingMessage(message, 'quota request');
     const requestVisibility = visibility === 'restricted' ? 'restricted' : 'public';
     const cleanEmails = requestVisibility === 'restricted' ? parseAllowedEmails(allowedEmails) : [];
     if (requestVisibility === 'restricted' && cleanEmails.length === 0) {
@@ -2248,9 +2251,9 @@ export class ProductStore {
       const id = randomUUID();
       this.sqlite.prepare(`
         INSERT INTO quota_requests
-          (id, account_id, quota_micros, visibility, allowed_emails, status, expires_at, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
-      `).run(id, accountId, quotaMicros, requestVisibility, allowedEmailsJson, expiry, now.toISOString(), now.toISOString());
+          (id, account_id, quota_micros, message, visibility, allowed_emails, status, expires_at, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
+      `).run(id, accountId, quotaMicros, requestMessage, requestVisibility, allowedEmailsJson, expiry, now.toISOString(), now.toISOString());
       this.event(accountId, 'quota_request', id, 'created', {
         quotaMicros,
         expiresAt: expiry,
@@ -2356,12 +2359,13 @@ export class ProductStore {
         replacementRequestId = randomUUID();
         this.sqlite.prepare(`
           INSERT INTO quota_requests
-            (id, account_id, quota_micros, visibility, allowed_emails, status, expires_at, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?)
+            (id, account_id, quota_micros, message, visibility, allowed_emails, status, expires_at, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)
         `).run(
           replacementRequestId,
           request.account_id,
           remainingMicros,
+          request.message,
           request.visibility || 'public',
           request.allowed_emails || null,
           request.expires_at,
@@ -3125,6 +3129,7 @@ function publicQuotaRequest(row, viewerAccountId) {
       displayName: poolDisplayName(row.email, row.display_name)
     },
     quotaDollars: microsToDollars(row.quota_micros),
+    message: row.message || null,
     status: row.status,
     isMine: row.account_id === viewerAccountId,
     visibility: row.visibility || 'public',
@@ -3263,12 +3268,12 @@ function cleanEmail(value, fallback = '') {
   return email || fallbackEmail || 'Codex user';
 }
 
-function cleanOfferMessage(value) {
+function cleanSharingMessage(value, subject) {
   if (value === undefined || value === null) return null;
-  if (typeof value !== 'string') throw new Error('offer message must be text');
+  if (typeof value !== 'string') throw new Error(`${subject} message must be text`);
   const message = value.replace(/\r\n?/g, '\n').trim();
-  if (message.length > OFFER_MESSAGE_MAX_LENGTH) {
-    throw new Error(`offer message must be ${OFFER_MESSAGE_MAX_LENGTH} characters or fewer`);
+  if (message.length > SHARING_MESSAGE_MAX_LENGTH) {
+    throw new Error(`${subject} message must be ${SHARING_MESSAGE_MAX_LENGTH} characters or fewer`);
   }
   return message || null;
 }

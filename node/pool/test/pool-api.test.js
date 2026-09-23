@@ -1177,6 +1177,13 @@ test('providers can unlink and relink duplicate Claude and AIS credentials indep
       metadata: { skip_account_profile: true }
     });
     try {
+      const apiKeyClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
+        method: 'POST',
+        body: JSON.stringify({ token: 'sk-ant-api03-not-oauth' })
+      });
+      assert.equal(apiKeyClaude.response.status, 400);
+      assert.equal(store.list().length, 0);
+
       const firstClaude = await request(base, '/api/pool/upstreams/claude', firstSession, {
         method: 'POST',
         body: JSON.stringify({ authJson: claudeAuthJson })
@@ -1340,6 +1347,30 @@ test('an owner can add an AIS project without a local quota estimate', async () 
       }
       assert.deepEqual(sharingStore.listAccountUpstreamLinks(provider.id).map((link) => link.upstreamId), [upstream.id]);
       assert.equal(store.list().length, 1);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('legacy AISwitch links show the signed-in provider email', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-aiswitch-owner-api-'));
+  try {
+    const store = new Store(dir);
+    const upstream = store.create({ type: 'compass', projectId: 'aiswitch-project', projectKey: 'test-key', quotaSource: 'aiswitch' });
+    const sharingStore = new ProductStore(dir);
+    const provider = account(sharingStore, 'aiswitch-provider');
+    sharingStore.linkUpstream(provider.id, upstream.id);
+    const session = sharingStore.createAccountSession(provider.id);
+    const server = createServer(createApp({ store, productStore: sharingStore }));
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const listed = await request(`http://127.0.0.1:${server.address().port}`, '/api/pool/upstreams', session);
+      assert.equal(listed.response.status, 200);
+      assert.equal(listed.body.upstreams[0].email, provider.email);
+      assert.equal(listed.body.upstreams[0].name, provider.email);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
@@ -1657,6 +1688,7 @@ test('provider controls, named keys, and friend quota requests are available thr
       });
       assert.equal(result.response.status, 201);
       assert.equal(result.body.quotaRequest.quotaDollars, 3);
+      assert.equal(result.body.quotaRequest.message, null);
       const quotaRequestId = result.body.quotaRequest.id;
 
       result = await request(base, '/api/pool/quota-requests', providerSession);
@@ -1688,13 +1720,22 @@ test('provider controls, named keys, and friend quota requests are available thr
 
       result = await request(base, '/api/pool/quota-requests', consumerSession, {
         method: 'POST',
+        body: JSON.stringify({ quotaDollars: 4, message: 'x'.repeat(501) })
+      });
+      assert.equal(result.response.status, 400);
+      assert.match(result.body.error.message, /quota request message must be 500 characters or fewer/);
+
+      result = await request(base, '/api/pool/quota-requests', consumerSession, {
+        method: 'POST',
         body: JSON.stringify({
           quotaDollars: 4,
+          message: '  Please help, I need some quota for my tasks  ',
           visibility: 'restricted',
           allowedEmails: ['reliability-provider@example.com']
         })
       });
       assert.equal(result.response.status, 201);
+      assert.equal(result.body.quotaRequest.message, 'Please help, I need some quota for my tasks');
       assert.equal(result.body.quotaRequest.visibility, 'restricted');
       assert.deepEqual(result.body.quotaRequest.allowedEmails, ['reliability-provider@example.com']);
       const restrictedQuotaRequestId = result.body.quotaRequest.id;
@@ -1702,6 +1743,8 @@ test('provider controls, named keys, and friend quota requests are available thr
       result = await request(base, '/api/pool/quota-requests', providerSession);
       assert.equal(result.response.status, 200);
       assert.equal(result.body.quotaRequests.some((quotaRequest) => quotaRequest.id === restrictedQuotaRequestId), true);
+      assert.equal(result.body.quotaRequests.find((quotaRequest) => quotaRequest.id === restrictedQuotaRequestId).message,
+        'Please help, I need some quota for my tasks');
 
       result = await request(base, '/api/pool/quota-requests', otherSession);
       assert.equal(result.response.status, 200);
@@ -1737,8 +1780,13 @@ test('provider controls, named keys, and friend quota requests are available thr
       });
       assert.equal(result.response.status, 200);
       assert.equal(result.body.session.grantedQuotaDollars, 1.5);
+      assert.throws(
+        () => sharingStore.offer(result.body.session.offerId, provider.id, store),
+        (error) => error.statusCode === 404
+      );
       assert.equal(result.body.quotaRequest.status, 'fulfilled');
       assert.equal(result.body.replacementQuotaRequest.quotaDollars, 2.5);
+      assert.equal(result.body.replacementQuotaRequest.message, 'Please help, I need some quota for my tasks');
       assert.equal(result.body.replacementQuotaRequest.visibility, 'restricted');
       assert.deepEqual(sharingStore.adminAnalytics().tickets, ticketFunnelBeforeGrant);
       const directGrantEvent = sharingStore.sqlite.prepare(`

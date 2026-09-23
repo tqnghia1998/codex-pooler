@@ -201,16 +201,18 @@ admin analytics view retains both provider and consumer rankings.
 ## Friend Requests
 
 A user who cannot find a suitable offer can post one request for the amount
-they need, either publicly or to an email allowlist. Posting a new request
-cancels their previous active request. Users can view and cancel their own
+they need, either publicly or to an email allowlist. An optional message (up to
+500 characters) is visible to members who can view the request. Posting a new
+request cancels their previous active request. Users can view and cancel their own
 active requests from the consumer dashboard. A provider who can see the request
 can grant it directly from one linked provider. A grant at or above the
 requested amount fulfills the request; a smaller grant fulfills the original
 and creates a replacement request for the remaining amount with the same
-visibility and expiry. Direct grants and offer-ticket approvals are independent:
+message, visibility, and expiry. Direct grants and offer-ticket approvals are
+independent:
 granting a request does not cancel offer tickets, and approving an offer ticket
 does not fulfill a quota request. Every grant atomically creates a share
-session and `cp_share_...` key. Requests contain no payment, message, rating,
+session and `cp_share_...` key. Requests contain no payment, rating,
 or guarantee fields.
 The admin request funnel counts offer tickets only; direct grants appear as
 separate `direct_grant/created` audit events.
@@ -281,7 +283,7 @@ POST   /api/pool/personal-keys/:id/reveal
 POST   /api/pool/personal-keys/:id/rotate
 POST   /api/pool/personal-keys/:id/revoke
 GET    /api/pool/upstreams
-POST   /api/pool/upstreams/claude                   { token|accessToken|authJson, name? }
+POST   /api/pool/upstreams/claude                   { token|accessToken|authJson }
 POST   /api/pool/upstreams/ais                      { projectId, projectKey }
 PATCH  /api/pool/upstreams/:id                      AIS: { projectId, projectKey? }; Claude: { token|accessToken|authJson }
 DELETE /api/pool/upstreams/:id                      removes credentials; revokes related offers and sessions

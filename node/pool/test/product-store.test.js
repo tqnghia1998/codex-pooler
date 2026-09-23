@@ -434,6 +434,56 @@ test('normalizes, updates, and bounds offer messages', () => {
   }
 });
 
+test('migrates and validates optional quota request messages', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-quota-request-messages-'));
+  try {
+    const legacy = new Database(join(dir, 'pool.sqlite'));
+    legacy.exec(`
+      CREATE TABLE quota_requests (
+        id TEXT PRIMARY KEY,
+        account_id TEXT NOT NULL,
+        quota_micros INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    legacy.close();
+
+    const sharingStore = new ProductStore(dir);
+    const consumer = account(sharingStore, 'request-message-consumer@example.com');
+    const provider = account(sharingStore, 'request-message-provider@example.com');
+    const other = account(sharingStore, 'request-message-other@example.com');
+    assert.ok(sharingStore.sqlite.pragma('table_info(quota_requests)').some(({ name }) => name === 'message'));
+
+    const request = sharingStore.createQuotaRequest(consumer.id, {
+      quotaDollars: 5,
+      message: '  Please help.\r\nI need quota.  ',
+      visibility: 'restricted',
+      allowedEmails: [provider.email]
+    });
+    assert.equal(request.message, 'Please help.\nI need quota.');
+    assert.equal(sharingStore.listQuotaRequests(provider.id)[0].message, request.message);
+    assert.equal(sharingStore.listQuotaRequests(other.id).length, 0);
+    assert.equal(sharingStore.listQuotaRequestsPage(provider.id, {
+      role: 'community', includePast: false, offset: 0, limit: 10
+    }).quotaRequests[0].message, request.message);
+    assert.equal(sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 'x'.repeat(500) }).message.length, 500);
+    assert.throws(
+      () => sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 'x'.repeat(501) }),
+      /quota request message must be 500 characters or fewer/
+    );
+    assert.throws(
+      () => sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: 42 }),
+      /quota request message must be text/
+    );
+    assert.equal(sharingStore.createQuotaRequest(consumer.id, { quotaDollars: 5, message: '   ' }).message, null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('closes an offer without revalidating a stale submitted expiration', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-close-offer-expiry-'));
   try {
@@ -761,13 +811,16 @@ test('keeps account sessions permanent, including sessions with an old expiry va
   }
 });
 
-test('revokes legacy browser sessions while preserving imported credential sessions', () => {
+test('revokes legacy and device sessions while preserving imported credential sessions', () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-session-source-migration-'));
   try {
     const sharingStore = new ProductStore(dir);
     const user = account(sharingStore, 'session-source@example.com');
     const legacy = sharingStore.createAccountSession(user.id);
     const imported = sharingStore.createAccountSession(user.id, { source: 'import' });
+    const device = sharingStore.createAccountSession(user.id, { source: 'device' });
+    sharingStore.sqlite.prepare("UPDATE account_sessions SET auth_source = 'device' WHERE token_hash = ?")
+      .run(createHash('sha256').update(device.token).digest('hex'));
     sharingStore.sqlite.prepare("UPDATE account_sessions SET auth_source = 'codex' WHERE token_hash = ?")
       .run(createHash('sha256').update(legacy.token).digest('hex'));
 
@@ -775,6 +828,7 @@ test('revokes legacy browser sessions while preserving imported credential sessi
 
     assert.equal(reopened.authenticateAccountSession(legacy.token), null);
     assert.equal(reopened.authenticateAccountSession(imported.token).account.id, user.id);
+    assert.equal(reopened.authenticateAccountSession(device.token), null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

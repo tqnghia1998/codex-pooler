@@ -211,7 +211,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
   if (!cloakEnabled) {
     prepared = applyPayloadConfig(prepared);
     sanitizeClaudeMessageHistory(prepared, { preserveEmptyThinking: modelAlias?.isCompat === true });
-    ensureClaudeNativeBillingHeader(prepared, claudeConfig);
+    ensureClaudeNativeBillingHeader(prepared, claudeConfig, req);
     if (!nativeClient && countClaudeCacheControls(prepared) === 0) ensureClaudeCacheControls(prepared, { ttl: oauth ? '1h' : '' });
     Object.defineProperty(prepared, CLAUDE_TOOL_ALIASES, { value: aliases, enumerable: false });
     return attachClaudeModelAlias(attachClaudeRequestProfile(signClaudeOAuthBody(prepared), nativeClient, helperProfile), modelAlias);

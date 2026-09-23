@@ -495,7 +495,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
       });
     }
 
-    const policyError = claudeOAuthInputError({ authJson }, { creating: true });
+    const policyError = claudeOAuthInputError({ authJson });
     if (policyError) throw new HttpError(400, 'invalid_request', policyError);
     let parsedAuth;
     try {
@@ -516,24 +516,22 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
       ? store.update(existing.id, { authJson })
       : store.create({
         type: 'claude',
-        authJson,
-        name: input.name || parsedAuth.account?.displayName || parsedAuth.account?.emailAddress || 'Claude OAuth'
+        authJson
       }, { allowDuplicateIdentity: true });
     try {
       // Setup tokens cannot read Claude's profile endpoint. QuotaHub's signed-in
       // account is the authoritative owner identity for the linked provider.
       store.persistClaudeIdentity(upstream.id, { email: auth.account.email });
-      const credentials = store.credentials(upstream.id);
-      if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
-        try {
+      try {
+        const credentials = store.credentials(upstream.id);
+        if (isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) {
           await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl, refreshProfile: true });
-        } catch (error) {
-          if (error?.statusCode === 401 || error?.statusCode === 403) {
-            throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
-          }
-          // Profile lookup is advisory; log warning for transient upstream connectivity issues
-          logger?.warn?.(`[pool] Advisory Claude identity lookup failed for ${upstream.id}: ${error?.message || error}`);
         }
+      } catch (error) {
+        if (error?.statusCode === 401 || error?.statusCode === 403) {
+          throw new HttpError(400, 'invalid_token', 'Failed to authenticate Claude token with Anthropic');
+        }
+        logger?.warn?.(`[pool] Advisory Claude identity lookup failed on link for ${upstream.id}: ${error?.message || error}`);
       }
       productStore.linkUpstream(accountId, upstream.id, 'default', store);
       const provider = productStore.providerSummary(accountId, upstream.id, store);
@@ -693,7 +691,10 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
         const upstream = store.getPublic(upstreamId);
         if (!upstream) return [];
         const provider = productStore.providerSummary(accountId, upstreamId, store);
-        const ownerEmail = upstream.email || ((upstream.type === 'claude' || upstream.quotaSource === 'ais') ? auth.account.email : '');
+        const ownerEmail = upstream.email ||
+          ((upstream.type === 'claude' || upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch')
+            ? auth.account.email
+            : '');
         return [{
           ...upstream,
           ...(ownerEmail ? { email: ownerEmail } : {}),

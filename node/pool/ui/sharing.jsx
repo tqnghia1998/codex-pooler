@@ -717,11 +717,12 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               });
             }} />
           )}
-          <Button label={t('askForQuota')} icon={<HandHeart size={16} />} variant="secondary" onClick={() => setQuotaRequestDialog({
+          <Button label={t('askForQuota')} icon={<HandHeart size={16} />} variant="primary" onClick={() => setQuotaRequestDialog({
             quotaDollars: 10,
             expiresOn: '',
             visibility: 'public',
-            allowedEmails: ''
+            allowedEmails: '',
+            message: ''
           })} />
         </HStack>
       </HStack>
@@ -1051,6 +1052,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
             method: 'POST',
             body: JSON.stringify({
               quotaDollars: value.quotaDollars,
+              message: value.message || '',
               expiresAt: expiryTimestamp(value.expiresOn),
               visibility: value.visibility || 'public',
               allowedEmails: value.visibility === 'restricted'
@@ -1646,6 +1648,16 @@ function QuotaRequestsView({ quotaRequests, emailQuery = '', emptyTitle, emptyDe
   const columns = [
     { key: 'requester', header: t('requester'), width: proportional(2), renderCell: (quotaRequest) => <Text maxLines={1}>{accountLabel(quotaRequest.requester, t)}</Text> },
     { key: 'needed', header: t('needed'), width: pixel(120), renderCell: (quotaRequest) => <Text weight="bold" maxLines={1}>${money(quotaRequest.quotaDollars)}</Text> },
+    {
+      key: 'message',
+      header: t('message'),
+      width: proportional(3),
+      renderCell: (quotaRequest) => quotaRequest.message ? (
+        <Tooltip content={quotaRequest.message} placement="top">
+          <Text type="supporting" color="secondary" maxLines={1}>{quotaRequest.message}</Text>
+        </Tooltip>
+      ) : <Text type="supporting" color="secondary" maxLines={1}>{t('noOfferMessage')}</Text>
+    },
     {
       key: 'visibility',
       header: t('offerVisibility'),
@@ -2326,7 +2338,7 @@ function OfferDialog({ value, upstreams, offerableUpstreams, onClose, onSave, on
 function QuotaRequestDialog({ value, onClose, onSave, onChange }) {
   const { t } = useLanguage();
   return (
-    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={460}>
+    <Dialog isOpen={Boolean(value)} onOpenChange={onClose} purpose="form" width={640}>
       <Layout
         header={<DialogHeader title={t('askForQuota')} onOpenChange={onClose} hasDivider />}
         content={(
@@ -2350,6 +2362,15 @@ function QuotaRequestDialog({ value, onClose, onSave, onChange }) {
                   isOptional
                   hasClear
                   width="100%"
+                />
+                <TextArea
+                  label={t('message')}
+                  placeholder={t('quotaRequestMessagePlaceholder')}
+                  value={value.message || ''}
+                  onChange={(message) => onChange({ ...value, message })}
+                  rows={3}
+                  maxLength={500}
+                  hasSpellCheck
                 />
                 <SegmentedControl
                   label={t('offerVisibility')}

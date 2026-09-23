@@ -64,6 +64,26 @@ test('applies CPA global Claude header defaults and cloak disable precedence', (
   assert.equal(disabled.metadata, undefined);
 });
 
+test('uses the incoming Claude CLI version for billing when cloak mode is disabled', () => {
+  const req = { headers: { 'user-agent': 'claude-cli/2.1.220 (external, cli)' } };
+  const prepared = prepareClaudeRequestBody({
+    req,
+    body: {
+      model: 'claude-sonnet-4-6',
+      system: 'caller system',
+      messages: [{ role: 'user', content: 'Hello' }]
+    },
+    credentials: { accessToken: 'sk-ant-oat-test' },
+    upstream: {
+      type: 'claude',
+      baseUrl: 'https://api.anthropic.com',
+      metadata: { fingerprint_profile: 'claude-code-cli', cloak_mode: 'never' }
+    }
+  });
+  assert.match(prepared.system[0].text, /^x-anthropic-billing-header: cc_version=2\.1\.220\./);
+  assert.equal(prepared.system[1].text, 'caller system');
+});
+
 test('matches CPA native Claude fingerprint preservation and stabilization rules', () => {
   const sessionId = '22222222-3333-4444-8555-666666666666';
   const userId = JSON.stringify({
