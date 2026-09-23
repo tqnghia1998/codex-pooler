@@ -28,7 +28,7 @@ import { TextInput } from '@astryxdesign/core/TextInput';
 import { Table, pixel, proportional } from '@astryxdesign/core/Table';
 import { Tooltip } from '@astryxdesign/core/Tooltip';
 import { HStack, Layout, LayoutContent, LayoutFooter, StackItem, VStack } from '@astryxdesign/core/Layout';
-import { Ban, CircleHelp, Eye, KeyRound, LogOut, Pause, Play, PlugZap, Plus, RefreshCw, Scaling, Trophy, Unplug } from 'lucide-react';
+import { Ban, CircleHelp, Eye, HandHeart, KeyRound, LogOut, Pause, Play, PlugZap, Plus, RefreshCw, Scaling, Store, Trophy, Unplug } from 'lucide-react';
 import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { CommunityBanner } from './CommunityBanner.jsx';
 import { useLanguage } from './i18n.jsx';
@@ -694,20 +694,43 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   return (
     <VStack gap={2}>
+      <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
+        <HStack gap={2} vAlign="center" wrap="wrap">
+          <Heading level={2}>{t('quotaSharing')}</Heading>
+          <HStack gap={1} vAlign="center">
+            <Badge label={accountLabel(account, t)} variant="neutral" />
+            <IconButton label={t('signOut')} tooltip={t('signOut')} icon={<LogOut size={16} />} size="sm" variant="secondary" onClick={() => void logout()} />
+          </HStack>
+        </HStack>
+        <HStack gap={2} vAlign="center" wrap="wrap">
+          {offerableUpstreams.length > 0 && (
+            <Button label={t('publishOffer')} icon={<Plus size={16} />} variant="primary" onClick={() => {
+              const upstream = offerableUpstreams[0];
+              setOfferDialog({
+                providerType: offerProviderType(upstream),
+                upstreamId: upstream.id,
+                quotaDollars: 10,
+                expiresOn: '',
+                visibility: 'public',
+                allowedEmails: '',
+                message: ''
+              });
+            }} />
+          )}
+          <Button label={t('askForQuota')} icon={<HandHeart size={16} />} variant="secondary" onClick={() => setQuotaRequestDialog({
+            quotaDollars: 10,
+            expiresOn: '',
+            visibility: 'public',
+            allowedEmails: ''
+          })} />
+        </HStack>
+      </HStack>
       <CommunityBanner
         key={account.id}
         activity={communityActivity?.accountId === account.id ? communityActivity : null}
         onNavigate={navigateCommunity}
       />
       <LeaderboardView />
-
-      <HStack gap={2} vAlign="center" wrap="wrap">
-        <Heading level={2}>{t('quotaSharing')}</Heading>
-        <HStack gap={1} vAlign="center">
-          <Badge label={accountLabel(account, t)} variant="neutral" />
-          <IconButton label={t('signOut')} tooltip={t('signOut')} icon={<LogOut size={16} />} size="sm" variant="secondary" onClick={() => void logout()} />
-        </HStack>
-      </HStack>
 
       <Grid columns={SHARING_CARD_GRID_COLUMNS} gap={2}>
         <GridSpan columns={2}>
@@ -760,25 +783,25 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       </Grid>
       <VStack gap={2} id="community-sharing" ref={sharingDestination} tabIndex={-1}>
         <VStack paddingBlock={1}>
-          <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-            <HStack gap={1} vAlign="center" role="group" aria-label={t('dashboardSection')}>
-              <Button
-                label={t('forProviders')}
-                size="lg"
-                variant={section === 'provider' ? 'secondary' : 'ghost'}
-                aria-pressed={section === 'provider'}
-                endContent={sectionBadge(PROVIDER_SECTIONS)}
-                onClick={() => handleSectionChange('provider')}
-              />
-              <Button
-                label={t('forConsumers')}
-                size="lg"
-                variant={section === 'consumer' ? 'secondary' : 'ghost'}
-                aria-pressed={section === 'consumer'}
-                endContent={sectionBadge(CONSUMER_SECTIONS)}
-                onClick={() => handleSectionChange('consumer')}
-              />
-            </HStack>
+          <HStack gap={1} vAlign="center" wrap="wrap" role="group" aria-label={t('dashboardSection')}>
+            <Button
+              label={t('forProviders')}
+              size="lg"
+              icon={<Store size={18} />}
+              variant={section === 'provider' ? 'primary' : 'secondary'}
+              aria-pressed={section === 'provider'}
+              endContent={sectionBadge(PROVIDER_SECTIONS)}
+              onClick={() => handleSectionChange('provider')}
+            />
+            <Button
+              label={t('forConsumers')}
+              size="lg"
+              icon={<HandHeart size={18} />}
+              variant={section === 'consumer' ? 'primary' : 'secondary'}
+              aria-pressed={section === 'consumer'}
+              endContent={sectionBadge(CONSUMER_SECTIONS)}
+              onClick={() => handleSectionChange('consumer')}
+            />
           </HStack>
         </VStack>
 
@@ -822,28 +845,6 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
               hasClear
               width={300}
             />
-            {offerableUpstreams.length > 0 && (
-              <Button label={t('publishOffer')} variant="primary" onClick={() => {
-                const upstream = offerableUpstreams[0];
-                setOfferDialog({
-                  providerType: offerProviderType(upstream),
-                  upstreamId: upstream.id,
-                  quotaDollars: 10,
-                  expiresOn: '',
-                  visibility: 'public',
-                  allowedEmails: '',
-                  message: ''
-                });
-              }} />
-            )}
-            {section === 'consumer' && (
-              <Button label={t('askForQuota')} variant="primary" onClick={() => setQuotaRequestDialog({
-                quotaDollars: 10,
-                expiresOn: '',
-                visibility: 'public',
-                allowedEmails: ''
-              })} />
-            )}
           </HStack>
           </HStack>
         </VStack>

@@ -25,7 +25,7 @@ const DICTIONARY = {
     'loadingWorkspace': 'Loading sharing workspace',
     'communityActivity': 'Community activity',
     'communityRequests': 'Requests',
-    'communityOffers': 'Offers',
+    'communityOffers': 'Shares',
     'communityHelp': 'Go help them!',
     'communityExplore': 'Check them out!',
     'communityOthers': ', and {count} more',
@@ -50,8 +50,8 @@ const DICTIONARY = {
     'consumerTabs': 'Consumer tabs',
 
     // Tabs
-    'tabCommunityOffers': 'Community offers',
-    'tabMyOffers': 'My published offers',
+    'tabCommunityOffers': 'Public sharings',
+    'tabMyOffers': 'My shares',
     'tabQuotaRequests': 'Quota requests',
     'tabMyQuotaRequests': 'My quota requests',
     'tabSentRequests': 'Sent requests',
@@ -71,8 +71,8 @@ const DICTIONARY = {
     'leaderboardSettledUsage': 'Settled usage',
 
     // Actions & Search
-    'publishOffer': 'Publish offer',
-    'askForQuota': 'Ask for quota',
+    'publishOffer': 'Share quota',
+    'askForQuota': 'Request quota',
     'broadcastQuotaRequest': 'Broadcast request',
     'grantQuotaBtn': 'Grant quota',
     'grantQuotaTitle': 'Grant quota',
@@ -124,8 +124,8 @@ const DICTIONARY = {
     'providerQuotaRemaining': 'Provider quota remaining',
     'committedAmount': '${amount} committed',
     'committedUnknownQuota': '${amount} committed · provider quota unknown',
-    'availableToOffer': '${amount} available to offer',
-    'offerableQuotaUnavailable': 'offerable quota unavailable',
+    'availableToOffer': '${amount} available to share',
+    'offerableQuotaUnavailable': 'shareable quota unavailable',
     'underfundedBadge': '${amount} underfunded',
 
     // Toasts
@@ -139,9 +139,9 @@ const DICTIONARY = {
     'sessionResumed': 'Session resumed',
     'sessionPaused': 'Session paused',
     'sessionRevoked': 'Session revoked',
-    'offerUpdated': 'Offer updated',
-    'offerClosed': 'Offer closed',
-    'offerPublished': 'Offer published',
+    'offerUpdated': 'Share updated',
+    'offerClosed': 'Share closed',
+    'offerPublished': 'Quota shared',
     'quotaRequestPublished': 'Quota request published',
     'quotaRequestGranted': 'Quota request granted',
     'quotaRequestCancelled': 'Quota request cancelled',
@@ -170,9 +170,9 @@ const DICTIONARY = {
     'revokeKeyConfirmTitle': 'Revoke pool key?',
     'revokeKeyConfirmDesc': '"{name}" will stop working immediately. Existing share sessions are not changed.',
     'revokeAllSharingTitle': 'Revoke all sharing?',
-    'revokeAllSharingDesc': 'Close every offer and revoke every share session backed by {name}. This cannot be undone.',
+    'revokeAllSharingDesc': 'Close every share and revoke every share session backed by {name}. This cannot be undone.',
     'unlinkProviderTitle': 'Unlink provider?',
-    'unlinkProviderDesc': 'Remove {name} and delete its saved credentials. All related offers and share sessions will be revoked. This cannot be undone.',
+    'unlinkProviderDesc': 'Remove {name} and delete its saved credentials. All related shares and share sessions will be revoked. This cannot be undone.',
 
     // Personal Keys Card
     'myKeys': 'My keys',
@@ -189,7 +189,7 @@ const DICTIONARY = {
     // Tables headers & columns
     'provider': 'Provider',
     'consumer': 'Consumer',
-    'offered': 'Offered',
+    'offered': 'Shared',
     'message': 'Message',
     'status': 'Status',
     'expires': 'Expires',
@@ -225,7 +225,7 @@ const DICTIONARY = {
     'resolvedAt': 'Resolved {date}',
     'usedOfRemaining': '${used} used of ${granted} · ${remaining} remaining',
     'currentlyBacked': '${amount} currently backed',
-    'offersTable': 'Offers table',
+    'offersTable': 'Shares table',
     'requestsTable': 'Requests table',
     'accessTable': 'Access table',
     'revealKey': 'Reveal key',
@@ -239,17 +239,17 @@ const DICTIONARY = {
     'revokeSession': 'Revoke session',
 
     // Table Empty States
-    'emptyCommunityOffersTitle': 'No community offers',
-    'emptyCommunityOffersDesc': 'Offers from other QuotaHub members will appear here.',
-    'emptyMyOffersTitle': 'No offers yet',
-    'emptyMyOffersDesc': 'Publish an offer to share quota with the community.',
+    'emptyCommunityOffersTitle': 'No public sharings',
+    'emptyCommunityOffersDesc': 'Shares from other QuotaHub members will appear here.',
+    'emptyMyOffersTitle': 'No shares yet',
+    'emptyMyOffersDesc': 'Share quota with the community.',
     'emptyQuotaRequestsTitle': 'No quota requests',
     'emptyQuotaRequestsDesc': 'Members asking for quota will appear here.',
     'noUpstreamForOffers': 'Your Codex account has no available upstream.',
     'emptySentRequestsTitle': 'No sent requests',
     'emptySentRequestsDesc': 'Quota requests you send will appear here.',
     'emptyApprovalsTitle': 'No requests to approve',
-    'emptyApprovalsDesc': 'Requests for your offered quota will appear here.',
+    'emptyApprovalsDesc': 'Requests for quota you share will appear here.',
     'emptyMyAccessTitle': 'No shared access',
     'emptyMyAccessDesc': 'Approved requests will create a share session here.',
     'emptySharedByMeTitle': 'No active shares',
@@ -284,11 +284,11 @@ const DICTIONARY = {
     // AIS dialog
     'linkAisDialogTitle': 'Link AIS project',
     'editAisDialogTitle': 'Update AIS project',
-    'linkAisDialogSub': 'Share it through the same offer and session flow as Codex quota',
+    'linkAisDialogSub': 'Share it through the same sharing and session flow as Codex quota',
     'updateProjectDetails': 'Update project details',
     'aisQuotaUnavailable': 'AIS quota unavailable',
     'updateProjectDetailsDesc': 'Update the project ID or replace the project key. Leave the key blank to keep the current key.',
-    'aisQuotaUnavailableDesc': 'AIS quota cannot be queried here. Publish an offer based on your own knowledge; external usage may cause the project to stop working when its quota is exhausted.',
+    'aisQuotaUnavailableDesc': 'AIS quota cannot be queried here. Share quota based on your own knowledge; external usage may cause the project to stop working when its quota is exhausted.',
     'aisProjectId': 'AIS project ID',
     'aisProjectKey': 'AIS project key',
     'newAisProjectKeyOptional': 'New AIS project key (optional)',
@@ -309,15 +309,15 @@ const DICTIONARY = {
     'aisGuideCopyMid': ' into AIS project ID and ',
     'aisGuideCopySuffix': ' into AIS project key in the form.',
 
-    // Offer dialog
-    'editOfferTitle': 'Edit offer',
+    // Sharing dialog
+    'editOfferTitle': 'Edit share',
     'shareSource': 'Share source',
     'shareableQuotaUsd': 'Shareable quota (USD)',
     'neededQuotaUsd': 'Needed quota (USD)',
     'requester': 'Requester',
     'needed': 'Needed',
     'offerMessage': 'Message',
-    'offerMessageHelp': 'Optional note shown to members who can view this offer.',
+    'offerMessageHelp': 'Optional note shown to members who can view this share.',
     'offerMessagePlaceholder': 'Here is my spare quota. Feel free to request it.',
     'noOfferMessage': 'No message',
     'expiresOn': 'Expires on',
@@ -325,16 +325,16 @@ const DICTIONARY = {
     'visibilityPublic': 'Public',
     'visibilityRestricted': 'Whitelist only',
     'visibilityWhitelistPlaceholder': 'alice@shopee.com, bob@shopee.com',
-    'visibilityWhitelistHelp': 'Comma- or line-separated list of emails who can view and request this offer.',
+    'visibilityWhitelistHelp': 'Comma- or line-separated list of emails who can view and request this share.',
     'quotaRequestWhitelistHelp': 'Comma- or line-separated provider emails who can see this request.',
     'visibilityBadgePublic': 'Public',
     'visibilityBadgeRestricted': 'Whitelist ({count})',
     'historicalOfferBadge': 'Grant history',
-    'closeOfferConfirmTitle': 'Close historical offer?',
-    'closeOfferConfirmDesc': 'This stops the offer and rejects any pending requests. Existing grants are not affected.',
-    'offerStatus': 'Offer status',
-    'saveOfferBtn': 'Save offer',
-    'publishBtn': 'Publish',
+    'closeOfferConfirmTitle': 'Close historical share?',
+    'closeOfferConfirmDesc': 'This stops the share and rejects any pending requests. Existing grants are not affected.',
+    'offerStatus': 'Share status',
+    'saveOfferBtn': 'Save share',
+    'publishBtn': 'Share quota',
 
     // Personal key dialog
     'createPoolKeyTitle': 'Create pool key',
@@ -390,7 +390,7 @@ const DICTIONARY = {
     'adminSubtitle': 'A privacy-safe view of sharing health, adoption, and settled usage.',
     'adminMembers': 'Members',
     'adminLinkedProviders': 'Linked providers',
-    'adminActiveOffers': 'Active offers',
+    'adminActiveOffers': 'Active shares',
     'adminActiveSessions': 'Active sessions',
     'adminPendingApprovals': 'Pending approvals',
     'adminOpenRequests': 'Open quota requests',
@@ -444,7 +444,7 @@ const DICTIONARY = {
   zh: {
     'communityActivity': '社区动态',
     'communityRequests': '求助',
-    'communityOffers': '分享',
+    'communityOffers': '共享',
     'communityHelp': '去帮帮他们！',
     'communityExplore': '去看看！',
     'communityOthers': '，以及其他 {count} 人',
@@ -488,8 +488,8 @@ const DICTIONARY = {
     'consumerTabs': '使用方页签',
 
     // Tabs
-    'tabCommunityOffers': '社区共享额度',
-    'tabMyOffers': '我发布的共享',
+    'tabCommunityOffers': '公开共享额度',
+    'tabMyOffers': '我的共享额度',
     'tabQuotaRequests': '求额度需求',
     'tabMyQuotaRequests': '我的额度需求',
     'tabSentRequests': '我的申请记录',
@@ -509,8 +509,8 @@ const DICTIONARY = {
     'leaderboardSettledUsage': '已结算用量',
 
     // Actions & Search
-    'publishOffer': '发布共享额度',
-    'askForQuota': '求额度',
+    'publishOffer': '共享额度',
+    'askForQuota': '申请额度',
     'broadcastQuotaRequest': '发布需求',
     'grantQuotaBtn': '授予额度',
     'grantQuotaTitle': '授予额度',
@@ -562,8 +562,8 @@ const DICTIONARY = {
     'providerQuotaRemaining': '提供方剩余额度',
     'committedAmount': '已承诺 ${amount}',
     'committedUnknownQuota': '已承诺 ${amount} · 提供方额度未知',
-    'availableToOffer': '可分配 ${amount}',
-    'offerableQuotaUnavailable': '可分配额度未知',
+    'availableToOffer': '可共享 ${amount}',
+    'offerableQuotaUnavailable': '可共享额度未知',
     'underfundedBadge': '欠保障 ${amount}',
 
     // Toasts
@@ -677,10 +677,10 @@ const DICTIONARY = {
     'revokeSession': '注销会话',
 
     // Table Empty States
-    'emptyCommunityOffersTitle': '暂无可用的社区共享',
+    'emptyCommunityOffersTitle': '暂无公开共享额度',
     'emptyCommunityOffersDesc': '来自其他 QuotaHub 成员的共享额度将显示在此处。',
-    'emptyMyOffersTitle': '尚未发布任何共享',
-    'emptyMyOffersDesc': '发布一个共享额度，与社区分享您的额度。',
+    'emptyMyOffersTitle': '暂无共享额度',
+    'emptyMyOffersDesc': '与社区共享您的额度。',
     'emptyQuotaRequestsTitle': '暂无额度需求',
     'emptyQuotaRequestsDesc': '成员发布的求额度需求将显示在此处。',
     'noUpstreamForOffers': '您的 Codex 账户暂无可用渠道。',
@@ -747,7 +747,7 @@ const DICTIONARY = {
     'aisGuideCopyMid': ' 填入 AIS 项目 ID，将 ',
     'aisGuideCopySuffix': ' 填入 AIS 项目密钥。',
 
-    // Offer dialog
+    // Sharing dialog
     'editOfferTitle': '编辑共享',
     'shareSource': '共享来源',
     'shareableQuotaUsd': '可共享额度（美元）',
@@ -772,7 +772,7 @@ const DICTIONARY = {
     'closeOfferConfirmDesc': '关闭后将停止该共享并拒绝所有待处理申请，现有授予不受影响。',
     'offerStatus': '共享状态',
     'saveOfferBtn': '保存共享',
-    'publishBtn': '发布',
+    'publishBtn': '共享额度',
 
     // Personal key dialog
     'createPoolKeyTitle': '创建池密钥',
