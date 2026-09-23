@@ -76,7 +76,10 @@ const BACKEND_METADATA_HEADERS = [
   'x-codex-parent-thread-id',
   'x-codex-installation-id',
   'x-codex-turn-state',
-  'x-openai-subagent'
+  'x-openai-subagent',
+  'x-openai-memgen-request',
+  'x-codex-guardian',
+  'x-codex-inference-call-id'
 ];
 const CODEX_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('codex'));
 const COMPASS_OPTIONAL_FALLBACK_FIELDS = new Set(compatibilityOptionalFields('compass'));
@@ -85,6 +88,7 @@ const ANTHROPIC_BETA_TOKEN_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const FORWARDED_HEADER_MAX_BYTES = 1024;
 const PROVIDER_SESSION_HEADERS = ['session-id', 'thread-id', 'x-client-request-id'];
 const PROVIDER_SESSION_HEADER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+const CODEX_GUARDIAN_VALUES = new Set(['reviewer', 'classifier']);
 const RELAYABLE_VALIDATION_CODES = new Set(['unsupported_value', 'invalid_value', 'unsupported_parameter', 'missing_required_parameter', 'invalid_type', 'string_above_max_length']);
 const CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS = 5 * 60_000;
 const CLAUDE_QUOTA_HEADER_NAMES = [
@@ -1278,7 +1282,10 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
     if (!value) continue;
     if (PROVIDER_SESSION_HEADERS.includes(name)) {
       if (validProviderSessionHeader(value)) headers[name] = value;
-    } else headers[name] = projectMetadataHeader(name, value);
+    } else {
+      const projected = projectBackendMetadataHeader(name, value);
+      if (projected !== null) headers[name] = projected;
+    }
   }
   if (!direct && originalPath.startsWith('/v1/')) {
     const sessionId = promptCacheSessionId({ scopeId: requestScopeId(req), apiKeyId: requestAccounting(req).apiKeyId }, projectedBody?.prompt_cache_key);
@@ -1784,6 +1791,13 @@ function projectMetadataHeader(name, value) {
   } catch {
     return value;
   }
+}
+
+function projectBackendMetadataHeader(name, value) {
+  if (name === 'x-openai-memgen-request') return value === 'true' ? value : null;
+  if (name === 'x-codex-guardian') return CODEX_GUARDIAN_VALUES.has(value) ? value : null;
+  if (name === 'x-codex-inference-call-id') return validProviderSessionHeader(value) ? value : null;
+  return projectMetadataHeader(name, value);
 }
 
 function validateAnthropicHeaders(req) {
@@ -2551,7 +2565,9 @@ function backendWebSocketMetadata(req) {
   const headers = {};
   for (const name of BACKEND_METADATA_HEADERS) {
     const value = header(req, name);
-    if (value) headers[name] = projectMetadataHeader(name, value);
+    if (!value) continue;
+    const projected = projectBackendMetadataHeader(name, value);
+    if (projected !== null) headers[name] = projected;
   }
   for (const name of PROVIDER_SESSION_HEADERS) {
     const value = header(req, name);
