@@ -4,7 +4,8 @@ export const PRODUCT_TABLES = [
   ['accounts', 'id'], ['account_sessions', 'id'], ['account_upstreams', 'upstream_id'],
   ['sharing_offers', 'id'], ['sharing_tickets', 'id'], ['sharing_sessions', 'id'], ['sharing_session_keys', 'id'],
   ['personal_api_keys', 'id'], ['personal_api_key_routes', "key_id || ':' || route_key"],
-  ['sharing_activity', "subject_type || ':' || subject_id"], ['quota_requests', 'id'], ['provider_observations', 'upstream_id'],
+  ['sharing_activity', "subject_type || ':' || subject_id"], ['admin_daily_usage', 'day'],
+  ['quota_requests', 'id'], ['provider_observations', 'upstream_id'],
   ['email_outbox', 'id'], ['sharing_events', 'id']
 ];
 const LEGACY_REQUEST_TABLES = new Set([

@@ -48,7 +48,7 @@ on startup and then every hour, replacing the previous snapshot. The file uses
 the same format as the admin export and can be restored through admin import;
 it contains the encrypted gateway records and every product table. Set
 `POOL_BACKUP_INTERVAL_MS` to change the cadence. Admin Data management shows
-the last successful automatic snapshot time.
+the last successful automatic snapshot time and any failure since then.
 
 The embedded pool always uses local SQLite. Deploy it with a persistent volume
 for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone
@@ -216,6 +216,20 @@ session and `cp_share_...` key. Requests contain no payment, rating,
 or guarantee fields.
 The admin request funnel counts offer tickets only; direct grants appear as
 separate `direct_grant/created` audit events.
+
+The admin view separates Overview, Operations, Usage, Activity, and Data.
+Operations lists linked providers with their current issue, sharing status,
+last observation, and active share/session record counts; it also shows
+aggregate email queue health without exposing message contents. Usage displays
+UTC daily session request, success, failure, and settled-usage totals recorded
+from this version onward for up to 90 days. Earlier daily history cannot be
+reconstructed; the older aggregate usage totals cover retained sessions only.
+The approval rate divides approved tickets by reviewed (approved or rejected)
+tickets. Activity supports a bounded search across actor, action, entity type,
+and entity ID, with a 7-day, 30-day, or full retained-history filter. Event
+details and credential contents are not returned by analytics. The Data tab
+shows collection counts before import and requires typing `IMPORT` to replace
+the listed collections.
 
 ## Community Activity Banner
 

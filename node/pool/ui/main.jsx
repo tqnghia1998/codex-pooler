@@ -147,7 +147,8 @@ function Product() {
 function AdminShell() {
   return (
     <AppShell variant="surface" height="auto" contentPadding={3} mobileNav={false}>
-      <VStack width="max(1440px, 100%)">
+      <VStack gap={2} width="100%">
+        <HStack justify="end"><LanguageToggle /></HStack>
         <AdminAnalytics />
       </VStack>
     </AppShell>

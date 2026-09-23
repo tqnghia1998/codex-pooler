@@ -48,3 +48,21 @@ test('hourly snapshot backup keeps one replaceable QuotaHub snapshot on disk', a
 test('snapshot backup defaults to a one-hour interval', () => {
   assert.equal(SNAPSHOT_BACKUP_INTERVAL_MS, 60 * 60 * 1_000);
 });
+
+test('backup status reports failures without exposing the error', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pool-backup-failure-'));
+  const backup = createSnapshotBackup({
+    store: {}, productStore: {}, filePath: join(dir, 'snapshot.json'),
+    logger: { error: () => {} }
+  });
+  try {
+    assert.equal(backup.run(), null);
+    assert.equal(backup.status().lastBackupAt, null);
+    assert.equal(typeof backup.status().lastAttemptAt, 'string');
+    assert.equal(backup.status().lastFailureAt, backup.status().lastAttemptAt);
+    assert.equal(JSON.stringify(backup.status()).includes('error'), false);
+  } finally {
+    backup.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

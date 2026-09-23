@@ -601,6 +601,10 @@ test('restricts QuotaHub analytics to the whitelisted administrator', async () =
       assert.deepEqual(nextEvents.body.analytics.recentEvents.map(({ id }) => id), ['pagination-01']);
       assert.equal(nextEvents.body.analytics.nextEventCursor, null);
       assert.equal(nextEvents.body.analytics.overview, undefined);
+      const matching = await request(base, '/api/pool/admin/analytics?q=pagination-03', adminSession);
+      assert.deepEqual(matching.body.analytics.recentEvents.map(({ entityId }) => entityId), ['pagination-03']);
+      const none = await request(base, '/api/pool/admin/analytics?q=missing&days=7', adminSession);
+      assert.deepEqual(none.body.analytics.recentEvents, []);
       const malformedCursor = await request(base, '/api/pool/admin/analytics?eventCursor=not-a-cursor', adminSession);
       assert.equal(malformedCursor.response.status, 200);
       assert.deepEqual(malformedCursor.body.analytics.recentEvents.map(({ id }) => id), analytics.body.analytics.recentEvents.map(({ id }) => id));

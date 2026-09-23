@@ -153,6 +153,13 @@ export class ProductStore {
         failures_json TEXT NOT NULL DEFAULT '[]',
         PRIMARY KEY (subject_type, subject_id)
       );
+      CREATE TABLE IF NOT EXISTS admin_daily_usage (
+        day TEXT PRIMARY KEY,
+        requests INTEGER NOT NULL DEFAULT 0,
+        successes INTEGER NOT NULL DEFAULT 0,
+        failures INTEGER NOT NULL DEFAULT 0,
+        settled_micros INTEGER NOT NULL DEFAULT 0
+      );
       CREATE TABLE IF NOT EXISTS quota_requests (
         id TEXT PRIMARY KEY,
         account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
@@ -845,6 +852,8 @@ export class ProductStore {
         DELETE FROM sharing_events
         WHERE created_at <= ?
       `).run(eventCutoff).changes,
+      dailyUsage: this.sqlite.prepare('DELETE FROM admin_daily_usage WHERE day < ?')
+        .run(new Date(timestamp - EVENT_RETENTION_MS).toISOString().slice(0, 10)).changes,
       activity: this.sqlite.prepare(`
         DELETE FROM sharing_activity
         WHERE (subject_type = 'session' AND NOT EXISTS (
@@ -1037,9 +1046,9 @@ export class ProductStore {
     };
   }
 
-  adminAnalytics({ eventCursor = null } = {}) {
+  adminAnalytics({ eventCursor = null, eventQuery = '', eventDays = 0, upstreamStore = null } = {}) {
     this.expireDue();
-    if (eventCursor) return this.adminEventPage(eventCursor);
+    if (eventCursor) return this.adminEventPage(eventCursor, { query: eventQuery, days: eventDays });
     const row = (sql, ...args) => this.sqlite.prepare(sql).get(...args);
     const count = (sql, ...args) => row(sql, ...args).count;
     const usage = row(`
@@ -1058,7 +1067,46 @@ export class ProductStore {
       JOIN sharing_offers ON sharing_offers.id = sharing_tickets.offer_id
       WHERE sharing_offers.internal_only = 0
     `);
+    const providerRows = this.sqlite.prepare(`
+      SELECT account_upstreams.upstream_id AS id, accounts.email,
+        account_upstreams.sharing_status AS sharingStatus,
+        provider_observations.issue_code AS observedIssue,
+        provider_observations.observed_at AS observedAt,
+        (SELECT COUNT(*) FROM sharing_offers
+          WHERE upstream_id = account_upstreams.upstream_id AND status = 'active' AND internal_only = 0) AS shares,
+        (SELECT COUNT(*) FROM sharing_sessions
+          WHERE upstream_id = account_upstreams.upstream_id AND status IN ('active', 'paused')) AS sessions
+      FROM account_upstreams
+      JOIN accounts ON accounts.id = account_upstreams.account_id
+      LEFT JOIN provider_observations ON provider_observations.upstream_id = account_upstreams.upstream_id
+      ORDER BY accounts.email, account_upstreams.upstream_id
+    `).all();
+    const providerDetails = providerRows.map((provider) => {
+      const upstream = upstreamStore?.getPublic(provider.id);
+      return {
+        id: provider.id,
+        email: provider.email,
+        type: upstream?.type || 'unknown',
+        quotaSource: upstream?.quotaSource || null,
+        sharingStatus: provider.sharingStatus,
+        issueCode: upstreamStore
+          ? (providerIssue(upstream)?.code || null)
+          : (provider.observedIssue || null),
+        observedAt: provider.observedAt,
+        shares: provider.shares,
+        sessions: provider.sessions
+      };
+    }).sort((left, right) => Number(Boolean(right.issueCode)) - Number(Boolean(left.issueCode))
+      || Number(right.sharingStatus === 'paused') - Number(left.sharingStatus === 'paused')
+      || left.email.localeCompare(right.email));
+    const email = row(`
+      SELECT SUM(status = 'pending') AS pending, SUM(status = 'failed') AS failed,
+        MIN(CASE WHEN status = 'pending' THEN created_at END) AS oldestPendingAt,
+        MIN(CASE WHEN status = 'pending' THEN next_attempt_at END) AS nextAttemptAt
+      FROM email_outbox
+    `);
     return {
+      sampledAt: new Date().toISOString(),
       overview: {
         accounts: count('SELECT COUNT(*) AS count FROM accounts'),
         linkedProviders: count('SELECT COUNT(*) AS count FROM account_upstreams'),
@@ -1082,36 +1130,57 @@ export class ProductStore {
       providers: {
         sharingActive: count("SELECT COUNT(*) AS count FROM account_upstreams WHERE sharing_status = 'active'"),
         sharingPaused: count("SELECT COUNT(*) AS count FROM account_upstreams WHERE sharing_status = 'paused'"),
-        unavailable: count('SELECT COUNT(*) AS count FROM provider_observations WHERE issue_code IS NOT NULL')
+        unavailable: providerDetails.filter((provider) => provider.issueCode).length,
+        details: providerDetails
       },
+      email: {
+        enabled: this.emailNotificationsEnabled,
+        pending: email.pending || 0,
+        failed: email.failed || 0,
+        oldestPendingAt: email.oldestPendingAt,
+        nextAttemptAt: email.nextAttemptAt
+      },
+      dailyUsage: this.sqlite.prepare(`
+        SELECT day, requests, successes, failures, settled_micros AS settledMicros
+        FROM admin_daily_usage WHERE day >= date('now', '-29 days') ORDER BY day
+      `).all(),
       topProviders: this.adminUsageLeaders('provider'),
       topConsumers: this.adminUsageLeaders('consumer'),
-      ...this.adminEventPage(eventCursor)
+      ...this.adminEventPage(null, { query: eventQuery, days: eventDays })
     };
   }
 
-  adminEventPage(cursor) {
-    const events = cursor
-      ? this.sqlite.prepare(`
-          SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
-            accounts.email AS actor_email
-          FROM sharing_events
-          LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
-          WHERE (sharing_events.created_at, sharing_events.id) < (?, ?)
-          ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
-          LIMIT 13
-        `).all(cursor.createdAt, cursor.id)
-      : this.sqlite.prepare(`
-          SELECT sharing_events.id, sharing_events.entity_type, sharing_events.action, sharing_events.created_at,
-            accounts.email AS actor_email
-          FROM sharing_events
-          LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
-          ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
-          LIMIT 13
-        `).all();
+  adminEventPage(cursor, { query = '', days = 0 } = {}) {
+    const conditions = [];
+    const args = [];
+    if (cursor) {
+      conditions.push('(sharing_events.created_at, sharing_events.id) < (?, ?)');
+      args.push(cursor.createdAt, cursor.id);
+    }
+    if (query) {
+      conditions.push(`(instr(lower(coalesce(accounts.email, 'System')), ?) > 0
+        OR instr(lower(sharing_events.entity_type), ?) > 0
+        OR instr(lower(sharing_events.action), ?) > 0
+        OR instr(lower(sharing_events.entity_id), ?) > 0)`);
+      args.push(...Array(4).fill(query.toLowerCase()));
+    }
+    if (days) {
+      conditions.push('sharing_events.created_at >= ?');
+      args.push(new Date(Date.now() - days * 86_400_000).toISOString());
+    }
+    const events = this.sqlite.prepare(`
+      SELECT sharing_events.id, sharing_events.entity_type, sharing_events.entity_id,
+        sharing_events.action, sharing_events.created_at, accounts.email AS actor_email
+      FROM sharing_events
+      LEFT JOIN accounts ON accounts.id = sharing_events.actor_account_id
+      ${conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''}
+      ORDER BY sharing_events.created_at DESC, sharing_events.id DESC
+      LIMIT 13
+    `).all(...args);
     const page = events.slice(0, 12).map((event) => ({
       id: event.id,
       entityType: event.entity_type,
+      entityId: event.entity_id,
       action: event.action,
       createdAt: event.created_at,
       actorEmail: event.actor_email || 'System'
@@ -2468,6 +2537,7 @@ export class ProductStore {
         request_count = request_count + 1,
         last_used_at = excluded.last_used_at
     `).run(subjectType, subjectId, utcDate(now), timestamp);
+    if (subjectType === 'session') this.recordDailyUsage(now, { requests: 1 });
   }
 
   recordActivitySuccess(subjectType, subjectId, settledMicros, now = new Date()) {
@@ -2497,6 +2567,7 @@ export class ProductStore {
       timestamp,
       todayMicros + settledMicros
     );
+    if (subjectType === 'session') this.recordDailyUsage(now, { successes: 1, settledMicros });
   }
 
   recordActivityFailure(subjectType, subjectId, errorCode, now = new Date()) {
@@ -2509,6 +2580,19 @@ export class ProductStore {
       ON CONFLICT(subject_type, subject_id) DO UPDATE SET
         last_used_at = excluded.last_used_at
     `).run(subjectType, subjectId, utcDate(now), timestamp);
+    if (subjectType === 'session') this.recordDailyUsage(now, { failures: 1 });
+  }
+
+  recordDailyUsage(now, { requests = 0, successes = 0, failures = 0, settledMicros = 0 }) {
+    this.sqlite.prepare(`
+      INSERT INTO admin_daily_usage (day, requests, successes, failures, settled_micros)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(day) DO UPDATE SET
+        requests = requests + excluded.requests,
+        successes = successes + excluded.successes,
+        failures = failures + excluded.failures,
+        settled_micros = settled_micros + excluded.settled_micros
+    `).run(utcDate(now), requests, successes, failures, settledMicros);
   }
 
   activityRow(subjectType, subjectId) {

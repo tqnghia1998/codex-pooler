@@ -46,14 +46,19 @@ export function createSnapshotBackup({
   let running = false;
   let closed = false;
   let lastBackupAt = backupTimestamp(resolvedFilePath);
+  let lastAttemptAt = null;
+  let lastFailureAt = null;
   const run = () => {
     if (running || closed) return null;
     running = true;
+    lastAttemptAt = new Date().toISOString();
     try {
       const result = writeSnapshotBackup({ store, productStore, filePath: resolvedFilePath });
       lastBackupAt = backupTimestamp(resolvedFilePath);
+      lastFailureAt = null;
       return result;
     } catch (error) {
+      lastFailureAt = lastAttemptAt;
       logger?.error?.(`QuotaHub automatic backup failed: ${error?.message || 'unknown error'}`);
       return null;
     } finally {
@@ -66,7 +71,7 @@ export function createSnapshotBackup({
     filePath: resolvedFilePath,
     run,
     status() {
-      return { enabled: true, lastBackupAt };
+      return { enabled: true, lastBackupAt, lastAttemptAt, lastFailureAt };
     },
     close() {
       closed = true;

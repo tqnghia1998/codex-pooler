@@ -721,7 +721,12 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
   }
   if (req.method === 'GET' && resource === 'admin' && id === 'analytics' && parts.length === 4) {
     requireAdmin(auth.account);
-    const analytics = productStore.adminAnalytics({ eventCursor: adminEventCursor(url) });
+    const analytics = productStore.adminAnalytics({
+      eventCursor: adminEventCursor(url),
+      eventQuery: String(url.searchParams.get('q') || '').trim().slice(0, 100),
+      eventDays: [7, 30].includes(Number(url.searchParams.get('days'))) ? Number(url.searchParams.get('days')) : 0,
+      upstreamStore: store
+    });
     analytics.backup = backupStatus();
     sendJson(res, 200, { analytics });
     return;
