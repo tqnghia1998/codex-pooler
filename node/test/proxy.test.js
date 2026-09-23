@@ -983,6 +983,9 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
         'x-codex-installation-id': 'install-1',
         'x-codex-turn-state': 'turn-1',
         'x-openai-subagent': 'subagent-1',
+        'x-openai-memgen-request': 'true',
+        'x-codex-guardian': 'reviewer',
+        'x-codex-inference-call-id': 'trace-1',
         'x-codex-session-id': 'must-not-forward',
         'session-id': 'native-session',
         'thread-id': 'native-thread',
@@ -1007,6 +1010,9 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     assert.equal(backendCall.body.service_tier, 'priority');
     assert.deepEqual(backendCall.body.include, ['reasoning.encrypted_content', 'custom']);
     assert.equal(backendCall.options.headers['x-codex-window-id'], 'window-1');
+    assert.equal(backendCall.options.headers['x-openai-memgen-request'], 'true');
+    assert.equal(backendCall.options.headers['x-codex-guardian'], 'reviewer');
+    assert.equal(backendCall.options.headers['x-codex-inference-call-id'], 'trace-1');
     assert.deepEqual(JSON.parse(backendCall.options.headers['x-codex-turn-metadata']), { safe: true });
     assert.equal('x-codex-session-id' in backendCall.options.headers, false);
     assert.equal(backendCall.options.headers['session-id'], 'native-session');
@@ -1034,6 +1040,46 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
     assert.deepEqual(calls[0].body.include, ['reasoning.encrypted_content']);
     assert.equal('x-codex-turn-state' in calls[0].options.headers, false);
     assert.match(calls[0].options.headers['session-id'], /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds newer native Codex metadata headers before upstream dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-metadata-bounds-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (new URL(url).pathname === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-metadata-bounds","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer local-client-key',
+        'content-type': 'application/json',
+        'x-openai-memgen-request': 'false',
+        'x-codex-guardian': 'operator',
+        'x-codex-inference-call-id': 'not valid'
+      },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    await response.text();
+    const call = calls.find(({ url }) => new URL(url).pathname === '/backend-api/codex/responses');
+    assert.equal(call.options.headers['x-openai-memgen-request'], undefined);
+    assert.equal(call.options.headers['x-codex-guardian'], undefined);
+    assert.equal(call.options.headers['x-codex-inference-call-id'], undefined);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

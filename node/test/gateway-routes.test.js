@@ -2139,7 +2139,17 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
     await models.text();
     let backendModelsEtag;
     const backendMessages = await new Promise((resolve, reject) => {
-      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, { headers: { authorization: `Bearer ${API_KEY}`, 'session-id': 'native-session', 'thread-id': 'native-thread', 'x-client-request-id': 'native-request' } });
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, {
+        headers: {
+          authorization: `Bearer ${API_KEY}`,
+          'session-id': 'native-session',
+          'thread-id': 'native-thread',
+          'x-client-request-id': 'native-request',
+          'x-openai-memgen-request': 'false',
+          'x-codex-guardian': 'operator',
+          'x-codex-inference-call-id': 'not valid'
+        }
+      });
       client.once('upgrade', (response) => { backendModelsEtag = response.headers['x-models-etag']; });
       client.once('open', () => client.send('{"backend":true}'));
       const received = [];
@@ -2162,6 +2172,9 @@ test('relays Responses websocket frames, required upstream headers, and rejects 
     assert.equal(targetHeaders['session-id'], 'native-session');
     assert.equal(targetHeaders['thread-id'], 'native-thread');
     assert.equal(targetHeaders['x-client-request-id'], 'native-request');
+    assert.equal(targetHeaders['x-openai-memgen-request'], undefined);
+    assert.equal(targetHeaders['x-codex-guardian'], undefined);
+    assert.equal(targetHeaders['x-codex-inference-call-id'], undefined);
 
     const status = await new Promise((resolve, reject) => {
       const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, { headers: { authorization: 'Bearer wrong' } });
