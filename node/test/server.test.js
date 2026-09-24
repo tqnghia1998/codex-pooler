@@ -914,6 +914,60 @@ test('tests Codex and Compass connections through the shared proxy path', async 
   }
 });
 
+for (const { name, requestRetry, claudeConfig, expectedCalls, expectedStatus } of [
+  { name: 'account retry settings', requestRetry: 1, claudeConfig: {}, expectedCalls: 2, expectedStatus: 200 },
+  { name: 'global retry settings', claudeConfig: { requestRetry: 1 }, expectedCalls: 2, expectedStatus: 200 },
+  { name: 'an explicit zero-retry override', requestRetry: 0, claudeConfig: { requestRetry: 1 }, expectedCalls: 1, expectedStatus: 502 }
+]) {
+  test(`Claude connection tests honor ${name}`, async () => {
+    const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+    const upstream = store.create({
+      type: 'claude',
+      authJson: JSON.stringify({
+        access_token: 'sk-ant-oat-synthetic-connection-test',
+        email: 'connection-test@example.test',
+        account_uuid: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        request_retry: requestRetry,
+        disable_cooling: true
+      })
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+    let calls = 0;
+    const { server, base } = await runningServer(store, {
+      claudeConfig,
+      fetchImpl: async (url) => {
+        assert.equal(new URL(url).pathname, '/v1/messages');
+        calls += 1;
+        const body = calls === 1
+          ? { error: { type: 'overloaded_error', message: 'try again' } }
+          : { id: 'msg_connection_retry', type: 'message', content: [{ type: 'text', text: 'Recovered' }] };
+        return new Response(JSON.stringify(body), {
+          status: calls === 1 ? 500 : 200,
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+    });
+    try {
+      const result = await request(base, `/api/upstreams/${upstream.id}/test-connection`, {
+        method: 'POST',
+        body: '{}'
+      });
+      assert.equal(result.response.status, expectedStatus);
+      assert.equal(calls, expectedCalls);
+      if (expectedStatus === 200) {
+        assert.equal(result.data.connection.ok, true);
+        assert.equal(result.data.connection.type, 'claude');
+        assert.equal(result.data.connection.answer, 'Recovered');
+      } else {
+        assert.equal(result.data.error.code, 'connection_test_failed');
+      }
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      store.sqlite.close();
+    }
+  });
+}
+
 test('keeps saved replacement credentials but clears stale quota when their refresh fails', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-replacement-quota-'));
   const store = new Store(dir);

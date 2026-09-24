@@ -1,5 +1,5 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { once } from 'node:events';
+import { writeChunk } from './http-stream.js';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { request as undiciRequest } from 'undici';
@@ -401,7 +401,7 @@ export async function testUpstreamConnection({
   const started = Date.now();
   const dispatched = await dispatchCandidates({
     store,
-    candidates: [{ id: upstreamId }],
+    candidates: [upstream],
     sourcePath: path,
     payload,
     req: probeReq,
@@ -738,20 +738,33 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   return plan;
 }
 
+export function* gatewayCandidateAttempts(candidates, claudeConfig = null) {
+  // Snapshot retry policy, but leave account lookup/admission until each attempt.
+  let lastRound = 0;
+  let lastIndex = candidates.length - 1;
+  const retryLimits = candidates.map((candidate, index) => {
+    const limit = claudeRequestRetryLimit(candidate, claudeConfig);
+    if (limit > 0 && limit >= lastRound) {
+      lastRound = limit;
+      lastIndex = index;
+    }
+    return limit;
+  });
+  for (let round = 0; round <= lastRound; round += 1) {
+    for (let index = 0; index < candidates.length; index += 1) {
+      if (retryLimits[index] < round) continue;
+      yield { candidate: candidates[index], last: round === lastRound && index === lastIndex };
+    }
+  }
+}
+
 async function dispatchCandidates({ store, candidates, sourcePath, payload, req, res, path, codexPayload, fetchImpl, lifecycle = null, upstreamDeadlines = {}, logger = null, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), allowUnavailableCandidate = false, claudeConfig = null, codexOptions = codexGatewayOptions() }) {
   const scope = { model: payload?.model, routeClass: payload?.stream === true ? 'proxy_stream' : 'proxy_http', ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) };
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
   let codexHostBlocked = false;
   let candidatesAttempted = 0;
-  const candidateAttempts = [];
-  for (let retryRound = 0; retryRound <= MAX_GATEWAY_CANDIDATE_ATTEMPTS; retryRound += 1) {
-    for (const candidate of candidates) {
-      const upstream = store.get(candidate.id, scopeId);
-      if (retryRound === 0 || claudeRequestRetryLimit(upstream, claudeConfig) >= retryRound) candidateAttempts.push({ candidate, retryRound });
-    }
-  }
-  for (const [candidateIndex, { candidate }] of candidateAttempts.entries()) {
+  for (const { candidate, last } of gatewayCandidateAttempts(candidates, claudeConfig)) {
     if (candidatesAttempted >= MAX_GATEWAY_CANDIDATE_ATTEMPTS) break;
     if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionAffinity(req), allowReselect: true })) continue;
     const upstream = store.get(candidate.id, scopeId);
@@ -759,8 +772,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     let admission = upstream && store.beginUpstreamAttempt(upstream.id, scope);
     if (!upstream || !admission && !allowUnavailableCandidate) continue;
     candidatesAttempted += 1;
-    const queuePacing = candidateIndex === candidateAttempts.length - 1
-      || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
+    const queuePacing = last || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
     const credentials = store.credentials(upstream.id);
     const startedAt = new Date().toISOString();
     const attempt = lifecycle ? store.beginGatewayAttempt(lifecycle.id, upstream.id, startedAt) : { id: randomUUID(), startedAt };
@@ -2676,11 +2688,6 @@ async function streamPassthrough(response, res, onEvent = null, upstreamDeadline
   }
 }
 
-async function writeChunk(res, chunk) {
-  if (res.destroyed || res.write(chunk)) return;
-  await Promise.race([once(res, 'drain'), once(res, 'close')]);
-}
-
 export function authenticateProxyRequest(req, store, expected, { allowXApiKey = false, sharingStore = null, shareKeysOnly = false } = {}) {
   if (!expected && !shareKeysOnly) return { scopeId: DEFAULT_SCOPE_ID };
   if (expected && !shareKeysOnly) store.configureApiKey(expected);
@@ -2735,17 +2742,14 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
         return;
       }
       if (isBackendResponsesRoute(path)) {
-        if (req.proxyAuth.kind === 'share_session') {
-          await modelCatalog.discoverAccount(req.proxyAuth.upstreamId, { fetchImpl, codexHostHealth });
-          req.codexModelsEtag = modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, requestScopeId(req))?.etag;
-        } else if (req.proxyAuth.kind === 'personal_share') {
-          const sessions = personalShareSessions(req);
-          await Promise.all(sessions.map(({ upstreamId }) => modelCatalog.discoverAccount(upstreamId, { fetchImpl, codexHostHealth })));
-          req.codexModelsEtag = modelCatalog.scopedAccountsCatalog(sessions.map(({ upstreamId }) => upstreamId), requestScopeId(req))?.etag;
-        } else {
-          req.codexModelsEtag = (await modelCatalog.resolve(requestScopeId(req), { fetchImpl, codexHostHealth })).etag;
-        }
+        const upstreamIds = req.proxyAuth.kind === 'share_session' ? [req.proxyAuth.upstreamId]
+          : req.proxyAuth.kind === 'personal_share' ? personalShareSessions(req).map(({ upstreamId }) => upstreamId)
+            : null;
+        req.codexModelsEtag = (await modelCatalog.forHandshake(requestScopeId(req), {
+          upstreamIds, fetchImpl, codexHostHealth
+        }))?.etag;
       }
+      if (socket.destroyed) return;
       wss.handleUpgrade(req, socket, head, (client) => {
         wss.emit('connection', client, req);
       });

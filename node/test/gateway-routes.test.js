@@ -9,6 +9,7 @@ import { createApp } from '../src/server.js';
 import { attachWebSocketProxy } from '../src/proxy.js';
 import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
+import { modelCatalogForStore } from '../src/codex-model-catalog.js';
 
 const API_KEY = 'client-key';
 
@@ -2213,6 +2214,58 @@ test('returns upstream WebSocket message-too-large as a request error without fa
     relay.close();
     await close(gateway);
     await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('native WebSocket upgrades while cold model discovery is still pending', { timeout: 5_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-cold-catalog-'));
+  const { store } = configuredStore(dir);
+  const catalog = modelCatalogForStore(store);
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let discoveryFinished = false;
+  const fetchImpl = async () => {
+    await pending;
+    discoveryFinished = true;
+    return new Response(JSON.stringify({ models: [{ slug: 'gpt-after-handshake' }] }));
+  };
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
+  const relay = attachWebSocketProxy(gateway, {
+    store, apiKey: API_KEY, fetchImpl,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  let client;
+  try {
+    const expectedEtag = catalog.snapshot('default').etag;
+    let handshakeEtag;
+    await new Promise((resolve, reject) => {
+      client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('upgrade', (response) => { handshakeEtag = response.headers['x-models-etag']; });
+      client.once('open', resolve);
+      client.once('error', reject);
+    });
+    assert.equal(discoveryFinished, false);
+    assert.equal(handshakeEtag, expectedEtag);
+    release();
+    const refreshed = await catalog.resolve('default', { fetchImpl });
+    assert.notEqual(refreshed.etag, handshakeEtag);
+    assert.equal(refreshed.publicModels.some(({ id }) => id === 'gpt-after-handshake'), true);
+  } finally {
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    if (client && client.readyState !== WebSocket.CLOSED) {
+      await new Promise((resolve) => { client.once('close', resolve); client.close(); });
+    }
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    store.sqlite.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

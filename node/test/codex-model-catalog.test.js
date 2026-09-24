@@ -40,6 +40,127 @@ function modelsResponse(models) {
   });
 }
 
+test('cold handshake discovery is bounded and continues through the shared cache', { timeout: 3_000 }, async () => {
+  const { dir, store } = fixture();
+  const catalog = new CodexModelCatalog(store, { handshakeWaitMs: 10 });
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    await pending;
+    return modelsResponse([{ slug: 'gpt-handshake' }]);
+  };
+  try {
+    const [first, second] = await Promise.all([
+      catalog.forHandshake('default', { fetchImpl }),
+      catalog.forHandshake('default', { fetchImpl })
+    ]);
+    assert.equal(first.status.source, 'static');
+    assert.equal(first.etag, second.etag);
+    assert.equal(calls, 1);
+    release();
+    const refreshed = await catalog.resolve('default', { fetchImpl });
+    assert.equal(calls, 1);
+    assert.notEqual(refreshed.etag, first.etag);
+    assert.equal(refreshed.publicModels.some(({ id }) => id === 'gpt-handshake'), true);
+  } finally {
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stale handshake catalogs return without awaiting refresh and survive provider failure', { timeout: 3_000 }, async () => {
+  const { dir, store } = fixture();
+  let now = Date.now();
+  const catalog = new CodexModelCatalog(store, { now: () => now, freshTtlMs: 100, handshakeWaitMs: 10_000 });
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const fetchImpl = async () => { await pending; throw new Error('synthetic outage'); };
+  try {
+    const initial = await catalog.resolve('default', { fetchImpl: async () => modelsResponse([{ slug: 'gpt-cached' }]) });
+    now += 200;
+    const stale = await catalog.forHandshake('default', { fetchImpl });
+    assert.equal(stale.etag, initial.etag);
+    assert.equal(stale.status.freshness, 'stale');
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    assert.equal(catalog.snapshot('default').etag, initial.etag);
+  } finally {
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('shared handshake discovery limits concurrency and excludes accounts outside the scope', { timeout: 3_000 }, async () => {
+  const { dir, store, upstreams } = fixture(7);
+  store.createScope({ id: 'private' });
+  const foreign = store.create(codexInput('foreign@example.com'), { scopeId: 'private' });
+  store.setCap(foreign.id, { capDollars: 100 });
+  const catalog = new CodexModelCatalog(store, { handshakeWaitMs: 10 });
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let active = 0;
+  let peak = 0;
+  const accounts = [];
+  const fetchImpl = async (_url, options) => {
+    accounts.push(options.headers['chatgpt-account-id']);
+    peak = Math.max(peak, ++active);
+    await pending;
+    active -= 1;
+    return modelsResponse([{ slug: 'gpt-shared' }]);
+  };
+  try {
+    const upstreamIds = [...upstreams.map(({ id }) => id), foreign.id, upstreams[0].id];
+    const fallback = await catalog.forHandshake('default', { upstreamIds, fetchImpl });
+    assert.equal(fallback.status.source, 'static');
+    assert.equal(accounts.length, 3);
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    assert.equal(accounts.length, 7);
+    assert.equal(peak, 3);
+    assert.equal(catalog.entries.has(foreign.id), false);
+    assert.equal(await catalog.forHandshake('default', { upstreamIds: [foreign.id], fetchImpl }), null);
+  } finally {
+    release();
+    await catalog.resolve('default', { fetchImpl });
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('handshake snapshots preserve selected-account isolation and credential invalidation', async () => {
+  const { dir, store, upstreams } = fixture(2);
+  const catalog = new CodexModelCatalog(store);
+  const fetchImpl = async (_url, options) => modelsResponse([
+    { slug: options.headers['chatgpt-account-id'] === 'acct-0' ? 'gpt-selected' : 'gpt-other' }
+  ]);
+  try {
+    await catalog.resolve('default', { fetchImpl });
+    const upstreamIds = [upstreams[0].id];
+    const selected = await catalog.forHandshake('default', { upstreamIds, fetchImpl });
+    assert.equal(selected.publicModels.some(({ id }) => id === 'gpt-selected'), true);
+    assert.equal(selected.publicModels.some(({ id }) => id === 'gpt-other'), false);
+    store.update(upstreams[0].id, codexInput('catalog-0@example.com', 'acct-replaced'));
+    const replaced = await catalog.forHandshake('default', {
+      upstreamIds, fetchImpl: async () => modelsResponse([{ slug: 'gpt-replaced' }])
+    });
+    assert.equal(replaced.publicModels.some(({ id }) => id === 'gpt-selected'), false);
+    assert.equal(replaced.publicModels.some(({ id }) => id === 'gpt-replaced'), true);
+    store.remove(upstreams[0].id);
+    assert.equal(await catalog.forHandshake('default', { upstreamIds, fetchImpl }), null);
+    assert.equal(catalog.entries.has(upstreams[0].id), false);
+  } finally {
+    await Promise.all(catalog.inflight.values());
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('coalesces concurrent discovery and serves fresh cache hits', async () => {
   const { dir, store, upstreams } = fixture();
   let calls = 0;

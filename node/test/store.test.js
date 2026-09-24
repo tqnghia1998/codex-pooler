@@ -12,6 +12,106 @@ function tempStore(options = {}) {
   return { dir, store: new Store(dir, options) };
 }
 
+test('indexed upstream lookups preserve scope, mutations, replacement, removal and reload', () => {
+  const { dir, store } = tempStore();
+  let reopened;
+  try {
+    const first = store.create({ type: 'compass', projectId: 'indexed', projectKey: 'synthetic' });
+    store.createScope({ id: 'other-scope' });
+    const other = store.create({ type: 'compass', projectId: 'other', projectKey: 'synthetic' }, { scopeId: 'other-scope' });
+    assert.equal(store.get(first.id, 'other-scope'), null);
+    assert.equal(store.get(other.id, 'default'), null);
+    assert.equal(store.get('missing'), null);
+    const record = store.get(first.id);
+    store.setQuota(first.id, { remainingPercent: 73 });
+    assert.equal(store.get(first.id, 'default'), record);
+    assert.equal(record.quota.remainingPercent, 73);
+    store.update(first.id, { projectKey: 'replacement-key' });
+    assert.equal(store.credentials(first.id).projectKey, 'replacement-key');
+    assert.equal(store.get(first.id).quota, null);
+    store.setQuota(first.id, { remainingPercent: 73 });
+
+    const replacement = structuredClone(store.load());
+    replacement.upstreams = replacement.upstreams.filter(({ id }) => id !== other.id);
+    store.save(replacement);
+    assert.notEqual(store.get(first.id), record);
+    assert.equal(store.get(other.id), null);
+    // Imports invalidate the loaded database and then read the replacement rows.
+    store.db = null;
+    assert.equal(store.get(first.id, 'default').quota.remainingPercent, 73);
+    assert.equal(store.get(other.id), null);
+    reopened = new Store(dir);
+    assert.equal(reopened.get(first.id, 'default').id, first.id);
+    store.remove(first.id);
+    assert.equal(store.get(first.id), null);
+  } finally {
+    store.sqlite.close();
+    reopened?.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('hot request writes serialize only affected upstreams and survive restart', () => {
+  const { dir, store } = tempStore();
+  let reopened;
+  try {
+    assert.equal(store.sqlite.pragma('journal_mode', { simple: true }), 'wal');
+    assert.equal(store.sqlite.pragma('synchronous', { simple: true }), 2);
+    const target = store.create({ type: 'compass', projectId: 'target', projectKey: 'synthetic' });
+    const other = store.create({ type: 'compass', projectId: 'other', projectKey: 'synthetic' });
+    const key = store.createApiKey({ key: 'synthetic-key' });
+    store.setCap(target.id, { capDollars: 100 });
+    Object.defineProperty(store.get(other.id), 'toJSON', {
+      configurable: true,
+      value() { throw new Error('Unrelated upstream was serialized'); }
+    });
+    store.setQuota(target.id, { remainingPercent: 80 });
+    store.pinSession('session', target.id, 'default', key.id);
+    store.pinResponse('resp_synthetic', target.id, 'default', key.id);
+    store.addSessionUsage('session', target.id, 123, 'default', key.id);
+    assert.equal(store.responseUpstream('resp_synthetic', 'default', key.id), target.id);
+    const admission = store.beginUpstreamAttempt(target.id, { model: 'synthetic', routeClass: 'proxy_http' });
+    store.settleUpstreamAttempt(target.id, admission, { class: 'success' });
+    const request = store.reserveGatewayRequest({ apiKeyId: key.id, endpoint: '/v1/responses' });
+    const attempt = store.beginGatewayAttempt(request.id, target.id);
+    store.finalizeGatewayRequest({
+      requestId: request.id, attemptId: attempt.id, status: 'succeeded',
+      settledCostMicros: 123, costSource: 'upstream_reported'
+    });
+    store.sqlite.close();
+    reopened = new Store(dir);
+    assert.equal(reopened.get(target.id).quota.remainingPercent, 80);
+    assert.equal(reopened.responseUpstream('resp_synthetic', 'default', key.id), target.id);
+    assert.equal(reopened.sessionEntry('session', 'default', key.id).spentCostMicros, 123);
+    assert.equal(reopened.load().gatewayUsage[0].totalCostMicros, 123);
+    assert.equal(reopened.load().gatewayRequests.length, 0);
+    assert.equal(reopened.credentials(other.id).projectKey, 'synthetic');
+  } finally {
+    if (store.sqlite.open) store.sqlite.close();
+    reopened?.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('failed targeted writes do not advance the persisted comparison cache', () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+  try {
+    const upstream = store.create({ type: 'compass', projectId: 'target', projectKey: 'synthetic' });
+    const key = JSON.stringify(['upstreams', upstream.id]);
+    const before = store.persistedRecords.get(key);
+    store.sqlite.exec(`CREATE TRIGGER reject_write BEFORE UPDATE ON records
+      BEGIN SELECT RAISE(ABORT, 'synthetic write failure'); END`);
+    assert.throws(() => store.setQuota(upstream.id, { remainingPercent: 70 }), /synthetic write failure/);
+    assert.equal(store.persistedRecords.get(key), before);
+    assert.equal(store.sqlite.prepare("SELECT value FROM records WHERE collection = 'upstreams' AND key = ?").get(upstream.id).value, before);
+    store.sqlite.exec('DROP TRIGGER reject_write');
+    store.setQuota(upstream.id, { remainingPercent: 70 });
+    assert.equal(JSON.parse(store.persistedRecords.get(key)).quota.remainingPercent, 70);
+  } finally {
+    store.sqlite.close();
+  }
+});
+
 test('persists stabilized Claude device profiles without exposing them publicly', () => {
   const { dir, store } = tempStore({ allowLegacyClaudeApiKey: true });
   try {

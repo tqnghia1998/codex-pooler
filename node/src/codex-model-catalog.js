@@ -20,6 +20,7 @@ const MAX_ACCOUNT_CATALOGS = 512;
 const MAX_AGGREGATION_CACHE_ENTRIES = 128;
 const MAX_NEGATIVE_MODELS = 128;
 const DISCOVERY_CONCURRENCY = 3;
+const HANDSHAKE_DISCOVERY_WAIT_MS = 250;
 const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$/;
 const MAX_METADATA_DEPTH = 5;
 const MAX_METADATA_KEYS = 64;
@@ -59,7 +60,8 @@ export class CodexModelCatalog {
     failureSuppressionMs = FAILURE_SUPPRESSION_MS,
     maxResponseBytes = MAX_RESPONSE_BYTES,
     maxModels = MAX_MODELS,
-    concurrency = DISCOVERY_CONCURRENCY
+    concurrency = DISCOVERY_CONCURRENCY,
+    handshakeWaitMs = HANDSHAKE_DISCOVERY_WAIT_MS
   } = {}) {
     this.store = store;
     this.now = now;
@@ -68,6 +70,7 @@ export class CodexModelCatalog {
     this.maxResponseBytes = maxResponseBytes;
     this.maxModels = maxModels;
     this.concurrency = concurrency;
+    this.handshakeWaitMs = handshakeWaitMs;
     this.entries = new Map();
     this.inflight = new Map();
     this.aggregationCache = new Map();
@@ -78,6 +81,30 @@ export class CodexModelCatalog {
     const candidates = this.discoveryCandidates(scopeId);
     await mapConcurrent(candidates, this.concurrency, ({ id }) => this.discoverAccount(id, options));
     return this.snapshot(scopeId);
+  }
+
+  async forHandshake(scopeId = DEFAULT_SCOPE_ID, { upstreamIds = null, ...options } = {}) {
+    const ids = upstreamIds === null ? null
+      : [...new Set(upstreamIds)].filter((id) => this.store.get(id, scopeId));
+    const snapshot = () => ids === null ? this.snapshot(scopeId) : this.scopedAccountsCatalog(ids, scopeId);
+    const cached = snapshot();
+    const refresh = (ids === null
+      ? this.resolve(scopeId, options)
+      : mapConcurrent(ids, this.concurrency, (id) => this.discoverAccount(id, options)))
+      .catch(() => {});
+    // Discovery is advisory: stale catalogs can serve immediately, and a cold
+    // handshake must not wait through every account's network deadline.
+    if (cached?.status.accountCount) return cached;
+    let timer;
+    try {
+      await Promise.race([
+        refresh,
+        new Promise((resolve) => { timer = setTimeout(resolve, this.handshakeWaitMs); })
+      ]);
+      return snapshot();
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   snapshot(scopeId = DEFAULT_SCOPE_ID) {

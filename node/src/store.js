@@ -66,8 +66,16 @@ export class Store {
     this.key = encryptionKey ? normalizeEncryptionKey(encryptionKey) : this.loadKey(existsSync(this.dbPath) || existsSync(this.legacyDbPath));
     this.sqlite = new Database(this.dbPath);
     if (!inMemory) chmodSync(this.dbPath, 0o600);
-    this.sqlite.pragma('journal_mode = DELETE');
+    this.sqlite.pragma('journal_mode = WAL');
+    this.sqlite.pragma('synchronous = FULL');
     this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
+    this.upsertRecord = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
+    this.removeRecord = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
+    this.persistedCollections = new Map();
+    this.writeRecords = this.sqlite.transaction((updates, removals) => {
+      for (const [id, value] of updates) this.upsertRecord.run(...JSON.parse(id), value);
+      for (const id of removals) this.removeRecord.run(...JSON.parse(id));
+    });
     this.events = new EventEmitter();
     this.allowLegacyClaudeApiKey = Boolean(allowLegacyClaudeApiKey);
     this.claudeRuntimeConfig = {};
@@ -211,8 +219,10 @@ export class Store {
   }
 
   get(id, scopeId = null) {
-    const upstream = scoped(this.load().upstreams, scopeId).find((item) => item.id === id) || null;
-    if (upstream) ensureSpending(upstream);
+    this.load();
+    const upstream = this.upstreamById.get(id);
+    if (!upstream || scopeId && upstream.scopeId !== scopeId) return null;
+    ensureSpending(upstream);
     return upstream;
   }
 
@@ -353,7 +363,7 @@ export class Store {
     const status = providerRefreshFailureCode(upstream.type, error);
     upstream.tokenRefresh = { status, finishedAt: new Date().toISOString(), trigger: 'runtime', errorCode: status, errorDetail: providerRefreshFailureDetail(upstream.type, error) };
     upstream.updatedAt = new Date().toISOString();
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     this.notifyUpstreamsChange();
     this.tokenRefreshFailureHandler?.(id, 'runtime');
     return publicUpstream(upstream);
@@ -366,7 +376,7 @@ export class Store {
     if (!upstream.tokenRefresh) return;
     delete upstream.tokenRefresh;
     upstream.updatedAt = new Date().toISOString();
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     this.notifyUpstreamsChange();
   }
 
@@ -381,7 +391,7 @@ export class Store {
       delete upstream.health;
     }
     upstream.updatedAt = new Date().toISOString();
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     if (notify) this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
@@ -391,7 +401,7 @@ export class Store {
     const upstream = findOrThrow(db, id);
     upstream.advisoryQuota = advisoryQuota;
     upstream.updatedAt = new Date().toISOString();
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     if (notify) this.notifyUpstreamsChange();
     return publicUpstream(upstream);
   }
@@ -554,7 +564,7 @@ export class Store {
     const upstream = findOrThrow(db, id);
     ensureSpending(upstream);
     const settlement = recordUsage(upstream, input);
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     if (settlement.appliedDeltaMicros) this.notifyUpstreamsChange();
     return { upstream: publicUpstream(upstream), settlement };
   }
@@ -562,7 +572,9 @@ export class Store {
   recordGatewayUsage({ scopeId = DEFAULT_SCOPE_ID, apiKeyId = null, attemptId, startedAt, usage = null, settledCostMicros = null } = {}) {
     if (!attemptId) return;
     const db = this.load();
-    if (addGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros })) this.save(db);
+    if (addGatewayUsage(db, { scopeId, apiKeyId, attemptId, startedAt, usage, settledCostMicros })) {
+      this.saveChanges(db, { collections: ['gatewayUsage'] });
+    }
   }
 
   reserveGatewayRequest({ scopeId = DEFAULT_SCOPE_ID, apiKeyId, endpoint, model = '', transport = 'http_json', admittedAt = new Date().toISOString() } = {}) {
@@ -665,7 +677,10 @@ export class Store {
       deleteGatewayRequest(db, requestId);
     }
     pruneGatewayHistory(db, true);
-    this.save(db);
+    this.saveChanges(db, {
+      upstreams: status === 'succeeded' && Number.isSafeInteger(settledCostMicros) ? [findOrThrow(db, attempt.upstreamId)] : [],
+      collections: ['gatewayUsage', 'gatewayRequests', 'gatewayAttempts']
+    });
     this.notifyUpstreamsChange();
     return { request: { ...request }, attempt: attempt && { ...attempt } };
   }
@@ -837,7 +852,7 @@ export class Store {
     if (upstream.type === 'claude' && !scope?.ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, this.claudeRuntimeConfig) && modelCooldownBlocks(upstream, scope?.model, now)) return null;
     const circuitLease = beginCircuitLease(upstream, scope, now);
     if (!circuitLease) return null;
-    this.save(db);
+    this.saveChanges(db, { upstreams: [upstream] });
     return {
       accountGeneration: generation,
       accountProbe,
@@ -917,7 +932,10 @@ export class Store {
       if (admission.accountProbe && accountCurrent && upstream.health) upstream.health.probeInFlight = false;
     }
     upstream.updatedAt = new Date(now).toISOString();
-    this.save(db);
+    this.saveChanges(db, {
+      upstreams: [upstream],
+      collections: ['quota', 'credential'].includes(outcome.class) ? ['sessions'] : []
+    });
     this.notifyUpstreamsChange();
     return true;
   }
@@ -1053,7 +1071,7 @@ export class Store {
     db.responsePins[responsePinKey(scopeId, apiKeyId, responseId)] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now };
     const overflow = Object.entries(db.responsePins).sort(([, a], [, b]) => Date.parse(a.lastUsedAt || 0) - Date.parse(b.lastUsedAt || 0)).slice(0, Math.max(0, Object.keys(db.responsePins).length - RESPONSE_PIN_LIMIT));
     for (const [key] of overflow) delete db.responsePins[key];
-    this.save(db);
+    this.saveChanges(db, { collections: ['responsePins'] });
   }
 
   responseUpstream(responseId, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
@@ -1064,7 +1082,7 @@ export class Store {
     if (!entry || entry.scopeId !== scopeId || entry.apiKeyId !== apiKeyId || Date.now() - Date.parse(entry.lastUsedAt) > RESPONSE_PIN_TTL_MS) return null;
     if (!scoped(db.upstreams, scopeId).some((upstream) => upstream.id === entry.upstreamId)) return null;
     entry.lastUsedAt = new Date().toISOString();
-    this.save(db);
+    this.persistRecordChanges(new Map([[JSON.stringify(['responsePins', key]), JSON.stringify(entry)]]));
     return entry.upstreamId;
   }
 
@@ -1082,7 +1100,7 @@ export class Store {
     db.sessions[key] = { upstreamId, scopeId, apiKeyId, lastUsedAt: now, spentCostMicros: previous?.upstreamId === upstreamId ? previous.spentCostMicros || 0 : 0 };
     const overflow = Object.entries(db.sessions).sort(([, a], [, b]) => Date.parse(a.lastUsedAt || 0) - Date.parse(b.lastUsedAt || 0)).slice(0, Math.max(0, Object.keys(db.sessions).length - SESSION_LIMIT));
     for (const [id] of overflow) delete db.sessions[id];
-    this.save(db);
+    this.saveChanges(db, { collections: ['sessions'] });
   }
 
   addSessionUsage(sessionId, upstreamId, settledCostMicros, scopeId = DEFAULT_SCOPE_ID, apiKeyId = null) {
@@ -1094,7 +1112,7 @@ export class Store {
     entry.spentCostMicros = (Number.isSafeInteger(entry.spentCostMicros) ? entry.spentCostMicros : 0) + settledCostMicros;
     entry.lastUsedAt = new Date().toISOString();
     if (entry.spentCostMicros >= SESSION_ROTATION_SPEND_MICROS) db.sessions[key] = { scopeId, apiKeyId, rotationUpstreamId: upstreamId, lastUsedAt: entry.lastUsedAt };
-    this.save(db);
+    this.persistRecordChanges(new Map([[JSON.stringify(['sessions', key]), JSON.stringify(db.sessions[key])]]));
   }
 
   listFiles(scopeId = null) {
@@ -1152,6 +1170,8 @@ export class Store {
       this.db = normalizeDatabase(db);
       this.rebuildApiKeyIndex();
       this.persistedRecords = persistedRecords;
+      this.persistedCollections = new Map();
+      for (const id of persistedRecords.keys()) this.indexPersistedRecord(id);
       this.save(this.db);
       return this.db;
     } catch (error) {
@@ -1161,21 +1181,45 @@ export class Store {
 
   save(db) {
     this.db = db;
+    this.upstreamById = new Map(db.upstreams.map((upstream) => [upstream.id, upstream]));
     const previous = this.persistedRecords || databaseRecords(emptyDatabase());
     const next = persistedDatabaseRecords(db);
-    const upsert = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
-    const remove = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
-    this.sqlite.transaction(() => {
-      for (const [id, value] of next) if (previous.get(id) !== value) {
-        const [collection, key] = JSON.parse(id);
-        upsert.run(collection, key, value);
-      }
-      for (const id of previous.keys()) if (!next.has(id)) {
-        const [collection, key] = JSON.parse(id);
-        remove.run(collection, key);
-      }
-    })();
-    this.persistedRecords = next;
+    this.persistRecordChanges(next, [...previous.keys()].filter((id) => !next.has(id)));
+  }
+
+  // Hot paths name their writes; full saves remain available for imports and bulk edits.
+  saveChanges(db, { upstreams = [], collections = [] } = {}) {
+    const partial = emptyDatabase();
+    for (const collection of collections) partial[collection] = db[collection];
+    partial.upstreams = upstreams;
+    const next = persistedDatabaseRecords(partial);
+    next.delete(JSON.stringify(['routingPolicy', 'strategy']));
+    const removals = collections.flatMap((collection) =>
+      [...(this.persistedCollections.get(collection) || [])].filter((id) => !next.has(id)));
+    this.persistRecordChanges(next, removals);
+  }
+
+  persistRecordChanges(next, removals = []) {
+    const previous = this.persistedRecords || new Map();
+    const updates = [...next].filter(([id, value]) => previous.get(id) !== value);
+    if (!updates.length && !removals.length) return;
+    this.writeRecords(updates, removals);
+    // Publish the comparison cache only after the transaction commits.
+    for (const [id, value] of updates) {
+      previous.set(id, value);
+      this.indexPersistedRecord(id);
+    }
+    for (const id of removals) {
+      previous.delete(id);
+      this.persistedCollections.get(JSON.parse(id)[0])?.delete(id);
+    }
+    this.persistedRecords = previous;
+  }
+
+  indexPersistedRecord(id) {
+    const [collection] = JSON.parse(id);
+    if (!this.persistedCollections.has(collection)) this.persistedCollections.set(collection, new Set());
+    this.persistedCollections.get(collection).add(id);
   }
 
   indexApiKey(record) {

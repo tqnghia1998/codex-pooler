@@ -9,6 +9,50 @@ import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 import { compatibilityContext, compatibilityLearningForStore } from '../src/compatibility-learning.js';
+import { gatewayCandidateAttempts } from '../src/proxy.js';
+
+test('lazy attempt planning preserves mixed-provider retry rounds and the last pacing slot', () => {
+  const candidates = [
+    { id: 'codex', type: 'codex', metadata: { request_retry: 8 } },
+    { id: 'claude-a', type: 'claude', metadata: { request_retry: 2 } },
+    { id: 'compass', type: 'compass' },
+    { id: 'claude-b', type: 'claude', metadata: { request_retry: 1 } }
+  ];
+  const attempts = [...gatewayCandidateAttempts(candidates)];
+  assert.deepEqual(attempts.map(({ candidate }) => candidate.id), [
+    'codex', 'claude-a', 'compass', 'claude-b', 'claude-a', 'claude-b', 'claude-a'
+  ]);
+  assert.deepEqual(attempts.map(({ last }) => last), [false, false, false, false, false, false, true]);
+  assert.deepEqual([...gatewayCandidateAttempts([])], []);
+  assert.deepEqual([...gatewayCandidateAttempts(candidates.slice(0, 1))].map(({ last }) => last), [true]);
+  const iterator = gatewayCandidateAttempts([{ id: 'global', type: 'claude' }], { requestRetry: 8 });
+  assert.equal(iterator.next().value.last, false);
+  assert.equal([...iterator].length, 8);
+});
+
+test('HTTP success does not look up every unused candidate to prepare retries', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+  const first = store.create(codexInput());
+  store.setCap(first.id, { capDollars: 100 });
+  const seed = structuredClone(store.get(first.id));
+  const db = store.load();
+  db.upstreams = Array.from({ length: 100 }, (_, index) => ({ ...structuredClone(seed), id: `synthetic-${index}` }));
+  store.save(db);
+  const get = store.get.bind(store);
+  let lookups = 0;
+  store.get = (...args) => { lookups += 1; return get(...args); };
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    id: 'resp_bench', status: 'completed', output: []
+  }), { headers: { 'content-type': 'application/json' } }));
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
+    assert.equal(result.response.status, 200);
+    assert.ok(lookups < 20, `Expected bounded dispatched-account lookups, got ${lookups}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
+  }
+});
 
 function jwt(payload) {
   return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
