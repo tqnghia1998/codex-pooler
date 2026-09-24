@@ -31,7 +31,7 @@ function fixture(t) {
   return { store, product, account, provider, offer, activity };
 }
 
-test('community activity respects visibility, includes self, and deduplicates providers', (t) => {
+test('community activity respects visibility, includes self, and deduplicates people', (t) => {
   const f = fixture(t);
   const viewer = f.provider('viewer');
   const publicProvider = f.provider('public');
@@ -43,7 +43,10 @@ test('community activity respects visibility, includes self, and deduplicates pr
   f.offer(privateProvider, { visibility: 'restricted', allowedEmails: [viewer.owner.email] });
   f.offer(hiddenProvider, { visibility: 'restricted', allowedEmails: ['someone-else@example.com'] });
   f.product.createQuotaRequest(viewer.owner.id, { quotaDollars: 5 });
+  const previousRequest = f.product.createQuotaRequest(publicProvider.owner.id, { quotaDollars: 5 });
   f.product.createQuotaRequest(publicProvider.owner.id, { quotaDollars: 5 });
+  // Imported history can contain multiple active requests for the same person.
+  f.product.sqlite.prepare("UPDATE quota_requests SET status = 'active' WHERE id = ?").run(previousRequest.id);
   f.product.createQuotaRequest(privateProvider.owner.id, {
     quotaDollars: 5, visibility: 'restricted', allowedEmails: [viewer.owner.email]
   });
@@ -73,6 +76,18 @@ test('own activity remains visible when no one else is sharing or requesting', (
     assert.equal(group.totalPeople, 1);
     assert.deepEqual(group.people.map(({ id }) => id), [viewer.owner.id]);
   }
+});
+
+test('community summary permits expiry checks during provider lookups', (t) => {
+  const f = fixture(t);
+  const viewer = f.account('viewer');
+  f.offer(f.provider('provider'));
+  const commitment = f.product.providerCommitment.bind(f.product);
+  f.product.providerCommitment = (...args) => {
+    f.product.lastExpiryCheckAt = 0;
+    return commitment(...args);
+  };
+  assert.equal(f.activity(viewer).sharing.totalPeople, 1);
 });
 
 test('community activity omits pending, paused, closed, unbacked, missing, and internal offers', (t) => {
@@ -179,6 +194,36 @@ test('community activity API is authenticated, private, and independent of table
     assert.equal(result.sharing.totalPeople, 1);
     assert.equal(JSON.stringify(result).includes('synthetic-test-key'), false);
     assert.deepEqual(result, await (await fetch(base, { headers })).json());
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('dashboard snapshot matches individual endpoints and stays account-scoped', async (t) => {
+  const f = fixture(t);
+  const viewer = f.provider('viewer');
+  const hidden = f.provider('hidden');
+  f.offer(hidden, { visibility: 'restricted', allowedEmails: ['someone-else@example.com'] });
+  const session = f.product.createAccountSession(viewer.owner.id);
+  const server = createServer(createApp({ store: f.store, productStore: f.product }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const base = `http://127.0.0.1:${server.address().port}/api/pool`;
+    assert.equal((await fetch(`${base}/dashboard`)).status, 401);
+    const headers = { cookie: `codex_pool_session=${session.token}` };
+    const response = await fetch(`${base}/dashboard`, { headers });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    const data = await response.json();
+    for (const [resource, field] of [
+      ['me', 'account'], ['upstreams', 'upstreams'], ['personal-keys', 'personalKeys'], ['sharing-counts', 'counts']
+    ]) {
+      assert.deepEqual(data[field], (await (await fetch(`${base}/${resource}`, { headers })).json())[field]);
+    }
+    assert.deepEqual(data.communityActivity, await (await fetch(`${base}/community-activity`, { headers })).json());
+    assert.deepEqual(data.upstreams.map(({ id }) => id), [viewer.upstream.id]);
+    assert.equal(JSON.stringify(data).includes('synthetic-test-key'), false);
+    assert.equal(JSON.stringify(data).includes(hidden.owner.email), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

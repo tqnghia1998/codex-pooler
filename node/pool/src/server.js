@@ -318,6 +318,13 @@ export function start(port = Number(process.env.POOL_PORT) || 3010, {
   void emailScheduler.run();
   const tokenTimer = setInterval(tokenScheduler.run, tokenRefreshIntervalMs);
   tokenTimer.unref?.();
+  const closeServer = server.close.bind(server);
+  server.close = (callback) => {
+    const backupClosed = snapshotBackup.close();
+    return closeServer((error) => {
+      void backupClosed.then(() => callback?.(error));
+    });
+  };
   server.once('close', () => {
     clearInterval(timer);
     clearInterval(advisoryTimer);
@@ -456,6 +463,16 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
 
   if (req.method === 'GET' && resource === 'me' && parts.length === 3) {
     sendJson(res, 200, { account: auth.account });
+    return;
+  }
+  if (req.method === 'GET' && resource === 'dashboard' && parts.length === 3) {
+    sendJson(res, 200, {
+      account: auth.account,
+      upstreams: accountUpstreams(auth.account, store, productStore),
+      personalKeys: productStore.listPersonalKeys(accountId, store),
+      communityActivity: productStore.communityActivity(accountId, store),
+      counts: productStore.sharingCounts(accountId)
+    });
     return;
   }
   if (req.method === 'GET' && resource === 'personal-key' && parts.length === 3) {
@@ -687,24 +704,7 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     return;
   }
   if (req.method === 'GET' && resource === 'upstreams' && parts.length === 3) {
-    const upstreams = productStore.listCanonicalAccountUpstreamLinks(accountId, store)
-      .flatMap(({ upstreamId }) => {
-        const upstream = store.getPublic(upstreamId);
-        if (!upstream) return [];
-        const provider = productStore.providerSummary(accountId, upstreamId, store);
-        const ownerEmail = upstream.email ||
-          ((upstream.type === 'claude' || upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch')
-            ? auth.account.email
-            : '');
-        return [{
-          ...upstream,
-          ...(ownerEmail ? { email: ownerEmail } : {}),
-          name: ownerEmail || upstream.name,
-          providerIssue: providerIssue(upstream),
-          sharing: provider.sharing,
-          commitment: provider.commitment
-        }];
-      });
+    const upstreams = accountUpstreams(auth.account, store, productStore);
     sendJson(res, 200, { upstreams });
     return;
   }
@@ -903,6 +903,27 @@ async function productRequest(req, res, url, { store, productStore, fetchImpl, c
     return;
   }
   throw new HttpError(404, 'not_found', 'Not found');
+}
+
+function accountUpstreams(account, store, productStore) {
+  return productStore.listCanonicalAccountUpstreamLinks(account.id, store)
+    .flatMap(({ upstreamId }) => {
+      const upstream = store.getPublic(upstreamId);
+      if (!upstream) return [];
+      const provider = productStore.providerSummary(account.id, upstreamId, store);
+      const ownerEmail = upstream.email ||
+        ((upstream.type === 'claude' || upstream.quotaSource === 'ais' || upstream.quotaSource === 'aiswitch')
+          ? account.email
+          : '');
+      return [{
+        ...upstream,
+        ...(ownerEmail ? { email: ownerEmail } : {}),
+        name: ownerEmail || upstream.name,
+        providerIssue: providerIssue(upstream),
+        sharing: provider.sharing,
+        commitment: provider.commitment
+      }];
+    });
 }
 
 async function productApi(req, res, url, context) {

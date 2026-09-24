@@ -32,6 +32,7 @@ import { UserGuideDialog } from './UserGuideDialog.jsx';
 import { CommunityBanner } from './CommunityBanner.jsx';
 import { useLanguage } from './i18n.jsx';
 import { isCountStorageEvent, openCountTab, reconcileTabCounts, SHARING_COUNTS_STORAGE_KEY } from './tab-counts.js';
+import { createRefreshQueue } from './refresh-queue.js';
 
 const SHARING_VIEWS = new Set([
   'community-offers',
@@ -212,62 +213,43 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
   const [loadingActions, setLoadingActions] = useState(new Set());
   const actionsInFlight = useRef(new Set());
   const tableRequestVersion = useRef(0);
-  const countRequestVersion = useRef(0);
+  const refreshQueue = useRef(null);
+  if (!refreshQueue.current) refreshQueue.current = createRefreshQueue();
   const smartSessionSyncs = useRef(new Map());
   const resetTablePage = useCallback(() => {
     tableRequestVersion.current += 1;
     setTablePage({ items: [], totalItems: 0, hasMore: false, nextOffset: null });
   }, []);
 
-  const load = useCallback(async ({ background = false } = {}) => {
+  const load = useCallback(({ background = false } = {}) => refreshQueue.current(async () => {
     const activityVersion = ++activityRequestVersion.current;
     if (!background) setLoading(true);
-    let accountId;
     try {
-      const me = await api('/api/pool/me');
-      accountId = me.account.id;
-      setAccount(me.account);
+      const data = await api('/api/pool/dashboard');
+      if (activityVersion !== activityRequestVersion.current) return;
+      const accountId = data.account.id;
+      setAccount((current) => JSON.stringify(current) === JSON.stringify(data.account) ? current : data.account);
+      setCommunityActivity(data.communityActivity ? { accountId, ...data.communityActivity } : null);
+      setUpstreams(data.upstreams || []);
+      setPersonalKeys(data.personalKeys || []);
+      setTabCounts((current) => ({
+        accountId,
+        ...reconcileTabCounts(
+          current.accountId === accountId ? current : storedTabCounts(accountId),
+          data.counts || {},
+          viewRef.current
+        )
+      }));
     } catch (nextError) {
-      if (activityVersion === activityRequestVersion.current) setCommunityActivity(null);
+      if (activityVersion !== activityRequestVersion.current) return;
+      setCommunityActivity(null);
       if (nextError.status === 401) {
         setAccount(null);
       } else if (!background) onNotice(nextError.message, true);
-      if (!background) setLoading(false);
-      return;
-    }
-    try {
-      const [upstreamData, personalKeyData, activityData] = await Promise.all([
-        api('/api/pool/upstreams'),
-        api('/api/pool/personal-keys'),
-        api('/api/pool/community-activity').catch(() => null)
-      ]);
-      if (activityVersion === activityRequestVersion.current) {
-        setCommunityActivity(activityData ? { accountId, ...activityData } : null);
-      }
-      setUpstreams(upstreamData.upstreams || []);
-      setPersonalKeys(personalKeyData.personalKeys || []);
-      try {
-        const requestVersion = ++countRequestVersion.current;
-        const countData = await api('/api/pool/sharing-counts');
-        if (requestVersion !== countRequestVersion.current) return;
-        setTabCounts((current) => ({
-          accountId,
-          ...reconcileTabCounts(
-            current.accountId === accountId ? current : storedTabCounts(accountId),
-            countData.counts || {},
-            viewRef.current
-          )
-        }));
-      } catch (countError) {
-        if (!background) onNotice(countError.message, true);
-      }
-    } catch (nextError) {
-      if (activityVersion === activityRequestVersion.current) setCommunityActivity(null);
-      if (!background) onNotice(nextError.message, true);
     } finally {
       if (!background) setLoading(false);
     }
-  }, [api, onNotice, t]);
+  }, { background }), [api, onNotice]);
 
   useEffect(() => {
     if (!tabCounts.accountId) return;
@@ -296,6 +278,7 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
           try { window.localStorage.removeItem('session'); } catch {}
           setSmartSession(null);
         }
+        activityRequestVersion.current += 1;
         setAccount(null);
         onNotice(err.message || t('smartAuthFailedToast'), true);
         return false;
@@ -454,13 +437,20 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
 
   useEffect(() => {
     if (!account) return undefined;
-    const timer = window.setInterval(() => {
-      if (!document.hidden) {
-        void load({ background: true });
-        void loadTable();
+    let cancelled = false;
+    let timer;
+    const poll = async () => {
+      try {
+        if (!document.hidden) await Promise.all([load({ background: true }), loadTable()]);
+      } finally {
+        if (!cancelled) timer = window.setTimeout(poll, 5_000);
       }
-    }, 5_000);
-    return () => window.clearInterval(timer);
+    };
+    timer = window.setTimeout(poll, 5_000);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [account, load, loadTable]);
 
   const mutate = useCallback(async (operation, message, actionKey = null) => {
@@ -518,6 +508,9 @@ export function SharingWorkspace({ onNotice, onLoadingChange = () => {} }) {
       await api('/auth/logout', { method: 'POST', body: '{}' });
     } catch {}
     try { window.localStorage.removeItem('session'); } catch {}
+    activityRequestVersion.current += 1;
+    tableRequestVersion.current += 1;
+    setCommunityActivity(null);
     setSmartSession(null);
     setAccount(null);
     setTablePage({ items: [], totalItems: 0, hasMore: false, nextOffset: null });

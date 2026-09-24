@@ -41,7 +41,9 @@ configuration.
 `pool/.data/db.sqlite` and `pool/.data/.key` are the product's private gateway
 store for linked Codex and Claude credentials. `pool/.data/pool.sqlite` and
 `pool/.data/.pool-key` hold product accounts, offers, tickets, sessions, key
-hashes, and audit events. Back up all four files together.
+hashes, and audit events. Both databases use WAL. For a filesystem backup, stop
+the service and copy all four files together with any remaining `-wal` and
+`-shm` sidecars. Do not copy only the main database files while the service runs.
 
 QuotaHub also writes a full JSON snapshot to `pool/.data/quotahub-snapshot.json`
 on startup and then every hour, replacing the previous snapshot. The file uses
@@ -49,6 +51,12 @@ the same format as the admin export and can be restored through admin import;
 it contains the encrypted gateway records and every product table. Set
 `POOL_BACKUP_INTERVAL_MS` to change the cadence. Admin Data management shows
 the last successful automatic snapshot time and any failure since then.
+Automatic backups synchronously capture both SQLite databases in one event-loop
+turn, then hydrate rows, serialize JSON, and atomically replace the snapshot in a
+worker thread. Snapshot capture still copies the database bytes on the main
+thread; export and disk I/O do not. Concurrent backup runs coalesce, and the
+server's close callback waits for an in-flight backup to finish. Keep the two
+encryption key files with any JSON snapshot intended for restoration.
 
 The embedded pool always uses local SQLite. Deploy it with a persistent volume
 for `POOL_DATA_DIR`; Redis and KMS persistence belong to the standalone
@@ -91,7 +99,7 @@ requires signing in again in that browser.
 
 After sign-in, QuotaHub waits for an immediate best-effort Codex quota
 refresh before completing the browser login, then refreshes every linked Codex
-account automatically every minute in batches of ten. The dashboard polls this
+account automatically every five minutes by default in batches of ten. The dashboard polls this
 stored quota state and can also refresh it manually. Some Codex plans expose
 only a percentage or provider units; QuotaHub shows that reported value rather
 than estimating a dollar balance. When the optional delayed quota integration
@@ -261,7 +269,13 @@ on the left and offers on the right in equal-width columns, each with its own
 single-line marquee. If only one category is available, it fills the strip.
 
 The dashboard refreshes the summary with its five-second polling and after
-sharing actions. Names open the corresponding list filtered by email (the
+sharing actions. A visible dashboard fetches one account-scoped
+`GET /api/pool/dashboard` snapshot and the current table page per cycle, then
+waits five seconds after completion before polling again. Background snapshot
+refreshes share in-flight work; explicit refreshes after mutations wait for a
+fresh read. Hidden tabs do not poll. Existing individual management endpoints
+remain supported.
+Names open the corresponding list filtered by email (the
 viewer's own name opens their "My" tab); the category action is an inline
 hyperlink that moves with the message and opens the whole list. Both reset
 pagination and past-data filters. Motion pauses on hover, keyboard focus,
@@ -302,6 +316,7 @@ POST   /auth/codex/import
 POST   /auth/logout
 
 GET    /api/pool/me
+GET    /api/pool/dashboard                       # account, providers, personal-key metadata, community summary, counts
 GET    /api/pool/community-activity              # viewer-visible unique people, bounded rotating samples
 GET    /api/pool/leaderboard                    # admin only; settled-usage rankings with account emails
 GET    /api/pool/admin/analytics                 # quangnghia.trinh@shopee.com only; recent events use eventCursor
@@ -382,6 +397,8 @@ The sharing list endpoints (`offers`, `tickets`, `sessions`, and
 `q` (case-insensitive provider or consumer email search where applicable), and
 `includePast=true`. The dashboard also supplies a route-specific `role` filter.
 Responses contain the list field plus `totalItems`, `hasMore`, and `nextOffset`.
+Offer and quota-request visibility is applied in SQLite before counting and
+paging; restricted rows do not contribute to another member's totals.
 
 Gateway routes require a valid `cp_share_...` or `cp_personal_...` key in a
 Bearer token; `POST /v1/messages` also accepts that key in `x-api-key`.

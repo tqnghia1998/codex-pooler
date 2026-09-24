@@ -1993,7 +1993,7 @@ test('Pool refreshes Codex quotas at startup and on its scheduled interval', asy
         }
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    const server = start(0, { store, productStore, fetchImpl, quotaRefreshIntervalMs: 10 });
+    const server = start(0, { dataDir: dir, store, productStore, fetchImpl, quotaRefreshIntervalMs: 10 });
     try {
       await new Promise((resolve) => server.once('listening', resolve));
       const deadline = Date.now() + 1_000;
@@ -2039,7 +2039,7 @@ test('Pool refreshes Codex tokens that expire within the 12-hour proactive windo
         }
       }), { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    const server = start(0, { store, productStore, fetchImpl, tokenRefreshIntervalMs: 60_000 });
+    const server = start(0, { dataDir: dir, store, productStore, fetchImpl, tokenRefreshIntervalMs: 60_000 });
     try {
       await new Promise((resolve) => server.once('listening', resolve));
       const deadline = Date.now() + 1_000;
