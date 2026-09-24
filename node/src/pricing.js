@@ -76,7 +76,10 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   if (!completeUsage(usage)) return null;
   const timestamp = Date.parse(startedAt);
   if (!Number.isFinite(timestamp)) return null;
-  const tier = canonicalTier(usage.serviceTier || requestedTier);
+  const reportedTier = string(usage.serviceTier)?.toLowerCase();
+  const tier = canonicalTier(requestedTier) === 'priority' && reportedTier === 'default'
+    ? 'priority'
+    : canonicalTier(reportedTier || requestedTier);
   const bucket = usage.inputTokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD ? 'long_context' : 'default';
   const snapshot = resolvePrice(models, tier, timestamp, bucket);
   if (!snapshot) return null;

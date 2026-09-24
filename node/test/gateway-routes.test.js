@@ -851,6 +851,34 @@ test('translates public image generations and edits through Responses SSE', asyn
   }
 });
 
+test('rejects an image when its terminal event exhausts quota after image output', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-image-quota-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const fetchImpl = async (url) => new URL(url).pathname === '/backend-api/codex/models'
+    ? new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol', input_modalities: ['image'] }] }), { status: 200 })
+    : new Response([
+      'data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"B64_IMAGE"}}',
+      'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"credit_balance_exhausted"},"error":{"message":"private account details"}}}',
+      'data: [DONE]', ''
+    ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await start(store, fetchImpl);
+  try {
+    const response = await gatewayFetch(base, '/v1/images/generations', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-codex-session-id': 'image-quota-session' },
+      body: JSON.stringify({ model: 'gpt-image-1', prompt: 'a cat' })
+    });
+    assert.equal(response.status, 429);
+    assert.deepEqual(await response.json(), {
+      error: { type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null }
+    });
+    assert.equal(store.get(codexUpstream.id).health.status, 'cooldown');
+    assert.equal(store.sessionUpstream('image-quota-session', undefined, store.listApiKeys()[0].id), null);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('redacts public image provider 5xx errors', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-image-errors-'));
   const { store } = configuredStore(dir);
@@ -1100,14 +1128,20 @@ test('does not open an upstream WebSocket after the client closes during credent
   }
 });
 
-test('reuses a public Responses WebSocket across completed turns', async () => {
+test('continues a public Responses WebSocket anchor on its producing connection', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-turns-'));
   const { store } = configuredStore(dir);
+  const frames = [];
+  let connections = 0;
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
-  target.on('connection', (socket) => socket.on('message', (data) => {
-    const request = JSON.parse(data);
-    socket.send(JSON.stringify({ type: 'response.completed', response: { id: request.input[0].content[0].text, status: 'completed', output: [] } }));
-  }));
+  target.on('connection', (socket) => {
+    connections += 1;
+    socket.on('message', (data) => {
+      const request = JSON.parse(data);
+      frames.push(request);
+      socket.send(JSON.stringify({ type: 'response.completed', response: { id: frames.length === 1 ? 'resp_first' : 'resp_second', status: 'completed', output: [] } }));
+    });
+  });
   await new Promise((resolve) => target.once('listening', resolve));
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
   const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, websocketUrl: () => `ws://127.0.0.1:${target.address().port}`, fetchImpl: async () => new Response('{}') });
@@ -1119,12 +1153,18 @@ test('reuses a public Responses WebSocket across completed turns', async () => {
       client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'first' })));
       client.on('message', (data) => {
         received.push(JSON.parse(data));
-        if (received.length === 1) client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'second' }));
+        if (received.length === 1) client.send(JSON.stringify({
+          type: 'response.create', model: 'gpt-5.6-sol', previous_response_id: 'resp_first',
+          input: [{ type: 'function_call_output', call_id: 'call-1', output: 'second' }]
+        }));
         else { client.close(); resolve(received); }
       });
       client.once('error', reject);
     });
-    assert.deepEqual(messages.map((message) => [message.response.id, message.sequence_number]), [['first', 0], ['second', 0]]);
+    assert.deepEqual(messages.map((message) => [message.response.id, message.sequence_number]), [['resp_first', 0], ['resp_second', 0]]);
+    assert.equal(connections, 1);
+    assert.equal(frames.length, 2);
+    assert.equal(frames[1].previous_response_id, 'resp_first');
   } finally {
     relay.close();
     await close(gateway);
@@ -2050,6 +2090,48 @@ test('projects upstream public WebSocket 4xx refusals as sanitized error events'
       sequence_number: 0
     });
     assert.equal(store.sessionUpstream('ws-provider-4xx-session'), null);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('types an upstream public WebSocket 429 as a sanitized rate-limit failure', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-provider-429-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => socket.once('message', () => socket.send(JSON.stringify({
+    type: 'error', status: 429,
+    error: { type: 'rate_limit_error', message: 'private quota and account details' }
+  }))));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store, apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const message = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/v1/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'limited' })));
+      client.once('message', (data) => {
+        client.close();
+        resolve(JSON.parse(data));
+      });
+      client.once('error', reject);
+    });
+    assert.equal(message.type, 'response.failed');
+    assert.deepEqual(message.response.error, {
+      type: 'rate_limit_error', code: 'rate_limit_error', message: 'upstream rate limit exceeded', param: null
+    });
+    assert.equal(store.get(codexUpstream.id).health.status, 'cooldown');
+    assert.equal(JSON.stringify(message).includes('private quota'), false);
   } finally {
     relay.close();
     await close(gateway);

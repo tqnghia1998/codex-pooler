@@ -4,7 +4,8 @@ import { publicMisalignmentError } from './policy-failures.js';
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 const RETRY_CODES = new Set(['upstream_request_timeout', 'stream_incomplete', 'server_error', 'overloaded_error', 'server_is_overloaded', 'websocket_connection_limit_reached']);
-const FAILURE_REASONS = new Set([...RETRY_CODES, 'invalid_api_key', 'invalid_authentication', 'context_length_exceeded', 'insufficient_quota', 'invalid_previous_response_id', 'invalid_request', 'invalid_request_error', 'previous_response_not_found', 'rate_limit_exceeded', 'unauthorized', 'usage_limit_exceeded', 'usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_owner_usage_limit_reached']);
+const QUOTA_INCOMPLETE_REASONS = new Set(['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']);
+const FAILURE_REASONS = new Set([...RETRY_CODES, ...QUOTA_INCOMPLETE_REASONS, 'invalid_api_key', 'invalid_authentication', 'context_length_exceeded', 'invalid_previous_response_id', 'invalid_request', 'invalid_request_error', 'previous_response_not_found', 'rate_limit_exceeded', 'unauthorized', 'usage_limit_exceeded', 'usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_owner_usage_limit_reached']);
 
 export function splitSseBlocks(value) { return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n\n'); }
 
@@ -185,10 +186,25 @@ function terminalKind(event) {
   return event.type === 'response.incomplete' && plain(event.response) ? 'incomplete' : null;
 }
 function failedIncomplete(event) { const response = event.response || {}; return event.type === 'response.incomplete' && (response.status === 'failed' || [event.error, response.error, event.status_details?.error, response.status_details?.error].some(plain) || FAILURE_REASONS.has(incompleteReason(event))); }
+export function quotaIncompleteReason(event) { const reason = incompleteReason(event); return event?.type === 'response.incomplete' && QUOTA_INCOMPLETE_REASONS.has(reason) ? reason : ''; }
 function nextSequence(incoming, state, terminal) { const value = Number.isSafeInteger(incoming) && incoming >= 0 && incoming > state.sequence ? incoming : state.sequence + 1; return value > MAX_SEQUENCE || !terminal && value === MAX_SEQUENCE ? 'overflow' : value; }
 function synthetic(state) { state.sequence += 1; return state.sequence; }
 function project(event, terminal, namespaces) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index }, namespaces)); return value; }
-function failed(event, reason = '') { const response = plain(event.response) ? event.response : {}; const usage = safeUsage(response.usage || event.usage); return { type: 'response.failed', response: { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'failed', error: safeError(event), ...(reason || incompleteReason(event) ? { incomplete_details: { reason: reason || incompleteReason(event) } } : {}), model: 'unknown', output: [], output_text: '', instructions: null, metadata: null, ...(usage ? { usage } : {}), temperature: null, top_p: null, parallel_tool_calls: false, tool_choice: 'auto', tools: [] } }; }
+function failed(event, reason = '') {
+  const response = plain(event.response) ? event.response : {};
+  const usage = safeUsage(response.usage || event.usage);
+  const error = safeError(event);
+  return {
+    type: 'response.failed',
+    ...(quotaIncompleteReason(event) ? { error } : {}),
+    response: {
+      id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'failed', error,
+      ...(reason || incompleteReason(event) ? { incomplete_details: { reason: reason || incompleteReason(event) } } : {}),
+      model: 'unknown', output: [], output_text: '', instructions: null, metadata: null,
+      ...(usage ? { usage } : {}), temperature: null, top_p: null, parallel_tool_calls: false, tool_choice: 'auto', tools: []
+    }
+  };
+}
 function publicWebSocketError(event) {
   const status = integer(event?.status) ?? integer(event?.status_code) ?? integer(event?.error?.status) ?? integer(event?.response?.error?.status);
   const error = event?.error || event?.response?.error || {};
@@ -205,7 +221,16 @@ function publicWebSocketError(event) {
     }
   };
 }
-function safeError(event) { return publicMisalignmentError(event) || { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null }; }
+function safeError(event) {
+  const policyError = publicMisalignmentError(event);
+  if (policyError) return policyError;
+  const quotaReason = quotaIncompleteReason(event);
+  if (quotaReason) return { type: 'server_error', code: quotaReason, message: 'upstream request failed', param: null };
+  const status = integer(event?.status) ?? integer(event?.status_code) ?? integer(event?.error?.status) ?? integer(event?.response?.error?.status);
+  return status === 429
+    ? { type: 'rate_limit_error', code: 'rate_limit_error', message: 'upstream rate limit exceeded', param: null }
+    : { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null };
+}
 function safeUsage(usage) { if (!plain(usage)) return null; const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0; const input = number(usage.input_tokens ?? usage.prompt_tokens); const output = number(usage.output_tokens ?? usage.completion_tokens); return { input_tokens: input, output_tokens: output, total_tokens: Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens : input + output }; }
 function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; if (item.type === 'custom_tool_call' && (item.namespace === undefined || item.namespace === null) && namespaces[item.name]) item.namespace = namespaces[item.name]; if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
 

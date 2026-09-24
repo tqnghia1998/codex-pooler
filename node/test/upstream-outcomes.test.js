@@ -53,6 +53,11 @@ test('classifies structured SSE and WebSocket terminal frames', () => {
   assert.equal(classifySseEvent({ type: 'response.failed', error: { code: 'model_not_found' } }).modelNotFound, true);
   assert.equal(classifySseEvent({ type: 'response.failed', error: { type: 'invalid_request_error' } }).class, 'caller');
   assert.equal(classifySseEvent({ type: 'response.output_text.delta' }).class, 'neutral');
+  for (const reason of ['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']) {
+    const outcome = classifySseEvent({ type: 'response.incomplete', response: { incomplete_details: { reason } } });
+    assert.equal(outcome.class, 'quota', reason);
+    assert.equal(outcome.errorCode, reason);
+  }
 });
 
 test('keeps eligible misalignment policy failures non-retryable and health-neutral', () => {

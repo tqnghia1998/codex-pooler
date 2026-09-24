@@ -15,7 +15,7 @@ import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './publ
 import { HttpError } from './http-ingress.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
@@ -198,6 +198,15 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       return;
     }
   }
+  if (path === '/v1/responses' && codexPayload?.previous_response_id && candidates[0]?.type === 'codex') {
+    sendJson(res, 400, { error: {
+      type: 'invalid_request_error',
+      code: 'previous_response_not_found',
+      message: 'previous_response_id requires the upstream WebSocket connection that produced the response; send the full input without previous_response_id',
+      param: 'previous_response_id'
+    } });
+    return;
+  }
   const lifecycle = accounting.apiKeyId && (path === '/v1/responses' || path === '/v1/chat/completions')
     ? store.reserveGatewayRequest({ scopeId: authScopeId, apiKeyId: accounting.apiKeyId, endpoint: path, model, transport: payload?.stream === true ? 'http_sse' : 'http_json' })
     : null;
@@ -227,7 +236,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     sendJson(res, failure.status, failure.body, failure.headers);
     return;
   }
-  if (sessionId && req.proxyAuth?.kind !== 'personal_share' && !store.sessionUpstream(sessionId, authScopeId, accounting.apiKeyId)) {
+  if (response.ok && sessionId && req.proxyAuth?.kind !== 'personal_share' && !store.sessionUpstream(sessionId, authScopeId, accounting.apiKeyId)) {
     store.pinSession(sessionId, upstream.id, authScopeId, accounting.apiKeyId);
   }
   const responseOptions = {
@@ -252,6 +261,9 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     if (policyError) sendJson(res, response.status, { error: policyError });
     else if (validationError) sendJson(res, response.status, { error: validationError });
     else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
+    else if (response.status === 429) sendJson(res, 429, { error: {
+      type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null
+    } }, retryAfterHeader(response));
     else sendFailure(res, retryAfterHeader(response));
     return;
   }
@@ -957,6 +969,20 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         && (path === '/v1/responses' || sourcePath === '/v1/chat/completions');
       if (publicCodexCollection) {
         collected = await collectCodexResponse(response, upstreamDeadlines);
+        const incompleteQuota = quotaIncompleteReason({
+          type: collected?.[TERMINAL_EVENT_TYPE] || (collected?.status === 'incomplete' ? 'response.incomplete' : ''),
+          response: collected
+        });
+        if (incompleteQuota) {
+          store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: true, errorCode: incompleteQuota });
+          releaseShareRequest(req, attemptId, incompleteQuota);
+          retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: incompleteQuota, responseStatusCode: 429 });
+          terminalFailure = {
+            upstream, attemptId: null, startedAt, response: new Response(null, { status: 429 }),
+            admission: null, failureCode: incompleteQuota
+          };
+          continue;
+        }
         const policyFailure = collected?.[TERMINAL_EVENT_TYPE] === 'response.failed'
           ? misalignmentPolicyFailure({ response: collected })
           : null;
@@ -1990,7 +2016,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       return;
     }
     const type = parsed.type;
-    if (type === 'response.failed' || type === 'error') {
+    if (type === 'response.failed' || type === 'error' || quotaIncompleteReason(parsed)) {
       terminal = true;
       healthOutcome = {
         ...classifySseEvent(parsed, {
@@ -2089,6 +2115,7 @@ function eventData(event) {
 function successfulSseTerminal(event, upstreamType, sourcePath) {
   if (['compass', 'claude'].includes(upstreamType) && sourcePath === '/v1/messages' && event?.type === 'message_stop') return true;
   return ['response.completed', 'response.incomplete'].includes(event?.type)
+    && !quotaIncompleteReason(event)
     && event.response?.status !== 'failed'
     && !event.error
     && !event.response?.error;
@@ -3562,7 +3589,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         try { nativeFrame = JSON.parse(data.toString()); } catch {}
       }
       if (nativeAttempt && nativeFrame) nativeUsage = mergeUsage(nativeUsage, extractUsage(nativeFrame));
-      if (nativeFrame && ['error', 'response.failed'].includes(nativeFrame.type)) {
+      if (nativeFrame && (['error', 'response.failed'].includes(nativeFrame.type) || quotaIncompleteReason(nativeFrame))) {
         const outcome = classifySseEvent(nativeFrame);
         if (outcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
         settleNativeAdmission(outcome);
@@ -3743,7 +3770,7 @@ function publicWebSocketFailure(client, code, message, sequenceNumber = 0, strea
       type: 'error',
       ...(status ? { status } : {}),
       sequence_number: sequenceNumber,
-      error: { type: status >= 400 && status < 500 ? 'invalid_request_error' : 'server_error', code, message, param },
+      error: { type: status === 429 ? 'rate_limit_error' : status >= 400 && status < 500 ? 'invalid_request_error' : 'server_error', code, message, param },
       ...(streamId ? { stream_id: streamId } : {})
     }));
   }
@@ -3842,8 +3869,16 @@ function publicPolicyError(bytes, path, sourcePath) {
 }
 
 function publicValidationError(response, bytes, path, sourcePath) {
-  if (response.status !== 400 || !['/v1/responses', '/v1/chat/completions'].includes(path) || sourcePath === '/v1/responses/compact' || bytes.length > 64 * 1024) return null;
-  const error = parseJson(bytes)?.error;
+  if (response.status !== 400 || (!['/v1/responses', '/v1/chat/completions'].includes(path) && !isBackendResponsesRoute(path))
+    || sourcePath === '/v1/responses/compact' || bytes.length > 64 * 1024) return null;
+  const body = parseJson(bytes);
+  const detail = body?.detail;
+  const detailParam = typeof detail === 'string' && detail.startsWith('Unsupported parameter: ')
+    ? detail.slice('Unsupported parameter: '.length)
+    : null;
+  const error = body?.error || (validValidationParam(detailParam) ? {
+    type: 'invalid_request_error', code: 'unsupported_parameter', param: detailParam
+  } : null);
   if (!error || error.type !== 'invalid_request_error' || !RELAYABLE_VALIDATION_CODES.has(error.code)) return null;
   const param = validValidationParam(error.param) ? mapChatValidationParam(error.param, path) : null;
   const supported = ['unsupported_value', 'invalid_value'].includes(error.code) ? supportedValidationValues(error.message) : null;
@@ -3856,11 +3891,13 @@ function publicValidationError(response, bytes, path, sourcePath) {
 }
 
 function validValidationParam(value) {
-  return typeof value === 'string' && value.length <= 256 && /^[A-Za-z0-9_.[\]-]+$/.test(value);
+  return typeof value === 'string' && value.length <= 160
+    && /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*|\[(?:0|[1-9][0-9]{0,3})\])*$/.test(value);
 }
 
 function mapChatValidationParam(param, path) {
   if (path !== '/v1/chat/completions') return param;
+  if (/^input(?:[.[]|$)/.test(param)) return 'messages';
   return {
     'reasoning.effort': 'reasoning_effort',
     max_output_tokens: 'max_completion_tokens',

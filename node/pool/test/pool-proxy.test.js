@@ -677,7 +677,7 @@ test('successful unpriced native streams release share reservations as successfu
   }
 });
 
-test('personal keys rotate across active sessions and pin response continuations', async () => {
+test('personal keys rotate across active sessions and reject unsupported HTTP anchors', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pool-personal-proxy-'));
   const calls = [];
   try {
@@ -732,7 +732,17 @@ test('personal keys rotate across active sessions and pin response continuations
           input: [{ type: 'function_call_output', call_id: 'call-personal', output: 'continue' }]
         })
       });
-      assert.equal(response.status, 200, await response.text());
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error.code, 'previous_response_not_found');
+      assert.deepEqual(calls, ['personal-second']);
+      assert.equal(sharingStore.session(secondSession.id, consumer.id, store).consumedQuotaDollars, 1);
+
+      response = await fetch(`${app.base}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${apiKey}`, 'content-type': 'application/json', 'x-codex-session-id': 'personal-conversation' },
+        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'full history and continuation' })
+      });
+      assert.equal(response.status, 200);
       assert.deepEqual(calls, ['personal-second', 'personal-second']);
       assert.equal(sharingStore.session(secondSession.id, consumer.id, store).status, 'exhausted');
 

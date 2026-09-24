@@ -119,6 +119,25 @@ test('redacts every provider error except valid Anthropic Messages 4xx envelopes
   }
 });
 
+test('preserves a final upstream throttle status and Retry-After without provider details', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-provider-throttle-'));
+  const store = configuredStore(dir);
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'rate_limit_error', message: 'private provider account and quota' }
+  }), { status: 429, headers: { 'retry-after': '17' } }));
+  try {
+    const result = await post(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-upstream-type': 'codex' });
+    assert.equal(result.response.status, 429);
+    assert.equal(result.response.headers.get('retry-after'), '17');
+    assert.deepEqual(result.body.error, {
+      type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null
+    });
+    assert.equal(store.list().find((entry) => entry.type === 'codex').health.status, 'cooldown');
+  } finally {
+    await close(server, dir);
+  }
+});
+
 test('redacts raw backend provider errors', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-raw-errors-'));
   const fetchImpl = async () => new Response(JSON.stringify({ error: { message: 'raw provider secret' } }), { status: 400, headers: { 'content-type': 'application/json' } });

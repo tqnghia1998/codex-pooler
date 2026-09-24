@@ -126,6 +126,21 @@ test('preserves SSE failure projection for provider 4xx terminals', () => {
   });
 });
 
+test('projects quota-limited incomplete terminals as failures', () => {
+  for (const reason of ['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']) {
+    const event = { type: 'response.incomplete', response: { id: 'resp_limited', status: 'incomplete', incomplete_details: { reason } } };
+    const [chunk] = normalizePublicResponsesEvent(event, createPublicResponsesState());
+    const projected = decode(chunk);
+    assert.equal(projected.type, 'response.failed', reason);
+    assert.deepEqual(projected.error, {
+      type: 'server_error', code: reason, message: 'upstream request failed', param: null
+    });
+    assert.deepEqual(projected.response.error, projected.error);
+    const chat = normalizeChatEvent(event, createChatStreamState({ model: 'gpt-6-sol' }));
+    assert.equal(chat[0].error.code, 'upstream_response_failed', reason);
+  }
+});
+
 test('projects policy failures with only the stable public contract', () => {
   const result = decode(normalizePublicResponsesEvent({
     type: 'response.failed',

@@ -73,6 +73,26 @@ export async function refreshProviderCredentials(upstream, credentials, {
   return false;
 }
 
+async function coordinateCredentialRefresh(upstream, credentials, task) {
+  if (!credentials.coordinateRefresh) return task(upstream, credentials);
+  const result = await credentials.coordinateRefresh(async () => {
+    const currentCredentials = credentials.reloadCredentials();
+    Object.defineProperty(currentCredentials, 'refreshCoordinationActive', { value: true, configurable: true });
+    const currentUpstream = credentials.reloadUpstream() || upstream;
+    const value = await task(currentUpstream, currentCredentials);
+    Object.assign(upstream, currentUpstream);
+    delete currentCredentials.refreshCoordinationActive;
+    replaceCredentials(credentials, currentCredentials);
+    return value;
+  });
+  return result?.executed ? result.value : false;
+}
+
+function replaceCredentials(target, source) {
+  for (const key of Reflect.ownKeys(target)) delete target[key];
+  Object.defineProperties(target, Object.getOwnPropertyDescriptors(source));
+}
+
 export function codexRefreshFailureCode(error) {
   const body = error?.providerBody || {};
   const code = body.error?.code || body.error;
@@ -269,6 +289,7 @@ function claudeQuotaRateLimitError(retryAfter = null, retryAfterEstimated = fals
 }
 
 async function refreshCodexCredentials(upstream, credentials, fetchImpl, saveCredentials, force = false) {
+  if (credentials.coordinateRefresh && !credentials.refreshCoordinationActive) return coordinateCredentialRefresh(upstream, credentials, (current, currentCredentials) => refreshCodexCredentials(current, currentCredentials, fetchImpl, saveCredentials, force));
   if (!credentials.refreshToken) {
     if (force || tokenRefreshDue(upstream, credentials)) credentials.onTokenRefreshFailure?.({ providerBody: { error: 'invalid_refresh_token' } });
     return false;
@@ -309,6 +330,7 @@ async function refreshCodexCredentials(upstream, credentials, fetchImpl, saveCre
 }
 
 async function refreshClaudeCredentials(upstream, credentials, fetchImpl, saveCredentials, force = false) {
+  if (credentials.coordinateRefresh && !credentials.refreshCoordinationActive) return coordinateCredentialRefresh(upstream, credentials, (current, currentCredentials) => refreshClaudeCredentials(current, currentCredentials, fetchImpl, saveCredentials, force));
   if (!credentials.refreshToken) {
     if (force || tokenRefreshDue(upstream, credentials)) credentials.onTokenRefreshFailure?.({ providerBody: { error: 'invalid_refresh_token' } });
     return false;

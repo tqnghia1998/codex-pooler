@@ -209,7 +209,13 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
   }
   const events = parseSse(textBody);
   const terminal = events.findLast((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type));
-  settleCodexFetch(provider, response, terminal ? classifySseEvent(terminal) : { class: 'transient', retryable: true });
+  const outcome = terminal ? classifySseEvent(terminal) : { class: 'transient', retryable: true };
+  settleCodexFetch(provider, response, outcome);
+  if (terminal?.type === 'response.incomplete' && outcome.class === 'quota') {
+    return sendJson(res, 429, {
+      error: { type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null }
+    }, retryAfterHeader(response));
+  }
   const result = imageResponse(events);
   if (result.error) return sendError(res, result.error.status, result.error.code, result.error.message, result.error.param);
   pinCompatibilitySession(provider);
@@ -452,15 +458,15 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
   } finally {
     abort.cleanup();
   }
-  Object.defineProperty(response, 'relaydeckAdmission', { value: admission });
+  Object.defineProperty(response, 'gatewayAdmission', { value: admission });
   if (!deferSettlement) {
-    Object.defineProperty(response, 'relaydeckSettleAfterBody', { value: true });
+    Object.defineProperty(response, 'gatewaySettleAfterBody', { value: true });
   }
   return response;
 }
 
 function settleCodexFetch(context, response, outcome) {
-  const admission = response?.relaydeckAdmission;
+  const admission = response?.gatewayAdmission;
   if (!admission) return;
   context.store.settleUpstreamAttempt(context.upstream.id, admission, outcome);
 }
@@ -586,12 +592,12 @@ async function responseJson(response, upstreamDeadlines = {}, context = null) {
   try {
     bytes = await responseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
   } catch (error) {
-    if (context && response?.relaydeckSettleAfterBody) settleCodexFetch(context, response, classifyTransportError(error));
+    if (context && response?.gatewaySettleAfterBody) settleCodexFetch(context, response, classifyTransportError(error));
     throw error;
   }
   let body = null;
   try { body = JSON.parse(bytes.toString('utf8')); } catch {}
-  if (context && response?.relaydeckSettleAfterBody) {
+  if (context && response?.gatewaySettleAfterBody) {
     settleCodexFetch(context, response, response.ok
       ? body === null ? { class: 'transient', retryable: true } : { class: 'success', retryable: false }
       : classifyHttpResponse(response, body));

@@ -37,6 +37,14 @@ test('prices usage when a provider total_tokens disagrees with input plus output
   assert.equal(priceUsage(['gpt-5.6-terra'], { inputTokens: 1_000, outputTokens: 100, totalTokens: 900 }).settledCostMicros, 3_200);
 });
 
+test('keeps requested priority when Codex echoes default, but respects other served tiers', () => {
+  const usage = { inputTokens: 1_000, outputTokens: 100, serviceTier: 'default' };
+  assert.equal(priceUsage(['gpt-6-sol'], usage, undefined, 'priority').settledCostMicros, 6_000);
+  assert.equal(priceUsage(['gpt-6-sol'], usage, undefined, 'default').settledCostMicros, 3_000);
+  assert.equal(priceUsage(['gpt-6-sol'], { ...usage, serviceTier: 'flex' }, undefined, 'priority').settledCostMicros, 1_500);
+  assert.equal(priceUsage(['gpt-6-sol'], { ...usage, serviceTier: null }, undefined, 'priority').settledCostMicros, 6_000);
+});
+
 test('accepts only plain decimal provider-reported cost', () => {
   assert.equal(upstreamCostMicros({ price_cost_usd: '0.5' }), 500_000);
   assert.equal(upstreamCostMicros({ price_cost_usd: 0.5 }), 500_000);
