@@ -32,6 +32,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     RequestReplayEntitlement
   }
 
+  alias CodexPooler.Accounting.NativeHttpToolObservation
   alias CodexPooler.Accounting.RequestLifecycle.DeadExecutionResendRecovery
   alias CodexPooler.Gateway.Payloads.WebsocketTurnIdentity
   alias CodexPooler.Gateway.Persistence.CodexTurn
@@ -53,6 +54,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           optional(:native_client_retry_witness) => ClientRetry.OriginalWitness.t() | nil,
           optional(:native_http_input_count) => non_neg_integer() | nil,
           optional(:native_http_semantic_turn_key) => <<_::256>> | nil,
+          optional(:native_http_transport) => String.t() | nil,
           optional(:payload) => map() | nil,
           optional(:anchor_present?) => boolean()
         }
@@ -75,6 +77,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
           | :task_exception
           | :lifecycle_cut
           | :partial_reasoning_cut
+          | :partial_http_tool_cut
           | :advanced_http_resume
           | :previsible_disconnect
           | :undelivered_completion
@@ -142,11 +145,11 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          }}
 
       %Request{} = request ->
-        continue_chain(request, claim, scope, now, markers, depth)
+        continue_chain(request, predecessor, claim, scope, now, markers, depth)
     end
   end
 
-  defp continue_chain(request, claim, scope, now, markers, depth) do
+  defp continue_chain(request, previous, claim, scope, now, markers, depth) do
     with {:ok, derived} <-
            ClientRetry.deterministic_failed_predecessor_claim(claim, request.id),
          successor <- lock_request_by_claim(derived),
@@ -156,13 +159,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          effective_now <- if(marker, do: db_now(), else: now),
          {:ok, request_shape} <-
            validate_predecessor(request, scoped_validation, effective_now),
-         :ok <- validate_semantic_retry(request, request_shape, scoped_validation) do
+         :ok <- validate_semantic_retry(request, request_shape, scoped_validation, {previous, successor}) do
       markers = if marker, do: [marker | markers], else: markers
       resolve_chain(derived, request, request_shape, scope, now, markers, depth + 1)
     end
   end
 
   defp scope_for_predecessor(scope, %Request{} = successor) do
+    scope = Map.put(scope, :successor_admitted?, true)
+
     case successor.request_metadata["native_http_input_count"] do
       count when is_integer(count) and count >= 0 ->
         Map.put(scope, :native_http_validation_input_count, count)
@@ -193,7 +198,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   # (`response.failed` `server_error`, overload), the shape the owner's
   # client-retry preflight already admits with forwarding on (findings#121
   # variant B, row 232-280).
-  defp validate_semantic_retry(request, shape, %{semantic_claim?: true} = scope) do
+  #
+  # A turn has at most one successor per predecessor. A client-retry link
+  # naming the request keeps the fence unless it is one of the chain's own
+  # edges (`chain_edges_only?/2`).
+  defp validate_semantic_retry(request, :partial_http_tool_cut, _scope, chain_edges) do
+    if chain_edges_only?(request, chain_edges), do: :ok, else: {:error, :terminal_predecessor}
+  end
+
+  defp validate_semantic_retry(request, shape, %{semantic_claim?: true} = scope, chain_edges) do
     turn = lock_turn(request.id)
     attempt = lock_final_attempt(turn, request.id)
 
@@ -202,11 +215,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          true <- ClientRetry.original_witness_eligible?(request),
          true <- ClientRetry.witness_matches?(request.native_client_retry_digest, digest, witness.alternates) or shape == :completed_item_resend,
          true <- request.native_client_retry_auth_epoch == epoch,
-         false <-
-           Repo.exists?(
-             from l in RequestClientRetryLink,
-               where: l.predecessor_request_id == ^request.id or l.successor_request_id == ^request.id
-           ),
+         true <- chain_edges_only?(request, chain_edges),
          true <- not is_nil(turn) and turn.codex_session_id == Map.get(scope, :codex_session_id),
          true <-
            ClientRetry.verified_dead_execution?(turn, request, attempt) or
@@ -220,7 +229,29 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
     end
   end
 
-  defp validate_semantic_retry(_request, _shape, _scope), do: :ok
+  defp validate_semantic_retry(_request, _shape, _scope, _chain_edges), do: :ok
+
+  # A turn-claim resend links its successor to the predecessor it chained onto,
+  # so every node of a chain longer than one carries the chain's own edges: the
+  # link from the node before it, and the link to the request holding the claim
+  # derived from it, which this walk visits next and validates in turn. With
+  # owner forwarding off a successor cut before any output reached the client
+  # is itself a pre-visible disconnect, and refusing the chain's own edge met
+  # the released client's next resend with `409 duplicate_turn` (findings#206
+  # row 206-519). Any other link names a successor admitted under another claim
+  # (the owner's `client-retry-v1:` preflight) or a predecessor outside the
+  # chain, and chaining past it would admit a second successor of one request.
+  defp chain_edges_only?(%Request{id: id}, {previous, successor}) do
+    from(l in RequestClientRetryLink,
+      where: l.predecessor_request_id == ^id or l.successor_request_id == ^id,
+      select: {l.predecessor_request_id, l.successor_request_id}
+    )
+    |> Repo.all()
+    |> Enum.all?(fn
+      {^id, successor_id} -> match?(%Request{id: ^successor_id}, successor)
+      {predecessor_id, ^id} -> match?(%Request{id: ^predecessor_id}, previous)
+    end)
+  end
 
   defp lock_request_by_claim(claim) do
     Repo.one(
@@ -235,8 +266,18 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
   defp validate_predecessor(%Request{} = request, scope, now) do
     family = failure_family(request.last_error_code)
 
+    # A request of the same turn under the same authorization but on a
+    # transport this claim does not resend (a native HTTP fallback met by a
+    # websocket or HTTPS resend) is still the turn's own predecessor: a live
+    # one is `active_predecessor` and a served one `terminal_predecessor`, not
+    # a changed authorization (findings#206 row 206-534). A served one is
+    # judged by `undelivered_completion/3`, whose shapes all require the
+    # websocket or the native HTTP compaction claim domain, which never holds a
+    # turn or resume chain claim; a failed one keeps `authorization_changed`,
+    # because a websocket resend's `terminal_predecessor` also looks up a
+    # recorded final refusal to relay.
     cond do
-      not scoped?(request, scope) ->
+      not authorization_scoped?(request, scope) ->
         {:error, :authorization_changed}
 
       request.status in @live_request_statuses or is_nil(request.completed_at) ->
@@ -244,6 +285,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       request.status == "succeeded" ->
         undelivered_completion(request, scope, now)
+
+      native_http_tool_scope?(request, scope) ->
+        admit_native_http_partial_tool(request, scope, now)
+
+      not transport_scoped?(request, scope) ->
+        {:error, :authorization_changed}
 
       request.status != "failed" or is_nil(family) ->
         {:error, :terminal_predecessor}
@@ -256,6 +303,38 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
       true ->
         admit_predecessor(request, family, scope, now)
+    end
+  end
+
+  # A client-side tool is dispatched only once its output_item.done arrives.
+  # Unlike an absent receipt, this bounded observation proves the HTTP source
+  # ended with only an incomplete tool. It authorizes one client-authored
+  # exact successor under this chain's locks, never an automatic replay.
+  defp native_http_tool_scope?(%Request{transport: "http_sse", request_metadata: %{"native_http_claim_arm" => arm}}, %{native_http_transport: "http_sse"}),
+    do: arm in ["opening", "tool_continuation"]
+
+  defp native_http_tool_scope?(_request, _scope), do: false
+
+  defp admit_native_http_partial_tool(request, scope, now) do
+    turn = lock_turn(request.id)
+    attempt = lock_final_attempt(turn, request.id)
+
+    with %Request{status: "failed", last_error_code: @stream_error_code, completed_at: %DateTime{}} <- request,
+         %CodexTurn{status: "failed", error_code: @stream_error_code, completed_at: %DateTime{}, codex_session_id: session_id} <- turn,
+         true <- session_id == Map.get(scope, :codex_session_id),
+         %Attempt{status: "failed", transport: "http_sse", network_error_code: @stream_error_code, replay_generation: 0, completed_at: %DateTime{}} <- attempt,
+         true <- NativeHttpToolObservation.eligible_metadata?(attempt.response_metadata["native_http_partial_tool"]),
+         %ClientRetry.OriginalWitness{version: 1, digest: digest, auth_epoch: epoch} <- Map.get(scope, :native_client_retry_witness),
+         true <- ClientRetry.original_witness_eligible?(request),
+         true <- secure_compare(request.native_client_retry_digest, digest),
+         true <- request.native_client_retry_auth_epoch == epoch,
+         false <- Repo.exists?(from link in RequestClientRetryLink, where: link.successor_request_id == ^request.id),
+         false <- live_turn?(request.id) or live_attempt?(request.id) or entitlement?(request.id),
+         :ok <- validate_retry_window(request, attempt, now, scope) do
+      {:ok, :partial_http_tool_cut}
+    else
+      {:error, :retry_expired} = error -> error
+      _unsafe -> {:error, :terminal_predecessor}
     end
   end
 
@@ -280,7 +359,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
       is_nil(shape) -> {:error, :terminal_predecessor}
       live_turn?(request.id) or live_attempt?(request.id) -> {:error, :active_predecessor}
       entitlement?(request.id) -> {:error, :entitlement_present}
-      true -> with :ok <- validate_retry_window(request, attempt, now), do: {:ok, shape}
+      true -> with :ok <- validate_retry_window(request, attempt, now, scope), do: {:ok, shape}
     end
   end
 
@@ -313,7 +392,7 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   defp admit_predecessor(request, family, scope, now) do
     with {:ok, shape} <- predecessor_shape(request, family, scope),
-         :ok <- validate_retry_window(request, request.id |> lock_turn() |> lock_final_attempt(request.id), now),
+         :ok <- validate_retry_window(request, request.id |> lock_turn() |> lock_final_attempt(request.id), now, scope),
          do: {:ok, shape}
   end
 
@@ -440,10 +519,12 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
 
   defp lock_final_attempt(_turn, _request_id), do: nil
 
-  defp scoped?(%Request{} = request, scope) do
+  defp scoped?(%Request{} = request, scope),
+    do: authorization_scoped?(request, scope) and transport_scoped?(request, scope)
+
+  defp authorization_scoped?(%Request{} = request, scope) do
     request.pool_id == scope.pool_id and request.api_key_id == scope.api_key_id and
-      request.model_id == scope.model_id and request.endpoint == scope.endpoint and
-      transport_scoped?(request, scope)
+      request.model_id == scope.model_id and request.endpoint == scope.endpoint
   end
 
   defp transport_scoped?(%Request{transport: "websocket"}, _scope), do: true
@@ -456,6 +537,17 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
          %{resume_claim?: true}
        )
        when transport in ["http_sse", "http_json"],
+       do: true
+
+  # A native HTTP compaction is met again only by a request deriving its own
+  # compaction-domain claim, i.e. the same compaction resent over native HTTP;
+  # whether it may be chained is `ClientRetry.verified_unreceived_compaction?/3`'s
+  # verdict (findings#206 row 206-404).
+  defp transport_scoped?(
+         %Request{transport: transport, request_metadata: %{"native_http_claim_arm" => "compaction"}},
+         %{semantic_claim?: false, resume_claim?: false}
+       )
+       when transport in ["http_json", "http_sse", "http_compact_json"],
        do: true
 
   defp transport_scoped?(%Request{}, _scope), do: false
@@ -569,6 +661,15 @@ defmodule CodexPooler.Accounting.RequestLifecycle.FailedPredecessorResend do
         lock: "FOR UPDATE"
     )
   end
+
+  # A chain node the walk passes through already had its successor admitted
+  # inside its window, so only the node the resend chains onto is held to one.
+  # The released client's retries of a turn are paced by its own backoff and by
+  # how long each successor ran before it was cut, and with owner forwarding off
+  # a chain of pre-visible cuts could outlast its first request's window and
+  # meet `409 duplicate_turn` (findings#206 row 206-519).
+  defp validate_retry_window(_request, _attempt, _now, %{successor_admitted?: true}), do: :ok
+  defp validate_retry_window(request, attempt, now, _scope), do: validate_retry_window(request, attempt, now)
 
   # From the predecessor's completion, or from the failed downstream write its
   # final attempt's receipt names (`ClientRetry.retry_window_start/3`,

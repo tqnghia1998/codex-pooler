@@ -5,7 +5,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   alias CodexPooler.Gateway.ErrorClassification
   alias CodexPooler.Gateway.ErrorSanitizer
   alias CodexPooler.Gateway.Payloads.RequestOptions
-  alias CodexPooler.Gateway.Runtime.Finalization.{Metadata, ValidationRejection}
+  alias CodexPooler.Gateway.Runtime.Finalization.{Metadata, NativeRateLimitRelay, ProviderUsageLimit, ValidationRejection}
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.ErrorCodes
   alias CodexPooler.Gateway.Transports.Streaming.WebsocketCodec
@@ -109,6 +109,9 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   @spec cleanup_detached_owner_session(socket_state()) :: :ok
   def cleanup_detached_owner_session(state), do: DownstreamSession.cleanup_detached(state)
 
+  @spec take_over_inherited_owner_turn(socket_state(), <<_::256>> | nil) :: :taken_over | :unsettled | :not_taken_over
+  def take_over_inherited_owner_turn(state, request_turn_digest \\ nil), do: DownstreamSession.take_over_inherited_turn(state, request_turn_digest)
+
   @spec cancel_owner_turn(socket_state(), pid(), :owner_drained) :: :ok
   def cancel_owner_turn(state, owner_turn_id, reason) do
     DownstreamSession.cancel_owner_turn(state, owner_turn_id, reason)
@@ -181,12 +184,45 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
   defp native_refusal_frame(canonical, %{"type" => "response.failed", "error" => %{} = error} = canonical_decoded, sole_account?) do
     case wrapped_status(canonical_decoded) do
       400 = status -> native_400_refusal_frame(canonical, status, error)
+      429 -> native_usage_limit_frame(canonical, canonical_decoded)
       status when is_integer(status) -> native_final_refusal_frame(canonical, canonical_decoded, status, error, sole_account?)
       _other -> canonical
     end
   end
 
   defp native_refusal_frame(canonical, _canonical_decoded, _sole_account?), do: canonical
+
+  # A provider usage limit with a reset still ahead goes out as the wrapped
+  # terminal `429` event of an all-exhausted Pool (findings#206 rows 206-508,
+  # 206-546): the released client maps a wrapped `429` naming
+  # `usage_limit_reached` to its terminal usage limit and shows the reset,
+  # while it reads a `response.failed` naming that code as a retryable stream
+  # error and resends the turn. The provider's message and plan never travel.
+  # Any other 429 keeps the canonical frame.
+  #
+  # A usage limit whose Pool advice was withheld, or whose reset is not known,
+  # goes out as the wrapped `429` with the classified error native HTTP sends
+  # for the same refusal (`NativeRateLimitRelay`: type, code, the provider's
+  # reset, the Pooler's message; findings#206 rows 206-589, 206-592). The
+  # canonical `response.failed` it used to keep is a retryable stream error to
+  # the released client, which reconnected five times and then fell back to
+  # HTTP.
+  defp native_usage_limit_frame(canonical, canonical_decoded) do
+    case ProviderUsageLimit.frame_projection(canonical_decoded) do
+      {:terminal, error} -> error |> websocket_error() |> CodexPooler.JSON.encode!()
+      {:relay, provider_error} -> relay_usage_limit_frame(provider_error)
+      :canonical -> canonical
+    end
+  end
+
+  # The canonical frame carries the error type again as its code when the
+  # provider sent none; that derived code is not the provider's and is dropped,
+  # so the relay reads the same tokens native HTTP does.
+  defp relay_usage_limit_frame(provider_error) do
+    provider_error = if provider_error["code"] == provider_error["type"], do: Map.delete(provider_error, "code"), else: provider_error
+    error = NativeRateLimitRelay.error(%Req.Response{status: 429, body: CodexPooler.JSON.encode!(%{"error" => provider_error})})
+    CodexPooler.JSON.encode!(%{"type" => "error", "status" => 429, "error" => error})
+  end
 
   defp native_400_refusal_frame(canonical, status, error) do
     response = %Req.Response{status: status, body: CodexPooler.JSON.encode!(%{"error" => error})}
@@ -420,6 +456,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
       "status" => status,
       "error" => error_payload(reason, status)
     }
+    |> put_policy_retry_headers(reason)
   end
 
   def websocket_error(reason) do
@@ -429,6 +466,25 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
       "error" => error_payload(reason, 500)
     }
   end
+
+  # A key policy window's retry hint travels as the wrapped error's `headers`,
+  # the field the released client reads as the HTTP response headers of a
+  # websocket error, like HTTP's `Retry-After` (findings#206 row 206-427).
+  defp put_policy_retry_headers(event, %{pooler_policy: true, status: 429, retry_after_seconds: seconds})
+       when is_integer(seconds) and seconds > 0,
+       do: Map.put(event, "headers", %{"retry-after" => Integer.to_string(seconds)})
+
+  # An all-exhausted Pool's retry hint rides the same field (findings#206 row
+  # 206-508); the released client reads it with the wrapped error's body.
+  defp put_policy_retry_headers(event, %{status: 429, usage_limit: %{resets_in_seconds: seconds}}),
+    do: Map.put(event, "headers", %{"retry-after" => Integer.to_string(seconds)})
+
+  # A retryable `503` with an open-circuit candidate carries the seconds until
+  # that circuit admits a probe the same way (findings#206 row 206-532).
+  defp put_policy_retry_headers(event, %{status: 503, circuit_retry_after_seconds: seconds}) when is_integer(seconds) and seconds > 0,
+    do: Map.put(event, "headers", %{"retry-after" => Integer.to_string(seconds)})
+
+  defp put_policy_retry_headers(event, _reason), do: event
 
   @spec request_id(term()) :: String.t() | nil
   def request_id(%RequestOptions{} = opts), do: opts.request_metadata.request_id
@@ -479,7 +535,7 @@ defmodule CodexPooler.Gateway.Websocket.Adapter do
         "code" => to_string(code),
         "param" => Map.get(reason, :param)
       },
-      Contracts.recovery_error_fields(reason)
+      reason |> Contracts.recovery_error_fields() |> Map.merge(Contracts.usage_limit_error_fields(reason))
     )
   end
 

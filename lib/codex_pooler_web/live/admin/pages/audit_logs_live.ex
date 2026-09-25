@@ -5,6 +5,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   alias CodexPooler.Pools
   alias CodexPoolerWeb.Admin.Components, as: AdminComponents
   alias CodexPoolerWeb.Admin.LogPagination
+  alias CodexPoolerWeb.Admin.NotificationCenterHooks
   alias CodexPoolerWeb.Admin.PoolFilterComponents
   alias CodexPoolerWeb.DateTimeDisplay
 
@@ -22,6 +23,13 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   # reconnecting client retries the same URL.
   @max_page 10_000
 
+  # How far past the current page the total is counted. `audit_events` has no
+  # retention, so an exact total of the all-Pools view reads the whole audit
+  # history on every load (findings#206 row 206-414). Past this many events the
+  # pager says "10000+": the operator still sees that more match and can page
+  # on, and never a wrong number.
+  @count_window 10_000
+
   @impl true
   def mount(_params, _session, socket) do
     {:ok,
@@ -38,7 +46,8 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
        filter_errors: [],
        pool_filter_options: [],
        datetime_preferences: DateTimeDisplay.preferences_for_user(socket.assigns.current_scope.user)
-     )}
+     )
+     |> NotificationCenterHooks.follow_viewer_visibility()}
   end
 
   @impl true
@@ -91,6 +100,22 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   @impl true
   def handle_event("close_audit_event", _params, socket) do
     {:noreply, assign(socket, selected_audit_event: nil)}
+  end
+
+  # A role change or a Pool granted or revoked changes which Pools and which
+  # instance events this page may show. It re-reads them at once with the Pool
+  # filter options, and an open event the viewer can no longer see closes
+  # (findings#206 row 206-410). A Pool filter the viewer lost leaves the address
+  # bar too, so the URL names the list the page shows instead of a filter error
+  # the operator did not cause (206-431).
+  @impl true
+  def handle_info({NotificationCenterHooks, :viewer_visibility_changed}, socket) do
+    filtered_pool = socket.assigns.selected_pool
+
+    {:noreply,
+     socket
+     |> load_audit_logs(socket.assigns.current_params)
+     |> drop_lost_pool_filter(filtered_pool)}
   end
 
   @impl true
@@ -171,14 +196,15 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
   end
 
   defp audit_events(_socket, selected_pool, filters, offset) when not is_nil(selected_pool) do
-    Audit.list_events(selected_pool, limit: @page_size, offset: offset, filters: filters)
+    Audit.list_events(selected_pool, limit: @page_size, offset: offset, filters: filters, count_limit: offset + @count_window)
   end
 
   defp audit_events(socket, _selected_pool, filters, offset) do
     Audit.list_events_for_scope(socket.assigns.current_scope,
       limit: @page_size,
       offset: offset,
-      filters: filters
+      filters: filters,
+      count_limit: offset + @count_window
     )
   end
 
@@ -216,6 +242,14 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
         socket
     end
   end
+
+  # The page selected a Pool before the re-read and none after it, so the Pool
+  # the URL names is one the viewer lost. It leaves the URL like a filter
+  # change: the other filters stay and the window starts over on page one.
+  defp drop_lost_pool_filter(%{assigns: %{selected_pool: nil}} = socket, %{id: _pool_id}),
+    do: patch_window(socket, Map.delete(socket.assigns.current_params, "pool_id"), 1, nil)
+
+  defp drop_lost_pool_filter(socket, _filtered_pool), do: socket
 
   defp patch_window(socket, params, page, cursor) do
     push_patch(socket, to: ~p"/admin/audit-logs?#{window_params(params, page, cursor)}")
@@ -381,7 +415,7 @@ defmodule CodexPoolerWeb.Admin.AuditLogsLive do
 
   defp form_errors(errors), do: Enum.map(errors, &{&1.field, {&1.message, []}})
 
-  defp empty_audit_logs, do: %{items: [], total: 0, limit: @page_size, offset: 0}
+  defp empty_audit_logs, do: %{items: [], total: 0, total_exact?: true, limit: @page_size, offset: 0}
 
   defp selected_audit_event(nil, _events), do: nil
 

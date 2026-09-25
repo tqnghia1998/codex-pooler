@@ -15,10 +15,12 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
   alias CodexPooler.Gateway.Runtime.Finalization.Metadata
   alias CodexPooler.Gateway.Transports.Streaming.RuntimeAdmissionProof
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
+  alias CodexPooler.Gateway.Transports.Websocket.NativeCompactionAdmission
   alias CodexPooler.Gateway.Transports.Websocket.NativeReplayAdmission
   alias CodexPooler.Gateway.Transports.Websocket.RemoteReconnectControlV2
   alias CodexPooler.Gateway.Transports.Websocket.RolloutDrain
   alias CodexPooler.Gateway.Transports.Websocket.UpstreamWebsocketSession
+  alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerAdmissionControlV1
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerContract
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarder
   alias CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerRequest
@@ -2039,6 +2041,149 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerForwarderTest d
                  [session.id, downstream(correlation_id)],
                  opts
                )
+    end
+  end
+
+  # A local owner's admission control answer reaches the socket unchanged; a
+  # remote one crosses `call_remote`, whose generic normalization folds every
+  # reason outside the owner vocabulary into `owner_crashed`. Every refusal of
+  # `NativeCompactionAdmission` must come back as the local owner gives it
+  # (a remote `compaction_item_mismatch` read as a crash answered 503 instead
+  # of 409), and nothing else may widen the pass-through (findings#206 rows
+  # 206-397/206-400).
+  test "a remote owner's native compaction admission refusals come back with their own reason", %{auth: auth} do
+    remote_node = :"codex_pooler@admission-refusal-owner-app.example"
+    remote_node_string = Atom.to_string(remote_node)
+    %{session: session, token: token} = owner_session_fixture(auth, remote_node_string, "admission-refusal")
+    downstream = downstream("corr-admission-refusal")
+    opts = [node_client: V2FailureKindNodeClient, app_node_names: [remote_node_string]]
+
+    assert {:ok, control} =
+             WebsocketOwnerAdmissionControlV1.new(%{
+               version: 1,
+               action: :snapshot,
+               downstream: downstream,
+               binding: nil,
+               phase: nil,
+               control_ref: nil,
+               capability: nil,
+               disposition: nil,
+               success?: nil,
+               compaction_item_digest: nil,
+               confirmation: nil,
+               first_compact_collection: nil,
+               expires_at_ms: nil,
+               now_ms: nil
+             })
+
+    refusals = NativeCompactionAdmission.refusal_reasons()
+    assert :compaction_item_mismatch in refusals
+    assert refusals -- WebsocketOwnerContract.owner_errors() == refusals
+
+    # The owner session's own refusals outside the admission (a stale or
+    # drained owner) keep the owner vocabulary.
+    for reason <- refusals ++ [:stale_downstream, :owner_drained, :owner_unavailable] do
+      V2FailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
+      assert {:error, ^reason} = WebsocketOwnerForwarder.admission_control(session, token, control, opts)
+      assert_received {:v2_failure_kind_call, ^remote_node, :remote_admission_control_v1, 2}
+    end
+
+    # Controls: an unknown reason from the admission call, and an admission
+    # refusal answered by another remote call, still read `owner_crashed`.
+    V2FailureKindNodeClient.configure([remote_node], {:return, {:error, :not_an_admission_refusal}})
+    assert {:error, :owner_crashed} = WebsocketOwnerForwarder.admission_control(session, token, control, opts)
+
+    for reason <- refusals do
+      V2FailureKindNodeClient.configure([remote_node], {:return, {:error, reason}})
+
+      assert {:error, :owner_crashed} =
+               WebsocketOwnerForwarder.call_remote(remote_node, :remote_attach_downstream, [session.id, downstream], opts)
+    end
+  end
+
+  # An owner answer outside both vocabularies is folded at the owner's node,
+  # before it crosses: a local owner used to hand it to the caller raw and a
+  # remote one as `owner_crashed`, so the same refusal meant two different
+  # things by topology. Both now read the admission's `invalid_transition`
+  # and log the unlisted reason (findings#206 row 206-402).
+  test "an owner refusal outside the admission and owner vocabularies reads invalid_transition from a local and a remote owner alike",
+       %{auth: auth} do
+    %{session: session, token: token} = owner_session_fixture(auth, Atom.to_string(node()), "admission-unlisted")
+    test_pid = self()
+
+    {:ok, owner} =
+      Task.start(fn ->
+        {:ok, _registration} = Registry.register(WebsocketOwnerSession.Registry, session.id, nil)
+        send(test_pid, :unlisted_owner_registered)
+        unlisted_owner_loop()
+      end)
+
+    on_exit(fn -> Process.exit(owner, :kill) end)
+    assert_receive :unlisted_owner_registered
+
+    downstream = downstream("corr-admission-unlisted")
+
+    assert {:ok, control} =
+             WebsocketOwnerAdmissionControlV1.new(%{
+               version: 1,
+               action: :snapshot,
+               downstream: downstream,
+               binding: nil,
+               phase: nil,
+               control_ref: nil,
+               capability: nil,
+               disposition: nil,
+               success?: nil,
+               compaction_item_digest: nil,
+               confirmation: nil,
+               first_compact_collection: nil,
+               expires_at_ms: nil,
+               now_ms: nil
+             })
+
+    refute NativeCompactionAdmission.refusal_reason?(:synthetic_unlisted_refusal)
+    refute WebsocketOwnerContract.owner_error?(:synthetic_unlisted_refusal)
+
+    local_log =
+      capture_log(fn ->
+        assert {:error, :invalid_transition} = WebsocketOwnerForwarder.admission_control(session, token, control)
+      end)
+
+    assert_received {:unlisted_owner_answered, :snapshot}
+
+    # The remote path: the calling node reaches the owner's node through the
+    # node client, which runs `remote_admission_control_v1/2` there.
+    remote = :"codex_pooler@admission-unlisted-owner-app.example"
+    remote_session = %{session | owner_instance_id: Atom.to_string(remote)}
+    opts = WebsocketOwnerNodeHarness.node_client_opts([remote], calls: %{remote => :success})
+
+    remote_log =
+      capture_log(fn ->
+        assert {:error, :invalid_transition} = WebsocketOwnerForwarder.admission_control(remote_session, token, control, opts)
+      end)
+
+    assert_received {:unlisted_owner_answered, :snapshot}
+    assert_receive {:websocket_owner_harness_node_call, %{function: :remote_admission_control_v1}}
+
+    for log <- [local_log, remote_log] do
+      assert log =~ "native compaction admission refusal outside vocabulary"
+      assert log =~ "action=snapshot reason_code=synthetic_unlisted_refusal answered=invalid_transition"
+    end
+
+    # A listed refusal from the same owner is still passed through unchanged.
+    send(owner, {:answer_next, :compaction_item_mismatch})
+    assert {:error, :compaction_item_mismatch} = WebsocketOwnerForwarder.admission_control(remote_session, token, control, opts)
+  end
+
+  defp unlisted_owner_loop(answer \\ :synthetic_unlisted_refusal) do
+    receive do
+      {:answer_next, next} ->
+        unlisted_owner_loop(next)
+
+      {:"$gen_call", from, {:admission_control_v1, control}} ->
+        send(from |> elem(0), {:unlisted_owner_answered, control.action})
+        GenServer.reply(from, {:error, answer})
+        unlisted_owner_loop()
     end
   end
 

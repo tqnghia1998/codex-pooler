@@ -372,6 +372,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
 
   def register_unboxed_pool_cleanup!(%{pool: pool, pricing: _} = fixture) do
     on_exit(fn ->
+      # A session cleanup deferred past its socket's terminate can still write
+      # this Pool's rows (a ledger entry of a committed attempt); deleting them
+      # first failed on a foreign key and left the whole graph committed
+      # (findings#206 row 206-405).
+      :ok = WebsocketCleanupFence.await_session_cleanups!()
+
       unboxed_run(fn ->
         cleanup_unboxed_pool!(fixture)
       end)
@@ -533,7 +539,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
   end
 
   def gateway_setup(upstream, opts \\ []) do
-    key = active_api_key_fixture()
+    key = if slug = Keyword.get(opts, :pool_slug), do: active_api_key_fixture(pool_fixture(%{slug: slug})), else: active_api_key_fixture()
     pool = key.pool
     # Registered before the fence so it runs after it: the owners this Pool's
     # sockets start are stopped once those sockets and their cleanup are done,
@@ -606,9 +612,16 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexTestSupport do
     ArgumentError -> :ok
   end
 
+  # A catalog entry the released Codex client decodes (findings#206 row
+  # 206-444): `priority`, `support_verbosity` and `experimental_supported_tools`
+  # are required by every client in `CodexModelDecodeContract`'s verified window,
+  # so an in-window client is served this model instead of having it left out.
   defp default_codex_source(exposed_model_id, upstream_model_id, display_name) do
     %{
       "slug" => exposed_model_id,
+      "priority" => 1,
+      "support_verbosity" => false,
+      "experimental_supported_tools" => [],
       "display_name" => display_name,
       "description" => display_name,
       "supported_reasoning_levels" => [

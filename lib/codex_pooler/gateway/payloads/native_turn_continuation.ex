@@ -72,6 +72,7 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   # caught by `compaction_request?/2` before the opening-request question is
   # ever asked.
 
+  alias CodexPooler.Gateway.Payloads.NativeCodexTurnMetadata
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Payloads.ToolResultShape
 
@@ -96,6 +97,8 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   @final_compaction_item_types ["compaction", "compaction_summary"]
 
   @anchor_domain "native_turn_compaction_anchor_v1"
+  @progress_domain "native_turn_user_progress_v1"
+  @pivot_domain "native_turn_progress_pivot_v1"
 
   @type turn_role :: :opening | :tool_continuation | {:post_compaction_resume, <<_::256>>}
 
@@ -150,6 +153,46 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   def ordinary_tool_continuation?(_payload, %RequestOptions{}), do: false
 
   @doc """
+  True for a native websocket frame anchored on the response a request of its
+  own turn just completed on this socket: a later request of that turn, never
+  its opener.
+
+  The released client drains user input steered into a running turn into the
+  SAME turn, under the same `turn_id`, once a request of it completed
+  (`session/turn.rs` `can_drain_pending_input`; `turn_input.rs` `steer_input`
+  returns the active turn's id), and sends it on the same connection as an
+  anchored increment: `previous_response_id` of the response just completed and
+  only the items added since (`client.rs` `prepare_websocket_request`). With no
+  tool result in that increment `turn_role/1` reads `:opening`, although the
+  turn's opener holds the bare claim (findings#206 row 206-409). An opener can
+  never be anchored on a response of its own turn -- it is sent before its turn
+  produced one -- so the anchor alone tells them apart, given the socket's
+  record of the last response it delivered and the turn that produced it
+  (`:socket_last_completed_native_response` in `extra`). Like
+  `ordinary_tool_continuation?/2` it reads the body only and requires a
+  websocket transport; the record is socket-local, so a frame on another socket
+  keeps the bare claim.
+  """
+  @spec steered_continuation?(map(), RequestOptions.t(), <<_::256>>) :: boolean()
+  def steered_continuation?(
+        %{"previous_response_id" => anchor} = payload,
+        %RequestOptions{
+          native_compaction_admission: nil,
+          transport: %{transport: "websocket"},
+          payload_context: %{compaction_trigger_bridge?: false},
+          openai_compatibility: %{public_openai_responses_stream: false},
+          extra: %{socket_last_completed_native_response: %{semantic_turn_key: semantic_turn_key, response_digest: response_digest}}
+        } = options,
+        semantic_turn_key
+      )
+      when is_binary(anchor) and anchor != "" and is_binary(response_digest) do
+    upstream_endpoint(options) != @compact_endpoint and request_kind(payload, options) == "turn" and
+      NativeCodexTurnMetadata.response_id_digest(anchor) == response_digest
+  end
+
+  def steered_continuation?(_payload, %RequestOptions{}, _semantic_turn_key), do: false
+
+  @doc """
   True when this request is a compaction of a turn rather than a request of the
   turn itself.
 
@@ -184,10 +227,12 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
 
     * a tool result there -> `:tool_continuation`. A previous request of this
       turn produced the call.
-    * a user message there -> `:opening`. The user started something, which in
-      the released client means a new turn with a new `turn_id`
-      (`turn_metadata.rs` mints one per `TurnMetadataState`), so this is that
-      turn's first request and it keeps the payload-independent claim. This is
+    * a user message there -> `:opening`. The user started something: usually a
+      new turn with a new `turn_id` (`turn_metadata.rs` mints one per
+      `TurnMetadataState`), whose first request keeps the payload-independent
+      claim; but also user input steered into the running turn under the same
+      `turn_id`, which the native HTTP reservation tells apart through
+      `turn_progress/1` (findings#206 row 206-403). This is
       what makes a turn in a compacted session behave exactly like a turn in an
       uncompacted one -- including agreeing with the websocket codec, which
       gives such a frame the bare claim too.
@@ -220,6 +265,120 @@ defmodule CodexPooler.Gateway.Payloads.NativeTurnContinuation do
   end
 
   def turn_role(_payload), do: :opening
+
+  @doc """
+  An opaque digest of how far the user has taken a turn: the latest compaction
+  pivot (or none) and the number of user messages after it.
+
+  An `:opening` request is not always the turn's opener. The released client
+  drains user input steered into a running turn into the SAME turn, under the
+  same `turn_id`, before its next model request (`session/turn.rs`
+  `can_drain_pending_input`; `turn_input.rs` `steer_input` returns the active
+  turn's id), and right after a mid-turn compaction when the model needed no
+  follow-up (`can_drain_pending_input = !model_needs_follow_up`). Such a request
+  ends with a user message and so reads `:opening`, although it is a later
+  request of the turn.
+
+  A retry of a request only appends model output, never a user message, so it
+  keeps this digest; a steered request moves it (one more user message, or a new
+  pivot). That is the whole discriminator; the digest carries nothing else of
+  the body and is identical across rebuilt retries (findings#206 row 206-403).
+  """
+  @spec turn_progress(map()) :: <<_::256>>
+  def turn_progress(%{"input" => input}) when is_list(input), do: input |> progress_state() |> progress_digest()
+
+  def turn_progress(_payload), do: progress_digest({nil, 0})
+
+  @typedoc """
+  What `turn_progress/1` digests, kept in the clear so it can be carried
+  forward: the latest compaction pivot item (or `nil`) and the number of user
+  messages after it. It holds the pivot item itself, so it lives only in the
+  process that saw the frame and is never persisted or sent anywhere.
+  """
+  @type progress_state :: {map() | nil, non_neg_integer()}
+
+  @doc """
+  The progress a native websocket frame stands for in full-history terms, or
+  `:unknown`.
+
+  An unanchored frame carries its whole history, so its progress is read from
+  it. An anchored frame carries only the items the client added since the
+  response it names (`client.rs` `get_incremental_items`: the previous
+  request's input, then that response's output items, then the increment), so
+  its progress is the progress of the request that produced that response,
+  extended by the increment -- known only when `base` is this socket's record of
+  exactly that response. Model output items are never user messages, and a
+  compaction replaces the history, after which the client sends full history
+  again (findings#206 row 206-412). Anything else is `:unknown`, which leaves
+  the frame's claim as it was.
+  """
+  @spec websocket_frame_progress(map(), map() | nil) :: {:ok, progress_state()} | :unknown
+  def websocket_frame_progress(%{"input" => input} = payload, base) when is_list(input) do
+    case Map.get(payload, "previous_response_id") do
+      anchor when is_binary(anchor) and anchor != "" -> extend_anchored_progress(input, anchor, base)
+      _unanchored -> {:ok, progress_state(input)}
+    end
+  end
+
+  def websocket_frame_progress(_payload, _base), do: :unknown
+
+  @doc "The opaque digest of a `progress_state/0`, identical to `turn_progress/1` of the full history."
+  @spec progress_digest(progress_state()) :: <<_::256>>
+  def progress_digest({pivot, user_messages}) when is_integer(user_messages) and user_messages >= 0,
+    do: :crypto.hash(:sha256, :erlang.term_to_binary({@progress_domain, pivot, user_messages}, [:deterministic]))
+
+  @typedoc """
+  Where a request stands in its turn, in a form that can be ordered and
+  recorded: an opaque digest of the latest compaction pivot (`nil` when there is
+  none) and the number of user messages after it.
+  """
+  @type progress_position :: {<<_::256>> | nil, non_neg_integer()}
+
+  @doc """
+  The `progress_position/0` of a `progress_state/0`.
+
+  The digest says only whether two requests stand at the same place; the
+  position says whether one is FURTHER along than the other, which is what a
+  later request of a turn must be (findings#206 row 206-423). A request is
+  further along than the turn's opener when it has the same compaction point
+  and strictly more user messages after it (the user steered input in), or a
+  compaction point the opener did not end on (a remote compaction replaced the
+  history: `compact_remote_v2.rs` `build_v2_compacted_history` keeps only
+  messages and appends the new compaction item last). Fewer user messages, or
+  a compaction point that disappeared, is a trimmed resend, not progress.
+  """
+  @spec progress_position(progress_state()) :: progress_position()
+  def progress_position({nil, user_messages}) when is_integer(user_messages) and user_messages >= 0, do: {nil, user_messages}
+
+  def progress_position({pivot, user_messages}) when is_integer(user_messages) and user_messages >= 0,
+    do: {:crypto.hash(:sha256, :erlang.term_to_binary({@pivot_domain, pivot}, [:deterministic])), user_messages}
+
+  @doc "The `progress_position/0` of a full-history request, the position `turn_progress/1` digests."
+  @spec turn_position(map()) :: progress_position()
+  def turn_position(%{"input" => input}) when is_list(input), do: input |> progress_state() |> progress_position()
+
+  def turn_position(_payload), do: {nil, 0}
+
+  defp extend_anchored_progress(increment, anchor, %{response_digest: response_digest, progress: {pivot, user_messages}})
+       when is_binary(response_digest) do
+    if NativeCodexTurnMetadata.response_id_digest(anchor) == response_digest do
+      case last_compaction_index(increment) do
+        nil -> {:ok, {pivot, user_messages + Enum.count(increment, &user_message?/1)}}
+        _index -> {:ok, progress_state(increment)}
+      end
+    else
+      :unknown
+    end
+  end
+
+  defp extend_anchored_progress(_increment, _anchor, _base), do: :unknown
+
+  defp progress_state(input) do
+    case last_compaction_index(input) do
+      nil -> {nil, Enum.count(input, &user_message?/1)}
+      index -> {Enum.at(input, index), input |> Enum.drop(index + 1) |> Enum.count(&user_message?/1)}
+    end
+  end
 
   defp compacted_turn_role(input, index) do
     tail = Enum.drop(input, index + 1)

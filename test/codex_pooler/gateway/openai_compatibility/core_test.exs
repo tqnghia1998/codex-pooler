@@ -3203,20 +3203,348 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       assert [%{"output" => ^structured_output}] = structured_payload["input"]
     end
 
-    test "function_call_output normalizes input image detail from Responses SDK tool output" do
+    # findings#206 row 206-476: the provider reads `detail` on a tool-output
+    # image (it refuses a value outside low/high/auto/original with param
+    # `input[2].output[1].detail`), so `/v1` forwards it as the native client
+    # does on a Full model; a null detail stays absent, as the native client
+    # never serializes one. Lite strips it later, in the payload normalizer.
+    test "function_call_output keeps input image detail from Responses SDK tool output" do
+      breakpoint = %{"mode" => "explicit"}
+
+      output = [
+        %{"type" => "input_text", "text" => "synthetic screenshot taken"},
+        %{"type" => "input_image", "detail" => "auto", "image_url" => "https://example.com/synthetic-image.png", "prompt_cache_breakpoint" => breakpoint},
+        %{"type" => "input_image", "detail" => "high", "file_id" => "file-fixture-image"},
+        %{"type" => "input_image", "detail" => "original", "image_url" => "https://example.com/original.png"},
+        %{"type" => "input_image", "detail" => "low", "file_id" => "file-fixture-low"},
+        %{"type" => "input_image", "detail" => nil, "file_id" => "file-fixture-null"}
+      ]
+
+      assert {:ok, %{payload: payload}} =
+               Responses.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "input" => [%{"type" => "function_call_output", "call_id" => "call_fixture_image_detail", "output" => output}]
+               })
+
+      assert [%{"type" => "function_call_output", "call_id" => "call_fixture_image_detail", "output" => forwarded}] = payload["input"]
+
+      assert forwarded == [
+               %{"type" => "input_text", "text" => "synthetic screenshot taken"},
+               %{"type" => "input_image", "detail" => "auto", "image_url" => "https://example.com/synthetic-image.png", "prompt_cache_breakpoint" => breakpoint},
+               %{"type" => "input_image", "detail" => "high", "file_id" => "file-fixture-image"},
+               %{"type" => "input_image", "detail" => "original", "image_url" => "https://example.com/original.png"},
+               %{"type" => "input_image", "detail" => "low", "file_id" => "file-fixture-low"},
+               %{"type" => "input_image", "file_id" => "file-fixture-null"}
+             ]
+
+      assert {:ok, %{payload: tool_payload}} =
+               Responses.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "input" => [
+                   %{"role" => "tool", "tool_call_id" => "call_fixture_role_tool", "content" => [%{"type" => "input_image", "detail" => "high", "image_url" => "https://example.com/tool.png"}]}
+                 ]
+               })
+
+      assert [%{"type" => "function_call_output", "output" => [%{"type" => "input_image", "detail" => "high", "image_url" => "https://example.com/tool.png"}]}] = tool_payload["input"]
+    end
+
+    test "input_image detail outside the provider enum is refused with its field path" do
+      bogus_image = %{"type" => "input_image", "detail" => "bogus", "file_id" => "file-fixture-bogus"}
+
+      cases = [
+        {[
+           %{"type" => "function_call", "call_id" => "call_bogus", "name" => "view_image", "arguments" => "{}"},
+           %{"type" => "function_call_output", "call_id" => "call_bogus", "output" => [%{"type" => "input_text", "text" => "loaded"}, bogus_image]}
+         ], "input[1].output[1].detail"},
+        {[%{"role" => "tool", "tool_call_id" => "call_bogus", "content" => [bogus_image]}], "input[0].content[0].detail"},
+        {[%{"type" => "custom_tool_call_output", "call_id" => "call_bogus", "output" => [bogus_image]}], "input[0].output[0].detail"},
+        {[%{"role" => "system", "content" => "lifted"}, %{"role" => "user", "content" => [%{"type" => "input_text", "text" => "look"}, bogus_image]}], "input[1].content[1].detail"},
+        {[%{"type" => "function_call_output", "call_id" => "call_bogus", "output" => [%{bogus_image | "detail" => 3}]}], "input[0].output[0].detail"},
+        {[%{"type" => "function_call_output", "call_id" => "call_bogus", "output" => [%{bogus_image | "detail" => "HIGH"}]}], "input[0].output[0].detail"}
+      ]
+
+      for {input, param} <- cases do
+        assert {:error, %{status: 400, code: "invalid_value", param: ^param, message: message}} =
+                 Responses.coerce(%{"model" => "gpt-fixture-text", "input" => input})
+
+        assert message == "invalid value for parameter #{param} (invalid_value); supported values: low, high, auto, original"
+      end
+    end
+
+    # findings#206 row 206-488: the Codex backend accepts a JSON-null `detail`
+    # on a message image (probed 2026-09-24), but the native client never
+    # serializes one and a `/v1` tool-output image already drops it, so a
+    # message image drops it too: a null detail is absent on every `/v1` image.
+    test "message input_image keeps a string detail and drops a null one" do
+      breakpoint = %{"mode" => "explicit"}
+
+      assert {:ok, %{payload: payload}} =
+               Responses.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "input" => [
+                   %{
+                     "type" => "message",
+                     "role" => "user",
+                     "content" => [
+                       %{"type" => "input_text", "text" => "synthetic image question"},
+                       %{"type" => "input_image", "detail" => nil, "image_url" => "https://example.com/null.png"},
+                       %{"type" => "input_image", "detail" => nil, "file_id" => "file-fixture-null", "prompt_cache_breakpoint" => breakpoint},
+                       %{"type" => "input_image", "detail" => "original", "image_url" => "https://example.com/original.png"}
+                     ]
+                   },
+                   %{"role" => "user", "content" => [%{"type" => "input_image", "detail" => nil, "image_url" => "https://example.com/untyped.png"}]}
+                 ]
+               })
+
+      assert [%{"type" => "message", "content" => content}, %{"type" => "message", "content" => untyped}] = payload["input"]
+
+      assert content == [
+               %{"type" => "input_text", "text" => "synthetic image question"},
+               %{"type" => "input_image", "image_url" => "https://example.com/null.png"},
+               %{"type" => "input_image", "file_id" => "file-fixture-null", "prompt_cache_breakpoint" => breakpoint},
+               %{"type" => "input_image", "detail" => "original", "image_url" => "https://example.com/original.png"}
+             ]
+
+      assert untyped == [%{"type" => "input_image", "image_url" => "https://example.com/untyped.png"}]
+    end
+
+    # The public Chat Completions API accepts `image_url.detail` (gpt-6-luna,
+    # probed 2026-09-24) and the Codex backend reads `detail` on an input image,
+    # so the Chat rebuild carries it into the `input_image` like the Responses
+    # adapter does; a null detail stays absent, and Lite strips it later.
+    test "Chat image_url detail becomes the input_image detail" do
+      assert {:ok, result} =
+               Chat.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "messages" => [
+                   %{
+                     "role" => "user",
+                     "content" => [
+                       %{"type" => "text", "text" => "synthetic image question"},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/high.png", "detail" => "high"}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/original.png", "detail" => "original"}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/null.png", "detail" => nil}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/object.png"}},
+                       %{"type" => "image_url", "image_url" => "https://example.com/bare.png"}
+                     ]
+                   }
+                 ]
+               })
+
+      assert [%{"type" => "message", "role" => "user", "content" => content}] = result.payload["input"]
+
+      assert content == [
+               %{"type" => "input_text", "text" => "synthetic image question"},
+               %{"type" => "input_image", "image_url" => "https://example.com/high.png", "detail" => "high"},
+               %{"type" => "input_image", "image_url" => "https://example.com/original.png", "detail" => "original"},
+               %{"type" => "input_image", "image_url" => "https://example.com/null.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/object.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/bare.png"}
+             ]
+    end
+
+    test "Chat image detail outside the provider enum is refused with the Chat field path" do
+      bogus = %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/bogus.png", "detail" => "bogus"}}
+      text = %{"type" => "text", "text" => "synthetic image question"}
+
+      cases = [
+        {[%{"role" => "system", "content" => "lifted"}, %{"role" => "user", "content" => [text, bogus]}], "messages[1].content[1].image_url.detail"},
+        {[%{"role" => "user", "content" => [put_in(bogus, ["image_url", "detail"], "HIGH")]}], "messages[0].content[0].image_url.detail"},
+        {[%{"role" => "user", "content" => [put_in(bogus, ["image_url", "detail"], 3)]}], "messages[0].content[0].image_url.detail"},
+        {[%{"role" => "user", "content" => put_in(bogus, ["image_url", "detail"], "bogus")}], "messages[0].content.image_url.detail"},
+        {[%{"role" => "user", "content" => [text, %{"type" => "input_image", "image_url" => "https://example.com/bogus.png", "detail" => "bogus"}]}], "messages[0].content[1].detail"}
+      ]
+
+      for {messages, param} <- cases do
+        assert {:error, %{status: 400, code: "invalid_value", param: ^param, message: message}} =
+                 Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => messages})
+
+        assert message == "invalid value for parameter #{param} (invalid_value); supported values: low, high, auto, original"
+      end
+    end
+
+    # Hermes in its default `chat_completions` mode (a `custom` provider without
+    # `api_mode: codex_responses`) sends a screenshot tool result as a Chat tool
+    # message whose content holds `image_url` parts. The Codex backend accepts
+    # an image in a `function_call_output` (findings#206 row 206-476, probed on
+    # `gpt-6-luna`), so the Chat rebuild carries it there with its detail.
+    test "Chat carries image_url parts of a tool message into the function_call_output" do
+      breakpoint = %{"mode" => "explicit"}
+
+      assert {:ok, result} =
+               Chat.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "messages" => [
+                   %{"role" => "user", "content" => "synthetic screenshot request"},
+                   %{"role" => "assistant", "content" => nil, "tool_calls" => [%{"id" => "call_fixture_screenshot", "type" => "function", "function" => %{"name" => "computer_use", "arguments" => "{}"}}]},
+                   %{
+                     "role" => "tool",
+                     "name" => "computer_use",
+                     "tool_call_id" => "call_fixture_screenshot",
+                     "content" => [
+                       %{"type" => "text", "text" => "synthetic capture summary"},
+                       %{"type" => "image_url", "image_url" => %{"url" => "data:image/png;base64,iVBORw0KGgo="}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/high.png", "detail" => "high"}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/null.png", "detail" => nil}},
+                       %{"type" => "image_url", "image_url" => "https://example.com/bare.png", "prompt_cache_breakpoint" => breakpoint}
+                     ]
+                   }
+                 ]
+               })
+
+      assert [_user, %{"type" => "function_call", "call_id" => "call_fixture_screenshot"}, function_output] = result.payload["input"]
+
+      assert function_output == %{
+               "type" => "function_call_output",
+               "call_id" => "call_fixture_screenshot",
+               "output" => [
+                 %{"type" => "input_text", "text" => "synthetic capture summary"},
+                 %{"type" => "input_image", "image_url" => "data:image/png;base64,iVBORw0KGgo="},
+                 %{"type" => "input_image", "image_url" => "https://example.com/high.png", "detail" => "high"},
+                 %{"type" => "input_image", "image_url" => "https://example.com/null.png"},
+                 %{"type" => "input_image", "image_url" => "https://example.com/bare.png", "prompt_cache_breakpoint" => breakpoint}
+               ]
+             }
+
+      bogus = %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/bogus.png", "detail" => "bogus"}}
+
+      assert {:error, %{status: 400, code: "invalid_value", param: "messages[0].content[1].image_url.detail"}} =
+               Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => [%{"role" => "tool", "tool_call_id" => "call_bogus", "content" => [%{"type" => "text", "text" => "loaded"}, bogus]}]})
+    end
+
+    # findings#206 row 206-494: a `/v1/responses` `role: "tool"` item may hold
+    # a Chat-style `image_url` part (a Pooler extension shape for clients that
+    # replay Chat tool messages as Responses input). Its `image_url.detail`
+    # reaches the rebuilt `input_image` like every other tool-output image, a
+    # null one stays absent, and a value outside the enum is refused under the
+    # field the client sent.
+    test "role tool image_url part keeps its detail in the function_call_output" do
+      assert {:ok, %{payload: payload}} =
+               Responses.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "input" => [
+                   %{"type" => "function_call", "call_id" => "call_fixture_chat_image", "name" => "computer_use", "arguments" => "{}"},
+                   %{
+                     "role" => "tool",
+                     "tool_call_id" => "call_fixture_chat_image",
+                     "content" => [
+                       %{"type" => "text", "text" => "synthetic capture summary"},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/high.png", "detail" => "high"}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/original.png", "detail" => "original"}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/null.png", "detail" => nil}},
+                       %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/object.png"}},
+                       %{"type" => "image_url", "image_url" => "https://example.com/bare.png"}
+                     ]
+                   }
+                 ]
+               })
+
+      assert [_call, %{"type" => "function_call_output", "call_id" => "call_fixture_chat_image", "output" => output}] = payload["input"]
+
+      assert output == [
+               %{"type" => "input_text", "text" => "synthetic capture summary"},
+               %{"type" => "input_image", "image_url" => "https://example.com/high.png", "detail" => "high"},
+               %{"type" => "input_image", "image_url" => "https://example.com/original.png", "detail" => "original"},
+               %{"type" => "input_image", "image_url" => "https://example.com/null.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/object.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/bare.png"}
+             ]
+
+      bogus = %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/bogus.png", "detail" => "bogus"}}
+      text = %{"type" => "text", "text" => "loaded"}
+
+      call = %{"type" => "function_call", "call_id" => "call_bogus", "name" => "view_image", "arguments" => "{}"}
+      tool = fn detail -> %{"role" => "tool", "tool_call_id" => "call_bogus", "content" => [text, put_in(bogus, ["image_url", "detail"], detail)]} end
+
+      cases = [
+        {[tool.("bogus")], "input[0].content[1].image_url.detail"},
+        {[call, tool.("HIGH")], "input[1].content[1].image_url.detail"},
+        {[call, tool.(3)], "input[1].content[1].image_url.detail"}
+      ]
+
+      for {input, param} <- cases do
+        assert {:error, %{status: 400, code: "invalid_value", param: ^param, message: message}} = Responses.coerce(%{"model" => "gpt-fixture-text", "input" => input})
+        assert message == "invalid value for parameter #{param} (invalid_value); supported values: low, high, auto, original"
+      end
+    end
+
+    # findings#206 row 206-494: a Cline `tool-result` part in a Chat message
+    # (the shape the Pooler has translated since the June Cline continuations)
+    # carries its image detail into the rebuilt `function_call_output` image,
+    # and a value outside the enum is refused under the Chat field path.
+    test "Chat Cline tool-result images keep their detail" do
+      assert {:ok, result} =
+               Chat.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "messages" => [
+                   %{"role" => "assistant", "content" => [%{"type" => "tool-call", "toolCallId" => "call_fixture_cline_image", "toolName" => "browser_action", "input" => %{"action" => "screenshot"}}]},
+                   %{
+                     "role" => "user",
+                     "content" => [
+                       %{
+                         "type" => "tool-result",
+                         "toolCallId" => "call_fixture_cline_image",
+                         "toolName" => "browser_action",
+                         "output" => [
+                           %{"type" => "text", "text" => "synthetic screenshot taken"},
+                           %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/high.png", "detail" => "high"}},
+                           %{"type" => "input_image", "image_url" => "https://example.com/low.png", "detail" => "low"},
+                           %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/null.png", "detail" => nil}},
+                           %{"type" => "input_image", "image_url" => "https://example.com/input-null.png", "detail" => nil},
+                           %{"type" => "image_url", "image_url" => "https://example.com/bare.png"},
+                           %{"type" => "image", "data" => "YWJj", "mediaType" => "image/png"}
+                         ]
+                       }
+                     ]
+                   }
+                 ]
+               })
+
+      assert [%{"type" => "function_call"}, %{"type" => "function_call_output", "call_id" => "call_fixture_cline_image", "output" => output}] = result.payload["input"]
+
+      assert output == [
+               %{"type" => "input_text", "text" => "synthetic screenshot taken"},
+               %{"type" => "input_image", "image_url" => "https://example.com/high.png", "detail" => "high"},
+               %{"type" => "input_image", "image_url" => "https://example.com/low.png", "detail" => "low"},
+               %{"type" => "input_image", "image_url" => "https://example.com/null.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/input-null.png"},
+               %{"type" => "input_image", "image_url" => "https://example.com/bare.png"},
+               %{"type" => "input_image", "image_url" => "data:image/png;base64,YWJj"}
+             ]
+
+      tool_result = fn output -> %{"type" => "tool-result", "toolCallId" => "call_bogus", "toolName" => "browser_action", "output" => output} end
+      text = %{"type" => "text", "text" => "loaded"}
+      bogus = %{"type" => "image_url", "image_url" => %{"url" => "https://example.com/bogus.png", "detail" => "bogus"}}
+
+      cases = [
+        {[%{"role" => "user", "content" => "look"}, %{"role" => "user", "content" => [tool_result.([text, bogus])]}], "messages[1].content[0].output[1].image_url.detail"},
+        {[%{"role" => "user", "content" => [text, tool_result.([put_in(bogus, ["image_url", "detail"], "HIGH")])]}], "messages[0].content[1].output[0].image_url.detail"},
+        {[%{"role" => "user", "content" => [tool_result.([%{"type" => "input_image", "image_url" => "https://example.com/bogus.png", "detail" => 3}])]}], "messages[0].content[0].output[0].detail"},
+        {[%{"role" => "user", "content" => tool_result.([text, bogus])}], "messages[0].content.output[1].image_url.detail"}
+      ]
+
+      for {messages, param} <- cases do
+        assert {:error, %{status: 400, code: "invalid_value", param: ^param, message: message}} = Chat.coerce(%{"model" => "gpt-fixture-text", "messages" => messages})
+        assert message == "invalid value for parameter #{param} (invalid_value); supported values: low, high, auto, original"
+      end
+    end
+
+    # findings#258 row 258-11: the Responses SDK types a tool-output image as
+    # `input_image` with `file_id` or `image_url`; the file reference is kept.
+    test "function_call_output keeps an input_image file_id from Responses SDK tool output" do
       assert {:ok, %{payload: payload}} =
                Responses.coerce(%{
                  "model" => "gpt-fixture-text",
                  "input" => [
                    %{
                      "type" => "function_call_output",
-                     "call_id" => "call_fixture_image_detail",
+                     "call_id" => "call_fixture_image_file",
                      "output" => [
-                       %{"type" => "input_text", "text" => "synthetic screenshot taken"},
+                       %{"type" => "input_text", "text" => "synthetic screenshot stored"},
+                       %{"type" => "input_image", "detail" => "auto", "file_id" => "file-fixture-image"},
                        %{
                          "type" => "input_image",
-                         "detail" => "auto",
-                         "image_url" => "https://example.com/synthetic-image.png",
+                         "file_id" => "file-fixture-image-marked",
                          "prompt_cache_breakpoint" => %{"mode" => "explicit"}
                        }
                      ]
@@ -3227,17 +3555,30 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
       assert [
                %{
                  "type" => "function_call_output",
-                 "call_id" => "call_fixture_image_detail",
+                 "call_id" => "call_fixture_image_file",
                  "output" => [
-                   %{"type" => "input_text", "text" => "synthetic screenshot taken"},
+                   %{"type" => "input_text", "text" => "synthetic screenshot stored"},
+                   %{"type" => "input_image", "file_id" => "file-fixture-image"},
                    %{
                      "type" => "input_image",
-                     "image_url" => "https://example.com/synthetic-image.png",
+                     "file_id" => "file-fixture-image-marked",
                      "prompt_cache_breakpoint" => %{"mode" => "explicit"}
                    }
                  ]
                }
              ] = payload["input"]
+
+      assert {:error, %{param: "input"}} =
+               Responses.coerce(%{
+                 "model" => "gpt-fixture-text",
+                 "input" => [
+                   %{
+                     "type" => "function_call_output",
+                     "call_id" => "call_fixture_image_blank_file",
+                     "output" => [%{"type" => "input_image", "file_id" => ""}]
+                   }
+                 ]
+               })
     end
 
     test "structured function_call_output preserves explicit null output" do
@@ -7626,15 +7967,12 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
   end
 
   @tag :prompt_cache_controls
-  test "Chat rejects image and file parts in tool messages" do
+  # A tool message carries text and images (the image parts become
+  # `function_call_output` images); a file part is still refused.
+  test "Chat rejects file parts in tool messages" do
     breakpoint = prompt_cache_breakpoint()
 
     for part <- [
-          %{
-            "type" => "image_url",
-            "image_url" => "https://example.com/image.png",
-            "prompt_cache_breakpoint" => breakpoint
-          },
           %{
             "type" => "file",
             "file" => %{"file_id" => "file_fixture"},
@@ -7891,6 +8229,34 @@ defmodule CodexPooler.Gateway.OpenAICompatibilityTest do
                 param: "input"
               }} = Responses.coerce(%{"model" => "gpt-6-sol", "input" => [item]})
     end
+  end
+
+  # The Responses SDK types a message image with a required `detail`, so a
+  # marked SDK image always carries it; the unmarked path already kept it.
+  @tag :prompt_cache_controls
+  test "marked user input_image keeps its detail for file_id and image_url references" do
+    breakpoint = prompt_cache_breakpoint()
+
+    parts = [
+      %{"type" => "input_image", "detail" => "high", "file_id" => "file-fixture-marked", "prompt_cache_breakpoint" => breakpoint},
+      %{"type" => "input_image", "detail" => "auto", "image_url" => "https://example.com/marked.png", "prompt_cache_breakpoint" => breakpoint}
+    ]
+
+    assert {:ok, %{payload: payload}} =
+             Responses.coerce(%{"model" => "gpt-6-sol", "input" => [%{"role" => "user", "content" => parts}]})
+
+    assert [%{"role" => "user", "content" => ^parts}] = payload["input"]
+
+    assert {:error, %{message: "message content part is not translatable"}} =
+             Responses.coerce(%{
+               "model" => "gpt-6-sol",
+               "input" => [
+                 %{
+                   "role" => "user",
+                   "content" => [%{"type" => "input_image", "detail" => "high", "file_id" => "file-fixture-marked", "extra" => true, "prompt_cache_breakpoint" => breakpoint}]
+                 }
+               ]
+             })
   end
 
   defp prompt_cache_breakpoint, do: %{"mode" => "explicit"}

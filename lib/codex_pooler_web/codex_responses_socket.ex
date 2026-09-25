@@ -7,7 +7,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   alias CodexPooler.Access.APIKey
   alias CodexPooler.Events
   alias CodexPooler.Gateway.OperationalSettings
-  alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata}
+  alias CodexPooler.Gateway.Payloads.{CompactionTrigger, NativeCodexTurnMetadata, NativeTurnContinuation}
   alias CodexPooler.Gateway.Payloads.PayloadNormalizer
   alias CodexPooler.Gateway.Payloads.RequestOptions
   alias CodexPooler.Gateway.Persistence.SessionContinuity
@@ -1301,8 +1301,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp handle_public_owner_payload(_payload, %{public_turn_aborted?: true} = state),
     do: {:ok, state}
 
-  defp handle_public_owner_payload({:data, _data}, %{public_turn_owner_complete?: true} = state),
-    do: {:ok, state}
+  defp handle_public_owner_payload({:data, data}, %{public_turn_owner_complete?: true} = state) do
+    if public_owner_attempt_reopenable?(state),
+      do: state |> reopen_public_owner_attempt() |> then(&public_chunk_result(data, &1)),
+      else: {:ok, state}
+  end
 
   defp handle_public_owner_payload({:data, data}, state), do: public_chunk_result(data, state)
 
@@ -1461,8 +1464,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           |> put_public_turn_state(turn_state)
           |> maybe_mark_public_turn_output_committed(data)
           |> count_public_downstream_frame(data)
-          |> record_public_downstream_terminal(DeliveryReceipt.terminal_class(data))
-          |> maybe_mark_public_completed_terminal(data)
+          |> record_public_downstream_terminal(pushed_public_terminal_class(normalized, data))
+          |> maybe_mark_public_pushed_terminal(normalized, data)
 
         {:push, {:text, normalized}, state}
 
@@ -1653,6 +1656,29 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     end
   end
 
+  # A public turn's task can submit more than one attempt to the owner: a
+  # pre-output refusal fails over to the next candidate inside the same turn.
+  # The owner completes each attempt (`:complete`), so while that task has not
+  # finished, anything the owner sends after a `:complete` belongs to the
+  # task's next attempt; the owner's messages reach the socket in the order it
+  # sent them. A turn whose task is done and whose owner leg completed is
+  # finished at once (`maybe_finish_public_owner_turn/1`), so an open turn with
+  # a completed leg always has its task running. Keeping the leg closed dropped
+  # the next attempt's frames, so a failover the sibling served never reached
+  # the client, and ignored its output-commit probe, so the owner held a
+  # refused attempt's result until the probe timed out (findings#206 rows
+  # 206-598, 206-599).
+  defp maybe_reopen_public_owner_attempt(state) do
+    if Map.get(state, :public_turn_owner_complete?, false) and public_owner_attempt_reopenable?(state),
+      do: reopen_public_owner_attempt(state),
+      else: state
+  end
+
+  defp public_owner_attempt_reopenable?(state),
+    do: public_owner_turn_open?(state) and not public_turn_aborted?(state)
+
+  defp reopen_public_owner_attempt(state), do: Map.put(state, :public_turn_owner_complete?, false)
+
   defp finish_public_turn(state) do
     task_pid = Map.get(state, :public_response_task_pid)
 
@@ -1829,12 +1855,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
 
   defp prepare_websocket_frame(payload, state) do
     parent = self()
+    decoded = WebsocketCodec.decode_payload(payload)
 
     opts =
       state
       |> Adapter.response_options(true, nil)
       |> RequestOptions.capture_api_key_runtime_epoch(Map.get(state, :auth))
-      |> maybe_put_native_turn_metadata(payload)
+      |> maybe_put_native_turn_metadata(decoded)
+      |> put_last_completed_native_response(state)
+      |> put_native_turn_progress(decoded, state)
 
     Websocket.prepare_websocket_response(
       payload,
@@ -1843,8 +1872,43 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     )
   end
 
-  defp maybe_put_native_turn_metadata(%RequestOptions{} = options, raw_payload) do
-    with {:ok, payload} <- WebsocketCodec.decode_payload(raw_payload),
+  defp put_last_completed_native_response(%RequestOptions{} = options, %{last_completed_native_response: %{} = record}),
+    do: %{options | extra: Map.put(options.extra, :socket_last_completed_native_response, Map.delete(record, :progress))}
+
+  defp put_last_completed_native_response(%RequestOptions{} = options, _state), do: options
+
+  # The full-history progress digest of this frame, when the socket can know it
+  # (`NativeTurnContinuation.websocket_frame_progress/2`). Only the 32-byte
+  # digest leaves the socket: the reservation records it on the row, and the
+  # claim of a later request of the same turn is compared against it on any
+  # socket or transport (findings#206 row 206-412). Its position beside it (the
+  # pivot's digest and a count) orders it against that request, so only a frame
+  # further along the turn is re-keyed (row 206-423).
+  defp put_native_turn_progress(%RequestOptions{} = options, decoded, state) do
+    with {:ok, payload} <- decoded,
+         {:ok, progress} <- native_turn_frame_progress(payload, options, state) do
+      extra =
+        options.extra
+        |> Map.put(:native_turn_progress, NativeTurnContinuation.progress_digest(progress))
+        |> Map.put(:native_turn_position, NativeTurnContinuation.progress_position(progress))
+
+      %{options | extra: extra}
+    else
+      _unknown -> options
+    end
+  end
+
+  # Only a model request of a turn carries its turn's progress forward: a
+  # compaction's response replaces the history, and the client sends full
+  # history after it.
+  defp native_turn_frame_progress(payload, %RequestOptions{} = options, state) do
+    if NativeTurnContinuation.request_kind(payload, options) == "turn",
+      do: NativeTurnContinuation.websocket_frame_progress(payload, Map.get(state, :last_completed_native_response)),
+      else: :unknown
+  end
+
+  defp maybe_put_native_turn_metadata(%RequestOptions{} = options, decoded) do
+    with {:ok, payload} <- decoded,
          true <- canonical_native_turn_metadata?(payload),
          {:ok, metadata} <-
            NativeCodexTurnMetadata.parse(payload, native_metadata_scope(payload, options)),
@@ -2071,7 +2135,21 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # turn.
   defp refuse_unadmitted_native_compaction(metadata, cause, state) do
     refusal = owner_error(:owner_unavailable)
+    log_native_compaction_refusal(state, refusal, metadata, :compact, cause, :arrival)
+    {:error, refusal}
+  end
 
+  # One line for every refusal of a native compaction reservation that found
+  # no admission, whichever route decided it: on arrival (nothing tracked), at
+  # dequeue behind a tracked task, or on the active-turn reconnect route from
+  # the cause the frame met on arrival. The deferral routes used to log only
+  # the info-level replay rejection, with no cause, next to the generic
+  # failed-turn warning, so a query for this line undercounted the refusals
+  # decided after a deferral (findings#206 row 206-394). `decided_at` names
+  # the route and `reservation_phase` the reservation (`final` is the turn
+  # that continues on a compacted history, whose metadata names no compaction
+  # phase).
+  defp log_native_compaction_refusal(state, refusal, metadata, reservation_phase, cause, decided_at) do
     Logger.warning(fn ->
       "native compaction refused before dispatch " <>
         "reason=admission_unavailable " <>
@@ -2080,10 +2158,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         "status=#{refusal.status} " <>
         "compaction_phase=#{native_compaction_metadata_phase(metadata)} " <>
         "topology=#{if owner_forwarded_socket?(state), do: "forwarded", else: "direct"} " <>
+        "decided_at=#{decided_at} " <>
+        "reservation_phase=#{reservation_phase} " <>
         "codex_session_id=#{codex_session_id(state)}"
     end)
-
-    {:error, refusal}
   end
 
   defp native_compaction_metadata_phase(%NativeCodexTurnMetadata{compaction: %NativeCodexTurnMetadata.Compaction{phase: phase}}), do: phase
@@ -2454,16 +2532,20 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       |> clear_native_compaction_deferral()
       |> dispatch_owner_prepared_response(state)
     else
-      reject_deferred_native_compaction(state)
+      reject_deferred_native_compaction(prepared, state)
     end
   end
 
   defp clear_native_compaction_deferral(%PreparedWebsocketFrame{} = prepared),
     do: %{prepared | request_options: %{prepared.request_options | native_compaction_reservation: nil}}
 
-  defp reject_deferred_native_compaction(state) do
+  defp reject_deferred_native_compaction(
+         %PreparedWebsocketFrame{request_options: %RequestOptions{native_compaction_reservation: %{metadata: metadata, phase: phase, cause: cause}}},
+         state
+       ) do
     refusal = owner_error(:owner_unavailable)
     log_replay_rejection(state, :owner_unavailable, :native_compaction_deferral, refusal)
+    log_native_compaction_refusal(state, refusal, metadata, phase, cause, :reconnect)
     reject_prepared_response(refusal, state)
   end
 
@@ -2483,6 +2565,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
        )
        when is_binary(semantic_turn_key) and byte_size(semantic_turn_key) == 32 do
     if WebsocketCodec.replay_eligible?(prepared) do
+      state = take_over_inherited_owner_turn(state, semantic_turn_key)
+
       with {:ok, intent} <- Service.prepare_replay_intent(state.auth, prepared),
            {:ok, prepared} <- rebind_replay_claim(prepared, intent) do
         dispatch_replay_intent(prepared, state, intent)
@@ -2503,6 +2587,43 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       {:ok, start_or_queue_prepared_response(prepared, state)}
     end
   end
+
+  # This socket attached while the owner still ran a turn it inherited, and
+  # sends a request of its own: the released client dropped the previous socket
+  # in the middle of that turn and has moved on (a full-history resend of the
+  # same turn, or its next turn). Every such request met a refusal until the
+  # client closed this socket too, which cancelled the inherited turn, and its
+  # retry on a third socket was then served (findings#206 rows 206-359 and
+  # 206-362). The owner now cancels a visible inherited turn here as that close
+  # would, the predecessor settles, and the request is judged against settled
+  # state. An owner that refuses or predates the take-over leaves everything as
+  # it was, and the request meets the refusal it always met. A pre-visible
+  # inherited turn is not taken over when a replay serves its same-turn resend;
+  # one no replay serves (a native compaction) is, when the socket it came from
+  # had already closed (findings#206 row 206-436). The wait covers this
+  # request's own semantic turn too, which is the one a resend of that turn
+  # carries even when the owner could not key the turn it cancelled.
+  defp take_over_inherited_owner_turn(state, semantic_turn_key) do
+    if Map.get(state, :websocket_owner_active_turn_reconnect?, false) and
+         not is_map(Map.get(state, :websocket_owner_pending_handoff)) do
+      case Adapter.take_over_inherited_owner_turn(state, semantic_turn_key) do
+        :not_taken_over ->
+          state
+
+        outcome ->
+          log_reconnect_disposition(state, inherited_take_over_disposition(outcome))
+
+          state
+          |> Map.put(:websocket_owner_active_turn_reconnect?, false)
+          |> Map.put(:websocket_owner_reconnect_turn_pid, nil)
+      end
+    else
+      state
+    end
+  end
+
+  defp inherited_take_over_disposition(:taken_over), do: :inherited_turn_taken_over
+  defp inherited_take_over_disposition(:unsettled), do: :inherited_turn_unsettled
 
   defp dispatch_replay_intent(prepared, state, replay_intent) do
     control_ref = make_ref()
@@ -2543,13 +2664,26 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # (findings#232 rows 232-181, 232-202). The dequeue therefore asks the owner
   # the same fresh-dispatch question now that the previous turn is gone; any
   # other answer keeps the frame as it was, and its submission meets the owner's
-  # ordinary checks exactly as before.
+  # ordinary checks exactly as before. Those checks raise again, from durable
+  # state, every refusal the replay preflight can raise, which is why a queued
+  # turn leaves no `runtime_replay_preflight` line (findings#206 row 206-496).
+  #
+  # A fresh intent that names a predecessor gets the binding too, lifecycle and
+  # all, as on the unqueued route: the client's resend of a turn the provider
+  # failed. The released client sends that resend the moment its reconnect's
+  # prewarm completes, which can be while the prewarm's task is still tracked
+  # (row 206-339). Binding
+  # only an intent without a predecessor ran the resend unbound: a cut before any
+  # output settled it `client_disconnected` with no replay entitlement, and the
+  # next resend met `409 duplicate_turn` where the unqueued resend is replayed
+  # (row 206-496). A fresh intent never carries a rebound claim (only an armed
+  # replay's does), so no rebind precedes the binding.
   defp attach_queued_owner_replay_intent(%PreparedWebsocketFrame{} = prepared, state) do
     with true <- owner_forwarded_socket?(state),
          false <- Map.get(state, :websocket_owner_active_turn_reconnect?, false),
          false <- is_map(Map.get(state, :websocket_owner_pending_handoff)),
          true <- WebsocketCodec.replay_eligible?(prepared),
-         {:ok, %{intent: :fresh, lifecycle: nil} = replay_intent} <- Service.prepare_replay_intent(state.auth, prepared),
+         {:ok, %{intent: :fresh} = replay_intent} <- Service.prepare_replay_intent(state.auth, prepared, record_model_denial: false),
          {:ok, control} <- replay_preflight_control(prepared, state, replay_intent, make_ref()),
          {:ok, :fresh_dispatch, binding} <- Adapter.reconnect_control_v2(state, control),
          true <- fresh_owner_binding?(binding, state),
@@ -3149,6 +3283,16 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
        }),
        do: true
 
+  # A steered frame is anchored on the response its turn just completed, like a
+  # tool-result continuation, and waits for that request to settle the same way:
+  # dispatched at once, it met the turn's still in-progress row
+  # (`codex_turns_active_semantic_turn_uq`) with owner forwarding off
+  # (findings#206 row 206-409).
+  defp continuity_ordered_prepared?(%PreparedWebsocketFrame{variant: :native_response_create, payload: payload, semantic_turn_key: <<_::256>> = key, request_options: %RequestOptions{} = options}) do
+    NativeTurnContinuation.steered_continuation?(payload, options, key) or
+      WebsocketCodec.continuity_ordered_payload?(CodexPooler.JSON.encode!(payload))
+  end
+
   defp continuity_ordered_prepared?(%PreparedWebsocketFrame{payload: payload}) do
     WebsocketCodec.continuity_ordered_payload?(CodexPooler.JSON.encode!(payload))
   end
@@ -3248,7 +3392,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       {:error, {:owner_unavailable, cause}} ->
         if unadmitted_final_runs_as_ordinary?(phase, cause, state),
           do: start_deferred_or_tracked_response(prepared, state),
-          else: refuse_deferred_native_compaction_at_dequeue(prepared, state)
+          else: refuse_deferred_native_compaction_at_dequeue(prepared, metadata, phase, cause, state)
 
       {:error, reason} ->
         start_owner_retarget_error_task(owner_error(reason), prepared, state)
@@ -3256,13 +3400,14 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   end
 
   # The dequeue's refusal carries the stage the reconnect route's refusal logs
-  # (`reject_deferred_native_compaction/1`), so one query counts the same
+  # (`reject_deferred_native_compaction/2`), so one query counts the same
   # decision on both routes. Before, an unreachable owner at dequeue left only
   # the generic failed-turn line, the same line the ordinary run of that turn
   # writes, so nothing told the two apart (findings#206 row 206-342).
-  defp refuse_deferred_native_compaction_at_dequeue(prepared, state) do
+  defp refuse_deferred_native_compaction_at_dequeue(prepared, metadata, phase, cause, state) do
     refusal = owner_error(:owner_unavailable)
     log_replay_rejection(state, :owner_unavailable, :native_compaction_deferral, refusal)
+    log_native_compaction_refusal(state, refusal, metadata, phase, cause, :dequeue)
     start_owner_retarget_error_task(refusal, prepared, state)
   end
 
@@ -3301,6 +3446,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         |> track_response_task(pid, monitor)
         |> put_direct_context(pid, direct_ref, parent)
         |> put_response_task_model(pid, prepared)
+        |> put_response_task_turn(pid, prepared)
         |> maybe_open_public_turn(prepared, pid)
 
       {:error, reason} ->
@@ -3331,6 +3477,66 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     do: %{state | response_task_models: Map.delete(models, pid)}
 
   defp forget_response_task_model(state, _pid), do: state
+
+  # The turn a native request belongs to, so the response it completes on this
+  # socket is known to be that turn's (findings#206 row 206-409).
+  defp put_response_task_turn(
+         state,
+         pid,
+         %PreparedWebsocketFrame{variant: :native_response_create, semantic_turn_key: <<_::256>> = key, payload: payload, request_options: %RequestOptions{} = options}
+       ) do
+    state = Map.update(state, :response_task_turns, %{pid => key}, &Map.put(&1, pid, key))
+
+    # Carried forward only when it is the very progress this frame's row
+    # records, so the socket never knows a turn's history its rows do not.
+    with {:ok, progress} <- native_turn_frame_progress(payload, options, state),
+         %{native_turn_progress: recorded} <- options.extra,
+         true <- NativeTurnContinuation.progress_digest(progress) == recorded do
+      Map.update(state, :response_task_progress, %{pid => progress}, &Map.put(&1, pid, progress))
+    else
+      _unknown_or_diverged -> state
+    end
+  end
+
+  defp put_response_task_turn(state, _pid, _prepared), do: state
+
+  defp forget_response_task_turn(%{response_task_turns: turns} = state, pid),
+    do: %{state | response_task_turns: Map.delete(turns, pid)} |> forget_response_task_progress(pid)
+
+  defp forget_response_task_turn(state, pid), do: forget_response_task_progress(state, pid)
+
+  defp forget_response_task_progress(%{response_task_progress: progress} = state, pid),
+    do: %{state | response_task_progress: Map.delete(progress, pid)}
+
+  defp forget_response_task_progress(state, _pid), do: state
+
+  # The released client drains user input steered into a running turn into the
+  # same turn, right after a request of it completed, and sends it on this
+  # connection anchored on that response (`session/turn.rs`
+  # `can_drain_pending_input`, `client.rs` `prepare_websocket_request`). The
+  # codec reads this record to tell such a frame from the turn's opener, which
+  # can never be anchored on a response of its own turn (findings#206 row
+  # 206-409). Only the last response counts, because the client anchors only on
+  # the last one; any other terminal forgets it.
+  defp record_completed_native_response(state, pid, data) do
+    with {:ok, %{kind: :completed}} <- StreamProtocol.terminal_outcome(data),
+         <<_::256>> = key <- state |> Map.get(:response_task_turns, %{}) |> Map.get(pid),
+         {:ok, %{"response" => %{"id" => id}}} when is_binary(id) and id != "" <- CodexPooler.JSON.decode(data) do
+      record = %{semantic_turn_key: key, response_digest: NativeCodexTurnMetadata.response_id_digest(id)}
+
+      # The progress of the request that produced this response, so the next
+      # frame anchored on it can be read in full-history terms (row 206-412).
+      record =
+        case state |> Map.get(:response_task_progress, %{}) |> Map.get(pid) do
+          {_pivot, _user_messages} = progress -> Map.put(record, :progress, progress)
+          nil -> record
+        end
+
+      Map.put(state, :last_completed_native_response, record)
+    else
+      _not_a_completed_native_turn_response -> Map.delete(state, :last_completed_native_response)
+    end
+  end
 
   defp put_prepared_public_context(%PreparedWebsocketFrame{} = prepared, state) do
     if prepared.variant == :public_response_create do
@@ -3910,25 +4116,35 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp record_public_downstream_terminal(state, class),
     do: record_downstream_terminal(state, Map.get(state, :public_response_task_pid), class)
 
+  # The terminal class the client was sent: the public route rewrites a
+  # provider terminal before it pushes it (a usage-limit `response.failed`
+  # goes out as the `error` event), and the receipt names what was pushed
+  # (findings#206 row 206-598). A pushed frame that is no terminal of its own
+  # keeps the class of the provider frame it carries.
+  defp pushed_public_terminal_class(normalized, data),
+    do: DeliveryReceipt.terminal_class(normalized) || DeliveryReceipt.terminal_class(data)
+
   # The public route's own record that the client was sent its turn's
-  # `response.completed`: an SDK closes the moment that terminal arrives, while
-  # the turn's task is still settling, and the receipt of that turn used to say
-  # `aborted` (findings#225 row 225-240, openai-node `ResponsesWS`). It feeds
-  # only the termination receipt (`termination_receipt_outcome/3`), never the
-  # task's acknowledgement, which keeps reading
-  # `response_task_completed_terminals` (row 225-130 changed only the receipt).
-  defp maybe_mark_public_completed_terminal(state, data) do
+  # terminal: an SDK closes the moment that terminal arrives, while the turn's
+  # task is still settling, and the receipt of that turn used to say `aborted`
+  # (findings#225 row 225-240, openai-node `ResponsesWS`, for
+  # `response.completed`; findings#206 row 206-598 for the `error` event of a
+  # refused turn). It feeds only the termination receipt
+  # (`termination_receipt_outcome/3`), never the task's acknowledgement, which
+  # keeps reading `response_task_completed_terminals` (row 225-130 changed only
+  # the receipt).
+  defp maybe_mark_public_pushed_terminal(state, normalized, data) do
     pid = Map.get(state, :public_response_task_pid)
 
-    if is_pid(pid) and DeliveryReceipt.terminal_class(data) == "response.completed",
-      do: Map.update(state, :public_completed_terminals, MapSet.new([pid]), &MapSet.put(&1, pid)),
+    if is_pid(pid) and is_binary(pushed_public_terminal_class(normalized, data)),
+      do: Map.update(state, :public_pushed_terminals, MapSet.new([pid]), &MapSet.put(&1, pid)),
       else: state
   end
 
-  defp forget_public_completed_terminal(%{public_completed_terminals: pids} = state, pid),
-    do: %{state | public_completed_terminals: MapSet.delete(pids, pid)}
+  defp forget_public_pushed_terminal(%{public_pushed_terminals: pids} = state, pid),
+    do: %{state | public_pushed_terminals: MapSet.delete(pids, pid)}
 
-  defp forget_public_completed_terminal(state, _pid), do: state
+  defp forget_public_pushed_terminal(state, _pid), do: state
 
   defp maybe_record_skipped_downstream_terminal(state, pid, data) when is_pid(pid) do
     with true <- tracked_response_task?(state, pid),
@@ -4146,7 +4362,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
         |> Map.update(:response_task_results_ready, MapSet.new(), &MapSet.delete(&1, pid))
         |> Map.update(:response_task_terminals_accepted, MapSet.new(), &MapSet.delete(&1, pid))
         |> Map.update(:response_task_completed_terminals, MapSet.new(), &MapSet.delete(&1, pid))
-        |> forget_public_completed_terminal(pid)
+        |> forget_public_pushed_terminal(pid)
         |> clear_downstream_delivery_evidence(pid)
         |> do_remove_tracked_response_task(pid)
         |> remove_native_turn_output(pid)
@@ -4234,11 +4450,12 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   # `:aborted` (it cannot certify a settlement it did not observe, findings#225
   # row 225-105). The delivery receipt records what the client received
   # instead: when the socket already pushed and accepted the turn's completed
-  # terminal, the receipt is `delivered` even though the acknowledgement is
-  # not (findings#225 row 225-130). Only the receipt changes.
+  # terminal, or a public turn's terminal of any class, the receipt is
+  # `delivered` even though the acknowledgement is not (findings#225 rows
+  # 225-130 and 225-240, findings#206 row 206-598). Only the receipt changes.
   defp termination_receipt_outcome(state, pid, :aborted) do
     if MapSet.member?(Map.get(state, :response_task_completed_terminals, MapSet.new()), pid) or
-         MapSet.member?(Map.get(state, :public_completed_terminals, MapSet.new()), pid),
+         MapSet.member?(Map.get(state, :public_pushed_terminals, MapSet.new()), pid),
        do: :delivered,
        else: :aborted
   end
@@ -4515,6 +4732,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
       state
       |> Map.update(:response_task_terminals_accepted, MapSet.new([pid]), &MapSet.put(&1, pid))
       |> maybe_mark_completed_response_task_terminal(pid, terminal_outcome(data))
+      |> record_completed_native_response(pid, data)
       |> record_downstream_terminal(pid, DeliveryReceipt.terminal_class_from_outcome(outcome))
     else
       _not_terminal -> state
@@ -4652,6 +4870,8 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
   defp maybe_put_public_stream_id(payload, _stream_id), do: payload
 
   defp handle_output_commit_probe(message, state) do
+    state = maybe_reopen_public_owner_attempt(state)
+
     with false <- public_turn_aborted?(state),
          false <- Map.get(state, :public_turn_owner_complete?, false),
          %{epoch: epoch, correlation_id: correlation_id} <-
@@ -4752,6 +4972,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
     state
     |> Map.update(:tasks, MapSet.new(), &MapSet.delete(&1, pid))
     |> forget_response_task_model(pid)
+    |> forget_response_task_turn(pid)
     |> clear_direct_cleanup(pid)
     |> DownstreamSession.clear_cleanup_witness(pid)
   end
@@ -5638,7 +5859,10 @@ defmodule CodexPoolerWeb.CodexResponsesSocket do
           state = put_drained_response_task_activity(state, pid, token)
           do_await_response_tasks(state, reason, tasks, monitors, deadline)
 
-        {:codex_response_done, pid, result} ->
+        # Only a result of a task this drain awaits, as in the pre-cleanup
+        # drain: a result from any other pid is not this socket's to take
+        # (findings#206 row 206-437).
+        {:codex_response_done, pid, result} when is_map_key(monitors, pid) ->
           pending = Map.get(state, :pending_cleanup_activities, %{})
 
           state =

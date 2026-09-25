@@ -13,6 +13,8 @@ Codex Pooler provides narrow OpenAI-compatible `/v1` support for selected SDK ro
 
 It doesn't provide full OpenAI API parity.
 
+![Codex Pooler OpenAI-compatible SDK integrations](/codex-pooler-sdks.png)
+
 For a short citable summary, see [OpenAI-compatible Codex gateway](/discovery/openai-compatible-codex-gateway/).
 
 ## What OpenAI-Compatible Means Here
@@ -67,8 +69,9 @@ model metadata advertisement is not an entitlement or price promise.
 Use the dedicated setup pages when configuring an agent or editor that has its own provider shape:
 
 - [Aider](/clients/aider/)
-- [Continue](/clients/continue/)
 - [Cline](/clients/cline/)
+- [Continue](/clients/continue/)
+- [DeepSeek Harness](/clients/deepseek-harness/)
 - [Goose](/clients/goose/)
 - [Hermes Agent](/clients/hermes/)
 - [Kilo Code](/clients/kilo-code/)
@@ -342,6 +345,11 @@ including streams whose terminal event omits the output list.
 The optional `user` field accepts a string or null and is discarded before
 dispatch. It does not establish ownership, permissions, or routing identity.
 
+A `tool` message may carry `image_url` parts next to its text, as Hermes sends a
+screenshot tool result when it talks Chat Completions. Codex Pooler forwards them
+as images of the tool output, with `image_url.detail` handled like a user image.
+A `file` part in a `tool` message returns `invalid_request`.
+
 ### Image generation and edits
 
 Use `gpt-image-2.5-flare` for current image examples, or select `gpt-image-2.5-sunburst` explicitly. Both [Flare](https://developers.openai.com/api/docs/models/gpt-image-2.5-flare) and [Sunburst](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst) are accepted; `gpt-image-2`, `gpt-image-1.5`, `gpt-image-1`, and `gpt-image-1-mini` remain available for compatibility. Media identifiers do not have to appear in the Pool's model catalog for these translated routes to work.
@@ -466,6 +474,9 @@ has one type on every surface.
   succeed on a retry.
 - `rate_limit_error`: the request was throttled with HTTP `429`. Retry after
   backing off.
+- `usage_limit_reached`: HTTP `429` when every upstream account is exhausted
+  until a known reset (see below). Retry after the reset it names. The same
+  `quota_exhausted` code on a retryable `503` keeps `server_error`.
 - `invalid_request_error`: the client must change the request before retrying,
   or the connection was superseded by its own newer replacement.
 
@@ -476,9 +487,12 @@ openai-python and the Vercel AI SDK retry on the HTTP status (`408`, `409`,
 Codex's HTTP client retries `5xx` and transport errors, not `429`, with a
 default budget of four retries on a 200 ms doubling backoff; its sampling loop
 then retries any retryable turn error, including an unexpected status such as
-`409` and a `429` rate limit, up to five more times from its own error variant,
-surfacing each as a stream disconnect and falling back from websocket to HTTPS
-once that budget is spent. None of that reads the type. Keep that behaviour and use the type and `error.code` for diagnosis,
+`403` or `409` and a stream-level rate limit, up to five more times from its own
+error variant, surfacing each as a stream disconnect and falling back from
+websocket to HTTPS once that budget is spent. A `400` response or frame and a
+`429` status end the turn at once, so a Pooler policy denial that no resend can
+pass (`model_not_allowed`, a per-request token cap) answers `400`. None of that
+reads the type. Keep that behaviour and use the type and `error.code` for diagnosis,
 treating `error.code` as an open string as described below; on the
 `GET /v1/responses` frame surface there is no HTTP status, and the type is what
 a reader sees. The status and the type never disagree: a `5xx` response or frame
@@ -491,6 +505,61 @@ Policy denials that Codex Pooler authors (`api_key_missing`,
 own code and message on `/v1/*`, exactly as on `/backend-api/codex/*`; they are
 never rewritten to `server_error` or `upstream request failed`, because no
 upstream was involved.
+
+### When every upstream account is exhausted
+
+When every account that can serve the requested model is excluded because its
+quota is exhausted, and Codex Pooler knows when each of them resets, the
+request is answered before any upstream work with the same terminal shape the
+Codex backend uses for an exhausted account, on every route and transport:
+
+- HTTP status `429` (and `"status": 429` on a websocket error frame);
+- `error.type` `usage_limit_reached`, `error.code` `quota_exhausted` and Codex
+  Pooler's own message, also on `/v1/*`;
+- `resets_at` (Unix seconds) and `resets_in_seconds` for the earliest reset
+  among those accounts;
+- a `Retry-After` header with the same number of seconds (in the websocket
+  error frame's `headers`), plus `x-should-retry: false` on HTTP when the wait
+  is longer than 60 seconds.
+
+The Codex client ends the turn and names the reset time; the OpenAI SDKs do not
+retry it. The time is advice rather than a promise: an automatically redeemed
+saved reset can bring an account back sooner. When the reset of any of those
+accounts is unknown (missing or stale quota evidence), or an account was taken
+out by an open circuit rather than by quota, the answer stays a retryable `503`
+(`quota_evidence_unavailable` or `quota_exhausted`) with no reset fields. When
+an open circuit took an account out, that `503` (and the `no_eligible_backend`
+`503` when open circuits took out every account) carries a `Retry-After` of the
+seconds until the earliest of those circuits lets a request through again,
+between 1 and 60, in the websocket error frame's `headers` too, and never
+`x-should-retry: false`, because the request can succeed then. The same
+applies when a circuit opens between routing and dispatch, and to file
+uploads. When
+at least one account is still eligible, the request is routed to it as usual,
+and a provider usage-limit refusal that arrives before any output moves the
+same request to another eligible account. That includes an account Codex
+Pooler kept out of the request because it advertises the model with a
+different catalog shape: when the last account of the chosen shape refuses
+with a usage limit, the request moves to such an account once.
+
+When no other account is left for the request and the Codex backend's
+usage-limit refusal names the account's reset, that refusal gets the same
+answer: `429`, `usage_limit_reached`, `quota_exhausted` and Codex Pooler's
+message, and `resets_at` and `resets_in_seconds` for the soonest of the
+backend's reset and the resets of the other accounts, which must all be
+exhausted with a known reset (otherwise the refusal stays retryable),
+`Retry-After`, and `x-should-retry: false` when the wait is longer than 60
+seconds. The backend's own message and other fields are not relayed. Over
+the `GET /v1/responses` websocket the same refusal is the `error` event with
+`"status": 429`, those fields and `headers.retry-after`. A streaming
+`/v1/responses` request that Codex Pooler carries over the backend's
+websocket gets the same HTTP answer, or moves to another eligible account,
+when the refusal arrives before any output. A usage-limit
+refusal that names no reset still ahead, or one answered while another
+account's return is not known, keeps the redacted `429` `rate_limit_error`
+described below in both serving modes, with `Retry-After` (and, over the
+websocket, an `error` event with `headers.retry-after`) when an account that
+an open circuit took out bounds the wait.
 
 ### Relayed terminal errors
 

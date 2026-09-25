@@ -8,6 +8,7 @@ defmodule CodexPooler.Gateway.Routing.FileSelection do
 
   alias CodexPooler.Gateway.Routing.{
     CandidateEligibility,
+    CircuitRetryAfter,
     RouteFiltering,
     RoutePlanInput,
     RoutingSelection
@@ -88,8 +89,17 @@ defmodule CodexPooler.Gateway.Routing.FileSelection do
       {:ok, selection}
     else
       {:error, reason} ->
-        {:error, route_selection_error(reason, request_options)}
+        {:error, reason |> route_selection_error(request_options) |> circuit_retry_advice(auth, model, candidates, request_options)}
     end
+  end
+
+  # A file route refusal carries the circuit retry advice of the turn routes
+  # (findings#206 rows 206-532, 206-548), from the circuits read now: that
+  # covers the filter's circuit refusal and a circuit that refused at
+  # `select_and_begin_circuit/1` after the filter admitted the candidate.
+  defp circuit_retry_advice(error, auth, model, candidates, request_options) do
+    {:error, error} = CircuitRetryAfter.put_current({:error, error}, auth, model, candidates, RequestOptions.route_class(request_options))
+    error
   end
 
   defp require_file_candidates([], request_options) do
@@ -126,8 +136,13 @@ defmodule CodexPooler.Gateway.Routing.FileSelection do
     |> RouteFiltering.filter_candidates_with_route_state(route_state, quota_mode: :optional)
   end
 
+  # An all-exhausted Pool's terminal usage limit keeps its reset, so the file
+  # route renders the same fields and retry headers as the turn routes
+  # (findings#206 row 206-508).
   defp route_selection_error(%{status: status, code: code, message: message} = reason, opts) do
-    safe_error(status, code, message, route_error_metadata(reason, opts))
+    status
+    |> safe_error(code, message, route_error_metadata(reason, opts))
+    |> maybe_put_usage_limit(reason)
   end
 
   defp route_selection_error(reason, opts) do
@@ -138,6 +153,9 @@ defmodule CodexPooler.Gateway.Routing.FileSelection do
       route_error_metadata(reason, opts)
     )
   end
+
+  defp maybe_put_usage_limit(error, %{usage_limit: %{} = usage_limit}), do: Map.put(error, :usage_limit, usage_limit)
+  defp maybe_put_usage_limit(error, _reason), do: error
 
   defp route_error_metadata(reason, opts) do
     reason

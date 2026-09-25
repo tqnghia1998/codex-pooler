@@ -11,6 +11,7 @@ defmodule CodexPooler.Access.APIKeys do
     Assignment,
     AuditLog,
     Authentication,
+    Deletion,
     Errors,
     Material,
     Notifications,
@@ -33,6 +34,14 @@ defmodule CodexPooler.Access.APIKeys do
   @status_active "active"
   @status_paused "paused"
   @status_revoked "revoked"
+  @binding_fields [:default_policy, "default_policy", :model_policies, "model_policies"]
+  @key_row_policy_fields [
+    :allowed_model_identifiers,
+    :enforced_model_identifier,
+    :enforced_reasoning_effort,
+    :maximum_reasoning_effort,
+    :enforced_service_tier
+  ]
   @policy_denial_precedence [
     :api_key_missing,
     :api_key_disabled,
@@ -204,6 +213,32 @@ defmodule CodexPooler.Access.APIKeys do
   @spec update_api_key(Scope.t(), APIKey.t() | Ecto.UUID.t(), map()) ::
           {:ok, APIKey.t()} | {:error, Ecto.Changeset.t() | access_error()}
   def update_api_key(%Scope{} = scope, %APIKey{} = api_key, attrs) when is_map(attrs) do
+    with :ok <- refuse_binding_fields(attrs) do
+      do_update_api_key(scope, api_key, attrs)
+    end
+  end
+
+  def update_api_key(%Scope{} = scope, api_key_id, attrs) when is_binary(api_key_id) do
+    with {:ok, api_key} <- get_api_key(scope, api_key_id) do
+      update_api_key(scope, api_key, attrs)
+    end
+  end
+
+  def update_api_key(_scope, _api_key, _attrs),
+    do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
+
+  # This path writes the key row only. A caller that sends binding limits
+  # would otherwise believe it changed a limit while nothing happened, so they
+  # are refused before any lock or write (findings#206 row 206-505).
+  defp refuse_binding_fields(attrs) do
+    if Enum.any?(@binding_fields, &Map.has_key?(attrs, &1)) do
+      {:error, Errors.access_error(:unsupported_field, "default_policy and model_policies change bindings; use update_api_key_with_policy")}
+    else
+      :ok
+    end
+  end
+
+  defp do_update_api_key(scope, api_key, attrs) do
     case update_api_key_transaction(scope, api_key, attrs) do
       {:ok, {updated_api_key, previous_api_key, invalidate_dashboard_sessions?, notification}} ->
         maybe_broadcast_dashboard_invalidation(
@@ -222,15 +257,6 @@ defmodule CodexPooler.Access.APIKeys do
         error
     end
   end
-
-  def update_api_key(%Scope{} = scope, api_key_id, attrs) when is_binary(api_key_id) do
-    with {:ok, api_key} <- get_api_key(scope, api_key_id) do
-      update_api_key(scope, api_key, attrs)
-    end
-  end
-
-  def update_api_key(_scope, _api_key, _attrs),
-    do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
 
   @spec update_api_key_with_policy(
           Scope.t(),
@@ -272,7 +298,8 @@ defmodule CodexPooler.Access.APIKeys do
            {:ok, target_pool_id} <- authorize_api_key_update(scope, previous_api_key, attrs),
            transition =
              RuntimeAuthorization.advance_epoch_for_pool_move(transition, target_pool_id),
-           update_attrs = api_key_update_attrs(attrs, target_pool_id),
+           {:ok, policy_attrs} <- key_row_policy_attrs(scope, target_pool_id, previous_api_key, attrs),
+           update_attrs = attrs |> api_key_update_attrs(target_pool_id) |> Map.merge(policy_attrs),
            {:ok, updated_api_key} <-
              update_api_key_record(previous_api_key, update_attrs, transition) do
         {:ok,
@@ -286,13 +313,29 @@ defmodule CodexPooler.Access.APIKeys do
     end)
   end
 
+  # A policy field on the key row goes through the policy path's merge and
+  # validation: an omitted group keeps the stored value read under the writer
+  # lock, the allow list is lowercased, and a list that drops the stored
+  # enforced model is refused (findings#206 row 206-505). This path never
+  # writes bindings, so the stored bindings are not read.
+  defp key_row_policy_attrs(scope, target_pool_id, api_key, attrs) do
+    if Policy.key_policy_submitted?(attrs) do
+      with {:ok, normalized} <- Policy.normalize_attrs(scope, target_pool_id, Policy.merge_stored(attrs, api_key, [])) do
+        {:ok, Map.take(normalized, @key_row_policy_fields)}
+      end
+    else
+      {:ok, %{}}
+    end
+  end
+
   defp update_api_key_record(api_key, update_attrs, transition) do
     mutation = fn ->
-      api_key
-      |> APIKey.changeset(update_attrs)
+      changeset = APIKey.changeset(api_key, update_attrs)
+
+      changeset
       |> Ecto.Changeset.put_change(
         :runtime_revocation_epoch,
-        transition.runtime_revocation_epoch
+        RuntimeAuthorization.epoch_for_policy_change(transition.runtime_revocation_epoch, api_key, changeset)
       )
       |> Repo.update()
     end
@@ -446,8 +489,13 @@ defmodule CodexPooler.Access.APIKeys do
   def revoke_api_key(_scope, _api_key),
     do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
 
+  @doc """
+  Deletes an API key. A key with a small history is deleted at once (`{:ok, api_key}`); a larger
+  one is revoked at once and deleted by a background job (`{:deleting, api_key}`), see
+  `CodexPooler.Access.APIKeys.Deletion` (findings#206 row 206-561).
+  """
   @spec delete_api_key(Scope.t(), APIKey.t() | Ecto.UUID.t()) ::
-          {:ok, APIKey.t()} | {:error, term()}
+          {:ok, APIKey.t()} | {:deleting, APIKey.t()} | {:error, term()}
   def delete_api_key(%Scope{} = scope, %APIKey{} = api_key) do
     with {:ok, _decision} <-
            PoolAuthorization.require_capability(
@@ -455,16 +503,7 @@ defmodule CodexPooler.Access.APIKeys do
              PoolAuthorization.capability(:pool_api_key_manage),
              pool_id: api_key.pool_id
            ) do
-      delete_api_key_serialized(api_key)
-      |> tap(fn
-        {:ok, deleted_api_key} ->
-          DashboardSessions.broadcast_invalidation(deleted_api_key, "api_key_deleted")
-
-        {:error, _reason} ->
-          :ok
-      end)
-      |> Notifications.notify_api_key_change("api_key_deleted")
-      |> AuditLog.audit_api_key_change(scope, "api_key.delete")
+      Deletion.request(scope, api_key)
     end
   end
 
@@ -477,48 +516,68 @@ defmodule CodexPooler.Access.APIKeys do
   def delete_api_key(_scope, _api_key),
     do: {:error, Errors.access_error(:invalid_request, "user scope is required")}
 
-  defp delete_api_key_serialized(%APIKey{} = api_key) do
-    delete_api_key_serialized(api_key, session_ids_for_api_key(api_key.id), 3)
+  @doc """
+  Deletes the key row under `statement_timeout_ms` and writes its `api_key.delete` audit event in
+  the same transaction, for `delete_api_key/2` and the deletion job. `{:error, :statement_timeout}`
+  when the delete ran out of its bound; nothing was deleted then.
+  """
+  @spec delete_api_key_row(Scope.t(), APIKey.t(), pos_integer()) ::
+          {:ok, APIKey.t()} | {:error, :statement_timeout | term()}
+  def delete_api_key_row(%Scope{} = scope, %APIKey{} = api_key, statement_timeout_ms) do
+    delete_context = %{scope: scope, statement_timeout_ms: statement_timeout_ms}
+
+    api_key
+    |> delete_api_key_serialized(session_ids_for_api_key(api_key.id), 3, delete_context)
+    |> tap(fn
+      {:ok, deleted_api_key} ->
+        DashboardSessions.broadcast_invalidation(deleted_api_key, "api_key_deleted")
+
+      {:error, _reason} ->
+        :ok
+    end)
+    |> Notifications.notify_api_key_change("api_key_deleted")
   end
 
-  defp delete_api_key_serialized(api_key, session_ids, attempts_left) do
+  defp delete_api_key_serialized(api_key, session_ids, attempts_left, delete_context) do
     maybe_wait_after_api_key_delete_snapshot(api_key.id, session_ids, attempts_left)
 
-    result = Repo.transact(fn -> delete_api_key_with_locked_sessions(api_key, session_ids) end)
+    result = Repo.transact(fn -> delete_api_key_with_locked_sessions(api_key, session_ids, delete_context) end)
 
     case normalize_api_key_delete_result(result) do
       {:error, %{code: :api_key_delete_conflict}} when attempts_left > 1 ->
-        delete_api_key_serialized(api_key, session_ids_for_api_key(api_key.id), attempts_left - 1)
+        delete_api_key_serialized(api_key, session_ids_for_api_key(api_key.id), attempts_left - 1, delete_context)
 
       normalized ->
         normalized
     end
   rescue
     exception in Postgrex.Error ->
-      if api_key_delete_retryable_postgres_error?(exception) do
-        retry_api_key_delete_after_conflict(api_key, attempts_left)
-      else
-        reraise exception, __STACKTRACE__
+      cond do
+        match?(%{postgres: %{code: :query_canceled}}, exception) -> {:error, :statement_timeout}
+        api_key_delete_retryable_postgres_error?(exception) -> retry_api_key_delete_after_conflict(api_key, attempts_left, delete_context)
+        true -> reraise exception, __STACKTRACE__
       end
 
     exception in Ecto.ConstraintError ->
       if exception.type == :foreign_key do
-        retry_api_key_delete_after_conflict(api_key, attempts_left)
+        retry_api_key_delete_after_conflict(api_key, attempts_left, delete_context)
       else
         reraise exception, __STACKTRACE__
       end
   end
 
-  defp delete_api_key_with_locked_sessions(api_key, session_ids) do
+  defp delete_api_key_with_locked_sessions(api_key, session_ids, %{scope: scope, statement_timeout_ms: statement_timeout_ms}) do
+    Repo.query!("SELECT set_config('statement_timeout', $1, true)", ["#{statement_timeout_ms}ms"])
     lock_api_key_sessions(session_ids)
 
     with %APIKey{} = locked_api_key <- lock_api_key(api_key.id),
          :ok <- require_current_api_key_sessions(locked_api_key.id, session_ids),
          :ok <- close_api_key_replays(locked_api_key.id) do
+      # The audit event commits with the delete or not at all (findings#206 row 206-561).
       DashboardSessionLifecycle.run_in_transaction(
         locked_api_key,
         "api_key_deleted",
-        fn -> Repo.delete(locked_api_key) end
+        fn -> locked_api_key |> Repo.delete() |> AuditLog.audit_api_key_change(scope, "api_key.delete") end
       )
     else
       nil -> {:error, Errors.access_error(:api_key_not_found, "api key was not found")}
@@ -526,10 +585,10 @@ defmodule CodexPooler.Access.APIKeys do
     end
   end
 
-  defp retry_api_key_delete_after_conflict(api_key, attempts_left) when attempts_left > 1,
-    do: delete_api_key_serialized(api_key, session_ids_for_api_key(api_key.id), attempts_left - 1)
+  defp retry_api_key_delete_after_conflict(api_key, attempts_left, delete_context) when attempts_left > 1,
+    do: delete_api_key_serialized(api_key, session_ids_for_api_key(api_key.id), attempts_left - 1, delete_context)
 
-  defp retry_api_key_delete_after_conflict(_api_key, _attempts_left),
+  defp retry_api_key_delete_after_conflict(_api_key, _attempts_left, _delete_context),
     do: api_key_delete_conflict()
 
   defp api_key_delete_retryable_postgres_error?(%Postgrex.Error{
@@ -839,7 +898,6 @@ defmodule CodexPooler.Access.APIKeys do
       :dashboard_access,
       :max_active_requests,
       :expires_at,
-      :allowed_model_identifiers,
       :metadata
     ]
     |> Enum.reduce(%{}, &put_update_attr(&2, attrs, &1))

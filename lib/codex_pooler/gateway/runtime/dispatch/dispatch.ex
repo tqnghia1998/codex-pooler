@@ -13,8 +13,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
   alias CodexPooler.Gateway.Payloads.RequestOptions.ResetProbe
   alias CodexPooler.Gateway.Persistence.RoutingCircuitState
   alias CodexPooler.Gateway.Routing.CandidateEligibility.Quota
-  alias CodexPooler.Gateway.Routing.{ModelMetadata, RouteLifecycle, RoutingSelection}
+  alias CodexPooler.Gateway.Routing.{CircuitRetryAfter, ModelMetadata, RouteLifecycle, RoutingSelection}
   alias CodexPooler.Gateway.Runtime.Dispatch.Context
+  alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.ReplayPreparation
   alias CodexPooler.Gateway.Runtime.Dispatch.SelectedCandidateContext
   alias CodexPooler.Gateway.Runtime.Finalization.AttemptSettlement
@@ -33,8 +34,22 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
       when is_function(transport_dispatch, 1) do
     context
     |> dispatch_from(0, transport_dispatch)
+    |> maybe_dispatch_partition_fallback(context, transport_dispatch)
     |> finalize_dispatch_result()
   end
+
+  # The selected partition's last candidate refused with a provider usage limit
+  # before output while a held-back partition can serve the model: the turn
+  # moves there once (findings#206 row 206-586). The fallback context's route
+  # state has the fallback spent, so its own last candidate finalizes.
+  defp maybe_dispatch_partition_fallback({:retry, :partition_fallback}, %Context{} = context, transport_dispatch) do
+    case PartitionFallback.context(context) do
+      {:ok, fallback_context} -> dispatch_from(fallback_context, 0, transport_dispatch)
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp maybe_dispatch_partition_fallback(result, _context, _transport_dispatch), do: result
 
   @spec dispatch_from(dispatch_context(), non_neg_integer(), dispatch_callback()) ::
           dispatch_result()
@@ -480,14 +495,12 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch do
              usage_status: "not_applicable",
              pre_attempt_phase: PreAttemptRelease.routing_rejected()
            }) do
+        # A circuit refused the candidate after route filtering admitted it:
+        # the same retry advice as the filter's refusal (findings#206 row
+        # 206-548).
         {:ok, _finalized} ->
-          {:error,
-           error(
-             503,
-             "no_eligible_backend",
-             "no healthy eligible backend is currently available",
-             "model"
-           )}
+          {:error, error(503, "no_eligible_backend", "no healthy eligible backend is currently available", "model")}
+          |> CircuitRetryAfter.put_current(context.auth, context.model, context.route_plan.candidates, context.route_class)
 
         {:error, gateway_error} ->
           {:error, gateway_error}

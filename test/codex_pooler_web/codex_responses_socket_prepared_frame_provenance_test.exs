@@ -115,6 +115,9 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
       assert settled_state.tasks == MapSet.new([active_turn])
       assert :queue.is_empty(settled_state.queued_response_payloads)
       assert log =~ "rejection_stage=native_compaction_deferral"
+      # The refusal line every route writes, with the cause the frame met on
+      # arrival (findings#206 row 206-394).
+      assert log =~ "native compaction refused before dispatch reason=admission_unavailable cause=owner_unavailable code=owner_unavailable status=503 compaction_phase=none topology=forwarded decided_at=reconnect reservation_phase=final"
       assert FakeUpstream.count(upstream) == 0
     end
 
@@ -159,8 +162,11 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
 
       # An owner that could not be asked at all is refused at the deferral, not
       # run as the ordinary turn: that run answers the same 503 with no row, so
-      # only the stage tells the two apart (findings#206 row 206-342).
+      # only the stage tells the two apart (findings#206 row 206-342). The
+      # refusal line names the dequeue's own cause, as the immediate route's
+      # does (findings#206 row 206-394).
       assert log =~ "rejection_stage=native_compaction_deferral"
+      assert log =~ "native compaction refused before dispatch reason=admission_unavailable cause=owner_unavailable code=owner_unavailable status=503 compaction_phase=none topology=forwarded decided_at=dequeue reservation_phase=final"
       assert :queue.is_empty(dequeued_state.queued_response_payloads)
       assert [retry_task] = MapSet.to_list(dequeued_state.tasks)
       refute retry_task == active_turn
@@ -178,6 +184,42 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
       decoded = CodexPooler.JSON.decode!(frame)
       assert decoded["status"] == 503
       assert decoded["error"]["code"] == "owner_unavailable"
+      assert FakeUpstream.count(upstream) == 0
+    end
+
+    # An incremental compaction deferred behind the active turn is refused at
+    # dequeue with the same line the immediate route writes (findings#206 row
+    # 206-394): it used to leave only the info-level rejection, without the
+    # owner's cause, next to the generic failed-turn warning.
+    test "the queue route refuses a deferred incremental compaction with the immediate route's refusal line", %{
+      auth: auth,
+      session: session,
+      model: model,
+      upstream: upstream
+    } do
+      active_turn = idle_process()
+      on_exit(fn -> send(active_turn, :stop) end)
+
+      state =
+        auth
+        |> reconnect_socket_state(session, active_turn)
+        |> Map.put(:websocket_owner_active_turn_reconnect?, false)
+        |> put_in([:websocket_owner_downstream, :active_turn_reconnect?], false)
+
+      assert {:ok, queued_state} = CodexResponsesSocket.handle_in({incremental_compaction_frame(model), [opcode: :text]}, state)
+      assert [%{request_options: %RequestOptions{native_compaction_reservation: %{phase: :compact}}}] = :queue.to_list(queued_state.queued_response_payloads)
+
+      {dequeued_state, log} =
+        with_log(fn ->
+          assert {:ok, dequeued_state} = CodexResponsesSocket.handle_info({:codex_response_done, active_turn, :ok}, queued_state)
+          dequeued_state
+        end)
+
+      assert log =~ "native compaction refused before dispatch reason=admission_unavailable cause=owner_unavailable code=owner_unavailable status=503 compaction_phase=mid_turn topology=forwarded decided_at=dequeue reservation_phase=compact"
+      assert [retry_task] = MapSet.to_list(dequeued_state.tasks)
+      assert_receive {:codex_response_done, ^retry_task, result}, @detection_timeout_ms
+      assert {:push, {:text, frame}, _final_state} = CodexResponsesSocket.handle_info({:codex_response_done, retry_task, result}, dequeued_state)
+      assert %{"status" => 503, "error" => %{"code" => "owner_unavailable"}} = CodexPooler.JSON.decode!(frame)
       assert FakeUpstream.count(upstream) == 0
     end
 
@@ -275,6 +317,15 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
 
       if interrupt == :before_output do
         dispatched_state = assert_superseded_replay_dispatch!(result, log, owner_pid, setup, prewarm)
+        # Both sockets of this test are the test process, and the drain inside
+        # `terminate/2` takes any task's result, so the first socket's drain
+        # can take the dispatched turn's result as its own. That task then
+        # parks for a delivery acknowledgement nobody sends, and the second
+        # `terminate/2` sat out its whole 15 s owner drain whenever the session
+        # cleanup was deferred (findings#206 row 206-426). The dispatched turn
+        # completes at once, so its result is processed here, as the second
+        # socket's WebSock loop would.
+        dispatched_state = settle_dispatched_turn!(dispatched_state)
         release_interrupted_turn!(predecessor)
         CodexResponsesSocket.terminate(:closed, first_state)
         CodexResponsesSocket.terminate(:closed, dispatched_state)
@@ -351,6 +402,7 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
       assert {:push, {:text, frame}, refused_state} = result
       assert %{"status" => 503, "error" => %{"code" => "owner_unavailable"}} = CodexPooler.JSON.decode!(frame)
       assert log =~ "rejection_stage=native_compaction_deferral"
+      assert log =~ "native compaction refused before dispatch reason=admission_unavailable cause=no_admission code=owner_unavailable status=503 compaction_phase=mid_turn topology=forwarded decided_at=reconnect reservation_phase=compact"
       assert refused_state.websocket_owner_pending_handoff == nil
       assert [_interrupted] = request_logs(setup.pool.id)
       assert FakeUpstream.count(upstream) == 0
@@ -462,6 +514,41 @@ defmodule CodexPoolerWeb.CodexResponsesSocketPreparedFrameProvenanceTest do
     state = settle_task!(state, task)
     assert MapSet.size(state.tasks) == 0
     state
+  end
+
+  # Runs the second socket's WebSock loop for the dispatched turn until that
+  # turn's task exits, its exit being the signal that no drain can wait on it:
+  # the owner's frames for the second downstream (its correlation and epoch)
+  # and the task's own messages. The first socket's messages, which share this
+  # mailbox, stay where they are.
+  @dispatched_task_messages [:websocket_response_activity, :codex_response_done, :websocket_response_delivery_complete, :direct_request_cleanup]
+
+  defp settle_dispatched_turn!(state) do
+    assert [task] = MapSet.to_list(state.tasks)
+    %{correlation_id: correlation_id, epoch: epoch} = state.websocket_owner_downstream
+    pump_dispatched_turn!(state, task, Process.monitor(task), {correlation_id, epoch})
+  end
+
+  defp pump_dispatched_turn!(state, task, monitor, {correlation_id, epoch} = downstream) do
+    receive do
+      {:DOWN, ^monitor, :process, ^task, _reason} ->
+        state
+
+      message when is_tuple(message) and tuple_size(message) >= 3 and elem(message, 1) == correlation_id and elem(message, 2) == epoch ->
+        state |> socket_info!(message) |> pump_dispatched_turn!(task, monitor, downstream)
+
+      message when is_tuple(message) and tuple_size(message) >= 2 and elem(message, 0) in @dispatched_task_messages and elem(message, 1) == task ->
+        state |> socket_info!(message) |> pump_dispatched_turn!(task, monitor, downstream)
+    after
+      @detection_timeout_ms -> flunk("the dispatched turn's task never finished")
+    end
+  end
+
+  defp socket_info!(state, message) do
+    case CodexResponsesSocket.handle_info(message, state) do
+      {:ok, state} -> state
+      {:push, _frames, state} -> state
+    end
   end
 
   defp settle_task!(state, task) do

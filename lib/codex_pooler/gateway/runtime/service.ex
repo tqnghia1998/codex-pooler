@@ -62,6 +62,10 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   require Logger
 
   @backend_transcription_model "gpt-4o-transcribe"
+  # The key's own refusals of a retry successor's reservation: answered and
+  # recorded as the ordinary reservation answers them, never `409 duplicate_turn`
+  # (findings#206 row 206-428).
+  @retry_claim_policy_refusals [:api_key_concurrency_limit_exceeded, :api_key_policy_limit_exceeded]
   @native_image_endpoints [
     "/backend-api/codex/images/generations",
     "/backend-api/codex/images/edits"
@@ -156,7 +160,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
        when is_binary(enforced_model) do
     if native_image_request?(endpoint, request_options) and
          canonical_model_identifier(requested_model) != canonical_model_identifier(enforced_model) do
-      {:error, Denials.policy_error(403, "model_not_allowed", "api key is not allowed to use this model")}
+      {:error, Denials.policy_denial_error(:model_not_allowed)}
     else
       {:ok, enforced_model}
     end
@@ -526,12 +530,13 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     request_options = context.request_options
     maybe_test_runtime_authorization_barrier(:heartbeat, :before)
 
-    SessionLeaseHeartbeat.run(request_options, fn heartbeat ->
+    SessionLeaseHeartbeat.run(request_options, fn heartbeat, request_options ->
       context
+      |> Map.put(:request_options, request_options)
       |> do_execute_session_routable_model(reserve_and_start_turn)
       |> wrap_deferred_session_lease_stream(heartbeat)
     end)
-    |> normalize_session_lease_heartbeat_failure(request_options)
+    |> normalize_session_lease_heartbeat_failure(context)
   end
 
   defp do_execute_session_routable_model(
@@ -640,9 +645,12 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         )
 
       # A database failure is not recorded as a denied request: the record
-      # needs the database that just failed (findings#206 row 206-358).
+      # needs the database that just failed (findings#206 row 206-358). The
+      # turn claim committed before the reservation is released with it, or it
+      # fences every resend of this request (findings#206 row 206-331).
       {:error, %{code: code} = reason} when code in ["duplicate_turn", "service_unavailable"] ->
         clear_native_compaction_admission(request_options)
+        release_turn_claim(turn_claim)
         {:error, reason}
 
       {:error, {:reset_probe_scope_mismatch, reason}} ->
@@ -668,18 +676,21 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
       {:error, reason} ->
         clear_native_compaction_admission(request_options)
-        reason = AccountingReservation.pre_attempt_failure(reason, request_options)
 
-        reject_claimed_turn(
-          auth,
-          model,
-          reason,
-          endpoint,
-          payload,
-          request_options,
-          turn_claim
+        reject_pre_attempt_failure(
+          %{auth: auth, model: model, endpoint: endpoint, payload: payload, request_options: request_options, turn_claim: turn_claim},
+          reason
         )
     end
+  end
+
+  defp reject_pre_attempt_failure(context, reason) when reason in [:owner_unavailable, :stale_owner],
+    do: reject_owner_lease_refusal(context, reason, "reservation")
+
+  defp reject_pre_attempt_failure(context, reason) do
+    %{auth: auth, model: model, endpoint: endpoint, payload: payload, request_options: request_options, turn_claim: turn_claim} = context
+    reason = AccountingReservation.pre_attempt_failure(reason, request_options)
+    reject_claimed_turn(auth, model, reason, endpoint, payload, request_options, turn_claim)
   end
 
   defp clear_native_compaction_admission(%RequestOptions{} = request_options) do
@@ -752,19 +763,64 @@ defmodule CodexPooler.Gateway.Runtime.Service do
 
   @spec prepare_websocket_response(binary(), opts(), (binary() -> any())) ::
           {:ok, PreparedWebsocketFrame.t()} | {:error, gateway_error()}
-  def prepare_websocket_response(raw_payload, %RequestOptions{} = opts, push_frame),
-    do: WebsocketCodec.prepare_frame(raw_payload, opts, push_frame)
+  def prepare_websocket_response(raw_payload, %RequestOptions{} = opts, push_frame) do
+    with {:ok, prepared} <- WebsocketCodec.prepare_frame(raw_payload, opts, push_frame) do
+      before_dispatch("steered_turn_claim", fn -> maybe_rebind_steered_turn_claim(prepared) end)
+    end
+  end
 
-  @spec prepare_replay_intent(auth(), PreparedWebsocketFrame.t()) ::
+  # The released client drains user input steered into a running turn into the
+  # same turn once a request of it completed. When the connection that
+  # delivered that response is gone (or the session fell back to HTTPS) the
+  # steer goes out as full history and derives the turn's bare claim, which the
+  # turn's opener holds (findings#206 row 206-412). A frame further along the
+  # turn than the holder -- more user messages after the same compaction point,
+  # or a compaction point the holder did not end on -- cannot be a retry of it,
+  # which only appends model output, nor a resend of it with trimmed history,
+  # which stands behind it (row 206-423); it takes the steered claim of its own
+  # progress, the claim every other form of that steer derives too. A holder
+  # that recorded no position, and a frame whose progress its socket could not
+  # know, keep the bare claim and today's verdict.
+  defp maybe_rebind_steered_turn_claim(%PreparedWebsocketFrame{} = prepared) do
+    with {:ok, _progress, steered_claim} <- WebsocketCodec.steered_turn_claim(prepared),
+         {_pivot, _user_messages} = position <- Map.get(prepared.request_options.extra, :native_turn_position),
+         recorded = Accounting.native_turn_recorded_position(prepared.turn_claim_key),
+         true <- Accounting.native_turn_progress_advances?(recorded, position),
+         {:ok, rebound} <- WebsocketCodec.rebind_steered_turn_claim(prepared, steered_claim) do
+      log_steered_turn_claim_rebound(rebound)
+      {:ok, rebound}
+    else
+      {:error, _reason} -> {:error, prepared_frame_provenance_breach(prepared, "steered_turn_claim")}
+      _not_steered -> {:ok, prepared}
+    end
+  end
+
+  defp log_steered_turn_claim_rebound(%PreparedWebsocketFrame{request_options: request_options}) do
+    session = Map.get(request_options.continuity, :codex_session)
+    session_id = if is_struct(session, CodexSession), do: session.id
+    Logger.info("native websocket steered turn claim rebound codex_session_id=#{session_id} claim_class=steered_continuation")
+  end
+
+  @doc """
+  The owner's replay preflight for a replay-eligible native frame. A frame
+  whose model the key or the Pool refuses is recorded as a refused request
+  unless `record_model_denial: false`: a caller that submits the frame to the
+  ordinary checks after any refusal here (the queued-frame dequeue) leaves the
+  record to those checks, so one refusal is never recorded twice.
+  """
+  @spec prepare_replay_intent(auth(), PreparedWebsocketFrame.t(), keyword()) ::
           {:ok, replay_intent_result()} | {:error, gateway_error() | term()}
-  def prepare_replay_intent(auth, %PreparedWebsocketFrame{} = prepared) do
+  def prepare_replay_intent(auth, prepared, opts \\ [])
+
+  def prepare_replay_intent(auth, %PreparedWebsocketFrame{} = prepared, opts) when is_list(opts) do
     with :ok <- validate_replay_prepared_frame(prepared),
          {:ok, replay_context} <- replay_preflight_context(auth, prepared) do
+      replay_context = Map.put(replay_context, :record_model_denial?, Keyword.get(opts, :record_model_denial, true))
       before_dispatch("replay_intent", fn -> prepare_replay_intent_transaction(replay_context) end)
     end
   end
 
-  def prepare_replay_intent(_auth, _prepared),
+  def prepare_replay_intent(_auth, _prepared, _opts),
     do: {:error, log_prepared_frame_provenance_breach("replay_intent_shape", :unknown, nil, nil, nil)}
 
   defp validate_replay_prepared_frame(%PreparedWebsocketFrame{} = prepared) do
@@ -839,6 +895,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
          session: request_options.continuity.codex_session,
          api_key_runtime_epoch: api_key_runtime_epoch,
          endpoint: prepared.endpoint,
+         payload: payload,
          request_options: request_options,
          requested_model: requested_model,
          semantic_turn_claim_key: prepared.turn_claim_key,
@@ -891,8 +948,49 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     end)
     |> case do
       {:ok, result} -> {:ok, result}
+      {:error, {:replay_model_denial, denial}} -> refuse_replay_model(context, denial)
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  # The key's policy or the Pool's catalog refuses the frame's model before it
+  # is matched to any recorded turn, so it refuses a brand-new turn: recorded
+  # and logged as the fresh path records the same refusal, once the preflight
+  # transaction has rolled back, so the record outlives it. Forwarding on, the
+  # released client's turn (its turn metadata makes the frame replay-eligible)
+  # met this refusal here and left no row and no log line (production rev 50,
+  # Codex 0.156.1).
+  #
+  # The record carries the routing the fresh path has put on its request
+  # options by the same refusal: the requested model always, and once the
+  # key's policy resolved it, the effective model and the policy (the source
+  # of `enforced_model`). Without them the preflight's row read as a refusal
+  # of the requested model when the key had substituted an enforced one
+  # (findings#206 row 206-535).
+  defp refuse_replay_model(%{record_model_denial?: false}, {:policy, _model, reason, _routing}),
+    do: {:error, Denials.policy_denial_error(reason)}
+
+  defp refuse_replay_model(%{record_model_denial?: false}, {:gateway, _model, reason, _routing}),
+    do: {:error, reason}
+
+  defp refuse_replay_model(context, {kind, model, reason, routing}) do
+    denial_context = %Denials.Context{
+      auth: context.auth,
+      model: model,
+      reason: reason,
+      endpoint: context.endpoint,
+      payload: context.payload,
+      opts: RequestOptions.put_routing(context.request_options, [requested_model: context.requested_model] ++ routing)
+    }
+
+    {:error, public_error} =
+      case kind do
+        :policy -> Denials.log_policy(denial_context)
+        :gateway -> Denials.log_gateway(denial_context)
+      end
+
+    log_pre_classification_refusal(context.request_options, context.session, public_error.code, public_error)
+    {:error, public_error}
   end
 
   defp classify_replay_intent(locked_session, authorization, model, context) do
@@ -1238,39 +1336,68 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     Repo.rollback(public_error)
   end
 
+  # Each refusal answers what the fresh path answers for the same condition:
+  # a policy that fails normalization its own reason, recorded as a policy
+  # denial; a model the Pool does not serve `invalid_model`; a model the key
+  # may not use `model_not_allowed`, recorded against that model. A policy
+  # that failed normalization answered `model_not_allowed` here.
   defp authorize_replay_model(api_key, pool, context) do
-    with {:ok, policy} <- Access.normalize_api_key_policy(api_key),
-         {:ok, effective_model} <-
-           effective_model_name(
-             policy,
-             context.requested_model,
-             context.endpoint,
-             context.request_options
-           ),
-         %Model{} = model <- Catalog.get_model_by_exposed_id(pool, effective_model),
-         true <- model.status == "active",
-         {:ok, _policy} <-
-           Access.authorize_api_key_policy(policy, %{model_identifier: model.exposed_model_id}) do
-      {:ok, model}
-    else
-      nil ->
-        {:error, error(400, "invalid_model", "model is not available for this pool", "model")}
-
-      false ->
-        {:error, error(400, "invalid_model", "model is not available for this pool", "model")}
-
-      {:error, %{code: _code} = reason} ->
-        {:error, reason}
-
-      {:error, _reason} ->
-        {:error,
-         Denials.policy_error(
-           403,
-           "model_not_allowed",
-           "api key is not allowed to use this model"
-         )}
+    with {:ok, policy} <- normalize_replay_policy(api_key),
+         {:ok, effective_model} <- effective_replay_model_name(policy, context) do
+      authorize_replay_catalog_model(pool, policy, effective_model, context)
     end
   end
+
+  defp normalize_replay_policy(api_key) do
+    case Access.normalize_api_key_policy(api_key) do
+      {:ok, policy} -> {:ok, policy}
+      {:error, reason} -> replay_model_denial(:policy, nil, reason, [])
+    end
+  end
+
+  defp effective_replay_model_name(policy, context) do
+    case effective_model_name(policy, context.requested_model, context.endpoint, context.request_options) do
+      {:ok, effective_model} -> {:ok, effective_model}
+      {:error, reason} -> replay_model_denial(:gateway, nil, reason, [])
+    end
+  end
+
+  # HTTP and the fresh path judge the Pool's visible models before the key's
+  # policy, so a model the key does not allow that the catalog lists as active
+  # but no assignment serves is `invalid_model` there. The preflight reads the
+  # catalog row alone, so it asks for visibility before it answers
+  # `model_not_allowed`; it answered `model_not_allowed` for that model and the
+  # code depended on the forwarding mode (findings#206 row 206-549). A model
+  # the key allows is admitted on the catalog row, as before: the fresh path
+  # that runs next judges its visibility and records its own refusal.
+  defp authorize_replay_catalog_model(pool, policy, effective_model, context) do
+    routing = [api_key_policy: policy, effective_model: effective_model]
+
+    case Catalog.get_model_by_exposed_id(pool, effective_model) do
+      %Model{status: "active"} = model ->
+        case Access.authorize_api_key_policy(policy, %{model_identifier: model.exposed_model_id}) do
+          {:ok, _policy} -> {:ok, model}
+          {:error, reason} -> refuse_replay_policy_model(pool, model, reason, routing, context)
+        end
+
+      _missing_or_inactive ->
+        replay_invalid_model(routing)
+    end
+  end
+
+  defp refuse_replay_policy_model(pool, model, reason, routing, context) do
+    if replay_model_visible?(pool, Keyword.fetch!(routing, :effective_model), context),
+      do: replay_model_denial(:gateway, model, Denials.policy_denial_error(reason), routing),
+      else: replay_invalid_model(routing)
+  end
+
+  defp replay_model_visible?(pool, effective_model, context),
+    do: match?(%{visible_model: %Model{}}, visible_model_context(pool, effective_model, context.endpoint, context.request_options))
+
+  defp replay_invalid_model(routing),
+    do: replay_model_denial(:gateway, nil, error(400, "invalid_model", "model is not available for this pool", "model"), routing)
+
+  defp replay_model_denial(kind, model, reason, routing), do: {:error, {:replay_model_denial, {kind, model, reason, routing}}}
 
   defp replay_authorization_binding(session, authorization, model) do
     %{
@@ -1745,6 +1872,27 @@ defmodule CodexPooler.Gateway.Runtime.Service do
     )
   end
 
+  # The claim row this request inserted in `claim_prepared_turn/6`, never a
+  # predecessor it chained onto. Best effort: a database still failing keeps the
+  # row for the stale-claim recovery, and the refusal the client gets is the one
+  # it would have got anyway.
+  defp release_turn_claim(nil), do: :ok
+
+  defp release_turn_claim(%Accounting.Request{} = turn_claim) do
+    case Accounting.release_websocket_turn_claim(turn_claim) do
+      {:ok, _released_or_kept} -> :ok
+      {:error, reason} -> log_turn_claim_release_failure(reason)
+    end
+  rescue
+    exception -> log_turn_claim_release_failure(exception.__struct__)
+  catch
+    kind, _reason -> log_turn_claim_release_failure(kind)
+  end
+
+  defp log_turn_claim_release_failure(reason) do
+    Logger.warning("websocket turn claim release failed reason_code=#{DiagnosticTaxonomy.reason_code(reason) || "unknown"}")
+  end
+
   defp claim_explicit_websocket_turn(
          _auth,
          _model,
@@ -2090,7 +2238,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         {:ok, claim} ->
           {:ok, Map.from_struct(claim)}
 
-        {:error, %{code: :api_key_concurrency_limit_exceeded}} = denial ->
+        {:error, %{code: code}} = denial when code in @retry_claim_policy_refusals ->
           denial
 
         {:error, reason} ->
@@ -2147,7 +2295,7 @@ defmodule CodexPooler.Gateway.Runtime.Service do
       {:ok, claim} ->
         {:ok, Map.from_struct(claim)}
 
-      {:error, %{code: :api_key_concurrency_limit_exceeded}} = denial ->
+      {:error, %{code: code}} = denial when code in @retry_claim_policy_refusals ->
         denial
 
       {:error, reason} ->
@@ -2394,14 +2542,33 @@ defmodule CodexPooler.Gateway.Runtime.Service do
         )
 
       :none ->
-        :ok
+        register_frame_window_alias(auth, payload, request_options)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp register_final_window_alias(_auth, _payload, _request_options, _correlation), do: :ok
+  defp register_final_window_alias(auth, payload, request_options, _correlation),
+    do: register_frame_window_alias(auth, payload, request_options)
+
+  # A turn frame naming a newer window than the socket's session is keyed by:
+  # the client's reconnect names that window, so the window must lead to this
+  # session, whose owner holds the turn's replay (findings#206, P115). Best
+  # effort: the lookup aid never fails the turn.
+  defp register_frame_window_alias(auth, payload, %RequestOptions{continuity: %{codex_session: %CodexSession{} = session}} = request_options) do
+    case ReplayPreparation.frame_window_alias_hash(request_options, payload) do
+      {:ok, hash} ->
+        disposition = SessionAliases.point_frame_window_hash(session, auth, hash, DateTime.utc_now() |> DateTime.truncate(:microsecond))
+        Logger.info("websocket frame window alias codex_session_id=#{session.id} alias_preview=#{hash |> Base.encode16(case: :lower) |> String.slice(0, 16)} disposition=#{disposition}")
+        :ok
+
+      :none ->
+        :ok
+    end
+  end
+
+  defp register_frame_window_alias(_auth, _payload, _request_options), do: :ok
 
   defp lock_codex_session_before_reservation(%RequestOptions{runtime: %{session_owner_witness: %OwnerWitness{}}} = request_options) do
     :ok =
@@ -2421,14 +2588,40 @@ defmodule CodexPooler.Gateway.Runtime.Service do
   defp lock_codex_session_before_reservation(%RequestOptions{} = request_options),
     do: request_options
 
-  defp normalize_session_lease_heartbeat_failure(
-         {:error, reason},
-         %RequestOptions{} = request_options
-       )
+  defp normalize_session_lease_heartbeat_failure({:error, reason}, context)
        when reason in [:stale_owner, :owner_unavailable],
-       do: {:error, AccountingReservation.pre_attempt_failure(reason, request_options)}
+       do: reject_owner_lease_refusal(context, reason, "synchronous_renewal")
 
-  defp normalize_session_lease_heartbeat_failure(result, %RequestOptions{}), do: result
+  defp normalize_session_lease_heartbeat_failure(result, _context), do: result
+
+  # A session owner refusal before any attempt is a client-visible answer, so
+  # it gets a rejected request row like every other refusal (findings#206 row
+  # 206-564): no attempt, turn or ledger entry, the refusal code, and the phase
+  # that refused it (`synchronous_renewal` or `reservation`). Recording is best
+  # effort, because the database can be what failed the renewal; the client
+  # gets the same refusal either way, and a claimed turn is released.
+  defp reject_owner_lease_refusal(context, reason, phase) do
+    %{auth: auth, model: model, endpoint: endpoint, payload: payload, request_options: request_options, turn_claim: turn_claim} = context
+
+    error =
+      reason
+      |> AccountingReservation.pre_attempt_failure(request_options)
+      |> Map.put(:continuity_denial, %{
+        "denial_family" => "session_owner_lease",
+        "internal_reason" => Atom.to_string(reason),
+        "failure_phase" => phase,
+        "operator_action" => "none needed; the session changed owner before this request could run, and a resend attaches to the current owner"
+      })
+
+    try do
+      Denials.log_gateway(denial_context(auth, model, error, endpoint, payload, request_options), turn_claim)
+    rescue
+      exception ->
+        Logger.warning("session owner refusal not recorded reason_code=#{DiagnosticTaxonomy.reason_code(exception.__struct__)}")
+        release_turn_claim(turn_claim)
+        {:error, error}
+    end
+  end
 
   defp wrap_deferred_session_lease_stream({:ok, %{stream: stream} = result}, heartbeat)
        when is_function(stream, 1) do

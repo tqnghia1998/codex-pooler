@@ -22,6 +22,8 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
   defstruct [
     :session_id,
     :owner_lease_token,
+    :owner_instance_id,
+    :owner_instance_boot_id,
     :ttl_seconds,
     :renewal_interval_ms,
     :caller_pid,
@@ -49,30 +51,72 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     end
   end
 
-  @spec run(RequestOptions.t(), (-> term()) | (pid() | nil -> term())) ::
+  # A two-argument callback also receives the request options the request must
+  # continue with: when the synchronous renewal took an expired lease over, they
+  # carry the new owner and witness, and the old witness would fail every later
+  # check as `stale_owner`.
+  @spec run(
+          RequestOptions.t(),
+          (-> term()) | (pid() | nil -> term()) | (pid() | nil, RequestOptions.t() -> term())
+        ) ::
           term() | {:error, :stale_owner | :owner_unavailable}
   def run(%RequestOptions{} = request_options, callback) when is_function(callback, 0) do
-    run(request_options, fn _heartbeat -> callback.() end)
+    run(request_options, fn _heartbeat, _request_options -> callback.() end)
   end
 
   def run(%RequestOptions{} = request_options, callback) when is_function(callback, 1) do
+    run(request_options, fn heartbeat, _request_options -> callback.(heartbeat) end)
+  end
+
+  def run(%RequestOptions{} = request_options, callback) when is_function(callback, 2) do
     start_opts = [schedule?: false] ++ test_start_options()
     call_timeout_ms = renew_call_timeout_ms(start_opts, request_options)
     start_opts = Keyword.put(start_opts, :renew_call_timeout_ms, call_timeout_ms)
 
     case start(request_options, start_opts) do
       :ignore ->
-        callback.(nil)
+        callback.(nil, request_options)
 
       {:ok, heartbeat} ->
-        session_id = request_options.continuity.codex_session.id
-
-        case renew_now(heartbeat, call_timeout_ms, session_id) do
-          :ok -> run_callback(heartbeat, callback)
-          {:error, reason} -> {:error, reason}
-        end
+        renew_and_run(heartbeat, call_timeout_ms, request_options, callback)
     end
   end
+
+  defp renew_and_run(heartbeat, call_timeout_ms, request_options, callback) do
+    case renew_now(heartbeat, call_timeout_ms, request_options.continuity.codex_session.id) do
+      {:ok, renewed} ->
+        request_options = adopt_renewed_owner(request_options, renewed)
+        run_callback(heartbeat, fn heartbeat -> callback.(heartbeat, request_options) end)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The renewal either extended the lease the request holds (same token) or
+  # took an expired one over (new token and owner).
+  defp adopt_renewed_owner(
+         %RequestOptions{continuity: %{codex_session: %CodexSession{} = current}} = request_options,
+         %CodexSession{owner_lease_token: token} = renewed
+       )
+       when token != current.owner_lease_token do
+    session = %{
+      current
+      | owner_instance_id: renewed.owner_instance_id,
+        owner_instance_boot_id: renewed.owner_instance_boot_id,
+        owner_lease_token: renewed.owner_lease_token,
+        owner_lease_expires_at: renewed.owner_lease_expires_at,
+        last_heartbeat_at: renewed.last_heartbeat_at
+    }
+
+    {:ok, witness} = OwnerWitness.new(session)
+
+    request_options
+    |> RequestOptions.put_continuity(codex_session: session)
+    |> RequestOptions.put_session_owner_witness(witness)
+  end
+
+  defp adopt_renewed_owner(%RequestOptions{} = request_options, _renewed), do: request_options
 
   @spec stop(pid() | nil) :: :ok
   def stop(nil), do: :ok
@@ -111,6 +155,8 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     state = %__MODULE__{
       session_id: lifecycle.session_id,
       owner_lease_token: lifecycle.owner_lease_token,
+      owner_instance_id: lifecycle.owner_instance_id,
+      owner_instance_boot_id: lifecycle.owner_instance_boot_id,
       ttl_seconds: lifecycle.ttl_seconds,
       renewal_interval_ms: lifecycle.renewal_interval_ms,
       caller_pid: lifecycle.caller_pid,
@@ -133,8 +179,12 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
   @impl GenServer
   def handle_call(:renew_now, _from, state) do
     case renew(state, :synchronous) do
-      :ok -> {:reply, :ok, schedule_renewal(state)}
-      {:error, reason, reason_class} -> {:stop, :normal, {:error, reason, reason_class}, state}
+      {:ok, %CodexSession{} = renewed} ->
+        state = adopt_renewed_token(state, renewed)
+        {:reply, {:ok, renewed}, schedule_renewal(state)}
+
+      {:error, reason, reason_class} ->
+        {:stop, :normal, {:error, reason, reason_class}, state}
     end
   end
 
@@ -153,7 +203,7 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     state = %{state | renewal_ref: nil, renewal_token: nil}
 
     case renew(state, :scheduled) do
-      :ok ->
+      {:ok, _renewed} ->
         {:noreply, schedule_renewal(state)}
 
       {:error, _reason, reason_class} ->
@@ -209,8 +259,8 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
   # with its reason class, or is killed after the call bound without logging.
   defp renew_now(heartbeat, timeout, session_id) do
     case GenServer.call(heartbeat, :renew_now, timeout) do
-      :ok ->
-        :ok
+      {:ok, renewed} ->
+        {:ok, renewed}
 
       {:error, reason, reason_class} ->
         log_renewal_failure(session_id, :synchronous, reason_class)
@@ -248,13 +298,15 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
            request_options.runtime.session_owner_witness,
          transport when transport in @http_transports <- request_options.transport.transport,
          true <- is_pid(Keyword.get(opts, :caller, self())) do
-      ttl_seconds = ttl_seconds(request_options)
+      ttl_seconds = ttl_seconds(opts, request_options)
       renewal_interval_ms = renewal_interval_ms(opts)
 
       {:ok,
        %{
          session_id: session_id,
          owner_lease_token: owner_lease_token,
+         owner_instance_id: request_options.continuity.owner_instance_id,
+         owner_instance_boot_id: request_options.continuity.owner_instance_boot_id,
          ttl_seconds: ttl_seconds,
          renewal_interval_ms: OwnerRenewalSchedule.base_interval_ms(renewal_interval_ms, ttl_seconds * 1_000),
          caller_pid: Keyword.get(opts, :caller, self()),
@@ -266,6 +318,16 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
        }}
     else
       _ineligible -> :ignore
+    end
+  end
+
+  # `:ttl_seconds` renews with a ttl other than the one the request acquired its
+  # lease with; the controller owner-lease tests use it to keep the pre-dispatch
+  # window on a long acquisition ttl while the heartbeat renews a short one.
+  defp ttl_seconds(opts, %RequestOptions{} = request_options) do
+    case Keyword.get(opts, :ttl_seconds) do
+      ttl when is_integer(ttl) and ttl > 0 -> ttl
+      _value -> ttl_seconds(request_options)
     end
   end
 
@@ -284,7 +346,7 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
       _value ->
         OwnerRenewalSchedule.base_interval_ms(
           renewal_interval_ms(opts),
-          ttl_seconds(request_options) * 1_000
+          ttl_seconds(opts, request_options) * 1_000
         ) + @call_timeout
     end
   end
@@ -339,12 +401,12 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     timeout_ms =
       min(max(state.renew_call_timeout_ms - reply_allowance_ms, 1), state.renewal_interval_ms)
 
-    [lock_timeout_ms: max(div(timeout_ms, 2), 1), timeout_ms: timeout_ms]
+    [lock_timeout_ms: max(div(timeout_ms, 2), 1), timeout_ms: timeout_ms, take_over_expired: true]
   end
 
   defp renewal_lock_options(_state, :scheduled), do: []
 
-  defp classify_renewal({:ok, %CodexSession{}}), do: :ok
+  defp classify_renewal({:ok, %CodexSession{} = session}), do: {:ok, session}
   defp classify_renewal({:error, :stale_owner}), do: {:error, :stale_owner, :stale_owner}
 
   defp classify_renewal({:error, :owner_unavailable}),
@@ -423,13 +485,36 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
 
   defp query_fingerprint(_fingerprint), do: "none"
 
+  # The request's own owner identity, so a synchronous takeover mints the new
+  # lease for the VM (or the explicit owner override) the request runs under.
   defp renewal_options(state) do
     RequestOptions.build(
-      [bridge_owner_lease_ttl_seconds: state.ttl_seconds, transport: "http_json"],
+      [
+        bridge_owner_lease_ttl_seconds: state.ttl_seconds,
+        transport: "http_json",
+        owner_instance_id: state.owner_instance_id,
+        owner_instance_boot_id: state.owner_instance_boot_id
+      ],
       "/backend-api/codex/responses",
       %{}
     )
   end
+
+  # One bounded line when the synchronous renewal took an expired lease over:
+  # the trusted session correlator only, never a token.
+  defp adopt_renewed_token(%{owner_lease_token: token} = state, %CodexSession{owner_lease_token: token}), do: state
+
+  defp adopt_renewed_token(state, %CodexSession{owner_lease_token: token} = renewed) when is_binary(token) do
+    Logger.info(
+      "session lease taken over phase=synchronous reason=expired_unrenewed " <>
+        "codex_session_id=#{DiagnosticTaxonomy.safe_correlator(state.session_id)} " <>
+        "owner_instance_id=#{DiagnosticTaxonomy.safe_correlator(renewed.owner_instance_id)}"
+    )
+
+    %{state | owner_lease_token: token}
+  end
+
+  defp adopt_renewed_token(state, _renewed), do: state
 
   defp schedule_renewal(state) do
     state = cancel_renewal(state)
@@ -483,20 +568,16 @@ defmodule CodexPooler.Gateway.Runtime.SessionLeaseHeartbeat do
     # Controller tests set this in the request process, the only place a
     # synchronous renewal's start options can come from on that path.
     defp test_start_options do
-      timeout_options =
-        case Process.get({__MODULE__, :renew_call_timeout_ms}) do
-          timeout when is_integer(timeout) and timeout > 0 -> [renew_call_timeout_ms: timeout]
-          _value -> []
-        end
-
-      case Process.get({__MODULE__, :renew}) do
-        renew when is_function(renew, 3) or is_function(renew, 4) ->
-          [renew: renew] ++ timeout_options
-
-        _value ->
-          timeout_options
-      end
+      [
+        renew: Process.get({__MODULE__, :renew}),
+        renew_call_timeout_ms: Process.get({__MODULE__, :renew_call_timeout_ms}),
+        ttl_seconds: Process.get({__MODULE__, :ttl_seconds})
+      ]
+      |> Enum.filter(&test_start_option?/1)
     end
+
+    defp test_start_option?({:renew, renew}), do: is_function(renew, 3) or is_function(renew, 4)
+    defp test_start_option?({_key, value}), do: is_integer(value) and value > 0
 
     defp test_observer(%RequestOptions{extra: %{session_lease_heartbeat_test_observer: observer}})
          when is_pid(observer),

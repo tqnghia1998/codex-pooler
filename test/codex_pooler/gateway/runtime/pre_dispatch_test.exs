@@ -1925,7 +1925,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
       "input" => native_text_input("fully exhausted split pool")
     }
 
-    assert {:error, %{status: 503, code: "quota_exhausted"}} =
+    # Every seat of every partition is exhausted with a known reset, so the
+    # denial is the terminal usage limit (findings#206 row 206-508).
+    assert {:error, %{status: 429, code: "quota_exhausted", usage_limit: %{resets_in_seconds: _seconds}}} =
              Gateway.execute(
                auth,
                @endpoint_path,
@@ -2420,7 +2422,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
 
     assert {:error,
             %{
-              status: 403,
+              status: 400,
               code: "model_not_allowed",
               message: "api key is not allowed to use this model"
             }} = PreDispatch.prepare(auth, @endpoint_path, payload, request_options, setup.model)
@@ -2449,7 +2451,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
         }
       )
 
-    assert {:error, %{status: 403, code: "model_not_allowed"}} =
+    assert {:error, %{status: 400, code: "model_not_allowed"}} =
              PreDispatch.prepare(auth, @endpoint_path, payload, request_options, setup.model)
   end
 
@@ -2473,7 +2475,7 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.PreDispatchTest do
 
     assert {:error,
             %{
-              status: 403,
+              status: 400,
               code: "model_not_allowed",
               message: "api key is not allowed to use this model"
             }} =

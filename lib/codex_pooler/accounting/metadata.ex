@@ -70,7 +70,12 @@ defmodule CodexPooler.Accounting.Metadata do
                                "token_refresh_reason_code_preview"
                              ])
 
-  @type accounting_error :: %{required(:code) => atom(), required(:message) => String.t()}
+  @type accounting_error :: %{
+          required(:code) => atom(),
+          required(:message) => String.t(),
+          optional(:limit_scope) => :window | :request,
+          optional(:retry_after_seconds) => pos_integer()
+        }
   @type request_result_row :: %{required(:request) => Request.t(), optional(atom()) => term()}
   @type request_result :: {:ok, request_result_row()} | {:error, accounting_error()}
 
@@ -396,6 +401,12 @@ defmodule CodexPooler.Accounting.Metadata do
       normalized == "native_http_resume_progress" ->
         sanitize_native_http_resume_progress(value)
 
+      normalized == "native_http_turn_progress" ->
+        sanitize_native_http_turn_progress(value)
+
+      normalized == "native_turn_progress" ->
+        sanitize_native_http_turn_progress(value)
+
       normalized == "transport_failure" ->
         sanitize_transport_failure_map(value)
 
@@ -587,6 +598,43 @@ defmodule CodexPooler.Accounting.Metadata do
   end
 
   defp sanitize_native_http_resume_progress(_value), do: %{}
+
+  # The opaque progress digest a native HTTP opening request records
+  # (`NativeTurnContinuation.turn_progress/1`, findings#206 row 206-403), and
+  # the same digest a native websocket request records as
+  # `native_turn_progress` (row 206-412). Since row 206-423 it also carries the
+  # position that orders a later request against it: the count of user
+  # messages after the latest compaction pivot and, when there is a pivot, the
+  # pivot's 32-byte digest. Rows of the previous release carry the digest alone.
+  @max_recorded_turn_user_messages 1_000_000
+
+  defp sanitize_native_http_turn_progress(%{"version" => 1, "digest" => digest} = value) when is_binary(digest) do
+    with true <- recorded_progress_digest?(digest),
+         true <- recorded_turn_position?(Map.drop(value, ["version", "digest"])) do
+      value
+    else
+      _invalid -> %{}
+    end
+  end
+
+  defp sanitize_native_http_turn_progress(_value), do: %{}
+
+  defp recorded_turn_position?(position) when map_size(position) == 0, do: true
+
+  defp recorded_turn_position?(%{"user_messages" => count} = position)
+       when map_size(position) == 1 and is_integer(count) and count >= 0 and count <= @max_recorded_turn_user_messages,
+       do: true
+
+  defp recorded_turn_position?(%{"user_messages" => count, "pivot" => pivot} = position)
+       when map_size(position) == 2 and is_integer(count) and count >= 0 and count <= @max_recorded_turn_user_messages,
+       do: recorded_progress_digest?(pivot)
+
+  defp recorded_turn_position?(_position), do: false
+
+  defp recorded_progress_digest?(digest) when is_binary(digest) and byte_size(digest) == 43,
+    do: match?({:ok, <<_::256>>}, Base.url_decode64(digest, padding: false))
+
+  defp recorded_progress_digest?(_digest), do: false
 
   defp sanitize_compaction_projection_map(value) do
     value

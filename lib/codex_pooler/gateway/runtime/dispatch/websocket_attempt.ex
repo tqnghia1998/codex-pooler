@@ -2,14 +2,21 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   @websocket_refresh_metadata_operation :merge_websocket_auth_refresh_metadata
   @moduledoc false
 
+  require Logger
+
   alias CodexPooler.Accounting
   alias CodexPooler.Accounting.FailureResponse
+  alias CodexPooler.Gateway.Contracts
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Routing.CandidateEligibility.PoolReturn
+  alias CodexPooler.Gateway.Routing.CircuitRetryAfter
   alias CodexPooler.Gateway.Runtime.Dispatch.AuthRefresh
+  alias CodexPooler.Gateway.Runtime.Dispatch.PartitionFallback
   alias CodexPooler.Gateway.Runtime.Dispatch.PreparedContext
   alias CodexPooler.Gateway.Runtime.Dispatch.ResponseContext
+  alias CodexPooler.Gateway.Runtime.Dispatch.RouteState
   alias CodexPooler.Gateway.Runtime.Finalization
-  alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata}
+  alias CodexPooler.Gateway.Runtime.Finalization.{AttemptSettlement, Metadata, ProviderUsageLimit}
   alias CodexPooler.Gateway.Runtime.Finalization.SideEffects
   alias CodexPooler.Gateway.Transports.NativeCodexResponseControl
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol
@@ -70,8 +77,9 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
   defp handle_quota_exhausted_first_event(context, dispatch_request, response, failure) do
     SideEffects.observe_websocket_response(context, response)
 
-    if context.allow_retry? and first_event_retry_policy(context) == :same_assignment and
-         context.request_options.payload_context.portable_full_history? do
+    retry_reason = quota_first_event_retry_reason(context)
+
+    if retry_reason do
       response_context = retryable_websocket_response_context(context, response)
 
       case Finalization.record_retryable_first_event_stream_failure(
@@ -81,11 +89,22 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
              record_health?: false
            ) do
         {:stale_generation, finalized} -> {:ok, finalized}
-        {:ok, _recorded_failure} -> {:retry, :upstream_quota_exhausted}
+        {:ok, _recorded_failure} -> {:retry, retry_reason}
         {:error, _reason} = error -> error
       end
     else
       finalize_retryable_first_websocket_event(context, dispatch_request, response, failure)
+    end
+  end
+
+  defp quota_first_event_retry_reason(context) do
+    cond do
+      not (first_event_retry_policy(context) == :same_assignment and context.request_options.payload_context.portable_full_history?) -> nil
+      context.allow_retry? -> :upstream_quota_exhausted
+      # The selected partition's last candidate: the turn moves to a held-back
+      # partition once (findings#206 row 206-586).
+      PartitionFallback.available?(context) -> :partition_fallback
+      true -> nil
     end
   end
 
@@ -411,9 +430,17 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
          response,
          failure
        ) do
-    deliver_retry_exhausted_websocket_failure(dispatch_request, response)
+    delivered =
+      deliver_retry_exhausted_websocket_failure(
+        dispatch_request,
+        response,
+        &ProviderUsageLimit.pool_frame(&1, fn -> other_candidates_return(context) end, fn -> other_candidates_circuit_seconds(context) end)
+      )
 
-    response_context = retryable_websocket_response_context(context, response)
+    answer = delivered |> List.last() |> usage_limit_answer()
+    log_usage_limit_answer(answer, dispatch_request, failure)
+
+    response_context = context |> retryable_websocket_response_context(response) |> record_usage_limit_answer(answer)
 
     case Finalization.finalize_first_event_stream_failure(
            Map.get(response, :body, ""),
@@ -700,17 +727,84 @@ defmodule CodexPooler.Gateway.Runtime.Dispatch.WebsocketAttempt do
     }
   end
 
+  defp deliver_retry_exhausted_websocket_failure(dispatch_request, upstream_response, project \\ &Function.identity/1)
+
+  # Delivers the refused turn's frames and returns them as the client got them.
   defp deliver_retry_exhausted_websocket_failure(
          %DispatchRequest{accounting_request: %{id: request_id}, writer: writer},
-         upstream_response
+         upstream_response,
+         project
        )
        when is_function(writer, 1) do
     request_id
     |> WebsocketCodec.stream_messages(Map.get(upstream_response, :body, ""))
-    |> Enum.each(&writer.(sanitize_retry_terminal(&1)))
+    |> Enum.map(fn frame ->
+      projected = frame |> sanitize_retry_terminal() |> project.()
+      writer.(projected)
+      projected
+    end)
   end
 
-  defp deliver_retry_exhausted_websocket_failure(_dispatch_request, _upstream_response), do: :ok
+  defp deliver_retry_exhausted_websocket_failure(_dispatch_request, _upstream_response, _project), do: []
+
+  # What the socket answers a pre-output usage-limit refusal with, read the way
+  # the socket projects the delivered frame (`ProviderUsageLimit.frame_projection/2`):
+  # the terminal usage limit and the reset it advises, or the classified relay
+  # whose Pool advice was withheld (findings#206 row 206-596).
+  defp usage_limit_answer(frame) when is_binary(frame) do
+    case CodexPooler.JSON.decode(frame) do
+      {:ok, %{} = decoded} -> decoded |> ProviderUsageLimit.frame_projection() |> projected_usage_limit_answer()
+      _other -> nil
+    end
+  end
+
+  defp usage_limit_answer(_frame), do: nil
+
+  defp projected_usage_limit_answer({:terminal, error}), do: {:terminal, Contracts.usage_limit_record(error)}
+  defp projected_usage_limit_answer({:relay, _provider_error}), do: :withheld
+  defp projected_usage_limit_answer(:canonical), do: nil
+
+  # The row records the 429 the client was answered, and the attempt the reset
+  # a terminal answer advised, like the HTTP twin (rows 206-553, 206-596).
+  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, {:terminal, record}),
+    do: %{response_context | response: response |> Map.put(:status, 429) |> Req.Response.put_private(:usage_limit_record, record)}
+
+  defp record_usage_limit_answer(%ResponseContext{response: response} = response_context, :withheld),
+    do: %{response_context | response: %{response | status: 429}}
+
+  defp record_usage_limit_answer(response_context, nil), do: response_context
+
+  defp log_usage_limit_answer(nil, _dispatch_request, _failure), do: :ok
+
+  defp log_usage_limit_answer(answer, dispatch_request, failure) do
+    advice =
+      case answer do
+        {:terminal, %{"resets_at" => resets_at, "resets_in_seconds" => seconds}} -> "advice=pool resets_at=#{resets_at} resets_in_seconds=#{seconds}"
+        {:terminal, _record} -> "advice=pool"
+        :withheld -> "advice=withheld"
+      end
+
+    Logger.info(
+      "websocket usage limit answered request_id=#{accounting_request_id(dispatch_request)} " <>
+        "status=429 error_code=#{DiagnosticTaxonomy.identifier(to_string(Map.get(failure, :code)))} " <> advice
+    )
+  end
+
+  defp accounting_request_id(%DispatchRequest{accounting_request: %{id: request_id}}), do: request_id
+  defp accounting_request_id(_dispatch_request), do: nil
+
+  # The Pool a pre-output usage-limit refusal on the last candidate speaks for
+  # (findings#206 rows 206-545, 206-546): the socket projects the frame without
+  # route context, so the Pool's advice is written into it here.
+  # The wait an open circuit of another candidate bounds, for the public
+  # socket's `retry-after` when the Pool advice is withheld (row 206-593).
+  defp other_candidates_circuit_seconds(%{auth: auth, model: model, route_state: route_state, assignment: assignment, route_class: route_class}) do
+    others = route_state |> RouteState.route_filter_candidates() |> Enum.reject(fn {candidate, _identity} -> candidate.id == assignment.id end)
+    CircuitRetryAfter.current_seconds(auth, model, others, route_class)
+  end
+
+  defp other_candidates_return(%{model: model, route_state: route_state, assignment: assignment}),
+    do: PoolReturn.others(model, RouteState.route_filter_candidates(route_state), assignment.id, DateTime.utc_now())
 
   defp sanitize_retry_terminal(frame) do
     with {:ok, event} <- CodexPooler.JSON.decode(frame),

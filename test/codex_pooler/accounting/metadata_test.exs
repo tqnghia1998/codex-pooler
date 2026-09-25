@@ -163,6 +163,48 @@ defmodule CodexPooler.Accounting.MetadataTest do
       end
     end
 
+    # findings#206 rows 206-403 and 206-412: the turn progress a native request
+    # records is one 32-byte digest, whichever transport recorded it.
+    test "native turn progress keeps only the bounded digest on either transport's key" do
+      progress = %{"version" => 1, "digest" => Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)}
+
+      for key <- ["native_http_turn_progress", "native_turn_progress"] do
+        assert Accounting.sanitize_metadata(%{key => progress}) == %{key => progress}
+        assert Accounting.sanitize_metadata(%{key => Map.put(progress, "input", "private")}) == %{key => %{}}
+
+        for invalid <- [Map.put(progress, "version", 2), Map.put(progress, "digest", "invalid"), Map.put(progress, "digest", String.duplicate("a", 44)), Map.delete(progress, "digest")] do
+          assert Accounting.sanitize_metadata(%{key => invalid}) == %{key => %{}}
+        end
+      end
+    end
+
+    # findings#206 row 206-423: beside the digest, the position that orders a
+    # later request against the row: a bounded count and an optional pivot digest.
+    test "native turn progress keeps a bounded position beside the digest and nothing else" do
+      digest = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+      pivot = Base.url_encode64(:crypto.strong_rand_bytes(32), padding: false)
+
+      for key <- ["native_http_turn_progress", "native_turn_progress"],
+          valid <- [
+            %{"version" => 1, "digest" => digest, "user_messages" => 0},
+            %{"version" => 1, "digest" => digest, "user_messages" => 3, "pivot" => pivot}
+          ] do
+        assert Accounting.sanitize_metadata(%{key => valid}) == %{key => valid}
+      end
+
+      for key <- ["native_http_turn_progress", "native_turn_progress"],
+          invalid <- [
+            %{"version" => 1, "digest" => digest, "pivot" => pivot},
+            %{"version" => 1, "digest" => digest, "user_messages" => -1},
+            %{"version" => 1, "digest" => digest, "user_messages" => 1_000_001},
+            %{"version" => 1, "digest" => digest, "user_messages" => "3"},
+            %{"version" => 1, "digest" => digest, "user_messages" => 3, "pivot" => "invalid"},
+            %{"version" => 1, "digest" => digest, "user_messages" => 3, "pivot" => pivot, "input" => "private"}
+          ] do
+        assert Accounting.sanitize_metadata(%{key => invalid}) == %{key => %{}}
+      end
+    end
+
     test "rejects invalid usage observation envelopes without retaining arbitrary content" do
       valid = %{
         "version" => 1,

@@ -1,7 +1,31 @@
 defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
   @moduledoc """
-  Holds a test's teardown until every websocket termination cleanup it caused
-  has finished.
+  Holds a test's teardown until the sockets of the listeners it registered
+  have terminated and every session cleanup it saw deferred has finished.
+
+  That is narrower than "every cleanup the test caused" (findings#206 row
+  206-405). A cleanup is recorded only once its socket emits the
+  `cleanup_deferred` failure while the fence's handlers are attached, and a
+  socket is waited for only when a registered listener started it. The fence
+  therefore does not see:
+
+  - a socket of a listener that was never registered with `install!/1`
+    (`server:`) and is still inside the 100 ms yield of `terminate/2` when the
+    callback checks;
+  - a cleanup deferred before `install!/1` or after the callback detached its
+    handlers, such as one set off by an `on_exit` callback registered before
+    the fence (those run after it);
+  - a socket whose client outlives the 15 s budget, which is left to the
+    listener's own shutdown.
+
+  The handlers are global, so a cleanup another test deferred in the same
+  window is recorded and waited for too.
+
+  `await_session_cleanups!/0` is the barrier behind it: it waits for every
+  session cleanup task running when it is called, whoever started it, and
+  `DataCase.stop_sandbox/2` calls it in every test before the sandbox owner
+  stops, so these cleanups still finish under a live owner. The fence is still needed for the order of teardown and for its log
+  handling, which are described below.
 
   `CodexResponsesSocket.terminate/2` runs its owner or direct cleanup in a
   supervised task and waits for it only `WebsocketControlPath`'s 100 ms; a
@@ -282,4 +306,180 @@ defmodule CodexPoolerWeb.Runtime.WebsocketCleanupFence do
 
   defp expected_teardown_entry?(entry),
     do: Regex.match?(@deferred_line, entry) or String.contains?(entry, "[info]") or String.contains?(entry, "[debug]")
+
+  @doc """
+  Calls `CodexResponsesSocket.terminate/2` from the calling process and returns
+  its result only once that call's session cleanup has finished, so rows,
+  owner state and log lines the cleanup writes can be read next (findings#206
+  rows 206-341/206-345). A cleanup slower than the 100 ms yield is deferred and
+  keeps running after `terminate/2` returns; this waits for its
+  `cleanup_finished` event (`caller` is the calling process) within the
+  detection budget. Call it inside a log capture to capture the cleanup's lines.
+  """
+  @spec terminate_and_await!(term(), map()) :: :ok
+  def terminate_and_await!(reason, state) do
+    caller = self()
+    tag = make_ref()
+    handler_id = {__MODULE__, :terminate_and_await, tag}
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:codex_pooler, :gateway, :websocket_control, :cleanup_finished],
+        fn _event, _measurements, metadata, _config ->
+          if metadata.caller == caller, do: send(caller, {tag, :cleanup_finished})
+        end,
+        nil
+      )
+
+    try do
+      result = CodexPoolerWeb.CodexResponsesSocket.terminate(reason, state)
+
+      receive do
+        {^tag, :cleanup_finished} -> result
+      after
+        @budget_ms -> flunk("websocket session cleanup did not finish within #{@budget_ms} ms of terminate/2")
+      end
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  @doc """
+  Counts the sockets of the calling test's registered listeners whose session
+  cleanup has finished (`cleanup_finished` with the socket as `caller`).
+
+  A wire socket's cleanup runs in its own process, after the client closed
+  it; read this before the socket that is about to close was opened, and wait
+  for one more with `await_listener_socket_cleanups!/1` (findings#206 row
+  206-425).
+  """
+  @spec listener_socket_cleanups() :: non_neg_integer()
+  def listener_socket_cleanups do
+    state = Agent.get(installed_fence!(), & &1)
+    state.sockets |> MapSet.intersection(state.finished) |> MapSet.size()
+  end
+
+  @doc """
+  Waits, within the detection budget, until at least `count` sockets of the
+  calling test's registered listeners have finished their session cleanup,
+  deferred or not, and fails the test otherwise.
+  """
+  @spec await_listener_socket_cleanups!(non_neg_integer()) :: :ok
+  def await_listener_socket_cleanups!(count) when is_integer(count) and count >= 0 do
+    await_listener_socket_cleanups(count, System.monotonic_time(:millisecond) + @budget_ms)
+  end
+
+  defp await_listener_socket_cleanups(count, deadline) do
+    cond do
+      listener_socket_cleanups() >= count ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("#{count - listener_socket_cleanups()} listener socket cleanup(s) did not finish within #{@budget_ms} ms")
+
+      true ->
+        receive do
+        after
+          @poll_ms -> await_listener_socket_cleanups(count, deadline)
+        end
+    end
+  end
+
+  defp installed_fence! do
+    case Process.get(@installed_key) do
+      fence when is_pid(fence) -> fence
+      nil -> flunk("the websocket cleanup fence is not installed in this process; start the listener with start_public_endpoint_with_server!/0")
+    end
+  end
+
+  @doc """
+  Waits until no websocket session cleanup task is in flight, within the
+  detection budget, and fails the caller if one is still running then.
+
+  `DataCase.stop_sandbox/2` calls it before it stops the sandbox owner, so it
+  applies to every test, not only to those that `install!/1` the fence: a
+  cleanup deferred past the 100 ms yield of `terminate/2`, whose socket or
+  test did not wait for it, used to reach its first query after the owner
+  stopped, fail on a sandbox `OwnershipError` (`websocket control path failed
+  phase=terminate reason=exception`) and lose its writes (findings#206 row
+  206-405). A cleanup task is a child of the websocket task supervisor that
+  `WebsocketControlPath.cleanup/1` started; the set is read again after each
+  wait, so a socket still terminating while this runs is covered once its
+  cleanup started. Lines logged during the wait are handled like the fence's
+  teardown capture: the `cleanup_deferred` warning and info lines are
+  dropped, every other line is written through.
+  """
+  @spec await_session_cleanups!() :: :ok
+  def await_session_cleanups! do
+    case session_cleanup_tasks() do
+      [] ->
+        :ok
+
+      tasks ->
+        deadline = System.monotonic_time(:millisecond) + @budget_ms
+        {result, log} = ExUnit.CaptureLog.with_log([level: :info], fn -> await_session_cleanups(tasks, deadline) end)
+        pass_through_unexpected(log)
+
+        case result do
+          :ok -> :ok
+          {:unfinished, count} -> flunk("#{count} websocket session cleanup(s) still running #{@budget_ms} ms before the sandbox owner stops")
+        end
+    end
+  end
+
+  defp await_session_cleanups([], deadline) do
+    case session_cleanup_tasks() do
+      [] -> :ok
+      tasks -> await_session_cleanups(tasks, deadline)
+    end
+  end
+
+  defp await_session_cleanups([task | rest] = tasks, deadline) do
+    monitor = Process.monitor(task)
+
+    receive do
+      {:DOWN, ^monitor, :process, ^task, _reason} -> await_session_cleanups(rest, deadline)
+    after
+      max(deadline - System.monotonic_time(:millisecond), 0) ->
+        Process.demonitor(monitor, [:flush])
+        {:unfinished, length(tasks)}
+    end
+  end
+
+  # `WebsocketControlPath.cleanup/1` runs its operation in a task of this
+  # supervisor; the task's initial call is the anonymous function of that
+  # module (`run/2`, the module's other entry point, runs in the caller).
+  defp session_cleanup_tasks do
+    supervisor = CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSession.TaskSupervisor
+
+    if Process.whereis(supervisor) do
+      supervisor
+      |> Task.Supervisor.children()
+      |> Enum.filter(&session_cleanup_task?/1)
+    else
+      []
+    end
+  end
+
+  defp session_cleanup_task?(pid) do
+    case Process.info(pid, :dictionary) do
+      {:dictionary, dictionary} -> match?({CodexPoolerWeb.WebsocketControlPath, _function, _arity}, Keyword.get(dictionary, :"$initial_call"))
+      nil -> false
+    end
+  end
+
+  @doc """
+  Removes the `cleanup_deferred` warning from captured logs. That line records
+  only that the session cleanup outlasted the 100 ms yield, which scheduling
+  alone decides; a test asserting that a path stays quiet asserts on the rest,
+  after awaiting the cleanup with `terminate_and_await!/2`.
+  """
+  @spec without_deferred_cleanup(String.t()) :: String.t()
+  def without_deferred_cleanup(logs) when is_binary(logs) do
+    logs
+    |> String.split("\n")
+    |> Enum.reject(&Regex.match?(@deferred_line, &1))
+    |> Enum.join("\n")
+  end
 end

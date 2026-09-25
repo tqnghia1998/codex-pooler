@@ -185,6 +185,8 @@ Model modes are:
 
 Catalog models are derived from current routable model metadata. Manual model identifiers support controlled exceptions when a model is not yet present in the catalog.
 
+A request for a model the key may not use returns `400 model_not_allowed` with `invalid_request_error` and `param: "model"` before reservation or upstream work, on every route and transport. The status is `400`, like the Codex backend's own refusal of a model the account cannot serve, because resending the same request cannot pass: the Codex client ends the turn on a `400`, while it resends a `403` several times and then switches the session from websocket to HTTPS. OpenAI SDKs retry neither status.
+
 Enforced request fields let the key override selected client request values:
 
 1. enforced model
@@ -217,7 +219,7 @@ Default policy fields check:
 
 Leave a field blank when no cap should be saved. A blank limit is different from a zero limit.
 
-The model-scoped override is an optional single-model override. A matching active override replaces the default binding for that request; its blank fields do not inherit default limits. Its thresholds still compare against usage across the whole key, not a separate model allowance. Additional model rows are not part of the current wizard. Policy changes and moving the key between Pools do not reset its budget history.
+The model-scoped override is an optional single-model override. A matching active override replaces the default binding for that request; its blank fields do not inherit default limits. Its thresholds still compare against usage across the whole key, not a separate model allowance. The wizard edits one model override. A key that already has overrides for more than one model, for example one created programmatically, shows the others read-only under **Other model overrides**. Saving keeps them as they are, and the editable override cannot name a model that one of them already limits. Saving also keeps the key's stored labels. Policy changes and moving the key between Pools do not reset its budget history.
 
 ### Active request limit
 
@@ -225,7 +227,17 @@ The model-scoped override is an optional single-model override. A matching activ
 
 Lowering the limit lets existing work finish and refuses new reservations until capacity is available. Replaying the same reserved execution reuses its slot; an eligible retry that creates a new successor needs a new slot. Finishing with unknown usage releases the slot even when a provisional token estimate remains.
 
-Saturation returns retryable `429 api_key_concurrency_limit_exceeded` with `rate_limit_error`. HTTP responses include `Retry-After: 1` as minimum backoff advice, not a promise that a slot will be free after one second. Websocket turns receive the corresponding error without requiring the socket to close. Authentication failures remain `401`; token or request-budget denials remain `403 api_key_policy_limit_exceeded`.
+Saturation returns retryable `429 api_key_concurrency_limit_exceeded` with `rate_limit_error`. HTTP responses include `Retry-After: 1` as minimum backoff advice, not a promise that a slot will be free after one second. Websocket turns receive the corresponding error without requiring the socket to close. Authentication failures remain `401`.
+
+### Policy limit refusals
+
+A request refused by the key's policy answers `api_key_policy_limit_exceeded` with the Pooler's own message on every route and transport, and the request log records the status the client received:
+
+- **Windows** (requests per minute, tokens per day, tokens per week) that the request fits once they move answer `429` with `rate_limit_error`, because the same request is admitted again once the window moves. The retry hint comes from the window's own boundary: `Retry-After: 60` for the minute window, the seconds until the next 00:00 UTC for the daily window, and none for the trailing week. Websocket turns carry the same value as `retry-after` in the error event's `headers`. When the window frees no sooner than a minute (daily or weekly), HTTP responses also send `x-should-retry: false`, so OpenAI SDKs do not spend their automatic retries within seconds. The hint is advice, not a promise: in-flight work that settles below its estimate can free a window earlier.
+- **Per-request estimate caps** (input or output tokens per request) answer `400` with `invalid_request_error` and no hint, because resending the same request cannot pass them. The Codex client ends the turn on a `400`; it resent the `403` answered before several times and then switched the session from websocket to HTTPS.
+- **A daily or weekly token window whose max is below the request's own estimate** answers the same `400` with `invalid_request_error` and no hint, and its message names the request estimate and the max. No later window admits that request, so a `429` with a reset hint would promise something the Pooler never grants. The request's estimate is judged against every configured token window before any window's usage, so an exhausted daily window never announces a reset that a lower weekly max would refuse again. Raise the window or lower the request's output estimate (see below).
+
+Owner forwarding does not change the answer: a resend chained onto an earlier failed request gets the same refusal as any other request.
 
 ### Token estimates and budget pressure
 
@@ -299,7 +311,7 @@ The current actions are:
     </tr>
     <tr>
       <td>Delete</td>
-      <td>Opens a confirmation dialog that requires the key prefix. Delete permanently removes the key. Request history is retained under its Pool without a link to the deleted key. Connections still open with the key close as well. See <a href="#responses-websocket-lifecycle">Responses WebSocket lifecycle</a>.</td>
+      <td>Opens a confirmation dialog that requires the key prefix. Delete permanently removes the key. Request history is retained under its Pool without a link to the deleted key. Connections still open with the key close as well. A key with a large request history is revoked at once and removed by a background job: its row shows <code>deleting</code> and Delete stays disabled until the job has detached the history and removed the key. If the job gives up, the row shows <code>deletion failed</code>, and deleting again resumes. The <code>API key deleted</code> audit event is recorded only when the key is actually gone. See <a href="#responses-websocket-lifecycle">Responses WebSocket lifecycle</a>.</td>
     </tr>
   </tbody>
 </table>
@@ -315,10 +327,16 @@ For supported Responses WebSocket routes, every change that makes a Pool API key
 3. the key reaching its expiry time
 4. disabling or archiving the key's Pool
 5. moving the key to another Pool
+6. rotating the key
+7. editing the key's allowed models, enforced model, reasoning effort policy, or enforced service tier
 
-The first four block new runtime authentication. A move does not: the key authenticates in its new Pool, but a connection opened before the move still belongs to the previous Pool. In every case the existing connections close with policy code `1008` and the reason `api key is no longer active`. The cluster notification only prompts that close; it is not the authorization authority.
+The first four block new runtime authentication. The last three do not: a moved key authenticates in its new Pool, a rotated key authenticates with its new secret, and an edited key authenticates under its new policy. A connection opened before the change still carries what it read when it opened, so it is closed as well. In every case the existing connections close with policy code `1008` and the reason `api key is no longer active`. The cluster notification only prompts that close; it is not the authorization authority.
 
-Before later work is admitted, a durable fence reads the key's persisted status, revocation generation, and expiry, together with its Pool's status. A move advances the revocation generation, so authorization from before the move no longer matches. A key that no longer exists fails the same fence. If a socket misses or receives a delayed cluster notification, its next frame is still rejected and the connection closes without starting that work. That includes `response.processed` acknowledgements: one sent after the change is not passed on to the upstream account.
+A policy edit closes the key's connections whether it narrows or widens what the key may use, because the open connection judges each request against the policy it read when it opened. An edit that changes none of those fields keeps connections open: a rename, the Dashboard access switch, request and token limits, per-request caps, and the active-request cap. Limits and caps are read again for every request, so a new limit applies to the next request on an open connection without closing it. Saving the form without changing the policy does not close anything.
+
+Current Codex clients treat that close like any dropped connection: the next request is retried on a new connection without showing a message, and it sends the full conversation instead of continuing from the previous response. A request refused by the new policy then returns its usual error, such as `model_not_allowed`.
+
+Before later work is admitted, a durable fence reads the key's persisted status, revocation generation, and expiry, together with its Pool's status. A move, a rotation, and a policy edit that changes one of the fields above advance the revocation generation, so authorization from before the change no longer matches. A key that no longer exists fails the same fence. If a socket misses or receives a delayed cluster notification, its next frame is still rejected and the connection closes without starting that work. That includes `response.processed` acknowledgements: one sent after the change is not passed on to the upstream account.
 
 Expiry sends no notification, because nothing is edited when the clock passes the expiry time. A connection whose key has an expiry time checks the key again when that time arrives and closes then, even if the client sends nothing. Editing the expiry, including moving it into the past, prompts the same check immediately.
 

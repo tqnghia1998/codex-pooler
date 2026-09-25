@@ -68,7 +68,6 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     end
   end
 
-  @pending_terminal_observation_timeout_ms 5_000
   # Scenario timer for the owner's terminal-delivery fallback in tests that
   # release the retained task result before the terminal frames: it outlasts
   # every detection wait, so a test stalled between the two releases cannot
@@ -1309,7 +1308,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       end)
 
     assert_receive {:websocket_owner_harness_barrier, barrier_pid, ^block_ref},
-                   @pending_terminal_observation_timeout_ms
+                   @detection_timeout_ms
 
     assert %{compaction_retry_submit_hold: nil, draining?: true, active_turn: active} =
              :sys.get_state(owner)
@@ -1326,7 +1325,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
              )
 
     send(barrier_pid, {:websocket_owner_harness_release, block_ref})
-    assert :ok = Task.await(submit_task, @pending_terminal_observation_timeout_ms)
+    assert :ok = Task.await(submit_task, @detection_timeout_ms)
     assert [_single_request] = WebsocketOwnerNodeHarness.fake_upstream_frames(upstream_pid)
     assert %{active_turn: nil, draining?: true} = :sys.get_state(owner)
   end
@@ -1352,7 +1351,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     assert :ok = WebsocketOwnerSession.drain_owner(owner)
 
     assert_receive {:DOWN, ^monitor, :process, ^owner, :normal},
-                   @pending_terminal_observation_timeout_ms
+                   @detection_timeout_ms
 
     assert_receive {:websocket_owner_harness_upstream_closed, ^upstream_pid}
     assert :ok = WebsocketOwnerSession.cancel_compaction_retry_submit(hold)
@@ -1876,24 +1875,26 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       45_000
     end
 
+    # 10 s is below the default ttl's third, so the cap leaves it as given; the
+    # policy's longer answer is still bounded by the interval.
     assert {:ok, owner} =
              start_owner(context,
                upstream: upstream,
-               owner_renewal_ms: 60_000,
+               owner_renewal_ms: 10_000,
                owner_renewal_delay: owner_renewal_delay
              )
 
     assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
-    assert_receive {:websocket_owner_renewal_delay, ^delay_ref, 60_000}
+    assert_receive {:websocket_owner_renewal_delay, ^delay_ref, 10_000}
 
     assert %{owner_renewal_ref: first_timer_ref} = :sys.get_state(owner)
     assert is_reference(first_timer_ref)
-    assert Process.read_timer(first_timer_ref) in 0..45_000
+    assert Process.read_timer(first_timer_ref) in 0..10_000
     cancel_owner_timer(first_timer_ref)
 
     send(owner, :renew_owner_lease)
 
-    assert_receive {:websocket_owner_renewal_delay, ^delay_ref, 60_000}
+    assert_receive {:websocket_owner_renewal_delay, ^delay_ref, 10_000}
   end
 
   test "renews persisted owner lease while owner remains alive" do
@@ -1926,6 +1927,75 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
              :gt
 
     assert {:ok, ^owner, :existing} = start_owner(context, upstream: upstream)
+  end
+
+  # The HTTP heartbeat caps its cadence at ttl / 3; the websocket owner renews
+  # on the same `OwnerRenewalSchedule` cap, so a renewal setting at or above
+  # the lease ttl cannot let a live owner's lease lapse between renewals
+  # (findings#206 row 206-499). The delay policy takes the whole interval, the
+  # stagger's worst case, and every scheduled renewal must land before the
+  # lease it renews expires.
+  test "renews before its lease expires when the renewal setting is at or above the lease ttl" do
+    previous = CodexPooler.TestAppEnv.restore_on_exit(OperationalSettings)
+
+    for {ttl_seconds, renewal_seconds} <- [{45, 60}, {24, 24}] do
+      settings = %{OperationalSettings.current() | bridge_owner_lease_ttl_seconds: ttl_seconds, bridge_owner_lease_renewal_seconds: renewal_seconds}
+      Application.put_env(:codex_pooler, OperationalSettings, Keyword.put(previous, :settings, settings))
+
+      context = db_owner_context()
+      on_exit(fn -> cleanup_owner_session(context.codex_session_id) end)
+
+      upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
+      test_pid = self()
+      delay_ref = make_ref()
+
+      owner_renewal_delay = fn interval ->
+        send(test_pid, {:websocket_owner_renewal_interval, delay_ref, interval})
+        interval
+      end
+
+      assert {:ok, owner} = start_owner(context, upstream: upstream, owner_renewal_delay: owner_renewal_delay)
+      assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
+
+      for cycle <- [:start, :renewed] do
+        if cycle == :renewed, do: send(owner, :renew_owner_lease)
+
+        assert_receive {:websocket_owner_renewal_interval, ^delay_ref, interval}
+        assert interval <= div(ttl_seconds * 1_000, 3), "ttl=#{ttl_seconds} renewal=#{renewal_seconds} cycle=#{cycle} interval=#{interval}"
+
+        assert %{owner_renewal_ref: timer_ref} = :sys.get_state(owner)
+        renewal_in_ms = Process.read_timer(timer_ref)
+        lease_left_ms = lease_left_ms!(context.codex_session_id)
+
+        assert is_integer(renewal_in_ms) and renewal_in_ms < lease_left_ms,
+               "ttl=#{ttl_seconds} renewal=#{renewal_seconds} cycle=#{cycle} renewal_in_ms=#{inspect(renewal_in_ms)} lease_left_ms=#{lease_left_ms}"
+      end
+
+      assert active_lease!(context.codex_session_id).lease_token == context.owner_lease_token
+    end
+  end
+
+  test "caps an explicit renewal interval at a third of the lease ttl" do
+    context = db_owner_context()
+    on_exit(fn -> cleanup_owner_session(context.codex_session_id) end)
+
+    upstream = WebsocketOwnerNodeHarness.fake_upstream_boundary(self())
+    test_pid = self()
+    delay_ref = make_ref()
+    ttl_ms = OperationalSettings.current().bridge_owner_lease_ttl_seconds * 1_000
+
+    owner_renewal_delay = fn interval ->
+      send(test_pid, {:websocket_owner_renewal_interval, delay_ref, interval})
+      interval
+    end
+
+    assert {:ok, owner} = start_owner(context, upstream: upstream, owner_renewal_ms: ttl_ms, owner_renewal_delay: owner_renewal_delay)
+    assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
+    assert_receive {:websocket_owner_renewal_interval, ^delay_ref, interval}
+    assert interval == div(ttl_ms, 3)
+
+    assert %{owner_renewal_ref: timer_ref} = :sys.get_state(owner)
+    assert Process.read_timer(timer_ref) < lease_left_ms!(context.codex_session_id)
   end
 
   test "stops as stale owner when renewal token is no longer current", context do
@@ -2672,7 +2742,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     Process.exit(downstream_pid, :kill)
     assert_receive {:DOWN, ^downstream_monitor, :process, ^downstream_pid, :killed}
 
-    assert Task.await(submit_task, @pending_terminal_observation_timeout_ms * 3) ==
+    assert Task.await(submit_task, @detection_timeout_ms) ==
              interrupted_result()
 
     elapsed_ms = System.monotonic_time(:millisecond) - started_at_ms
@@ -2710,7 +2780,7 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     # The downstream stays alive and attached but deliberately never acks, so
     # the only exit is the (shortened) budget timer.
     assert_receive {:websocket_owner_frame, "commit-silent", ^epoch, ^owner_turn_id, {:error, :owner_forward_timeout, timeout_payload}},
-                   @pending_terminal_observation_timeout_ms
+                   @detection_timeout_ms
 
     assert timeout_payload.code == "owner_forward_timeout"
     assert_receive {:websocket_owner_frame, "commit-silent", ^epoch, ^owner_turn_id, :complete}
@@ -4200,6 +4270,66 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
         assert %{active_turn: %{task_pid: ^task}, downstream: nil, downstream_epoch: 1} = :sys.get_state(armed.owner)
         assert Process.alive?(task)
         :sys.replace_state(armed.owner, fn state -> %{state | active_turn: nil} end)
+      end
+    end
+  end
+
+  # findings#206 row 206-362: the socket that received a running turn through
+  # its attach sends a request of its own, and the owner cancels that turn as
+  # the socket's close would, keeping the socket attached. Only an inherited,
+  # visible, relayed turn without a terminal is taken over; every other shape
+  # answers an error and leaves the turn running.
+  describe "taking over the turn a socket inherited at its attach" do
+    @describetag :inherited_turn_take_over
+
+    test "cancels a visible inherited turn once and keeps the socket attached", context do
+      inherited = inherited_turn_owner!(context, "take-over-visible", %{}, true)
+      task_monitor = Process.monitor(inherited.task)
+
+      log =
+        capture_info_log(fn ->
+          assert {:ok, %{semantic_turn_digest: <<9::256>>}} = WebsocketOwnerSession.take_over_inherited_turn(inherited.owner, inherited.downstream)
+        end)
+
+      task = inherited.task
+      assert_receive {:DOWN, ^task_monitor, :process, ^task, :shutdown}, @detection_timeout_ms
+      downstream = inherited.downstream
+      assert %{downstream: %{pid: pid, epoch: 1}, active_turn: %{downstream: nil, canceled_result: {:error, :client_disconnected}}} = :sys.get_state(inherited.owner)
+      assert pid == downstream.pid
+      assert log =~ "websocket owner inherited turn taken over"
+      assert log =~ "downstream_epoch=1"
+
+      # A second request finds nothing of this socket's left to take over.
+      assert {:error, :stale_downstream} = WebsocketOwnerSession.take_over_inherited_turn(inherited.owner, inherited.downstream)
+      :sys.replace_state(inherited.owner, fn state -> %{state | active_turn: nil} end)
+    end
+
+    for {label, turn, inherited?, requested, expected} <- [
+          {"a turn before visible output", %{visible_output?: false}, true, :same, :owner_busy},
+          {"a turn this socket submitted itself", %{}, false, :same, :owner_busy},
+          {"a collected delivery", %{collect?: true}, true, :same, :owner_busy},
+          {"a compaction phase", %{admission_phase: :compact}, true, :same, :owner_busy},
+          {"a turn whose terminal was relayed", %{terminal_forwarded?: true}, true, :same, :owner_busy},
+          {"another socket's request", %{}, true, :next_epoch, :stale_downstream},
+          {"a draining owner", %{}, true, :draining, :owner_drained}
+        ] do
+      @tag turn: turn, inherited?: inherited?, requested: requested, expected: expected
+      test "leaves #{label} running", %{turn: turn, inherited?: inherited?, requested: requested, expected: expected} = context do
+        inherited = inherited_turn_owner!(context, "take-over-refused", turn, inherited?)
+
+        requested_downstream =
+          case requested do
+            :same -> inherited.downstream
+            :next_epoch -> %{inherited.downstream | epoch: 2}
+            :draining -> tap(inherited.downstream, fn _downstream -> :sys.replace_state(inherited.owner, &%{&1 | draining?: true}) end)
+          end
+
+        assert {:error, ^expected} = WebsocketOwnerSession.take_over_inherited_turn(inherited.owner, requested_downstream)
+        task = inherited.task
+        assert %{active_turn: %{task_pid: ^task, downstream: %{pid: _pid}} = active_turn} = :sys.get_state(inherited.owner)
+        refute Map.has_key?(active_turn, :canceled_result)
+        assert Process.alive?(task)
+        :sys.replace_state(inherited.owner, fn state -> %{state | active_turn: nil, draining?: false} end)
       end
     end
   end
@@ -5882,45 +6012,49 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     refute logs =~ owner_lease_token
   end
 
-  defp await_owner_unavailable(codex_session_id, attempts \\ 100)
+  # Owner registration, retirement and turn clearing emit no message the test
+  # can await, so the helpers below poll authoritative state (the registry or
+  # the owner's own state) against one monotonic detection deadline and return
+  # the last observation when it expires, for the caller's assertion to report.
+  defp detection_deadline, do: System.monotonic_time(:millisecond) + @detection_timeout_ms
 
-  defp await_owner_unavailable(codex_session_id, attempts) when attempts > 0 do
+  defp poll_again?(deadline) do
+    if System.monotonic_time(:millisecond) < deadline do
+      receive do
+      after
+        1 -> true
+      end
+    else
+      false
+    end
+  end
+
+  defp await_owner_unavailable(codex_session_id, deadline \\ detection_deadline()) do
     case WebsocketOwnerSession.lookup(codex_session_id) do
       {:error, :owner_unavailable} = unavailable ->
         unavailable
 
-      {:ok, _pid} ->
-        yield_once({:await_owner_unavailable, codex_session_id, attempts})
-        await_owner_unavailable(codex_session_id, attempts - 1)
+      {:ok, _pid} = found ->
+        if poll_again?(deadline), do: await_owner_unavailable(codex_session_id, deadline), else: found
     end
   end
 
-  defp await_owner_unavailable(codex_session_id, 0),
-    do: WebsocketOwnerSession.lookup(codex_session_id)
-
-  defp await_fresh_owner(context, upstream, old_owner, attempts \\ 100)
-
-  defp await_fresh_owner(context, upstream, old_owner, attempts) when attempts > 0 do
+  defp await_fresh_owner(context, upstream, old_owner, deadline \\ detection_deadline()) do
     case start_owner(context, upstream: upstream) do
       {:ok, fresh_owner} when fresh_owner != old_owner ->
         {:ok, fresh_owner}
 
-      {:ok, owner, :existing} when owner != old_owner and is_pid(owner) ->
-        if Process.alive?(owner) do
-          {:ok, owner}
-        else
-          yield_once({:await_fresh_owner, context.codex_session_id, attempts})
-          await_fresh_owner(context, upstream, old_owner, attempts - 1)
+      {:ok, owner, :existing} = existing when owner != old_owner and is_pid(owner) ->
+        cond do
+          Process.alive?(owner) -> {:ok, owner}
+          poll_again?(deadline) -> await_fresh_owner(context, upstream, old_owner, deadline)
+          true -> existing
         end
 
-      _other ->
-        yield_once({:await_fresh_owner, context.codex_session_id, attempts})
-        await_fresh_owner(context, upstream, old_owner, attempts - 1)
+      other ->
+        if poll_again?(deadline), do: await_fresh_owner(context, upstream, old_owner, deadline), else: other
     end
   end
-
-  defp await_fresh_owner(context, upstream, _old_owner, 0),
-    do: start_owner(context, upstream: upstream)
 
   defp cleanup_owner_session(codex_session_id) do
     case WebsocketOwnerSession.lookup(codex_session_id) do
@@ -5941,67 +6075,33 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
     :exit, _reason -> :ok
   end
 
-  defp yield_once(message) do
-    send(self(), message)
-
-    receive do
-      ^message -> :ok
-    end
-  end
-
-  defp await_active_turn_cleared(owner, attempts \\ 100)
-
-  defp await_active_turn_cleared(owner, attempts) when attempts > 0 do
+  defp await_active_turn_cleared(owner, deadline \\ detection_deadline()) do
     case :sys.get_state(owner) do
       %{active_turn: nil} = state ->
         state
 
-      _state ->
-        yield_once({:await_active_turn_cleared, owner, attempts})
-        await_active_turn_cleared(owner, attempts - 1)
+      state ->
+        if poll_again?(deadline), do: await_active_turn_cleared(owner, deadline), else: state
     end
   end
 
-  defp await_active_turn_cleared(owner, 0), do: :sys.get_state(owner)
-
-  defp await_owner_cleared(owner, attempts \\ 100)
-
-  defp await_owner_cleared(owner, attempts) when attempts > 0 do
+  defp await_owner_cleared(owner, deadline \\ detection_deadline()) do
     case :sys.get_state(owner) do
       %{active_turn: nil, downstream: nil} = state ->
         state
 
-      _state ->
-        yield_once({:await_owner_cleared, owner, attempts})
-        await_owner_cleared(owner, attempts - 1)
+      state ->
+        if poll_again?(deadline), do: await_owner_cleared(owner, deadline), else: state
     end
   end
 
-  defp await_owner_cleared(owner, 0), do: :sys.get_state(owner)
-
-  defp await_pending_terminal_result(owner) do
-    deadline =
-      System.monotonic_time(:millisecond) + @pending_terminal_observation_timeout_ms
-
-    await_pending_terminal_result_until(owner, deadline)
-  end
-
-  defp await_pending_terminal_result_until(owner, deadline) do
-    state = :sys.get_state(owner)
-
-    case state do
+  defp await_pending_terminal_result(owner, deadline \\ detection_deadline()) do
+    case :sys.get_state(owner) do
       %{active_turn: %{pending_result: pending_result}} = state when not is_nil(pending_result) ->
         state
 
-      _state ->
-        if System.monotonic_time(:millisecond) >= deadline do
-          state
-        else
-          receive do
-          after
-            1 -> await_pending_terminal_result_until(owner, deadline)
-          end
-        end
+      state ->
+        if poll_again?(deadline), do: await_pending_terminal_result(owner, deadline), else: state
     end
   end
 
@@ -6481,6 +6581,13 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
         where: lease.codex_session_id == ^session_id and lease.status == "active",
         limit: 1
     )
+  end
+
+  # Milliseconds left on the session's active owner lease by the database clock
+  # that wrote its deadline.
+  defp lease_left_ms!(session_id) do
+    %{rows: [[%DateTime{} = now]]} = Repo.query!("SELECT clock_timestamp()")
+    DateTime.diff(active_lease!(session_id).expires_at, now, :millisecond)
   end
 
   defp released_lease!(session_id) do
@@ -6974,6 +7081,41 @@ defmodule CodexPooler.Gateway.Transports.Websocket.WebsocketOwnerSessionTest do
       semantic_turn_digest: <<1::256>>,
       replay_claim_digest: <<2::256>>
     }
+  end
+
+  # An owner whose attached downstream (this test process, epoch 1) receives a
+  # running native turn: `inherited?` marks the downstream as attached while
+  # that turn ran, as `attach_downstream_now/2` does.
+  defp inherited_turn_owner!(context, label, turn_overrides, inherited?) do
+    context = replay_owner_context(context, label)
+    {:ok, owner} = start_owner(context, upstream: WebsocketOwnerNodeHarness.fake_upstream_boundary(self()), persistence: replay_persistence())
+    assert_receive {:websocket_owner_harness_upstream_started, _upstream_pid}
+    assert {:ok, %{epoch: 1} = downstream} = WebsocketOwnerSession.attach_downstream(owner, downstream_target(label))
+    task = spawn(fn -> receive do: (:stop -> :ok) end)
+    on_exit(fn -> send(task, :stop) end)
+
+    active_turn =
+      Map.merge(
+        %{
+          task_pid: task,
+          task_ref: make_ref(),
+          downstream: downstream |> Map.take([:pid, :epoch, :correlation_id]) |> Map.put(:owner_turn_id, task),
+          visible_output?: true,
+          collect?: false,
+          admission_phase: nil,
+          terminal_forwarded?: false,
+          pending_result: nil,
+          output_commit_probe: nil,
+          descriptor: %{kind: :native, semantic_turn_key: <<9::256>>, downstream_status: :attached, visible_output?: true}
+        },
+        turn_overrides
+      )
+
+    :sys.replace_state(owner, fn state ->
+      %{state | active_turn: active_turn, downstream: Map.put(state.downstream, :active_turn_reconnect?, inherited?)}
+    end)
+
+    %{owner: owner, task: task, downstream: Map.take(downstream, [:pid, :epoch, :correlation_id])}
   end
 
   defp superseding_control(armed, downstream, semantic_turn_digest, replay_claim_digest) do

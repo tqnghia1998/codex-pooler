@@ -45,6 +45,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
     reasoning_none
     reasoning_ultra
     api_key_reasoning_availability
+    api_key_reservation_policy_refusals
+    api_key_terminal_policy_denials
+    exhausted_pool_usage_limit
     reasoning_context
     unsupported_upstream_fields
     api_key_websocket_revocation
@@ -1133,12 +1136,39 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
       feature = CompatibilityMatrix.by_slug!(:unsupported_input_image_reference)
       fixture = CompatibilityMatrix.fixture!(:unsupported_input_image_reference)
 
-      assert feature.contract =~ "input_image.file_id"
+      assert feature.contract =~ "input_image.file_id references are forwarded unchanged"
+      assert feature.contract =~ "pins the request to the assignment holding the file"
       assert feature.contract =~ "Codex sediment://"
       assert feature.contract =~ "unsupported URL schemes"
 
       assert fixture.accepted_url_schemes == ["https", "data:image"]
       assert fixture.unsupported_url_schemes == ["http", "sediment", "file"]
+
+      # findings#206 row 206-476: /v1 forwards a tool-output image detail on
+      # Full and refuses one outside the provider's enum before dispatch.
+      assert %{method: :post, path: "/v1/responses"} in feature.routes
+      assert feature.contract =~ "forwards input_image.detail from message and tool-output images alike on a Full model"
+      assert feature.contract =~ "400 invalid_value on the provider's field path"
+      assert fixture.v1_image_details == ["low", "high", "auto", "original"]
+      assert fixture.v1_invalid_image_detail.param == "input[2].output[1].detail"
+
+      # Chat carries image_url.detail under the same rules and refuses an
+      # invalid one under the Chat field path.
+      assert %{method: :post, path: "/v1/chat/completions"} in feature.routes
+      assert feature.contract =~ "carries image_url.detail into the rebuilt input_image detail"
+      assert fixture.v1_chat_invalid_image_detail.param == "messages[0].content[1].image_url.detail"
+
+      # A Chat tool message carries its image_url parts into the rebuilt
+      # function_call_output, as Hermes sends a screenshot in Chat mode.
+      assert feature.contract =~ "carries image_url parts of a role tool message into the rebuilt function_call_output"
+      assert fixture.v1_chat_tool_message_image_parts == ["image_url"]
+
+      # findings#206 row 206-494: the tool-result extension shapes carry and
+      # validate image_url.detail under the field the client sent.
+      assert feature.contract =~ "refused at input[i].content[j].image_url.detail"
+      assert feature.contract =~ "refused at messages[i].content[j].output[k].image_url.detail"
+      assert fixture.v1_role_tool_invalid_image_detail.param == "input[1].content[1].image_url.detail"
+      assert fixture.v1_chat_tool_result_invalid_image_detail.param == "messages[1].content[0].output[1].image_url.detail"
     end
 
     test "documents non-strict function tool schema lowering scope" do
@@ -2453,6 +2483,24 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                    owner_forwarded_turns: "carried_in_owner_request_headers_built_on_the_proxy_node",
                    public_v1_origins: "caller_values_never_forwarded_derived_session_id_only"
                  },
+                 native_http_derived_session_id: %{
+                   routes: [
+                     "/backend-api/codex/responses",
+                     "/backend-api/codex/v1/responses",
+                     "/backend-api/codex/responses/compact",
+                     "/backend-api/codex/v1/responses/compact"
+                   ],
+                   transports: ["http_json", "http_sse"],
+                   applies_when: "no_client_session_id_within_the_provider_bound",
+                   precedence: "client_session_id_then_prompt_cache_key_then_local_continuity_alias",
+                   alias_namespace: TransportEnvelope.continuity_alias_session_namespace(),
+                   alias_derivation: "uuid_v5_distinct_namespace_over_pool_id_api_key_id_and_raw_alias_never_forwarded_raw",
+                   client_session_id: "forwarded_unchanged_never_replaced",
+                   derivation: "same_as_public_v1_same_pool_api_key_and_prompt_cache_key_yield_the_same_value",
+                   local_session: "keyed_by_the_client_continuity_header_unchanged",
+                   native_websocket_handshake: "unchanged_only_the_upgrade_session_headers",
+                   privacy: "derived_value_not_persisted_or_logged"
+                 },
                  public_v1: %{
                    client_headers: "local_only_never_forwarded",
                    synthesized_header: "session-id",
@@ -2735,7 +2783,9 @@ defmodule CodexPoolerWeb.Runtime.CompatibilityContractTest do
                  live_owner_refusal_code: "owner_busy",
                  running_request_lost_race: "duplicate_turn_counted_as_owner_replay_preflight",
                  resend_of_recorded_turn: "duplicate_turn_counted_as_owner_replay_preflight",
-                 newer_socket_turn_at_armed_previsible_replay: "retires_replay_settles_predecessor_once_then_dispatches"
+                 newer_socket_turn_at_armed_previsible_replay: "retires_replay_settles_predecessor_once_then_dispatches",
+                 request_from_socket_that_inherited_visible_turn: "owner_cancels_inherited_turn_awaits_settlement_then_judges_request",
+                 inherited_visible_turn_at_owner_without_take_over: "refusal_kept"
                },
                runtime_replay_pre_classification: %{
                  session_not_reconnectable: "owner_unavailable",

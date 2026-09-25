@@ -7,6 +7,7 @@ defmodule CodexPooler.InstanceSettings.Cache do
 
   require Logger
 
+  alias CodexPooler.Gateway.{OperationalSettings, OwnerRenewalSchedule}
   alias CodexPooler.InstanceSettings.Settings
   alias Ecto.Adapters.SQL
   alias Phoenix.PubSub
@@ -267,6 +268,8 @@ defmodule CodexPooler.InstanceSettings.Cache do
 
   defp publish_success(state, %Settings{} = settings) do
     settings = settings |> Settings.mark_loaded(:database) |> clear_virtual_secrets()
+    log_clamped_owner_lease_ttl(state.cached, settings)
+    log_clamped_owner_lease_renewal(state.cached, settings)
     :persistent_term.put(@cache_key, {@cache_version, settings})
 
     :ok =
@@ -491,6 +494,46 @@ defmodule CodexPooler.InstanceSettings.Cache do
   end
 
   defp cancel_timers(state), do: state |> cancel_retry() |> cancel_reconciliation()
+
+  # A stored owner lease ttl below the validated minimum predates the minimum;
+  # `OperationalSettings` raises it at read time. Say so once per node for each
+  # stored value, not on every reconciliation reload.
+  defp log_clamped_owner_lease_ttl(previous, %Settings{} = settings) do
+    stored = stored_owner_lease_ttl(settings)
+    minimum = OwnerRenewalSchedule.minimum_lease_ttl_seconds()
+
+    if is_integer(stored) and stored < minimum and stored != stored_owner_lease_ttl(previous) do
+      Logger.warning(fn ->
+        "instance setting clamped at read setting=bridge_owner_lease_ttl_seconds stored=#{stored} effective=#{minimum}"
+      end)
+    end
+
+    :ok
+  end
+
+  defp stored_owner_lease_ttl(%Settings{gateway: %{bridge_owner_lease_ttl_seconds: ttl}}), do: ttl
+  defp stored_owner_lease_ttl(_settings), do: nil
+
+  # A stored renewal interval above a third of the effective ttl is lowered at
+  # read time by `OperationalSettings`; say so once per node for each stored
+  # (renewal, ttl) pair, not on every reconciliation reload.
+  defp log_clamped_owner_lease_renewal(previous, %Settings{gateway: gateway} = settings) do
+    stored = stored_owner_lease_renewal(settings)
+    effective = OperationalSettings.effective_owner_lease_renewal_seconds(gateway)
+
+    if is_integer(stored) and stored > effective and stored_owner_lease_pair(settings) != stored_owner_lease_pair(previous) do
+      Logger.warning(fn ->
+        "instance setting clamped at read setting=bridge_owner_lease_renewal_seconds stored=#{stored} effective=#{effective}"
+      end)
+    end
+
+    :ok
+  end
+
+  defp stored_owner_lease_renewal(%Settings{gateway: %{bridge_owner_lease_renewal_seconds: renewal}}), do: renewal
+  defp stored_owner_lease_renewal(_settings), do: nil
+
+  defp stored_owner_lease_pair(settings), do: {stored_owner_lease_renewal(settings), stored_owner_lease_ttl(settings)}
 
   defp log_db_failure(reason, warm_cache?) do
     Logger.warning(fn ->

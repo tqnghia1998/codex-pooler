@@ -151,11 +151,12 @@ defmodule CodexPooler.Gateway.DenialsTest do
 
     # `GatewayControllerHelpers.authenticate/1` already says 401 for a disabled
     # key; the gateway policy path used to say 403 for the same condition
-    # (findings#221). Missing stays 401 and a model policy stays 403.
+    # (findings#221). Missing stays 401; a model policy answers 400, which the
+    # released Codex client does not resend (findings#206 row 206-438).
     for {reason, status, message} <- [
           {:api_key_disabled, 401, "api key is disabled"},
           {:api_key_missing, 401, "api key is required"},
-          {:model_not_allowed, 403, "api key is not allowed to use this model"},
+          {:model_not_allowed, 400, "api key is not allowed to use this model"},
           {:api_key_policy_malformed, 403, "api key policy is invalid"}
         ] do
       code = Atom.to_string(reason)
@@ -223,7 +224,11 @@ defmodule CodexPooler.Gateway.DenialsTest do
     refute inspect(request.request_metadata) =~ raw_effort
   end
 
-  test "websocket denial inserts a separate rejected row with current request claim" do
+  # A refusal made before the request's claim never takes that claim: the same
+  # request resent once the cause is gone would meet it and get `409
+  # duplicate_turn` for good (findings#206 row 206-429). It takes the socket's
+  # handshake request id instead.
+  test "websocket denial inserts a separate rejected row that never takes the request claim" do
     fake = start_upstream(FakeUpstream.json_response(%{"data" => []}))
     setup = gateway_setup(fake)
     {:ok, auth} = Access.authenticate_authorization_header(setup.authorization)
@@ -284,7 +289,8 @@ defmodule CodexPooler.Gateway.DenialsTest do
              })
 
     assert [^anchor, rejected] = Repo.all(from request in Request, order_by: request.admitted_at)
-    assert rejected.correlation_id == request_claim_key
+    assert rejected.correlation_id == frame_correlation
+    refute Repo.get_by(Request, correlation_id: request_claim_key)
     assert rejected.status == "rejected"
 
     assert {:error, ^reason} =
@@ -355,9 +361,10 @@ defmodule CodexPooler.Gateway.DenialsTest do
              Denials.policy_denial_error(:api_key_disabled)
 
     assert %{
-             status: 403,
+             status: 400,
              code: "model_not_allowed",
-             message: "api key is not allowed to use this model"
+             message: "api key is not allowed to use this model",
+             param: "model"
            } =
              Denials.policy_denial_error(:model_not_allowed)
 

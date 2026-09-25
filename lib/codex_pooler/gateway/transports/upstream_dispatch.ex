@@ -275,6 +275,28 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
   def regular_runtime_forwarded_metadata_headers(%RequestOptions{} = request_options),
     do: regular_runtime_forwarded_metadata_headers(request_options, nil)
 
+  # Native Codex-backend origin: the client's own bounded metadata headers go
+  # upstream as they are, and a usable client `session-id` is never replaced.
+  # When none survives the bounds (a client that names its conversation only
+  # through a Pooler-local alias such as `session_id` or `x-session-id`, or not
+  # at all), the provider gets the same Pool- and key-scoped `session-id` the
+  # `/v1` clause below derives from the request's `prompt_cache_key`, so a
+  # full-history HTTP turn still reaches the replica holding the warm prefix.
+  # The alias itself stays local: it keys the CodexSession but carries no
+  # tenant scope, so forwarding it raw would let two keys that send the same
+  # alias share one provider session. The released Codex client always sends
+  # `session-id` (equal to its `prompt_cache_key` for a root agent), so it
+  # never reaches the derivation (findings#206 row 206-557).
+  #
+  # Precedence: a usable client `session-id`, then the `prompt_cache_key`
+  # derivation, then a derivation from the accepted local continuity alias
+  # (`continuity.session_header`, whichever of `session_id`, `x-session-id`,
+  # `x-session-affinity`, `x-codex-session-id`, `x-codex-conversation-id` or
+  # `x-codex-window-id` keyed the local session) under its own Pool- and
+  # key-scoped namespace. The alias rung serves clients that name their
+  # conversation with an alias and send no `prompt_cache_key` at all, such as
+  # cline's `openai-codex` provider (findings#206 row 206-606). Neither the
+  # alias nor the derived value is ever logged or stored.
   @doc false
   @spec regular_runtime_forwarded_metadata_headers(RequestOptions.t(), map() | nil) ::
           [header()]
@@ -285,11 +307,15 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
             forwarded_metadata_headers: forwarded_headers
           },
           openai_compatibility: %{source_endpoint: nil, openai_chat_payload: nil}
-        },
-        _payload
+        } = request_options,
+        payload
       )
       when endpoint in @regular_runtime_metadata_endpoints and is_list(forwarded_headers) do
-    TransportEnvelope.bounded_forwarded_metadata_headers(forwarded_headers)
+    forwarded = TransportEnvelope.bounded_forwarded_metadata_headers(forwarded_headers)
+
+    if List.keymember?(forwarded, "session-id", 0),
+      do: forwarded,
+      else: forwarded ++ derived_native_session_header(request_options, payload)
   end
 
   # Public `/v1` origin: the client's continuity headers stay local, and the
@@ -306,9 +332,15 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           transport: %{upstream_endpoint: endpoint},
           openai_compatibility: %{source_endpoint: source_endpoint}
         } = request_options,
-        %{"prompt_cache_key" => prompt_cache_key}
+        payload
       )
       when endpoint in @regular_runtime_metadata_endpoints and is_binary(source_endpoint) do
+    prompt_cache_session_header(request_options, payload)
+  end
+
+  def regular_runtime_forwarded_metadata_headers(%RequestOptions{}, _payload), do: []
+
+  defp prompt_cache_session_header(%RequestOptions{} = request_options, %{"prompt_cache_key" => prompt_cache_key}) do
     case TransportEnvelope.prompt_cache_session_id(
            prompt_cache_tenant_scope(request_options),
            prompt_cache_key
@@ -318,7 +350,24 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
     end
   end
 
-  def regular_runtime_forwarded_metadata_headers(%RequestOptions{}, _payload), do: []
+  defp prompt_cache_session_header(%RequestOptions{}, _payload), do: []
+
+  defp derived_native_session_header(%RequestOptions{} = request_options, payload) do
+    case prompt_cache_session_header(request_options, payload) do
+      [] -> continuity_alias_session_header(request_options)
+      header -> header
+    end
+  end
+
+  defp continuity_alias_session_header(%RequestOptions{continuity: %{session_header: alias}} = request_options)
+       when is_binary(alias) do
+    case TransportEnvelope.continuity_alias_session_id(prompt_cache_tenant_scope(request_options), alias) do
+      session_id when is_binary(session_id) -> forwarded_metadata_header("session-id", session_id)
+      nil -> []
+    end
+  end
+
+  defp continuity_alias_session_header(%RequestOptions{}), do: []
 
   defp prompt_cache_tenant_scope(%RequestOptions{runtime: %{tenant_scope: scope}}), do: scope
   defp prompt_cache_tenant_scope(%RequestOptions{}), do: nil
@@ -1678,6 +1727,10 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
 
   defp normalize_upstream_transport_result(result, _identity, _opts), do: result
 
+  # A streaming request's 4xx body is read here, bounded by `RejectionDrain`
+  # (64 KiB, one 2 s deadline). A 429 is read too since findings#206 row
+  # 206-531: a provider usage limit names the account's reset only in its body,
+  # and the last candidate's refusal answers it (`ProviderUsageLimit`).
   defp maybe_drain_rejection_body(
          {:ok,
           %Req.Response{
@@ -1686,7 +1739,7 @@ defmodule CodexPooler.Gateway.Transports.UpstreamDispatch do
           } = response},
          %RequestOptions{} = request_options
        )
-       when status in 400..499 and status != 429 do
+       when status in 400..499 do
     body = RejectionDrain.drain(response)
 
     response =

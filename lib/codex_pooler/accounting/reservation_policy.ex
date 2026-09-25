@@ -109,6 +109,12 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
         is_nil(max_value)
       end)
 
+    with :ok <- enforce_windows_can_admit_request(limits) do
+      enforce_window_usages(api_key, limits, timestamp)
+    end
+  end
+
+  defp enforce_window_usages(api_key, limits, timestamp) do
     window_usages =
       limits
       |> Map.new(fn {_field, _max_value, window, since, _usage_field, _delta, _metric, _label} ->
@@ -124,8 +130,30 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
 
         case enforce_window_limit(limit) do
           :ok -> {:cont, :ok}
-          {:error, error} -> {:halt, {:error, error}}
+          {:error, error} -> {:halt, {:error, put_window_retry_hint(error, label, timestamp)}}
         end
+    end)
+  end
+
+  # A window whose max is below the request's own estimate never admits that
+  # request, whatever the window holds or when it moves: it is refused like a
+  # per-request estimate cap, with no hint, not as a window the client could
+  # wait out (findings#206 row 206-448). Every window is judged this way
+  # before any is judged on its usage, so an exhausted daily window never
+  # promises a reset that a weekly max below the estimate would refuse again.
+  # The minute window counts one request against a positive max, so only a
+  # token window refuses here.
+  defp enforce_windows_can_admit_request(limits) do
+    Enum.find_value(limits, :ok, fn {field, max_value, _window, _since, _usage_field, delta, metric, label} ->
+      delta = decimal_to_integer(delta)
+      max_value = decimal_to_integer(max_value)
+
+      if delta > max_value do
+        {:error,
+         :api_key_policy_limit_exceeded
+         |> Metadata.accounting_error("api key policy #{field} exceeded for #{metric} in #{label} window: request estimate #{delta} exceeds max #{max_value}")
+         |> Map.put(:limit_scope, :request)}
+      end
     end)
   end
 
@@ -170,7 +198,8 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
            "request",
            estimate.input_tokens,
            policy.max_input_tokens_per_request
-         )}
+         )
+         |> Map.put(:limit_scope, :request)}
 
       positive_limit_exceeded?(policy.max_output_tokens_per_request, estimate.output_tokens) ->
         {:error,
@@ -180,7 +209,8 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
            "request",
            estimate.output_tokens,
            policy.max_output_tokens_per_request
-         )}
+         )
+         |> Map.put(:limit_scope, :request)}
 
       true ->
         :ok
@@ -198,6 +228,22 @@ defmodule CodexPooler.Accounting.ReservationPolicy do
       :ok
     end
   end
+
+  # A window refusal admits the request again once the window moves; a
+  # per-request estimate cap never does. The retry hint is the window's own
+  # boundary: every admission the minute window counts has left it 60 s later,
+  # and the daily window restarts at 00:00 UTC. The trailing week has no
+  # boundary of its own, so it carries none; settling in-flight work can free
+  # any window earlier, so the hint is advice, never a promise.
+  defp put_window_retry_hint(error, "minute", _timestamp),
+    do: Map.merge(error, %{limit_scope: :window, retry_after_seconds: 60})
+
+  defp put_window_retry_hint(error, "daily", timestamp) do
+    next_day = timestamp |> beginning_of_day() |> DateTime.add(1, :day)
+    Map.merge(error, %{limit_scope: :window, retry_after_seconds: max(DateTime.diff(next_day, timestamp), 1)})
+  end
+
+  defp put_window_retry_hint(error, _label, _timestamp), do: Map.put(error, :limit_scope, :window)
 
   defp positive_limit_exceeded?(nil, _value), do: false
 

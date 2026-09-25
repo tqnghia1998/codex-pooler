@@ -121,7 +121,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           upstream_dispatch: false
         }
       },
-      contract: "backend model aliases return the same policy-visible native catalog body and deterministic weak ETag from the canonical pristine-source capability family selected by quota-routable member count, total member count, then the oldest created_at plus assignment id anchor, falling back to the largest family when none is routable, so the catalog body and ETag can change when the preferred family changes; reasoning-level-only variants inside that quota-selected capability family advertise the union from its quota-routable assignments and remain inside the native turn's canonical allowance, after which the established post-quota and post-circuit reasoning preference selects an eligible assignment that lists the effective known effort; this never crosses another capability family, changes the stable catalog body, or lets an ineligible advertiser hide a healthy fallback; when no eligible assignment lists the effort every effective candidate remains upstream-authoritative; shell_type values default, local, shell_command, and unified_exec are equivalent for partitioning, disabled is separate, and unknown, missing, or malformed values do not silently collapse, while the selected anchor's raw shell_type remains served; quota routing reads one shared candidate-identity snapshot and classifies it independently per model; API-key policy decides admission and projection before assignment selection and never clamps the request; backend Codex catalog-driven new turns use the selected capability family, while translated OpenAI Responses capacity includes all valid canonical assignments after concrete request compatibility; valid canonical hard pins may continue on their pinned partition; selected-family exhaustion and malformed-source hard pins fail before accounting or upstream work; cache coherence across processes or replicas is eventual after a successful Responses token is observed; the request's client_version query selects the instructions representation: 0.148.0 or newer drops the mirrored base_instructions from an entry whose model_messages.instructions_template is a string, while older, 0.147.0, absent, or unparsable versions receive the entry verbatim, and the ETag is the digest of the representation actually served"
+      contract: "backend model aliases return the same policy-visible native catalog body and deterministic weak ETag from the canonical pristine-source capability family selected by quota-routable member count, total member count, then the oldest created_at plus assignment id anchor, falling back to the largest family when none is routable, so the catalog body and ETag can change when the preferred family changes; reasoning-level-only variants inside that quota-selected capability family advertise the union from its quota-routable assignments and remain inside the native turn's canonical allowance, after which the established post-quota and post-circuit reasoning preference selects an eligible assignment that lists the effective known effort; this never crosses another capability family, changes the stable catalog body, or lets an ineligible advertiser hide a healthy fallback; when no eligible assignment lists the effort every effective candidate remains upstream-authoritative; shell_type values default, local, shell_command, and unified_exec are equivalent for partitioning, disabled is separate, and unknown, missing, or malformed values do not silently collapse, while the selected anchor's raw shell_type remains served; quota routing reads one shared candidate-identity snapshot and classifies it independently per model; API-key policy decides admission and projection before assignment selection and never clamps the request; backend Codex catalog-driven new turns use the selected capability family, while translated OpenAI Responses capacity includes all valid canonical assignments after concrete request compatibility; valid canonical hard pins may continue on their pinned partition; selected-family exhaustion and malformed-source hard pins fail before accounting or upstream work; cache coherence across processes or replicas is eventual after a successful Responses token is observed; the version in a Codex build's User-Agent (a first-party codex originator, or any originator, including one with a slash or longer than 64 bytes, followed by the Codex platform block) selects the instructions representation, and the catalog fetch and every Responses turn select it with the same function from that one header, so a turn's x-models-etag always names the ETag its own client's catalog fetch received; the client_version query value is ignored and the catalog response carries vary: user-agent; 0.148.0 or newer drops the mirrored base_instructions from an entry whose model_messages.instructions_template is a string, while older, 0.147.0, absent, or unparsable versions and every non-Codex agent receive the entry verbatim, and the ETag is the digest of the representation actually served; a client whose whole version is inside the window the Codex catalog decoder was verified against (0.154.0 through 0.156.1, including prereleases that report one of those whole versions) receives the decode_checked representation: the template-only entries minus every entry that client would fail to decode, because one such entry makes it discard the whole catalog; a left-out model is not advertised to that client but stays routable, and each omission is logged as codex catalog entry left out with the Pool id, the model slug and the failing field paths only"
     },
     %{
       slug: :backend_responses_etag,
@@ -136,7 +136,7 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :backend_responses_etag,
-      contract: "backend Responses HTTP SSE response headers expose x-models-etag equal byte-for-byte to the exact authenticated backend models ETag from the request snapshot, including when the turn routes within a reasoning-variant capability family represented by that catalog's stable routable-family union; websocket upgrade headers retain the same backward-compatible connection-opening value, while each accepted backend websocket turn emits an authoritative codex.response.metadata x-models-etag from that turn's current predispatch snapshot; the value is never relayed from upstream and is excluded from backend JSON, compact, public /v1, usage, unauthenticated, and unrelated routes; a native websocket replay re-emits the original turn's preserved snapshot value, provider codex.response.metadata events are relayed after the Pooler event with x-models-etag removed, and consumers must take the ETag only from metadata events that carry it; the value names the instructions representation the same client's catalog fetch selected, derived from the package version after the originator in the request User-Agent"
+      contract: "backend Responses HTTP SSE response headers expose x-models-etag equal byte-for-byte to the exact authenticated backend models ETag from the request snapshot, including when the turn routes within a reasoning-variant capability family represented by that catalog's stable routable-family union; websocket upgrade headers retain the same backward-compatible connection-opening value, while each accepted backend websocket turn emits an authoritative codex.response.metadata x-models-etag from that turn's current predispatch snapshot; the value is never relayed from upstream and is excluded from backend JSON, compact, public /v1, usage, unauthenticated, and unrelated routes; a native websocket replay re-emits the original turn's preserved snapshot value, provider codex.response.metadata events are relayed after the Pooler event with x-models-etag removed, and consumers must take the ETag only from metadata events that carry it; the value names the instructions representation the same client's catalog fetch received, selected by the same function from the same header as that catalog fetch: the package version after the originator in the request User-Agent"
     },
     %{
       slug: :pool_model_serving_modes,
@@ -416,6 +416,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           :advanced_http_resume,
           :claim_by_request_kind,
           :known_gaps,
+          :partial_http_tool_retry,
           :payload_independent_claims,
           :public_error
         ],
@@ -441,6 +442,17 @@ defmodule CodexPooler.CompatibilityMatrix do
           requires_input_prefix_match: true,
           requires_delivered_output_receipt_match: true,
           identical_retry_refused: true
+        },
+        partial_http_tool_retry: %{
+          predecessor_transport: "http_sse",
+          predecessor_error: "upstream_stream_error",
+          claim_arms: ["opening", "tool_continuation"],
+          partial_tools: ["custom_tool_call", "function_call"],
+          retry_limit: 1,
+          retry_window_seconds: 30,
+          completed_item_retry: false,
+          requires_exact_request: true,
+          requires_complete_observation: true
         },
         claim_by_request_kind: %{
           turn: %{shape: "bare_payload_independent_codex_turn_claim", prefix: "codex-turn:"},
@@ -495,7 +507,7 @@ defmodule CodexPooler.CompatibilityMatrix do
           compaction_changed_body_retry_fenced: false
         }
       },
-      contract: "409 duplicate_turn is a public runtime response on both transports. Two payload-independent claims are shared across native HTTP and websocket: the request that opened a native Codex turn takes the bare codex-turn claim, and a post-compaction resume takes codex-resume derived from the turn plus the latest compaction pivot. An HTTPS fallback of either shape therefore meets the same resend policy instead of buying a second upstream dispatch. The websocket compaction bridge retains its own transport-specific claim ordering. One turn id covers every request made about a turn, so the claim depends on which request of the turn it is. The opening request takes the bare claim so a rebuilt longer retry body still names the same turn. A tool-result continuation and an HTTP compaction each take their own payload-scoped claim. Remote compaction replaces the session history and the compaction output item is pushed last, so every later turn of that session carries it; what follows the last recognized pivot decides the ordinary-turn claim. A user message after it is a turn's opening request, which keeps the bare claim. Nothing after it is the request that resumes the turn from that compaction, named by the turn and an opaque digest of only the latest compaction pivot and by nothing else in the body. A native HTTP resume that delivered completed output items and then ended client_disconnected can accept exactly one rebuilt successor only when the new input strictly extends the predecessor input, the prefix HMAC matches the predecessor request witness, and the suffix HMAC matches the bounded receipt of output_item.done items actually written downstream; the successor uses codex-request-retry, while altered, unrelated, absent, or identical suffixes stay duplicate_turn without new rows or dispatch. A tool result after the compaction pivot is a tool-result continuation. A prewarm or memory request carrying the turn id takes a payload-scoped claim in a domain named by its kind, so it is clear of the turn and an identical resend of it is still refused. The canonical x-codex-turn-metadata document is preferred from the request body and falls back to the header, and the declared request kind is compared after trimming and case folding. Not claimed at all, keeping the generated correlation id: a translated /v1 request, a non-native route, a missing Codex session, an absent or malformed document, an absent or unknown request kind, and a repeated x-codex-turn-metadata header whose copies disagree. Every refusal fails closed through one disposition vocabulary, and only a predecessor that already bought provider output refuses a resend unless it is the proven advanced HTTP resume above. The resend policy is scoped by the predecessor row's transport. A zero-output provider failure and an unfinished predecessor are served, and so are a turn and its own compaction in either order, the request that resumes the turn from a compaction in every arrangement of the compacted history, a tool continuation of that resume, a prewarm or memory alongside the turn sharing its id, and the same turn id under a different session. The chain that steps over zero-output predecessors is bounded at sixteen hops and falls open to a generated id past the bound rather than refusing. Native HTTP refusals log their own stage and label with the transport field set, the websocket line is unchanged, and no line carries a claim key, payload, or frame. Two claims remain unfenced against a changed retry body because they are payload-scoped by construction: a tool-result continuation whose body has grown, on both transports, and an HTTP compaction resent with a changed body. One shape is deliberately refused rather than served: a single turn id reused across a user message that follows a compaction output item, which the fence cannot tell from a rebuilt retry of that turn's own opener. Each native HTTP claim shape carries its own wire prefix except the tool-result continuation and the compaction, which share codex-request:"
+      contract: "409 duplicate_turn is a public runtime response on both transports. Two payload-independent claims are shared across native HTTP and websocket: the request that opened a native Codex turn takes the bare codex-turn claim, and a post-compaction resume takes codex-resume derived from the turn plus the latest compaction pivot. An HTTPS fallback of either shape therefore meets the same resend policy instead of buying a second upstream dispatch. The websocket compaction bridge retains its own transport-specific claim ordering. One turn id covers every request made about a turn, so the claim depends on which request of the turn it is. The opening request takes the bare claim so a rebuilt longer retry body still names the same turn. A tool-result continuation and an HTTP compaction each take their own payload-scoped claim. Remote compaction replaces the session history and the compaction output item is pushed last, so every later turn of that session carries it; what follows the last recognized pivot decides the ordinary-turn claim. A user message after it is a turn's opening request, which keeps the bare claim, unless that claim is already held by a request of the turn, native HTTP or websocket, that it is further along than (the same latest compaction pivot, or none, and strictly more user messages after it, or a pivot the holder did not end on, both recorded beside its full-history progress digest): the released client drains user input steered into a running turn into the same turn under the same turn id, right after a mid-turn compaction included, so such a request is claimed as a steered continuation under codex-resume derived from the turn and that digest, and its own identical or rebuilt resend is refused. Nothing after it is the request that resumes the turn from that compaction, named by the turn and an opaque digest of only the latest compaction pivot and by nothing else in the body. A native HTTP resume that delivered completed output items and then ended client_disconnected can accept exactly one rebuilt successor only when the new input strictly extends the predecessor input, the prefix HMAC matches the predecessor request witness, and the suffix HMAC matches the bounded receipt of output_item.done items actually written downstream; the successor uses codex-request-retry, while altered, absent, or identical suffixes stay duplicate_turn without new rows or dispatch; a suffix that adds a user message is a steered continuation, not a suffix of that resume. A tool result after the compaction pivot is a tool-result continuation. A prewarm or memory request carrying the turn id takes a payload-scoped claim in a domain named by its kind, so it is clear of the turn and an identical resend of it is still refused. The canonical x-codex-turn-metadata document is preferred from the request body and falls back to the header, and the declared request kind is compared after trimming and case folding. Not claimed at all, keeping the generated correlation id: a translated /v1 request, a non-native route, a missing Codex session, an absent or malformed document, an absent or unknown request kind, and a repeated x-codex-turn-metadata header whose copies disagree. Every refusal fails closed through one disposition vocabulary, and only a predecessor that already bought provider output refuses a resend unless it is the proven advanced HTTP resume above. The resend policy is scoped by the predecessor row's transport. A zero-output provider failure and an unfinished predecessor are served, and so are a turn and its own compaction in either order, the request that resumes the turn from a compaction in every arrangement of the compacted history, a tool continuation of that resume, a prewarm or memory alongside the turn sharing its id, and the same turn id under a different session. The chain that steps over zero-output predecessors is bounded at sixteen hops and falls open to a generated id past the bound rather than refusing. Native HTTP refusals log their own stage and label with the transport field set, the websocket line is unchanged, and no line carries a claim key, payload, or frame. Two claims remain unfenced against a changed retry body because they are payload-scoped by construction: a tool-result continuation whose body has grown, on both transports, and an HTTP compaction resent with a changed body. On the websocket the same steered request rides the connection that produced the turn's last response, anchored on it with only the items added since; a native frame anchored on the response a request of its own turn completed on that socket is a later request of the turn, since an opener is sent before its turn produced any response, and takes the same steered codex-resume claim, derived from the full-history progress the socket carries forward from the request that produced that response (payload-scoped only when the socket holds no progress for it), waiting behind that request's settlement, so its identical resend is still refused while the next turn's opener, anchored on the previous turn's response, keeps the bare claim. A websocket request records its full-history progress digest on its row, read directly from an unanchored frame and carried forward on its socket for an anchored one, so the same steer sent as full history on another socket after its connection closed, or over HTTPS after the session fell back, is claimed as that steered continuation, and every form of one steer meets the others. One shape is deliberately refused rather than served: a single turn id reused across a user message when the turn's opener recorded no progress position, a row written before these releases or a websocket opener anchored on a response its socket held no progress for, which the fence cannot tell from a rebuilt retry of that opener. A full-history resend of the opener that is not further along, fewer user messages after the same pivot or its pivot gone, is that opener again with trimmed history and is refused, never generated twice. An identical native HTTP compaction resend is chained as one successor with its own single settlement, because the released client resends a remote compaction only when it never read its completion and three refusals fail the turn. Each native HTTP claim shape carries its own wire prefix except the tool-result continuation and the compaction, which share codex-request:"
     },
     %{
       slug: :reasoning_minimal,
@@ -550,7 +562,57 @@ defmodule CodexPooler.CompatibilityMatrix do
       ],
       future_routes: [],
       fixture: :api_key_reasoning_availability,
-      contract: "API keys derive unrestricted, allow_up_to, or always_use reasoning policy from their configured fields. Unrestricted preserves omission and current accepted explicit values. Allow_up_to accepts known values through its ceiling and the selected model's effective known levels, resolves omission from the permitted default or highest permitted known value, and rejects above-ceiling, unknown, custom, or empty-intersection requests before reservation or upstream work without clamping. Always_use preserves legacy exact enforcement regardless of metadata membership. Denials are status 400 reasoning_effort_not_allowed with message reasoning effort is not available for this API key and param reasoning.effort for Responses/backend/compact or reasoning_effort for Chat; model_not_allowed remains the prior status 403 decision. Upgraded response.create frames receive the same existing error frame after upgrade, not an upgrade rejection. Backend model metadata keeps the selected pristine entry with every advertised level and default whatever the policy (the policy changes only model membership there), models remain visible, and public /v1/models remains unchanged. minimal and ultra are evaluated before their backend low and max rewrites."
+      contract: "API keys derive unrestricted, allow_up_to, or always_use reasoning policy from their configured fields. Unrestricted preserves omission and current accepted explicit values. Allow_up_to accepts known values through its ceiling and the selected model's effective known levels, resolves omission from the permitted default or highest permitted known value, and rejects above-ceiling, unknown, custom, or empty-intersection requests before reservation or upstream work without clamping. Always_use preserves legacy exact enforcement regardless of metadata membership. Denials are status 400 reasoning_effort_not_allowed with message reasoning effort is not available for this API key and param reasoning.effort for Responses/backend/compact or reasoning_effort for Chat; model_not_allowed is status 400 invalid_request_error with param model (feature api_key_terminal_policy_denials). Upgraded response.create frames receive the same existing error frame after upgrade, not an upgrade rejection. Backend model metadata keeps the selected pristine entry with every advertised level and default whatever the policy (the policy changes only model membership there), models remain visible, and public /v1/models remains unchanged. minimal and ultra are evaluated before their backend low and max rewrites."
+    },
+    %{
+      slug: :api_key_reservation_policy_refusals,
+      status: :supported,
+      current: :window_429_request_cap_400,
+      categories: [:route, :auth, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/backend-api/codex/responses"},
+        %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: "websocket"},
+        %{method: :post, path: "/v1/chat/completions"}
+      ],
+      future_routes: [],
+      fixture: :api_key_reservation_policy_refusals,
+      contract: "an API key policy refusal at the reservation keeps the wire code api_key_policy_limit_exceeded and the Pooler's own message on every transport, is marked as a Pooler policy denial so public /v1 never redacts it, and takes its status from what refused it: a window (max_requests_per_minute, max_tokens_per_day, max_tokens_per_week) that the request fits once the window moves answers 429 rate_limit_error, with a retry hint taken from the window's own boundary (60 s for the minute window, the seconds until the next 00:00 UTC for the daily window, none for the trailing week) sent as the HTTP Retry-After header and as the websocket error event's headers retry-after, plus HTTP x-should-retry false when the window frees no sooner than a minute; a per-request estimate cap (max_input_tokens_per_request, max_output_tokens_per_request), and a daily or weekly token window whose max is below the request's own estimate, which no later window admits either, answer 400 invalid_request_error with no hint; the refused request row records the status the client received; with owner forwarding on or off the same request gets the same answer, including a chained client-retry successor refused by the key's own policy, which records its refused row under a correlation that holds no request claim; a refusal made before a request's durable claim never takes that claim, so the same request resent once the cause is gone is served instead of meeting 409 duplicate_turn"
+    },
+    %{
+      slug: :api_key_terminal_policy_denials,
+      status: :supported,
+      current: :deterministic_denials_400,
+      categories: [:route, :auth, :error, :streaming],
+      routes: [
+        %{method: :post, path: "/backend-api/codex/responses"},
+        %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
+        %{method: :post, path: "/backend-api/codex/images/generations"},
+        %{method: :post, path: "/backend-api/codex/images/edits"},
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: "websocket"},
+        %{method: :post, path: "/v1/chat/completions"}
+      ],
+      future_routes: [],
+      fixture: :api_key_terminal_policy_denials,
+      contract: "an API key policy denial that no resend of the same request can pass answers 400 invalid_request_error on every route and transport, because the released Codex client ends the turn on a 400 while it resends a 403 five times and then falls back from websocket to HTTPS for the session: model_not_allowed (the key's allowed or enforced model excludes the requested one, as the Codex backend answers 400 for a model the account cannot serve) with param model and the Pooler's own message, and the per-request estimate caps and token windows below the request's own estimate of feature api_key_reservation_policy_refusals; the refused request row records 400; image_generation_disabled stays 403 because it is answered only on the HTTP image routes, which the released client's HTTP layer and image tool never resend on a 4xx; api_key_policy_malformed stays 403 because the request is not at fault; OpenAI SDKs retry neither 400 nor 403"
+    },
+    %{
+      slug: :exhausted_pool_usage_limit,
+      status: :supported,
+      current: :terminal_429_usage_limit_reached,
+      categories: [:route, :error, :streaming, :ownership],
+      routes: [
+        %{method: :post, path: "/backend-api/codex/responses"},
+        %{method: :get, path: "/backend-api/codex/responses", transport: "websocket"},
+        %{method: :post, path: "/v1/responses"},
+        %{method: :get, path: "/v1/responses", transport: "websocket"},
+        %{method: :post, path: "/v1/chat/completions"}
+      ],
+      future_routes: [],
+      fixture: :exhausted_pool_usage_limit,
+      contract: "when routing excludes every candidate of a Pool because its quota is exhausted and every exhausted window carries a reset still ahead, the refusal is the provider's own terminal answer for an exhausted account: 429 with error.type usage_limit_reached, the Pooler's code quota_exhausted and message, resets_at (epoch seconds) and resets_in_seconds for the soonest reset among the exhausted windows of every candidate (the listed windows do not say which one binds: a refused model meter marks all its windows exhausted, and a 100% account window stays listed next to a model-meter block; an account the provider reports blocked advises the soonest fresh reset of its exhausted account windows, or of all its fresh account windows when none reads exhausted), the HTTP Retry-After header and the websocket error event's headers retry-after in seconds, plus HTTP x-should-retry false when the wait exceeds 60 s; the released Codex client ends the turn on it and names the reset, the OpenAI SDKs stop; public /v1 renders it unredacted; with owner forwarding on or off the same request gets the same answer, in Full and Lite; the refused request row records 429; the answer stays the retryable 503 (quota_exhausted or quota_evidence_unavailable) when any candidate's return time is unknown (stale, resetless or missing evidence, a pending saved-reset probe, a provider-blocked account with no fresh reset-bearing account window) or when an open circuit removed a candidate before quota classification; the reset is advice, because an auto-redeemed saved reset can bring an account back sooner; a provider usage-limit 429 on the last eligible candidate (nothing left to fail over to) whose body names a reset still ahead (resets_at, else resets_in_seconds) gets the same terminal answer, advising the soonest of the provider's reset and the returns of the Pool's other candidates (each exhausted, workspace-denied or refused earlier in the request with a known reset; any other candidate without a known return keeps the relayed answer), on native HTTP (streaming or not) and every /v1 HTTP route, the provider's message, plan_type and other body fields never relayed, and the request row and attempt keeping the provider 429 and upstream_rate_limited; the same refusal sent as the upstream websocket's wrapped 429 frame before output reaches the native and public /v1 websockets as the wrapped terminal 429 event with headers retry-after and the Pool's advice (a sibling with no known return keeps the retryable frame); a streaming /v1 turn bridged onto the upstream websocket that meets that frame before output moves to another eligible candidate or answers the same terminal HTTP 429; on native routes a turn whose selected canonical partition's last candidate refuses with a provider usage limit before output moves once to a held-back partition that can serve the model now (the next request's partition selection), and when none can, the terminal answer's advice counts the held-back partition too; without such a reset, or when another candidate's return is not known, /v1 (HTTP and the upstream websocket bridge, Full and Lite) answers the redacted 429 rate_limit_error with Retry-After when an open circuit of another candidate bounds the wait, the public /v1 websocket the same error as an error event with headers retry-after, and the native websocket the classified wrapped 429 native HTTP relays; a retryable 503 of a Pool with a circuit-blocked candidate (the quota 503 next to an open circuit, or no_eligible_backend when circuits removed every candidate) carries Retry-After, and the websocket error event headers retry-after, with the seconds until the earliest such circuit admits a probe (an open circuit's next_probe_at, a saturated half-open circuit's probe going stale), clamped to 1..60, never with x-should-retry, also on the redacted /v1 answer, on the file route, and when a circuit refuses the last candidate at dispatch after route filtering admitted it"
     },
     %{
       slug: :reasoning_context,
@@ -726,10 +788,10 @@ defmodule CodexPooler.CompatibilityMatrix do
       status: :supported,
       current: :pre_reservation_rejection,
       categories: [:route, :auth, :error, :ownership],
-      routes: [%{method: :post, path: "/backend-api/codex/responses"}],
+      routes: [%{method: :post, path: "/backend-api/codex/responses"}, %{method: :post, path: "/v1/responses"}, %{method: :post, path: "/v1/chat/completions"}],
       future_routes: [],
       fixture: :unsupported_input_image_reference,
-      contract: "Responses input_image.file_id, Codex sediment:// file URIs, and unsupported URL schemes such as http:// and file:// used as input_image.image_url values are rejected before reservation or upstream dispatch"
+      contract: "Responses input_image.file_id references are forwarded unchanged on every serving mode (Lite removes only the detail hint), and one the Pool bridged pins the request to the assignment holding the file like input_file; Codex sediment:// file URIs and unsupported URL schemes such as http:// and file:// used as input_image.image_url values are rejected before reservation or upstream dispatch. Public /v1/responses forwards input_image.detail from message and tool-output images alike on a Full model and Lite removes it, as native requests do; a null detail is dropped from message and tool-output images alike (the native client never sends one), and a detail outside low, high, auto and original is refused on every serving mode with 400 invalid_value on the provider's field path (input[i].output[j].detail or input[i].content[j].detail, indexed on the input as the client sent it) before reservation or upstream dispatch. Public /v1/chat/completions carries image_url.detail into the rebuilt input_image detail under the same rules (Full forwards it, Lite removes it, null is absent) and refuses a value outside that enum on every serving mode with 400 invalid_value on the Chat field path (messages[i].content[j].image_url.detail) before reservation or upstream dispatch. Public /v1/chat/completions also carries image_url parts of a role tool message into the rebuilt function_call_output as input_image under the same detail rules, and still refuses a file part in a tool message. The Pooler extension shapes that hold a Chat-style image inside a tool result carry image_url.detail under the same rules: an image_url part of a /v1/responses role tool item becomes a tool-output input_image and is refused at input[i].content[j].image_url.detail, and a Cline tool-result image on /v1/chat/completions is refused at messages[i].content[j].output[k].image_url.detail (or .detail for an input_image part)"
     },
     %{
       slug: :first_event_stream_retry,
@@ -964,12 +1026,22 @@ defmodule CodexPooler.CompatibilityMatrix do
       aliases_share_exact_body_and_token: true,
       cache_coherence: "eventual_after_successful_responses_token",
       instructions_representation: %{
-        selector: "client_version_query",
+        selector: "codex_build_user_agent",
         template_only_since: "0.148.0",
         template_only: "base_instructions_dropped_when_instructions_template_is_a_string",
-        verbatim: "older_0_147_0_absent_or_unparsable_client_version",
+        verbatim: "older_0_147_0_or_non_codex_user_agent",
         etag_input: "served_representation",
-        vary_header: false
+        vary_header: "user-agent",
+        client_version_query: :ignored,
+        decode_checked: %{
+          window: {"0.154.0", "0.156.1"},
+          window_version: "whole_version_prereleases_included",
+          body: "template_only_minus_entries_the_client_cannot_decode",
+          left_out_model: %{advertised: false, routable: true},
+          operator_log: "codex catalog entry left out",
+          log_fields: ["pool_id", "model", "fields"]
+        },
+        turn_selector: "codex_build_user_agent"
       }
     },
     backend_responses_etag: %{
@@ -1983,6 +2055,24 @@ defmodule CodexPooler.CompatibilityMatrix do
             owner_forwarded_turns: "carried_in_owner_request_headers_built_on_the_proxy_node",
             public_v1_origins: "caller_values_never_forwarded_derived_session_id_only"
           },
+          native_http_derived_session_id: %{
+            routes: [
+              "/backend-api/codex/responses",
+              "/backend-api/codex/v1/responses",
+              "/backend-api/codex/responses/compact",
+              "/backend-api/codex/v1/responses/compact"
+            ],
+            transports: ["http_json", "http_sse"],
+            applies_when: "no_client_session_id_within_the_provider_bound",
+            precedence: "client_session_id_then_prompt_cache_key_then_local_continuity_alias",
+            alias_namespace: "60a80f24-3dd3-5aeb-be77-26ea7c41d36f",
+            alias_derivation: "uuid_v5_distinct_namespace_over_pool_id_api_key_id_and_raw_alias_never_forwarded_raw",
+            client_session_id: "forwarded_unchanged_never_replaced",
+            derivation: "same_as_public_v1_same_pool_api_key_and_prompt_cache_key_yield_the_same_value",
+            local_session: "keyed_by_the_client_continuity_header_unchanged",
+            native_websocket_handshake: "unchanged_only_the_upgrade_session_headers",
+            privacy: "derived_value_not_persisted_or_logged"
+          },
           public_v1: %{
             client_headers: "local_only_never_forwarded",
             synthesized_header: "session-id",
@@ -2104,7 +2194,7 @@ defmodule CodexPooler.CompatibilityMatrix do
         transport: "same_downstream_websocket",
         retry_codes: ["usage_limit_reached", "usage_limit_exceeded"],
         retry_boundary: "before_output_with_absent_or_zero_usage",
-        portable_history: "unanchored_input_including_encrypted_reasoning_and_compaction_checkpoints",
+        portable_history: "unanchored_input_including_encrypted_reasoning_compaction_checkpoints_and_recognized_agent_handoffs",
         retained_fences: ["previous_response_id", "file_affinity", "item_reference", "compaction_trigger", "connection_bound_compaction"],
         denial_evidence: "explicit_error_source_over_percentage_only_permission",
         accounting: "one_request_with_failed_then_successful_attempts_and_one_settlement"
@@ -2200,7 +2290,9 @@ defmodule CodexPooler.CompatibilityMatrix do
           live_owner_refusal_code: "owner_busy",
           running_request_lost_race: "duplicate_turn_counted_as_owner_replay_preflight",
           resend_of_recorded_turn: "duplicate_turn_counted_as_owner_replay_preflight",
-          newer_socket_turn_at_armed_previsible_replay: "retires_replay_settles_predecessor_once_then_dispatches"
+          newer_socket_turn_at_armed_previsible_replay: "retires_replay_settles_predecessor_once_then_dispatches",
+          request_from_socket_that_inherited_visible_turn: "owner_cancels_inherited_turn_awaits_settlement_then_judges_request",
+          inherited_visible_turn_at_owner_without_take_over: "refusal_kept"
         },
         runtime_replay_pre_classification: %{
           session_not_reconnectable: "owner_unavailable",
@@ -2335,7 +2427,6 @@ defmodule CodexPooler.CompatibilityMatrix do
       },
       refused: [
         "identical_native_http_resend",
-        "identical_compaction_resend",
         "every_further_resend_of_one_turn",
         "resend_of_a_turn_that_delivered_output_after_a_served_zero_output_failure",
         "grown_body_retry_of_an_uncompacted_turn",
@@ -2343,7 +2434,13 @@ defmodule CodexPooler.CompatibilityMatrix do
         "changed_non_input_field_between_a_compacted_turns_attempts",
         "reordered_or_dropped_item_before_the_compaction_output_item",
         "https_fallback_of_a_drained_websocket_turn_in_a_compacted_session",
-        "one_turn_id_reused_across_a_user_message_after_a_compaction",
+        "one_turn_id_reused_across_a_user_message_after_an_opener_that_recorded_no_progress",
+        "identical_resend_of_a_served_steered_websocket_frame",
+        "full_history_resend_on_another_socket_of_a_steer_served_anchored",
+        "https_fallback_of_a_websocket_opener_as_sent_or_rebuilt_with_its_answer",
+        "full_history_resend_of_a_next_turn_opener_anchored_on_the_previous_turn",
+        "full_history_resend_of_a_turn_opener_with_fewer_user_messages_after_the_same_pivot",
+        "full_history_resend_of_a_turn_opener_whose_compaction_pivot_is_gone",
         "identical_post_compaction_resume",
         "identical_prewarm_or_memory_sharing_the_turn_id"
       ],
@@ -2359,7 +2456,13 @@ defmodule CodexPooler.CompatibilityMatrix do
         "same_turn_id_under_a_different_codex_session",
         "tool_result_continuation_resent_with_a_grown_body",
         "compaction_resent_with_a_changed_body",
-        "attempt_past_the_chain_depth_bound"
+        "attempt_past_the_chain_depth_bound",
+        "identical_native_http_compaction_resend_chained_once_per_request",
+        "steered_user_message_under_the_turn_id_of_a_native_http_opener",
+        "steered_websocket_frame_anchored_on_its_own_turns_response_on_the_same_socket",
+        "steered_full_history_frame_on_a_new_socket_after_a_websocket_opener",
+        "steered_native_http_request_after_a_websocket_opener",
+        "steered_request_after_a_mid_turn_compaction_of_an_already_compacted_session"
       ]
     },
     reasoning_minimal: %{
@@ -2382,6 +2485,43 @@ defmodule CodexPooler.CompatibilityMatrix do
         "input" => "synthetic reasoning request",
         "reasoning" => %{"effort" => "ultra"}
       }
+    },
+    api_key_reservation_policy_refusals: %{
+      code: "api_key_policy_limit_exceeded",
+      window: %{
+        limits: ["max_requests_per_minute", "max_tokens_per_day", "max_tokens_per_week"],
+        admits_request_once_moved: true,
+        status: 429,
+        type: "rate_limit_error",
+        retry_after_seconds: %{minute: 60, daily: :until_next_utc_midnight, weekly: nil},
+        http_x_should_retry: %{minute: nil, daily: "false", weekly: "false"},
+        hint_surfaces: %{http: "retry-after header", websocket: "error event headers.retry-after"}
+      },
+      request_cap: %{
+        limits: ["max_input_tokens_per_request", "max_output_tokens_per_request"],
+        window_below_request_estimate: ["max_tokens_per_day", "max_tokens_per_week"],
+        status: 400,
+        type: "invalid_request_error",
+        retry_hint: nil
+      },
+      recorded_status: :answered_status,
+      owner_forwarding: :same_answer,
+      retry_successor_refusal: %{recorded: true, holds_request_claim: false},
+      pre_claim_refusal_holds_request_claim: false
+    },
+    api_key_terminal_policy_denials: %{
+      model_not_allowed: %{status: 400, type: "invalid_request_error", param: "model"},
+      request_cap: %{status: 400, type: "invalid_request_error", code: "api_key_policy_limit_exceeded"},
+      image_generation_disabled: %{status: 403, type: "invalid_request_error", routes: :http_image_routes_only},
+      recorded_status: :answered_status
+    },
+    exhausted_pool_usage_limit: %{
+      terminal: %{status: 429, type: "usage_limit_reached", code: "quota_exhausted", fields: ["resets_at", "resets_in_seconds"], retry_after: :earliest_reset_seconds, x_should_retry_false_above_seconds: 60},
+      retryable: %{status: 503, codes: ["quota_evidence_unavailable", "quota_exhausted"], when: [:reset_unknown, :circuit_excluded_candidate]},
+      v1_message: "upstream quota is exhausted until its reset time",
+      recorded_status: :answered_status,
+      relayed_provider_usage_limit: %{when: :last_candidate_provider_429, reset: ["resets_at", "resets_in_seconds"], answer: :terminal, without_reset: %{v1_type: "rate_limit_error"}, recorded: %{status: 429, code: "upstream_rate_limited"}},
+      circuit_retry_after: %{status: 503, header: "retry-after", seconds: :earliest_circuit_probe, clamp: {1, 60}, x_should_retry: :absent}
     },
     api_key_reasoning_availability: %{
       modes: [:unrestricted, :allow_up_to, :always_use],
@@ -2707,6 +2847,12 @@ defmodule CodexPooler.CompatibilityMatrix do
     unsupported_input_image_reference: %{
       accepted_url_schemes: ["https", "data:image"],
       unsupported_url_schemes: ["http", "sediment", "file"],
+      v1_image_details: ["low", "high", "auto", "original"],
+      v1_invalid_image_detail: %{status: 400, type: "invalid_request_error", code: "invalid_value", param: "input[2].output[1].detail"},
+      v1_chat_invalid_image_detail: %{status: 400, type: "invalid_request_error", code: "invalid_value", param: "messages[0].content[1].image_url.detail"},
+      v1_chat_tool_message_image_parts: ["image_url"],
+      v1_role_tool_invalid_image_detail: %{status: 400, type: "invalid_request_error", code: "invalid_value", param: "input[1].content[1].image_url.detail"},
+      v1_chat_tool_result_invalid_image_detail: %{status: 400, type: "invalid_request_error", code: "invalid_value", param: "messages[1].content[0].output[1].image_url.detail"},
       json: %{
         "model" => "gpt-fixture-vision",
         "input" => [
@@ -3500,7 +3646,8 @@ defmodule CodexPooler.CompatibilityMatrix do
           "api_key_policy_malformed",
           "model_not_allowed",
           "image_generation_disabled",
-          "api_key_concurrency_limit_exceeded"
+          "api_key_concurrency_limit_exceeded",
+          "api_key_policy_limit_exceeded"
         ],
         pooler_policy_denial_marker: "pooler_policy",
         server_class_surfaces: ["responses_json", "responses_sse_terminal", "chat_streaming"],

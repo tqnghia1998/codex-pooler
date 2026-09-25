@@ -51,6 +51,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
   alias CodexPooler.Gateway.Metadata.CodexCatalog
   alias CodexPooler.Gateway.OperationalSettings
   alias CodexPooler.Gateway.Payloads.RequestOptions
+  alias CodexPooler.Gateway.Payloads.TransportEnvelope
   alias CodexPooler.Gateway.Routing.CandidateEligibility
   alias CodexPooler.Gateway.Transports.BoundedResponseBody
   alias CodexPooler.Gateway.Transports.Streaming.StreamProtocol.SSEParser
@@ -1313,7 +1314,12 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
              sentinels
            )
 
-    assert canonical_full_failure_response?(response, 429)
+    # A Full 429 keeps the tokens the client classifies it by instead of the
+    # canonical server_error body (findings#206 row 206-589).
+    assert response.status == 429
+
+    assert CodexPooler.JSON.decode(response.resp_body) ==
+             {:ok, %{"error" => %{"code" => "upstream_rate_limited", "message" => "upstream rate limited the request", "type" => "rate_limit_error"}}}
   end
 
   test "streaming 400 without content type persists bounded rejection facts only as metadata", %{
@@ -2367,7 +2373,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         "prompt" => "synthetic policy denial"
       })
 
-    assert %{"error" => %{"code" => "model_not_allowed"}} = json_response(response, 403)
+    assert %{"error" => %{"code" => "model_not_allowed"}} = json_response(response, 400)
     assert_no_native_dispatch!(upstream, setup.pool.id)
   end
 
@@ -2399,7 +2405,7 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         "prompt" => "synthetic enforced mismatch"
       })
 
-    assert %{"error" => %{"code" => "model_not_allowed"}} = json_response(response, 403)
+    assert %{"error" => %{"code" => "model_not_allowed"}} = json_response(response, 400)
     assert_no_native_dispatch!(upstream, setup.pool.id)
   end
 
@@ -5501,7 +5507,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     for captured <- [first_upstream_request, second_upstream_request] do
       captured_headers = Map.new(captured.headers)
 
-      refute Map.has_key?(captured_headers, "session-id")
+      # The alias stays local; the provider gets only its Pool- and
+      # key-scoped digest, since the body has no prompt_cache_key
+      # (findings#206 row 206-606).
+      assert captured_headers["session-id"] == continuity_alias_session_id(setup, session_header)
+      refute captured_headers["session-id"] == session_header
       refute Map.has_key?(captured_headers, "x-session-id")
       refute Map.has_key?(captured_headers, "x-session-affinity")
     end
@@ -5562,7 +5572,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     for captured <- [first_upstream_request, second_upstream_request] do
       captured_headers = Map.new(captured.headers)
 
-      refute Map.has_key?(captured_headers, "session-id")
+      # The alias stays local; the provider gets only its Pool- and
+      # key-scoped digest, since the body has no prompt_cache_key
+      # (findings#206 row 206-606).
+      assert captured_headers["session-id"] == continuity_alias_session_id(setup, session_header)
+      refute captured_headers["session-id"] == session_header
       refute Map.has_key?(captured_headers, "x-session-id")
       refute Map.has_key?(captured_headers, "x-session-affinity")
     end
@@ -12661,13 +12675,19 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
     for {captured, forwarded_session_id} <-
           Enum.zip(
             [first_upstream_request, second_upstream_request, third_upstream_request],
-            [session_id_header, nil, nil]
+            [
+              session_id_header,
+              continuity_alias_session_id(setup, x_session_id_header),
+              continuity_alias_session_id(setup, affinity_header)
+            ]
           ) do
       assert captured.path == "/backend-api/codex/responses/compact"
       captured_headers = Map.new(captured.headers)
 
       # Only a non-blank client session-id is forwarded as the provider's
-      # sticky-routing key; blank values and Pooler-local headers stay local.
+      # sticky-routing key; blank values and Pooler-local headers stay local,
+      # and a Pooler-local alias reaches the provider only as its scoped digest
+      # (findings#206 row 206-606).
       assert Map.get(captured_headers, "session-id") == forwarded_session_id
       refute Map.has_key?(captured_headers, "x-session-id")
       refute Map.has_key?(captured_headers, "x-session-affinity")
@@ -13402,8 +13422,8 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
   test "POST /backend-api/codex/responses scopes exhausted model aliases before dispatch",
        %{conn: conn} do
     cases = [
-      {:model, "gpt-test-model", "provider-gpt-test-model", 503, 0},
-      {:upstream_model, nil, "provider-gpt-test-model", 503, 0},
+      {:model, "gpt-test-model", "provider-gpt-test-model", 429, 0},
+      {:upstream_model, nil, "provider-gpt-test-model", 429, 0},
       {:model, "unrelated-model", "unrelated-upstream", 200, 1}
     ]
 
@@ -13443,7 +13463,10 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
       if status == 200 do
         assert %{"id" => "resp_model_scope_windowless"} = json_response(conn, 200)
       else
-        assert %{"error" => %{"code" => "quota_exhausted"}} = json_response(conn, 503)
+        # The model-scoped window is exhausted with a known reset, so the
+        # sole candidate answers the terminal usage limit (findings#206 row
+        # 206-508).
+        assert %{"error" => %{"code" => "quota_exhausted", "type" => "usage_limit_reached"}} = json_response(conn, status)
       end
 
       assert model_dispatch_count(upstream) == dispatch_count
@@ -14901,9 +14924,11 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
         "input" => native_text_input("all exhausted quota rejection")
       })
 
-    response = json_response(conn, 503)
+    # Both candidates are exhausted with a known reset: the provider's terminal
+    # usage-limit answer (findings#206 row 206-508).
+    response = json_response(conn, 429)
 
-    assert %{"error" => %{"code" => "quota_exhausted", "message" => message}} = response
+    assert %{"error" => %{"code" => "quota_exhausted", "message" => message, "type" => "usage_limit_reached"}} = response
     assert message == "upstream quota is exhausted until its reset time"
     assert FakeUpstream.count(first_upstream) == 0
     assert FakeUpstream.count(second_upstream) == 0
@@ -16729,5 +16754,9 @@ defmodule CodexPoolerWeb.Runtime.BackendCodexControllerTest do
 
       if is_binary(decoded["type"]), do: [decoded], else: []
     end)
+  end
+
+  defp continuity_alias_session_id(setup, alias) do
+    TransportEnvelope.continuity_alias_session_id(%{pool_id: setup.pool.id, api_key_id: setup.api_key.id}, alias)
   end
 end
