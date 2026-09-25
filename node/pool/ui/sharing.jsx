@@ -2476,8 +2476,8 @@ function SessionDialog({ value, onClose, onSave, onChange }) {
                     const quotaInputValid = event.currentTarget.validity.valid;
                     onChange((current) => ({ ...current, quotaInputValid }));
                   }}
-                  min={addingQuota ? 0.01 : value.session.consumedQuotaDollars}
-                  step={0.01}
+                  min={addingQuota ? 0.01 : Math.max(0.000001, value.session.consumedQuotaDollars)}
+                  step={addingQuota ? 0.01 : 0.000001}
                   isRequired
                 />
                 {!addingQuota && (
