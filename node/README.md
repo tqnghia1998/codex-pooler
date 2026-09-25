@@ -12,13 +12,36 @@ Relaydeck is a deliberately small local dashboard for:
 This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer. The Elixir application is retained unchanged from upstream as a reference, not as a second maintained implementation. Codex and Claude Enterprise OAuth access tokens are refreshed lazily before proxy requests, and proactively once per hour when they expire within 12 hours.
 
 QuotaHub is maintained only in the standalone `codex-share` repository. Its
-Redis/KMS persistence, DW relay, product server, and UI stay there. It pins
-this repository as a Git submodule and imports the gateway through the
-`codex-pooler-node/gateway/*` package exports. Relaydeck does not initialize
+Redis/KMS persistence, DW relay, product server, and UI stay there. Its
+`vendor/gateway` submodule pins a minimal runtime snapshot on the standalone
+repository's own internal `gateway` branch, not this repository or its history.
+It imports the snapshot through `@quotahub/gateway/gateway/*`. Relaydeck does not initialize
 or expose QuotaHub accounts, routes, sessions, or storage. Both products use
 `src/gateway-dispatch.js` for client-facing gateway routes; add protocol and
 compatibility behavior here. QuotaHub sets `CODEX_GATEWAY_IDENTITY=codex-share`
 before loading the gateway to preserve its persisted Claude identities.
+
+### Syncing QuotaHub
+
+For "sync code to codex-share" or equivalent requests, follow the
+[agent sync procedure](../AGENTS.md#syncing-code-to-codex-share). The standalone
+checkout is normally `~/Documents/Git/codex-share`; its `publish-gateway`
+script selects the source checkout. Check that the intended changes have
+reached that clean, committed checkout before building standalone.
+
+`npm run build` in standalone publishes the minimal gateway snapshot and
+updates its vendor pin before building the UI. This is not a source fetch,
+rebase, full application port, product-branch push, or deployment. The
+publisher currently uses fixed entry modules and npm dependencies with a
+regex-based import walk. Audit new imports/assets/packages and any required
+QuotaHub routes, configuration, or Redis integration; a passing UI build
+does not prove complete feature coverage. Upstream Elixir-only changes must
+be ported to Node before they can be shared.
+
+Keep standalone free of source branding, remote URLs, source commit metadata,
+and full-source history. Review and test both sides, then commit/push the
+standalone pin and integration changes when requested. Do not restore the
+old embedded app or copy Relaydeck's dashboard into the vendor.
 
 ## Proxy compatibility status
 

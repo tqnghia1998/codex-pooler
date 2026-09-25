@@ -19,11 +19,10 @@ npm start
 打开 `http://localhost:3000`。配置、路由、支持的端点、存储方式和运行限制请见
 [`node/README.md`](node/README.md)。
 
-QuotaHub 仅在独立的
-[`codex-share`](https://github.com/tqnghia1998/codex-share) 仓库中维护。
-它通过 Git submodule 固定本仓库的 Node 网关版本，并独立维护 Redis/KMS
-存储、DW 转发、界面和产品服务。请在独立仓库中运行；此仓库不再包含
-QuotaHub 应用。
+QuotaHub 仅在独立的 `codex-share` 仓库中维护。它通过 Git submodule 固定其
+内部 `gateway` 分支上的最小 Node 网关快照，不包含本仓库的历史，并独立维护
+Redis/KMS 存储、DW 转发、界面和产品服务。请在独立仓库中运行；此仓库不再包含
+QuotaHub 应用。更新流程见[同步说明](AGENTS.md#syncing-code-to-codex-share)。
 
 ## 项目方向
 
