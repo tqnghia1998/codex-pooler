@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-const DEFAULT_CODEX_VERSION = '0.146.1';
+const DEFAULT_CODEX_VERSION = '0.157.0';
 const DEFAULT_CODEX_ORIGINATOR = 'codex_cli_rs';
 const DEFAULT_CODEX_WEBSOCKET_BETA = 'responses_websockets=2026-02-06';
 export const DEFAULT_ANTHROPIC_VERSION = '2023-06-01';

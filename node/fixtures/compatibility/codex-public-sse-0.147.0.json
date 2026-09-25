@@ -508,11 +508,11 @@
     "targetPath": "/backend-api/codex/responses",
     "fingerprint": {
       "version": 1,
-      "hash": "be2458fe64be87ea96c97b38bb907e57",
+      "hash": "110106f215f05616cb78fce9a4d717f3",
       "values": {
-        "user-agent": "codex_cli_rs/0.146.1",
+        "user-agent": "codex_cli_rs/0.157.0",
         "originator": "codex_cli_rs",
-        "version": "0.146.1"
+        "version": "0.157.0"
       }
     },
     "projection": {

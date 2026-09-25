@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { applyClaudePayloadConfig } from '../src/claude-payload.js';
 import { claudeConfigFromEnv } from '../src/claude-config.js';
+import { CLAUDE_CODE_VERSION } from '../src/claude-client-version.js';
 import { claudeModelAlias, claudeRequestHeaders, prepareClaudeRequestBody } from '../src/claude-protocol.js';
 import { claudeCoolingDisabled, claudeRequestRetryLimit, claudeRequestScopedAction } from '../src/upstream-outcomes.js';
 import { claudeMetadataModelExcluded, createUpstream, isClaudeOAuthUpstream } from '../src/domain.js';
@@ -73,7 +74,7 @@ test('matches CPA native Claude fingerprint preservation and stabilization rules
   });
   const req = {
     headers: {
-      'user-agent': 'claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.220)',
+      'user-agent': `claude-cli/${CLAUDE_CODE_VERSION} (external, claude-vscode, agent-sdk/0.3.220)`,
       'x-app': 'cli',
       'anthropic-beta': 'claude-code-20250219,interleaved-thinking-2025-05-14',
       'x-claude-code-session-id': sessionId,

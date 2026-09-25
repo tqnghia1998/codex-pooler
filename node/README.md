@@ -11,22 +11,37 @@ Relaydeck is a deliberately small local dashboard for:
 
 This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer. The Elixir application is retained unchanged from upstream as a reference, not as a second maintained implementation. Codex and Claude Enterprise OAuth access tokens are refreshed lazily before proxy requests, and proactively once per hour when they expire within 12 hours.
 
-Quota sharing is a separate product under `pool/`. It has its own server, UI,
-cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
-not initialize or expose QuotaHub accounts, routes, sessions, or storage.
-Both products route their client-facing gateway surface through
-`src/gateway-dispatch.js`. Add proxy routes or compatibility behavior in the
-shared gateway modules, never as a Relaydeck-only or QuotaHub-only route.
-QuotaHub is an informal, free friend-sharing tool. It intentionally has no
-payments, marketplace pricing, reputation system, ratings, or availability
-guarantees. Durable operational notifications are delivered by email when its
-optional SMTP settings are configured; see `pool/README.md`.
-QuotaHub supports Codex, Claude, and AIS upstreams, but its sharing quota model
-refreshes Codex provider quota directly. When configured, its monthly Loop
-integration supplies the Claude and AIS sharing balance; that source is
-approximately one hour delayed, is visibly marked as such, and caps new offers
-and sessions until refreshed. Relaydeck's separate Claude quota and OAuth
-management behavior is unchanged.
+QuotaHub is maintained only in the standalone `codex-share` repository. Its
+Redis/KMS persistence, DW relay, product server, and UI stay there. Its
+`vendor/gateway` submodule pins a minimal runtime snapshot on the standalone
+repository's own internal `gateway` branch, not this repository or its history.
+It imports the snapshot through `@quotahub/gateway/gateway/*`. Relaydeck does not initialize
+or expose QuotaHub accounts, routes, sessions, or storage. Both products use
+`src/gateway-dispatch.js` for client-facing gateway routes; add protocol and
+compatibility behavior here. QuotaHub sets `CODEX_GATEWAY_IDENTITY=codex-share`
+before loading the gateway to preserve its persisted Claude identities.
+
+### Syncing QuotaHub
+
+For "sync code to codex-share" or equivalent requests, follow the
+[agent sync procedure](../AGENTS.md#syncing-code-to-codex-share). The standalone
+checkout is normally `~/Documents/Git/codex-share`; its `publish-gateway`
+script selects the source checkout. Check that the intended changes have
+reached that clean, committed checkout before building standalone.
+
+`npm run build` in standalone publishes the minimal gateway snapshot and
+updates its vendor pin before building the UI. This is not a source fetch,
+rebase, full application port, product-branch push, or deployment. The
+publisher currently uses fixed entry modules and npm dependencies with a
+regex-based import walk. Audit new imports/assets/packages and any required
+QuotaHub routes, configuration, or Redis integration; a passing UI build
+does not prove complete feature coverage. Upstream Elixir-only changes must
+be ported to Node before they can be shared.
+
+Keep standalone free of source branding, remote URLs, source commit metadata,
+and full-source history. Review and test both sides, then commit/push the
+standalone pin and integration changes when requested. Do not restore the
+old embedded app or copy Relaydeck's dashboard into the vendor.
 
 ## Proxy compatibility status
 
@@ -150,7 +165,7 @@ verified cache-only run. The full contract is in `COMPATIBILITY_RELEASE_GATE_PLA
 
 Shared Codex host health is enabled conservatively by default. Two proven pre-connect failures within 30 seconds open a 15-second circuit for the normalized Codex origin; requests receive a local retryable `503 codex_host_unavailable` with `Retry-After`, and one half-open probe is admitted after cooldown. Only `ECONNREFUSED`, `ENOTFOUND`, `EAI_AGAIN`, `ENETUNREACH`, `ENETDOWN`, and `EHOSTUNREACH` count. Timeouts, resets, broken pipes, TLS failures, HTTP responses, and authentication failures remain account-attributed, while any actual HTTP response clears host reachability evidence. Configure this with `CODEX_POOLER_CODEX_HOST_CIRCUIT_ENABLED`, `CODEX_POOLER_CODEX_HOST_FAILURE_THRESHOLD`, `CODEX_POOLER_CODEX_HOST_FAILURE_WINDOW_MS`, `CODEX_POOLER_CODEX_HOST_COOLDOWN_MS`, and `CODEX_POOLER_CODEX_HOST_MAX_ENTRIES`.
 
-Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; Claude Enterprise OAuth credentials use the Claude Code PKCE exchange and refresh endpoints, then call the configured Anthropic-compatible base URL (default `https://api.anthropic.com`) at `/v1/messages?beta=true`. Background quota refresh runs every 10 minutes; while the focused dashboard is open, it requests a non-forced refresh every 5 minutes for visible upstream cards. Claude OAuth quota/profile reads use Anthropic's read-only `/api/oauth/usage` and `/api/oauth/profile` control-plane endpoints; usage supports both the current structured `limits` response and the legacy flat windows. Gateway-generated Claude requests and quota reads identify as Claude Code `2.1.280` by default; set `CODEX_POOLER_CLAUDE_CODE_VERSION` to a newer numeric version when needed. Native Claude Code requests retain their actual client version and may still require `claude update`. When Anthropic reports enabled extra usage, its `monthly_limit` and `used_credits` are exposed as actual USD remaining alongside the percentage-only subscription windows. Successful Claude Messages responses also seed session, weekly, and overage windows from Anthropic's rate-limit headers when the usage endpoint is unavailable; when `/api/oauth/usage` specifically rejects `user:profile`, the dashboard performs a bounded one-token Messages probe to read those headers immediately. OAuth exchange performs a best-effort Claude profile lookup; upstream creation and credential replacement perform a best-effort profile lookup, and `POST /api/upstreams/:id/refresh-profile` refreshes identity metadata for manually imported credentials. If identity endpoints are unavailable, Relaydeck assigns a deterministic local UUID derived from the refresh token (or access token when no refresh token exists); it stores only the UUID, never the token-derived digest input. Quota refresh and profile refresh are separate management actions. Codex and Claude OAuth tokens are refreshed lazily before proxy requests and proactively once per hour when they expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. Claude usage reads are not success-cached: each scheduled or manual refresh queries the provider unless that credential is in a rate-limit cooldown. When Anthropic returns `429`, the provider's `Retry-After` value is used for the cooldown (bounded to one hour), with a 10-minute local fallback when no value is supplied; provider failures do not roll back the saved upstream or erase the last known quota.
+Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; Claude Enterprise OAuth credentials use the Claude Code PKCE exchange and refresh endpoints, then call the configured Anthropic-compatible base URL (default `https://api.anthropic.com`) at `/v1/messages?beta=true`. Background quota refresh runs every 10 minutes; while the focused dashboard is open, it requests a non-forced refresh every 5 minutes for visible upstream cards. Claude OAuth quota/profile reads use Anthropic's read-only `/api/oauth/usage` and `/api/oauth/profile` control-plane endpoints; usage supports both the current structured `limits` response and the legacy flat windows. Gateway-generated Claude requests and quota reads identify as Claude Code `2.1.282` by default; set `CODEX_POOLER_CLAUDE_CODE_VERSION` to a newer numeric version when needed. Native Claude Code requests retain their actual client version and may still require `claude update`. When Anthropic reports enabled extra usage, its `monthly_limit` and `used_credits` are exposed as actual USD remaining alongside the percentage-only subscription windows. Successful Claude Messages responses also seed session, weekly, and overage windows from Anthropic's rate-limit headers when the usage endpoint is unavailable; when `/api/oauth/usage` specifically rejects `user:profile`, the dashboard performs a bounded one-token Messages probe to read those headers immediately. OAuth exchange performs a best-effort Claude profile lookup; upstream creation and credential replacement perform a best-effort profile lookup, and `POST /api/upstreams/:id/refresh-profile` refreshes identity metadata for manually imported credentials. If identity endpoints are unavailable, Relaydeck assigns a deterministic local UUID derived from the refresh token (or access token when no refresh token exists); it stores only the UUID, never the token-derived digest input. Quota refresh and profile refresh are separate management actions. Codex and Claude OAuth tokens are refreshed lazily before proxy requests and proactively once per hour when they expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. Claude usage reads are not success-cached: each scheduled or manual refresh queries the provider unless that credential is in a rate-limit cooldown. When Anthropic returns `429`, the provider's `Retry-After` value is used for the cooldown (bounded to one hour), with a 10-minute local fallback when no value is supplied; provider failures do not roll back the saved upstream or erase the last known quota.
 Adding an upstream performs a best-effort quota refresh before the create response returns when the provider exposes quota data. Replacing Codex, Compass, or Claude OAuth quota credentials does the same, while provider failures do not roll back the saved upstream.
 
 Data is stored in `.data/`. Credential fields are encrypted with a local `.data/.key`. Public upstream records never include credentials; an authenticated operator can explicitly reveal an upstream's current credential export from the Edit upstream dialog or `GET /api/upstreams/:id/credentials`. `db.sqlite` keeps configuration, spending state, 90 days of compact daily usage counters, and at most 100 terminal failure diagnostics; successful request histories are not stored. Existing `db.json` files migrate automatically on startup. Back up `.data/.key` and `db.sqlite` together if you need to move the data; startup refuses to create a replacement key for an existing database. Set `CODEX_POOLER_NODE_DATA_DIR` to choose another data directory.

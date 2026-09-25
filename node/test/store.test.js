@@ -5,6 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Store } from '../src/store.js';
+import { CLAUDE_CODE_VERSION } from '../src/claude-client-version.js';
 import { claudeRequestHeaders } from '../src/claude-protocol.js';
 
 function tempStore(options = {}) {
@@ -19,7 +20,7 @@ test('persists stabilized Claude device profiles without exposing them publicly'
     const upstream = store.get(created.id);
     const sessionId = '22222222-3333-4444-8555-666666666666';
     const req = { headers: {
-      'user-agent': 'claude-cli/2.1.280 (external, claude-vscode, agent-sdk/0.3.220)',
+      'user-agent': `claude-cli/${CLAUDE_CODE_VERSION} (external, claude-vscode, agent-sdk/0.3.220)`,
       'x-claude-code-session-id': sessionId,
       'x-stainless-package-version': '0.94.0',
       'x-stainless-runtime-version': 'v26.3.0',
