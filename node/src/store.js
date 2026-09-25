@@ -69,13 +69,7 @@ export class Store {
     this.sqlite.pragma('journal_mode = WAL');
     this.sqlite.pragma('synchronous = FULL');
     this.sqlite.exec('CREATE TABLE IF NOT EXISTS records (collection TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (collection, key))');
-    this.upsertRecord = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
-    this.removeRecord = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
     this.persistedCollections = new Map();
-    this.writeRecords = this.sqlite.transaction((updates, removals) => {
-      for (const [id, value] of updates) this.upsertRecord.run(...JSON.parse(id), value);
-      for (const id of removals) this.removeRecord.run(...JSON.parse(id));
-    });
     this.events = new EventEmitter();
     this.allowLegacyClaudeApiKey = Boolean(allowLegacyClaudeApiKey);
     this.claudeRuntimeConfig = {};
@@ -343,10 +337,13 @@ export class Store {
     const credentials = decryptCredentials(upstream.credentials, this.key);
     if (['codex', 'claude'].includes(upstream.type)) {
       Object.defineProperties(credentials, {
-        credentialEpoch: { value: Number(upstream.credentialEpoch) || 0, enumerable: false },
-        modelCatalogEpoch: { value: Number(upstream.modelCatalogEpoch) || 0, enumerable: false },
-        onTokenRefreshFailure: { value: (error) => this.recordTokenRefreshFailure(id, error, Number(upstream.credentialEpoch) || 0), enumerable: false },
-        onTokenRefreshSuccess: { value: () => this.clearTokenRefresh(id, Number(upstream.credentialEpoch) || 0), enumerable: false }
+        credentialEpoch: { value: Number(upstream.credentialEpoch) || 0, enumerable: false, configurable: true },
+        modelCatalogEpoch: { value: Number(upstream.modelCatalogEpoch) || 0, enumerable: false, configurable: true },
+        onTokenRefreshFailure: { value: (error) => this.recordTokenRefreshFailure(id, error, Number(upstream.credentialEpoch) || 0), enumerable: false, configurable: true },
+        onTokenRefreshSuccess: { value: () => this.clearTokenRefresh(id, Number(upstream.credentialEpoch) || 0), enumerable: false, configurable: true },
+        coordinateRefresh: { value: (task) => this.coordinateCredentialRefresh(id, task), enumerable: false, configurable: true },
+        reloadCredentials: { value: () => this.credentials(id), enumerable: false, configurable: true },
+        reloadUpstream: { value: () => this.get(id), enumerable: false, configurable: true }
       });
     }
     return credentials;
@@ -354,6 +351,29 @@ export class Store {
 
   setTokenRefreshFailureHandler(handler) {
     this.tokenRefreshFailureHandler = typeof handler === 'function' ? handler : null;
+  }
+
+  setCredentialRefreshCoordinator(coordinator) {
+    this.credentialRefreshCoordinator = typeof coordinator === 'function' ? coordinator : null;
+  }
+
+  async coordinateCredentialRefresh(id, task) {
+    if (!this.credentialRefreshCoordinator) return { executed: true, value: await task() };
+    return this.credentialRefreshCoordinator(id, task);
+  }
+
+  replacePersistedUpstream(id, value) {
+    const upstream = JSON.parse(value);
+    if (!upstream || upstream.id !== id) throw new Error('invalid persisted upstream record');
+    const db = this.load();
+    const index = db.upstreams.findIndex((item) => item.id === id);
+    if (index === -1) return false;
+    db.upstreams[index] = upstream;
+    const recordId = JSON.stringify(['upstreams', id]);
+    if (!this.persistedRecords?.has(recordId)) return false;
+    this.persistedRecords.set(recordId, value);
+    this.upstreamById.set(id, upstream);
+    return true;
   }
 
   recordTokenRefreshFailure(id, error, expectedEpoch = null) {
@@ -1203,6 +1223,15 @@ export class Store {
     const previous = this.persistedRecords || new Map();
     const updates = [...next].filter(([id, value]) => previous.get(id) !== value);
     if (!updates.length && !removals.length) return;
+    if (this.recordDatabase !== this.sqlite) {
+      const upsert = this.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?) ON CONFLICT (collection, key) DO UPDATE SET value = excluded.value');
+      const remove = this.sqlite.prepare('DELETE FROM records WHERE collection = ? AND key = ?');
+      this.writeRecords = this.sqlite.transaction((updates, removals) => {
+        for (const [id, value] of updates) upsert.run(...JSON.parse(id), value);
+        for (const id of removals) remove.run(...JSON.parse(id));
+      });
+      this.recordDatabase = this.sqlite;
+    }
     this.writeRecords(updates, removals);
     // Publish the comparison cache only after the transaction commits.
     for (const [id, value] of updates) {

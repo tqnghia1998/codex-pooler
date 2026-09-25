@@ -3,7 +3,7 @@ import { DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { CLAUDE_BIP39_WORDS } from './claude-bip39.js';
 import { fetchProfile } from './claude-oauth.js';
 import { HttpError } from './http-ingress.js';
-import { claudeCredentialKind, claudeMetadataModelConfigs, claudeMetadataModelPrefix, deriveClaudeAccountId, isClaudeOAuthToken, isClaudeOAuthUpstream } from './domain.js';
+import { GATEWAY_IDENTITY, claudeCredentialKind, claudeMetadataModelConfigs, claudeMetadataModelPrefix, deriveClaudeAccountId, isClaudeOAuthToken, isClaudeOAuthUpstream } from './domain.js';
 import { applyClaudePayloadConfig } from './claude-payload.js';
 import { cacheClaudeThinkingReplay, clearClaudeThinkingReplay, getClaudeThinkingReplay, restoreClaudeThinkingReplay } from './claude-thinking-replay.js';
 import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
@@ -162,7 +162,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
     const systemError = validateClaudeSystemPrompt(prepared.system);
     if (systemError) throw new HttpError(400, 'invalid_request_error', systemError);
   }
-  const aliases = nativeClient || !cloakEnabled || !cliProfile ? new Map() : aliasClaudeOAuthTools(prepared, safeHeader(req, 'authorization') || 'codex-pooler');
+  const aliases = nativeClient || !cloakEnabled || !cliProfile ? new Map() : aliasClaudeOAuthTools(prepared, safeHeader(req, 'authorization') || GATEWAY_IDENTITY);
   if (!countTokens && !nativeClient && !shouldTransform && countClaudeCacheControls(prepared) === 0) {
     ensureClaudeCacheControls(prepared);
   }
@@ -575,7 +575,7 @@ export function claudeRequestHeaders({ req, body, credentials, upstream = null, 
     headers['anthropic-version'] = safeHeader(req, 'anthropic-version') || DEFAULT_ANTHROPIC_VERSION;
     if (betas.length) headers['anthropic-beta'] = betas.join(',');
     else delete headers['anthropic-beta'];
-    headers['user-agent'] = safeHeader(req, 'user-agent') || 'codex-pooler-node/0.1.0';
+    headers['user-agent'] = safeHeader(req, 'user-agent') || `${GATEWAY_IDENTITY === 'codex-share' ? 'codex-share' : 'codex-pooler-node'}/0.1.0`;
   }
   applyClaudeConfiguredHeaders(headers, upstream, req);
   if (isAnthropicClaudeBaseUrl(upstream?.baseUrl)) {
@@ -703,11 +703,11 @@ function validClaudeUserId(value) {
 }
 
 function stableHex(seed) {
-  return createHash('sha256').update(`codex-pooler-claude|${seed}`).digest('hex');
+  return createHash('sha256').update(`${GATEWAY_IDENTITY}-claude|${seed}`).digest('hex');
 }
 
 function stableUuid(seed) {
-  const bytes = createHash('sha1').update(`codex-pooler-claude|${seed}`).digest('hex').slice(0, 32).split('');
+  const bytes = createHash('sha1').update(`${GATEWAY_IDENTITY}-claude|${seed}`).digest('hex').slice(0, 32).split('');
   bytes[12] = '5';
   bytes[16] = ['8', '9', 'a', 'b'][parseInt(bytes[16], 16) % 4];
   const hex = bytes.join('');

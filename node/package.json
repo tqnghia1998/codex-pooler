@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./gateway/*": "./src/*"
+  },
   "scripts": {
     "build": "vite build",
     "pool:build": "vite build --config pool/vite.config.js",

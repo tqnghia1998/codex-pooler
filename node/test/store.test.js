@@ -112,6 +112,41 @@ test('failed targeted writes do not advance the persisted comparison cache', () 
   }
 });
 
+test('external credential refresh coordination reloads a persisted upstream', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+  try {
+    const upstream = store.create({
+      type: 'codex',
+      authJson: JSON.stringify({ tokens: { access_token: 'old-access', refresh_token: 'old-refresh' } })
+    });
+    const original = store.credentials(upstream.id);
+    let coordinated = false;
+    store.setCredentialRefreshCoordinator(async (id, task) => {
+      assert.equal(id, upstream.id);
+      coordinated = true;
+      return { executed: true, value: await task() };
+    });
+    const outcome = await original.coordinateRefresh(async () => {
+      assert.equal(original.reloadCredentials().refreshToken, 'old-refresh');
+      return 'refreshed';
+    });
+    assert.deepEqual(outcome, { executed: true, value: 'refreshed' });
+    assert.equal(coordinated, true);
+    assert.equal(Object.keys(original).includes('coordinateRefresh'), false);
+
+    const recordId = JSON.stringify(['upstreams', upstream.id]);
+    const saved = JSON.parse(store.persistedRecords.get(recordId));
+    saved.credentialEpoch = 9;
+    const replacement = JSON.stringify(saved);
+    assert.equal(store.replacePersistedUpstream(upstream.id, replacement), true);
+    assert.equal(store.get(upstream.id).credentialEpoch, 9);
+    assert.equal(store.persistedRecords.get(recordId), replacement);
+    assert.throws(() => store.replacePersistedUpstream(upstream.id, '{"id":"different"}'), /invalid persisted upstream/);
+  } finally {
+    store.sqlite.close();
+  }
+});
+
 test('persists stabilized Claude device profiles without exposing them publicly', () => {
   const { dir, store } = tempStore({ allowLegacyClaudeApiKey: true });
   try {

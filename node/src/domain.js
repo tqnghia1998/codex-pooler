@@ -338,11 +338,13 @@ export function claudeCredentialKind(upstream, credentials = null) {
 }
 
 // Prefer the refresh token so access-token rotation keeps the local UUID stable.
+export const GATEWAY_IDENTITY = process.env.CODEX_GATEWAY_IDENTITY === 'codex-share' ? 'codex-share' : 'codex-pooler';
+
 export function deriveClaudeAccountId({ refreshToken = '', accessToken = '' } = {}) {
   const seed = text(refreshToken) || text(accessToken);
   if (!seed) return '';
   const hex = createHash('sha256')
-    .update('codex-pooler:claude-account-id\0')
+    .update(`${GATEWAY_IDENTITY}:claude-account-id\0`)
     .update(seed)
     .digest('hex')
     .slice(0, 32);
