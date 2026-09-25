@@ -19,11 +19,11 @@ npm start
 打开 `http://localhost:3000`。配置、路由、支持的端点、存储方式和运行限制请见
 [`node/README.md`](node/README.md)。
 
-QuotaHub 是独立的好友额度共享产品，拥有自己的服务、登录和数据。它可共享
-Codex、Claude 或 AIS 访问，但其共享模型只刷新和执行 Codex 的提供方额度；
-Claude 和 AIS 的共享额度是名义上的本地结算限制。使用
-`cd node && npm run pool:start` 启动；详见
-[`node/pool/README.md`](node/pool/README.md)。
+QuotaHub 仅在独立的
+[`codex-share`](https://github.com/tqnghia1998/codex-share) 仓库中维护。
+它通过 Git submodule 固定本仓库的 Node 网关版本，并独立维护 Redis/KMS
+存储、DW 转发、界面和产品服务。请在独立仓库中运行；此仓库不再包含
+QuotaHub 应用。
 
 ## 项目方向
 

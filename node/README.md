@@ -11,22 +11,14 @@ Relaydeck is a deliberately small local dashboard for:
 
 This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer. The Elixir application is retained unchanged from upstream as a reference, not as a second maintained implementation. Codex and Claude Enterprise OAuth access tokens are refreshed lazily before proxy requests, and proactively once per hour when they expire within 12 hours.
 
-Quota sharing is a separate product under `pool/`. It has its own server, UI,
-cookies, environment, and data directory. See `pool/README.md`; Relaydeck does
-not initialize or expose QuotaHub accounts, routes, sessions, or storage.
-Both products route their client-facing gateway surface through
-`src/gateway-dispatch.js`. Add proxy routes or compatibility behavior in the
-shared gateway modules, never as a Relaydeck-only or QuotaHub-only route.
-QuotaHub is an informal, free friend-sharing tool. It intentionally has no
-payments, marketplace pricing, reputation system, ratings, or availability
-guarantees. Durable operational notifications are delivered by email when its
-optional SMTP settings are configured; see `pool/README.md`.
-QuotaHub supports Codex, Claude, and AIS upstreams, but its sharing quota model
-refreshes Codex provider quota directly. When configured, its monthly Loop
-integration supplies the Claude and AIS sharing balance; that source is
-approximately one hour delayed, is visibly marked as such, and caps new offers
-and sessions until refreshed. Relaydeck's separate Claude quota and OAuth
-management behavior is unchanged.
+QuotaHub is maintained only in the standalone `codex-share` repository. Its
+Redis/KMS persistence, DW relay, product server, and UI stay there. It pins
+this repository as a Git submodule and imports the gateway through the
+`codex-pooler-node/gateway/*` package exports. Relaydeck does not initialize
+or expose QuotaHub accounts, routes, sessions, or storage. Both products use
+`src/gateway-dispatch.js` for client-facing gateway routes; add protocol and
+compatibility behavior here. QuotaHub sets `CODEX_GATEWAY_IDENTITY=codex-share`
+before loading the gateway to preserve its persisted Claude identities.
 
 ## Proxy compatibility status
 
@@ -162,8 +154,8 @@ upstream or accounting/pin collections, reuse prepared statements, and commit
 before returning; there is no delayed settlement queue. Keep the database on a
 local persistent filesystem. Stop the service before copying its data directory,
 preserving any `db.sqlite-wal` and `db.sqlite-shm` files with `db.sqlite`; copying
-only a live main database file can omit committed writes. QuotaHub's JSON
-snapshot export remains the online backup path for that product.
+only a live main database file can omit committed writes. The standalone
+QuotaHub documents its own Redis/KMS storage and snapshot backup.
 
 `GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only sanitized fixed states.
 

@@ -20,11 +20,11 @@ npm start
 Open `http://localhost:3000`. See [`node/README.md`](node/README.md) for setup,
 routing, supported routes, storage, and operational limits.
 
-QuotaHub is a separate friend-sharing product with its own server, login, and
-data. It shares Codex, Claude, or AIS access. Codex quota is refreshed
-directly; when configured, approximately one-hour-delayed Loop balances cap
-Claude and AIS sharing. Start it with `cd node && npm run pool:start`; see
-[`node/pool/README.md`](node/pool/README.md).
+QuotaHub is maintained in the separate
+[`codex-share`](https://github.com/tqnghia1998/codex-share) repository. It
+pins this repository's Node gateway as a submodule while keeping its own
+Redis/KMS storage, DW relay, UI, and product server. Run it from that
+repository; this checkout no longer includes an embedded QuotaHub app.
 
 ## Project direction
 
