@@ -185,8 +185,15 @@ function terminalKind(event) {
   if (event.type === 'response.completed' && plain(event.response) && (event.response.status === undefined || event.response.status === 'completed')) return 'completed';
   return event.type === 'response.incomplete' && plain(event.response) ? 'incomplete' : null;
 }
-function failedIncomplete(event) { const response = event.response || {}; return event.type === 'response.incomplete' && (response.status === 'failed' || [event.error, response.error, event.status_details?.error, response.status_details?.error].some(plain) || FAILURE_REASONS.has(incompleteReason(event))); }
+function failedIncomplete(event) { return failedIncompleteResponse(event) || event.type === 'response.incomplete' && FAILURE_REASONS.has(incompleteReason(event)); }
 export function quotaIncompleteReason(event) { const reason = incompleteReason(event); return event?.type === 'response.incomplete' && QUOTA_INCOMPLETE_REASONS.has(reason) ? reason : ''; }
+export function failedIncompleteResponse(event) {
+  if (event?.type !== 'response.incomplete') return false;
+  const response = event.response || {};
+  return response.status === 'failed'
+    || [event.error, response.error, event.status_details?.error, response.status_details?.error].some(plain)
+    || Boolean(quotaIncompleteReason(event));
+}
 function nextSequence(incoming, state, terminal) { const value = Number.isSafeInteger(incoming) && incoming >= 0 && incoming > state.sequence ? incoming : state.sequence + 1; return value > MAX_SEQUENCE || !terminal && value === MAX_SEQUENCE ? 'overflow' : value; }
 function synthetic(state) { state.sequence += 1; return state.sequence; }
 function project(event, terminal, namespaces) { const value = structuredClone(event); if (terminal === 'completed') value.response.status = 'completed'; if (plain(value.response) && Array.isArray(value.response.output)) value.response.output.forEach((item, index) => repairItem({ item, output_index: index }, namespaces)); return value; }

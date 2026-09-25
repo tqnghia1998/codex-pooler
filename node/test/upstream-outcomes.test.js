@@ -58,6 +58,7 @@ test('classifies structured SSE and WebSocket terminal frames', () => {
     assert.equal(outcome.class, 'quota', reason);
     assert.equal(outcome.errorCode, reason);
   }
+  assert.equal(classifySseEvent({ type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } }).class, 'success');
 });
 
 test('keeps eligible misalignment policy failures non-retryable and health-neutral', () => {

@@ -15,7 +15,7 @@ import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './publ
 import { HttpError } from './http-ingress.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
@@ -46,7 +46,8 @@ import {
   prepareCodexMultiAgentRequest,
   restoreCodexMultiAgentResponse,
   sanitizeCodexInputItemIds,
-  promptCacheSessionId
+  promptCacheSessionId,
+  continuityAliasSessionId
 } from './codex-compatibility.js';
 
 export const WEBSOCKET_ENDPOINTS = new Set(['/v1/responses', '/backend-api/codex/responses', '/backend-api/codex/v1/responses']);
@@ -349,7 +350,19 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       // Preserve an unexpected successful upstream body rather than inventing an error.
     }
   }
-  settleUsage(store, upstream, attemptId, startedAt, parseJson(bytes), payload, accounting, lifecycle, response.status);
+  const terminalBody = parseJson(bytes);
+  if (upstream.type === 'codex' && failedIncompleteResponse({
+    type: terminalBody?.status === 'incomplete' ? 'response.incomplete' : '',
+    response: terminalBody
+  })) {
+    if (admission) store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent({ type: 'response.incomplete', response: terminalBody }));
+    releaseShareRequest(req, attemptId, 'upstream_response_failed');
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
+    sendFailure(res);
+    return;
+  }
+  if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
+  settleUsage(store, upstream, attemptId, startedAt, terminalBody, payload, accounting, lifecycle, response.status);
   writeResponse(res, response, output, responseOptions);
 }
 
@@ -932,16 +945,17 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             }), upstream, response.status, inspected.firstEvent, claudeConfig),
             model: payload?.model
           };
+          const quotaFailure = sseOutcome.class === 'quota';
           store.settleUpstreamAttempt(upstream.id, admission, sseOutcome);
-          releaseShareRequest(req, attemptId, 'upstream_first_event_failed');
-          retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_first_event_failed', responseStatusCode: response.status });
+          releaseShareRequest(req, attemptId, quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed');
+          retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed', responseStatusCode: quotaFailure ? 429 : response.status });
           terminalFailure = {
             upstream,
             attemptId: null,
             startedAt,
-            response: new Response(null, { status: 502 }),
+            response: new Response(null, { status: quotaFailure ? 429 : 502 }),
             admission: null,
-            failureCode: 'upstream_first_event_failed'
+            failureCode: quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed'
           };
           continue;
         }
@@ -1012,6 +1026,22 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             admission: null
           };
         }
+        if (failedIncompleteResponse({
+          type: collected?.[TERMINAL_EVENT_TYPE] || (collected?.status === 'incomplete' ? 'response.incomplete' : ''),
+          response: collected
+        })) {
+          const outcome = classifySseEvent({ type: 'response.incomplete', response: collected });
+          store.settleUpstreamAttempt(upstream.id, admission, outcome);
+          releaseShareRequest(req, attemptId, 'upstream_response_failed');
+          retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
+          terminalFailure = {
+            upstream, attemptId: null, startedAt,
+            response: new Response(null, { status: 502 }),
+            admission: null,
+            failureCode: 'upstream_response_failed'
+          };
+          continue;
+        }
       }
     } catch (error) {
       if (error instanceof HttpError) {
@@ -1070,8 +1100,9 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     }
     if (response.ok) {
       const streaming = isEventStream(response) || upstream.type === 'codex' && payload?.stream === true;
-      if (!streaming || collected) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
-      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState, codexMultiAgentOptimized: request.codexMultiAgentOptimized === true };
+      const nativeJson = upstream.type === 'codex' && isBackendResponsesRoute(path) && !streaming;
+      if ((!streaming || collected) && !nativeJson) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
+      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected || nativeJson ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState, codexMultiAgentOptimized: request.codexMultiAgentOptimized === true };
     }
     const body = parseJson(await readBoundedResponse(response.clone()));
     const outcome = {
@@ -1236,8 +1267,9 @@ function localSseFailure(response) {
 }
 
 function retryableSseFailure(event) {
-  if (!['response.failed', 'error'].includes(event?.type)) return false;
+  if (!['response.failed', 'error'].includes(event?.type) && !failedIncompleteResponse(event)) return false;
   if (retryableFirstSseEvent(event)) return true;
+  if (failedIncompleteResponse(event) && classifySseEvent(event).class === 'quota') return true;
   const error = event.error || event.response?.error || {};
   return event.status === 429 || event.status_code === 429 || error.code === 'rate_limit_exceeded' || modelNotFoundFailure(event);
 }
@@ -1326,8 +1358,14 @@ function buildRequest(upstream, sourcePath, payload, req, credentials, originalP
       if (projected !== null) headers[name] = projected;
     }
   }
+  if (!direct && isBackendMetadataRoute(originalPath) && !headers['session-id']) {
+    const scope = providerSessionScope(req);
+    const promptId = promptCacheSessionId(scope, projectedBody?.prompt_cache_key);
+    const aliasId = promptId ? '' : continuityAliasSessionId(scope, nativeContinuityAlias(req));
+    if (promptId || aliasId) headers['session-id'] = promptId || aliasId;
+  }
   if (!direct && originalPath.startsWith('/v1/')) {
-    const sessionId = promptCacheSessionId({ scopeId: requestScopeId(req), apiKeyId: requestAccounting(req).apiKeyId }, projectedBody?.prompt_cache_key);
+    const sessionId = promptCacheSessionId(providerSessionScope(req), projectedBody?.prompt_cache_key);
     if (sessionId) headers['session-id'] = sessionId;
   }
   if (direct && sourcePath === '/v1/messages' && !headers['anthropic-version']) headers['anthropic-version'] = DEFAULT_ANTHROPIC_VERSION;
@@ -1961,6 +1999,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   let visible = false;
   let terminal = false;
   let completed = false;
+  let failedIncompleteTerminal = false;
   let usage;
   let claudeMessageId = '';
   let healthOutcome = null;
@@ -1999,6 +2038,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       return;
     }
     usage = mergeUsage(usage, extractUsage(parsed));
+    if (failedIncompleteResponse(parsed)) failedIncompleteTerminal = true;
     if (upstream.type === 'claude' && parsed?.type === 'message_start' && typeof parsed.message?.id === 'string') claudeMessageId = parsed.message.id;
     const successfulTerminal = successfulSseTerminal(parsed, upstream.type, sourcePath);
     if (['response.failed', 'error'].includes(parsed.type) || parsed.type === 'response.incomplete' && !successfulTerminal) {
@@ -2028,7 +2068,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       return;
     }
     const type = parsed.type;
-    if (type === 'response.failed' || type === 'error' || quotaIncompleteReason(parsed)) {
+    if (type === 'response.failed' || type === 'error' || failedIncompleteResponse(parsed)) {
       terminal = true;
       healthOutcome = {
         ...classifySseEvent(parsed, {
@@ -2096,7 +2136,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
       );
       if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
-      else if (response.ok && usage) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+      else if (response.ok && usage && !failedIncompleteTerminal) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
     }
     if (admission) {
       const outcome = healthOutcome || (downstreamClosed
@@ -2130,7 +2170,8 @@ function successfulSseTerminal(event, upstreamType, sourcePath) {
     && !quotaIncompleteReason(event)
     && event.response?.status !== 'failed'
     && !event.error
-    && !event.response?.error;
+    && !event.response?.error
+    && !failedIncompleteResponse(event);
 }
 
 function gatewayOutcomeCode(outcome) {
@@ -2303,6 +2344,12 @@ function sessionAffinity(req) {
   return SESSION_HEADERS.map((name) => header(req, name)).find(Boolean) || '';
 }
 
+function nativeContinuityAlias(req) {
+  const alias = sessionAffinity(req);
+  return ['x-codex-window-id', 'x-codex-session-id', 'session_id', 'x-session-id', 'x-session-affinity', 'x-codex-conversation-id']
+    .some((name) => alias && header(req, name) === alias) ? alias : '';
+}
+
 function requestRequirements(path, payload = {}) {
   return {
     responses: !CLAUDE_MESSAGES_PATHS.has(path),
@@ -2332,6 +2379,13 @@ function requestAccounting(req) {
     get shareSessionId() { return isShareCredential(req.proxyAuth) ? req.proxyAuth.shareSessionId || null : null; },
     get sharingStore() { return req.sharingStore || null; },
     get sessionId() { return sessionAffinity(req); }
+  };
+}
+
+function providerSessionScope(req) {
+  return {
+    scopeId: requestScopeId(req),
+    apiKeyId: requestAccounting(req).apiKeyId || req.proxyAuth?.shareSessionId || req.proxyAuth?.personalKeyId
   };
 }
 
@@ -2485,13 +2539,13 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
           ? classifySseEvent(terminalEvent)
           : { class: 'transient', retryable: true };
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
-      if (['response.completed', 'response.incomplete'].includes(terminalEvent?.type)) {
+      if (['response.completed', 'response.incomplete'].includes(terminalEvent?.type) && !failedIncompleteResponse(terminalEvent)) {
         settleUsage(store, upstream, attemptId, startedAt, streamUsage, {}, requestAccounting(req));
       } else {
         releaseShareRequest(
           req,
           attemptId,
-          streamed.cancelled ? 'downstream_closed' : terminalEvent?.type === 'error' || terminalEvent?.type === 'response.failed'
+          streamed.cancelled ? 'downstream_closed' : terminalEvent?.type === 'error' || terminalEvent?.type === 'response.failed' || failedIncompleteResponse(terminalEvent)
             ? 'upstream_response_failed'
             : 'upstream_stream_incomplete'
         );
@@ -2621,7 +2675,7 @@ function validProviderSessionHeader(value) {
 }
 
 function publicWebSocketSessionId(payload, req) {
-  return promptCacheSessionId({ scopeId: requestScopeId(req), apiKeyId: requestAccounting(req).apiKeyId }, payload?.prompt_cache_key);
+  return promptCacheSessionId(providerSessionScope(req), payload?.prompt_cache_key);
 }
 
 function rawHeaders(upstream, credentials, req, protocolOptions = {}) {
@@ -3593,7 +3647,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         try { nativeFrame = JSON.parse(data.toString()); } catch {}
       }
       if (nativeAttempt && nativeFrame) nativeUsage = mergeUsage(nativeUsage, extractUsage(nativeFrame));
-      if (nativeFrame && (['error', 'response.failed'].includes(nativeFrame.type) || quotaIncompleteReason(nativeFrame))) {
+      if (nativeFrame && (['error', 'response.failed'].includes(nativeFrame.type) || failedIncompleteResponse(nativeFrame))) {
         const outcome = classifySseEvent(nativeFrame);
         if (outcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
         settleNativeAdmission(outcome);

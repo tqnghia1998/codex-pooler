@@ -2444,6 +2444,52 @@ test('preserves native WebSocket compaction continuations on the upstream connec
   }
 });
 
+test('treats native WebSocket spend-limit incomplete frames as quota failures', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-spend-limit-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  target.on('connection', (socket) => socket.once('message', () => socket.send(JSON.stringify({
+    type: 'response.incomplete',
+    response: {
+      id: 'resp_ws_exhausted',
+      status: 'incomplete',
+      incomplete_details: { reason: 'credit_balance_exhausted' },
+      usage: { input_tokens: 10, output_tokens: 5 }
+    }
+  }))));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, {
+    store, apiKey: API_KEY,
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  try {
+    const terminal = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, {
+        headers: { authorization: `Bearer ${API_KEY}` }
+      });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'hello' })));
+      client.on('message', (data) => {
+        const frame = JSON.parse(data);
+        if (frame.type !== 'response.incomplete') return;
+        client.close();
+        resolve(frame);
+      });
+      client.once('error', reject);
+    });
+    assert.equal(terminal.response.incomplete_details.reason, 'credit_balance_exhausted');
+    assert.equal(store.get(codexUpstream.id).health.status, 'cooldown');
+    assert.equal(store.get(codexUpstream.id).spending.spentCostMicros, 0);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('redacts misalignment guidance from native WebSocket terminals', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-ws-policy-details-'));
   const { store } = configuredStore(dir);

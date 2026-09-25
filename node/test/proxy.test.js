@@ -10,6 +10,7 @@ import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 import { compatibilityContext, compatibilityLearningForStore } from '../src/compatibility-learning.js';
 import { gatewayCandidateAttempts } from '../src/proxy.js';
+import { continuityAliasSessionId, promptCacheSessionId } from '../src/codex-compatibility.js';
 
 test('lazy attempt planning preserves mixed-provider retry rounds and the last pacing slot', () => {
   const candidates = [
@@ -1090,6 +1091,153 @@ test('normalizes Codex envelopes and scopes metadata headers to backend routes',
   }
 });
 
+test('derives scoped provider sessions for native HTTP only when no valid session-id survives', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-session-locality-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const sessions = [];
+  const fetchImpl = async (_url, options) => {
+    sessions.push(options.headers['session-id']);
+    return new Response('data: {"type":"response.completed","response":{"id":"resp_session","status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const scope = { scopeId: 'default', apiKeyId: store.authenticateApiKey('local-client-key').id };
+    const send = async (path, headers, body = {}) => {
+      const response = await fetch(base + path, {
+        method: 'POST',
+        headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true, ...body })
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+    };
+    await send('/backend-api/codex/responses', { 'session-id': 'provider-session', 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/v1/responses', { 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/responses/compact', { 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/responses', { 'x-session-id': 'local-alias' });
+    await send('/backend-api/codex/responses', { 'x-session-id': 'local-alias' });
+    await send('/backend-api/codex/responses', { 'x-client-request-id': 'per-request' });
+    assert.deepEqual(sessions, [
+      'provider-session',
+      promptCacheSessionId(scope, 'cache-key'),
+      promptCacheSessionId(scope, 'cache-key'),
+      continuityAliasSessionId(scope, 'local-alias'),
+      continuityAliasSessionId(scope, 'local-alias'),
+      undefined
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not settle native spend-limit incomplete terminals as success', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-spend-incomplete-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const terminal = { type: 'response.incomplete', response: { id: 'resp_spend', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, usage: { input_tokens: 10, output_tokens: 5 } } };
+  const visible = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n';
+  const { server, base } = await runningServer(store, async () => new Response(`${visible}event: response.incomplete\ndata: ${JSON.stringify(terminal)}\n\n`, { headers: { 'content-type': 'text/event-stream' } }), 'local-client-key');
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /credit_balance_exhausted/);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a pre-output spend-limit incomplete terminal without billing the exhausted account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-spend-incomplete-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'incomplete-first@example.com' }));
+  const second = store.create(codexInput({ email: 'incomplete-second@example.com' }));
+  for (const upstream of [first, second]) store.setCap(upstream.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    const event = options.headers.authorization === `Bearer ${firstToken}`
+      ? { type: 'response.incomplete', response: { id: 'resp_spend', status: 'incomplete', incomplete_details: { reason: 'project_spend_limit_exceeded' } } }
+      : { type: 'response.completed', response: { id: 'resp_recovered', status: 'completed', output: [] } };
+    return new Response(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /resp_recovered/);
+    assert.equal(calls.length, 2);
+    assert.equal(store.get(first.id).health.status, 'cooldown');
+    assert.equal(store.get(first.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a collected spend-limit response and does not pin or bill the exhausted account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-collected-spend-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'collected-first@example.com' }));
+  const second = store.create(codexInput({ email: 'collected-second@example.com' }));
+  for (const upstream of [first, second]) store.setCap(upstream.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    const body = options.headers.authorization === `Bearer ${firstToken}`
+      ? { id: 'resp_exhausted', status: 'incomplete', incomplete_details: { reason: 'organization_spend_limit_exceeded' }, usage: { input_tokens: 10, output_tokens: 5 } }
+      : { id: 'resp_recovered', status: 'completed', output: [] };
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hello' }, { authorization: 'Bearer local-client-key' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'resp_recovered');
+    assert.equal(calls.length, 2);
+    assert.equal(store.get(first.id).health.status, 'cooldown');
+    assert.equal(store.get(first.id).spending.spentCostMicros, 0);
+    assert.equal(store.responseUpstream('resp_exhausted', 'default', store.authenticateApiKey('local-client-key').id), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects native JSON spend-limit responses without successful accounting', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-json-spend-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const body = { id: 'resp_exhausted', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, usage: { input_tokens: 10, output_tokens: 5 } };
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }), 'local-client-key');
+  try {
+    const result = await request(base, '/backend-api/codex/responses', { model: 'gpt-5.6-sol', input: 'hello', stream: false }, { authorization: 'Bearer local-client-key' });
+    assert.equal(result.response.status, 502);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bounds newer native Codex metadata headers before upstream dispatch', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-metadata-bounds-'));
   const calls = [];
@@ -2097,7 +2245,7 @@ test('maps incomplete Codex Chat SSE to finish_reason length', async () => {
   }
 });
 
-test('fails a streamed quota-incomplete turn and cools the selected Codex account', async () => {
+test('withholds a pre-output quota-incomplete turn and cools the selected Codex account', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-quota-incomplete-stream-'));
   const store = new Store(dir);
   const upstream = store.create(codexInput());
@@ -2116,11 +2264,9 @@ test('fails a streamed quota-incomplete turn and cools the selected Codex accoun
       headers: { authorization: 'Bearer quota-key', 'content-type': 'application/json' },
       body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
     });
-    const text = await response.text();
-    assert.equal(response.status, 200);
-    assert.match(text, /event: response\.failed/);
-    assert.match(text, /"code":"project_spend_limit_exceeded"/);
-    assert.doesNotMatch(text, /event: response\.incomplete/);
+    const body = await response.json();
+    assert.equal(response.status, 429);
+    assert.equal(body.error.type, 'rate_limit_error');
     assert.equal(store.get(upstream.id).health.status, 'cooldown');
   } finally {
     await new Promise((resolve) => server.close(resolve));

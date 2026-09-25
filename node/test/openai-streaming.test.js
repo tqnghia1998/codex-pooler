@@ -65,6 +65,16 @@ test('projects failed terminals without provider fields and latches', () => {
   assert.equal(normalizePublicResponsesEvent({ type: 'response.output_text.delta', delta: 'late' }, state).length, 0);
 });
 
+test('projects spend-limit incomplete terminals as failures while retaining ordinary truncation', () => {
+  for (const reason of ['credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']) {
+    const event = { type: 'response.incomplete', response: { id: 'resp_quota', status: 'incomplete', incomplete_details: { reason } } };
+    assert.equal(decode(normalizePublicResponsesEvent(event, createPublicResponsesState())[0]).type, 'response.failed');
+    assert.equal(normalizeChatEvent(event, createChatStreamState({ model: 'gpt' }))[0].error.code, 'upstream_response_failed');
+  }
+  const truncated = { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } };
+  assert.equal(decode(normalizePublicResponsesEvent(truncated, createPublicResponsesState())[0]).type, 'response.incomplete');
+});
+
 test('drops backend-only public Responses events before sequencing', () => {
   const state = createPublicResponsesState();
   assert.deepEqual(normalizePublicResponsesEvent({ type: 'responsesapi.websocket_timing', duration_ms: 1 }, state), []);

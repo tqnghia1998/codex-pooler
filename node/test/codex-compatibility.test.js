@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   codexGatewayOptions,
+  continuityAliasSessionId,
   prepareCodexMultiAgentRequest,
   promptCacheSessionId,
   restoreCodexMultiAgentResponse,
@@ -21,6 +22,11 @@ test('derives bounded tenant-scoped UUIDv5 prompt-cache session IDs', () => {
   assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-2' }, 'cache-key'), 'af207d10-ce5d-5d42-b886-c30e5e961c5c');
   assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, ''), '');
   assert.equal(promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'x'.repeat(513)), '');
+  const alias = continuityAliasSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'cache-key');
+  assert.match(alias, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(alias, promptCacheSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'cache-key'));
+  assert.notEqual(alias, continuityAliasSessionId({ scopeId: 'default', apiKeyId: 'key-2' }, 'cache-key'));
+  assert.equal(continuityAliasSessionId({ scopeId: 'default', apiKeyId: 'key-1' }, 'x'.repeat(513)), '');
 });
 
 test('Codex gateway options keep transport defaults bounded and protocol rewrites opt-in', () => {

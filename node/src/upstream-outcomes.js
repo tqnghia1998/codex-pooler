@@ -1,6 +1,6 @@
 import { misalignmentPolicyFailure } from './policy-failures.js';
 import { isClaudeOAuthUpstream } from './domain.js';
-import { quotaIncompleteReason } from './openai-streaming.js';
+import { failedIncompleteResponse, quotaIncompleteReason } from './openai-streaming.js';
 
 const DEFAULT_QUOTA_COOLDOWN_MS = 60_000;
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
@@ -204,8 +204,8 @@ export function classifySseEvent(event, { allowMisalignmentPolicy = false, upstr
       errorCode: error.code || error.type || 'rate_limit_error'
     };
   }
-  if (status) return outcomeForStatus(status, error, allowMisalignmentPolicy);
-  if (!['error', 'response.failed'].includes(event?.type)) {
+  if (status && (status >= 400 || !failedIncompleteResponse(event))) return outcomeForStatus(status, error, allowMisalignmentPolicy);
+  if (!['error', 'response.failed'].includes(event?.type) && !failedIncompleteResponse(event)) {
     return ['response.completed', 'response.incomplete'].includes(event?.type)
       ? { class: 'success', retryable: false }
       : { class: 'neutral', retryable: false };
