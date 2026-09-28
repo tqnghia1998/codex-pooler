@@ -722,7 +722,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
     ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown),
     pinnedId: responsePinnedId,
     requestedId: responsePinnedId || requestedId, requestedType: responsePinnedId ? '' : requestedType, preferredType,
-    requiredType: path === '/v1/messages/count_tokens' ? 'claude' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
+    requiredType: path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : '',
     rotateFromId: pinnedId || responsePinnedId || requestedId || requestedType ? '' : rotationUpstreamId,
     model,
     modelSupport: (upstreamId, requestedModel, generation) => {
@@ -741,7 +741,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   // Claude OAuth is currently a native Anthropic Messages adapter. Do not
   // accidentally send OpenAI Chat/Responses payloads to /v1/messages upstreams.
   if (path === '/v1/messages') plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'codex');
-  else if (path === '/v1/messages/count_tokens') plan.candidates = plan.candidates.filter((candidate) => candidate.type === 'claude');
+  else if (path === '/v1/messages/count_tokens') plan.candidates = plan.candidates.filter((candidate) => ['claude', 'compass'].includes(candidate.type));
   else plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'claude');
   if (!personalKey) return plan;
   const position = new Map(personalSessions.map((session, index) => [session.upstreamId, index]));
@@ -809,12 +809,11 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const compatibilityService = compatibilityLearningForStore(store);
     let compatibilityScope = compatibilityFactContext(upstream, sourcePath, payload, req, path);
     let compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
-    const localClaudeTokenCount = upstream.type === 'claude'
-      && sourcePath === '/v1/messages/count_tokens'
-      && !isAnthropicClaudeBaseUrl(upstream.baseUrl);
+    const localTokenCount = sourcePath === '/v1/messages/count_tokens'
+      && (upstream.type === 'compass' || upstream.type === 'claude' && !isAnthropicClaudeBaseUrl(upstream.baseUrl));
     diagnostics.credentialStarted(attemptId);
     try {
-      const refreshed = localClaudeTokenCount ? false : await ensureProviderCredentials(upstream, credentials, {
+      const refreshed = localTokenCount ? false : await ensureProviderCredentials(upstream, credentials, {
         fetchImpl,
         saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
       });
@@ -837,9 +836,11 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       diagnostics.credentialPrepared(attemptId);
     }
     try {
-      if (!localClaudeTokenCount) await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
-      request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
-      response = localClaudeTokenCount
+      if (!localTokenCount) await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+      request = localTokenCount && upstream.type === 'compass'
+        ? { body: JSON.stringify(prepareClaudeLocalCountTokensBody({ body: payload })) }
+        : buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
+      response = localTokenCount
         ? new Response(JSON.stringify({ input_tokens: countClaudeInputTokens(request.body) }), { status: 200, headers: { 'content-type': 'application/json' } })
         : await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
           store,
@@ -2591,7 +2592,12 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
     return;
   }
   if (isClaudeModelsRequest(req)) {
-    sendJson(res, 200, buildClaudeModelsResponse(store, requestScopeId(req), claudeConfig));
+    const upstreamIds = req.proxyAuth?.kind === 'share_session'
+      ? [req.proxyAuth.upstreamId]
+      : req.proxyAuth?.kind === 'personal_share'
+        ? personalShareSessions(req).map(({ upstreamId }) => upstreamId)
+        : null;
+    sendJson(res, 200, buildClaudeModelsResponse(store, requestScopeId(req), claudeConfig, { upstreamIds }));
     return;
   }
   const modelCatalog = modelCatalogForStore(store);
