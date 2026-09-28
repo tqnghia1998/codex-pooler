@@ -140,7 +140,7 @@ function normalizeChatHistory(payload) {
     if (!['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'].includes(item.type) || typeof item.call_id !== 'string') return item;
     const id = item.call_id;
     const normalized = Buffer.byteLength(id) > MAX_CHAT_CALL_ID_BYTES
-      ? `call_${createHash('sha256').update('codex-pooler:chat-call-id:v1\0').update(id).digest('base64url')}`
+      ? `call_${createHash('sha256').update('gateway:chat-call-id:v1\0').update(id).digest('base64url')}`
       : id;
     if (ids.has(normalized) && ids.get(normalized) !== id) invalid('tool call IDs collide after normalization', 'messages');
     ids.set(normalized, id);
