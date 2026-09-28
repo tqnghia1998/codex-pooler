@@ -12,6 +12,7 @@ import { compatibilityContext, compatibilityLearningForStore } from '../src/comp
 import { gatewayCandidateAttempts, projectPublicWebSocketFrame } from '../src/proxy.js';
 import { adaptResponsesRequest } from '../src/openai-adapters.js';
 import { continuityAliasSessionId, promptCacheSessionId } from '../src/codex-compatibility.js';
+import { countClaudeInputTokens } from '../src/claude-input-tokens.js';
 
 test('lazy attempt planning preserves mixed-provider retry rounds and the last pacing slot', () => {
   const candidates = [
@@ -666,6 +667,34 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
     ]);
     assert.equal(calls[0].options.headers.authorization, 'Bearer project-secret');
     assert.equal(store.getPublic(created.id).spending.spentDollars, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('counts Compass Messages tokens locally without contacting the provider', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-count-'));
+  const store = new Store(dir);
+  const upstream = store.create({ type: 'compass', projectId: 'count-project', projectKey: 'count-secret' });
+  store.setCap(upstream.id, { capDollars: 100 });
+  let calls = 0;
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    throw new Error('Compass token count must be local');
+  });
+  try {
+    const payload = {
+      model: 'claude-sonnet-5',
+      messages: [{ role: 'user', content: 'count this' }]
+    };
+    const result = await request(base, '/v1/messages/count_tokens', payload, {
+      'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01'
+    });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(result.body, { input_tokens: countClaudeInputTokens(payload) });
+    assert.equal(calls, 0);
+    assert.equal(store.getPublic(upstream.id).spending.spentDollars, 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

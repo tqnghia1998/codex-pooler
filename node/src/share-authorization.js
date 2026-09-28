@@ -29,7 +29,10 @@ export function personalShareSessions(req, { sessionId = '', responseId = '' } =
     const route = responseId ? `response:${responseId}` : sessionId ? `session:${sessionId}` : '';
     if (route) {
       const pinned = req.sharingStore?.personalRouteSession?.(req.proxyAuth.personalKeyId, route, req.upstreamStore);
-      if (pinned) return [pinned];
+      if (pinned) {
+        if (responseId) return [pinned];
+        return [pinned, ...cached.filter((session) => session.shareSessionId !== pinned.shareSessionId)];
+      }
       if (responseId && req.sharingStore?.personalRouteExists?.(req.proxyAuth.personalKeyId, route)) return [];
     }
     return cached;
