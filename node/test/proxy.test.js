@@ -1,0 +1,2603 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createApp } from '../src/server.js';
+import { Store } from '../src/store.js';
+import { CodexHostHealth } from '../src/codex-host-health.js';
+import { upstreamPacerForStore } from '../src/upstream-pacer.js';
+import { compatibilityContext, compatibilityLearningForStore } from '../src/compatibility-learning.js';
+import { gatewayCandidateAttempts } from '../src/proxy.js';
+import { continuityAliasSessionId, promptCacheSessionId } from '../src/codex-compatibility.js';
+
+test('lazy attempt planning preserves mixed-provider retry rounds and the last pacing slot', () => {
+  const candidates = [
+    { id: 'codex', type: 'codex', metadata: { request_retry: 8 } },
+    { id: 'claude-a', type: 'claude', metadata: { request_retry: 2 } },
+    { id: 'compass', type: 'compass' },
+    { id: 'claude-b', type: 'claude', metadata: { request_retry: 1 } }
+  ];
+  const attempts = [...gatewayCandidateAttempts(candidates)];
+  assert.deepEqual(attempts.map(({ candidate }) => candidate.id), [
+    'codex', 'claude-a', 'compass', 'claude-b', 'claude-a', 'claude-b', 'claude-a'
+  ]);
+  assert.deepEqual(attempts.map(({ last }) => last), [false, false, false, false, false, false, true]);
+  assert.deepEqual([...gatewayCandidateAttempts([])], []);
+  assert.deepEqual([...gatewayCandidateAttempts(candidates.slice(0, 1))].map(({ last }) => last), [true]);
+  const iterator = gatewayCandidateAttempts([{ id: 'global', type: 'claude' }], { requestRetry: 8 });
+  assert.equal(iterator.next().value.last, false);
+  assert.equal([...iterator].length, 8);
+});
+
+test('HTTP success does not look up every unused candidate to prepare retries', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+  const first = store.create(codexInput());
+  store.setCap(first.id, { capDollars: 100 });
+  const seed = structuredClone(store.get(first.id));
+  const db = store.load();
+  db.upstreams = Array.from({ length: 100 }, (_, index) => ({ ...structuredClone(seed), id: `synthetic-${index}` }));
+  store.save(db);
+  const get = store.get.bind(store);
+  let lookups = 0;
+  store.get = (...args) => { lookups += 1; return get(...args); };
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    id: 'resp_bench', status: 'completed', output: []
+  }), { headers: { 'content-type': 'application/json' } }));
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
+    assert.equal(result.response.status, 200);
+    assert.ok(lookups < 20, `Expected bounded dispatched-account lookups, got ${lookups}`);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
+  }
+});
+
+function jwt(payload) {
+  return `header.${Buffer.from(JSON.stringify(payload)).toString('base64url')}.signature`;
+}
+
+async function runningServer(store, fetchImpl, apiKey = '') {
+  const server = createServer(createApp({ store, apiKey, fetchImpl }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function runningServerWithOptions(store, options = {}) {
+  const server = createServer(createApp({ store, ...options }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return { server, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+async function request(base, path, body, headers = {}) {
+  const response = await fetch(base + path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body)
+  });
+  return { response, body: await response.json() };
+}
+
+function codexInput({ refreshToken, email = 'proxy@example.com', accountId = 'acct-proxy' } = {}) {
+  return {
+    type: 'codex',
+    authJson: JSON.stringify({ tokens: {
+      access_token: jwt({ email, 'https://api.openai.com/auth': { chatgpt_account_id: accountId } }),
+      ...(refreshToken ? { refresh_token: refreshToken } : {}),
+      id_token: jwt({ email })
+    }})
+  };
+}
+
+test('requires the configured single gateway API key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-auth-'));
+  const fetchImpl = async () => new Response('{"id":"auth-ok","output":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const rejected = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
+    assert.equal(rejected.response.status, 401);
+    const accepted = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' }, { authorization: 'Bearer local-client-key' });
+    assert.equal(accepted.response.status, 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('authenticates before parsing an invalid JSON proxy body', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-auth-order-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => { calls += 1; return new Response('{}'); }, 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not-json' });
+    assert.equal(response.status, 401);
+    assert.equal(calls, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('proxies Codex Responses and translates Chat Completions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({
+      id: 'resp-1', model: 'gpt-5-codex', output_text: 'hello',
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'hello' }] }]
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const responses = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
+    assert.equal(responses.response.status, 200);
+    assert.equal(responses.body.output_text, 'hello');
+    assert.equal(new URL(calls[0].url).pathname, '/backend-api/codex/responses');
+    assert.equal(calls[0].options.headers.authorization.startsWith('Bearer header.'), true);
+
+    const chat = await request(base, '/v1/chat/completions', { model: 'gpt-5-codex', messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(chat.response.status, 200);
+    assert.equal(chat.body.object, 'chat.completion');
+    assert.equal(chat.body.choices[0].message.content, 'hello');
+    assert.deepEqual(calls[1].body.input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hello' }] }]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validates public OpenAI adapters before dispatch and supports Chat input fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-adapter-boundary-'));
+  const bodies = [];
+  const fetchImpl = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ id: 'resp-adapter', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const fallback = await request(base, '/v1/chat/completions', { model: 'gpt-5.6-sol', input: 'fallback' });
+    assert.equal(fallback.response.status, 200);
+    assert.deepEqual(bodies[0].input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'fallback' }] }]);
+    assert.equal(bodies[0].instructions, '');
+
+    const invalidCases = [
+      ['/v1/responses', { model: 'gpt-5.6-sol', input: [] }, 'invalid_request', 'input'],
+      ['/v1/responses', { model: 'gpt-5.6-sol', input: 'x', store: true }, 'unsupported_parameter', 'store'],
+      ['/v1/chat/completions', { model: 'gpt-5.6-sol' }, 'invalid_request', 'messages'],
+      ['/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'x' }], functions: [] }, 'invalid_request', 'functions'],
+      ['/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'x' }], max_tokens: 0 }, 'invalid_request', 'max_tokens']
+    ];
+    for (const [path, payload, code, param] of invalidCases) {
+      const result = await request(base, path, payload);
+      assert.equal(result.response.status, 400);
+      assert.equal(result.body.error.type, 'invalid_request_error');
+      assert.equal(result.body.error.code, code);
+      assert.equal(result.body.error.param, param);
+    }
+    assert.equal(bodies.length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normalizes collected Chat metadata, partial usage, and incomplete finish reasons', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-chat-output-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  let withToolCall = false;
+  const fetchImpl = async () => new Response(JSON.stringify(withToolCall ? {
+    id: 'resp-truncated-tool', status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' },
+    output: [{ type: 'function_call', call_id: 'call-truncated', name: 'unsafe', arguments: '{"partial":' }]
+  } : {
+    id: 'resp-filtered', created_at: 123, status: 'incomplete', service_tier: 'priority',
+    incomplete_details: { reason: 'content_filter' }, output: [],
+    usage: { input_tokens: 2, prompt_tokens_details: { cached_tokens: 1 } }
+  }), { status: 200, headers: { 'content-type': 'application/json' } });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.created, 123);
+    assert.equal(result.body.model, 'gpt-5.6-sol');
+    assert.equal(result.body.service_tier, 'priority');
+    assert.equal(result.body.choices[0].finish_reason, 'content_filter');
+    assert.equal(result.body.choices[0].message.content, null);
+    assert.deepEqual(result.body.usage, { prompt_tokens: 2, prompt_tokens_details: { cached_tokens: 1 } });
+
+    withToolCall = true;
+    const truncated = await request(base, '/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(truncated.body.choices[0].finish_reason, 'length');
+    assert.equal(truncated.body.choices[0].message.tool_calls[0].id, 'call-truncated');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('translates Chat Completions image and tool-call contracts in both directions', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-chat-tools-'));
+  let upstreamBody;
+  const fetchImpl = async (_url, options) => {
+    upstreamBody = JSON.parse(options.body);
+    return new Response(JSON.stringify({
+      id: 'resp-tools', model: 'gpt-5.6-sol',
+      output: [{ type: 'function_call', call_id: 'call-2', name: 'weather', arguments: '{"city":"SG"}' }],
+      usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 }
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/chat/completions', {
+      model: 'gpt-5.6-sol',
+      messages: [
+        { role: 'user', content: [{ type: 'text', text: 'weather' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AQ==', detail: 'high' } }] },
+        { role: 'assistant', content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'lookup', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 'call-1', content: '{"ok":true}' }
+      ],
+      tools: [{ type: 'function', function: { name: 'weather', description: 'Weather', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false }, strict: true } }],
+      tool_choice: { type: 'function', function: { name: 'weather' } }
+    });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(upstreamBody.input[0].content[1], { type: 'input_image', image_url: 'data:image/png;base64,AQ==' });
+    assert.deepEqual(upstreamBody.input[1], { type: 'function_call', call_id: 'call-1', name: 'lookup', arguments: '{}' });
+    assert.deepEqual(upstreamBody.input[2], { type: 'function_call_output', call_id: 'call-1', output: '{"ok":true}' });
+    assert.deepEqual(upstreamBody.tools[0], { type: 'function', name: 'weather', description: 'Weather', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false }, strict: true });
+    assert.deepEqual(upstreamBody.tool_choice, { type: 'function', name: 'weather' });
+    assert.equal(result.body.choices[0].finish_reason, 'tool_calls');
+    assert.deepEqual(result.body.choices[0].message.tool_calls, [{ id: 'call-2', type: 'function', function: { name: 'weather', arguments: '{"city":"SG"}' } }]);
+    assert.deepEqual(result.body.usage, { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('keeps a session preference until its spending cap is reached', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-pin-'));
+  const authHeaders = [];
+  const fetchImpl = async (_url, options) => {
+    authHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'resp-session', output_text: 'ok' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first@example.com', accountId: 'acct-first' }));
+  const second = store.create(codexInput({ email: 'second@example.com', accountId: 'acct-second' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const headers = { 'x-codex-session-id': 'session-1' };
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'one' }, headers)).response.status, 200);
+    store.addUsage(first.id, { attemptId: 'spend-90', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 90_000_000, costSource: 'upstream_reported' });
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'two' }, headers)).response.status, 200);
+    assert.deepEqual(authHeaders, [`Bearer ${firstToken}`, `Bearer ${firstToken}`]);
+
+    store.addUsage(first.id, { attemptId: 'spend-125', startedAt: new Date(Date.now() + 1).toISOString(), settledCostMicros: 35_000_000, costSource: 'upstream_reported' });
+    const continued = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'three' }, headers);
+    assert.equal(continued.response.status, 200);
+    assert.deepEqual(authHeaders, [`Bearer ${firstToken}`, `Bearer ${firstToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rotates a session to the next upstream after five dollars of settled spend', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-rotation-'));
+  const authHeaders = [];
+  const fetchImpl = async (_url, options) => {
+    authHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'resp-session', output_text: 'ok', usage: { price_cost_usd: 5 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first@example.com', accountId: 'acct-first' }));
+  const second = store.create(codexInput({ email: 'second@example.com', accountId: 'acct-second' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.setPriorityList([first.id]);
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const headers = { 'x-codex-session-id': 'rotate-at-five' };
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'one' }, headers)).response.status, 200);
+    assert.equal(store.sessionUpstream('rotate-at-five'), null);
+    assert.equal(store.sessionRotationUpstream('rotate-at-five'), first.id);
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'two' }, headers)).response.status, 200);
+    assert.deepEqual(authHeaders, [`Bearer ${store.credentials(first.id).accessToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('routes by model preference, explicit type, and explicit upstream ID', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-routing-'));
+  const urls = [];
+  const fetchImpl = async (url) => {
+    urls.push(url);
+    return new Response(JSON.stringify({ id: 'ok', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const codex = store.create(codexInput());
+  const compass = store.create({ type: 'compass', projectId: 'routing-project', projectKey: 'routing-secret' });
+  store.setCap(codex.id, { capDollars: 100 });
+  store.setCap(compass.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-upstream-type': 'compass' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' }, { 'x-upstream-id': codex.id })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-codex-session-id': 'model-switch-session' })).response.status, 200);
+    assert.equal((await request(base, '/v1/responses', { model: 'claude-fable-5-1', input: 'hi' }, { 'x-codex-session-id': 'model-switch-session' })).response.status, 200);
+    assert.deepEqual(urls.map((url) => new URL(url).host), ['chatgpt.com', 'compass.llm.shopee.io', 'compass.llm.shopee.io', 'chatgpt.com', 'chatgpt.com', 'chatgpt.com']);
+    const invalid = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }, { 'x-upstream-id': 'missing' });
+    assert.equal(invalid.response.status, 503);
+    const wrongMessages = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-id': codex.id });
+    assert.equal(wrongMessages.response.status, 503);
+    assert.equal(urls.length, 6);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('retries Codex proxy requests with a rotated access token after 401', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-refresh-'));
+  const authHeaders = [];
+  let upstreamCalls = 0;
+  const fetchImpl = async (url, options) => {
+    if (url === 'https://auth.openai.com/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'rotated-access-token', expires_in: 3600 }), { status: 200 });
+    }
+    authHeaders.push(options.headers.authorization);
+    upstreamCalls += 1;
+    if (upstreamCalls === 1) return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'resp-2', output_text: 'ok' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput({ refreshToken: 'refresh-token' }));
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5-codex', input: 'hello' });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(authHeaders, ['Bearer ' + jwt({ email: 'proxy@example.com', 'https://api.openai.com/auth': { chatgpt_account_id: 'acct-proxy' } }), 'Bearer rotated-access-token']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rebuilds compatibility projection after automatic Codex credential refresh', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compatibility-refresh-'));
+  const bodies = [];
+  const fetchImpl = async (url, options) => {
+    if (url === 'https://auth.openai.com/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'fresh-compatibility-token', expires_in: 3600 }), { status: 200 });
+    }
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ id: 'fresh-compatibility', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput({ refreshToken: 'refresh-token' }));
+  store.setCap(created.id, { capDollars: 100 });
+  store.persistCredentials(created.id, store.credentials(created.id), new Date(Date.now() - 1_000).toISOString());
+  const upstream = store.get(created.id);
+  const context = compatibilityContext(upstream, { sourcePath: '/v1/responses', model: 'gpt-5-codex' });
+  const learning = compatibilityLearningForStore(store);
+  const observation = {
+    upstream,
+    context,
+    value: { unsupportedFields: ['max_output_tokens'] },
+    feature: 'unsupported_field:max_output_tokens'
+  };
+  learning.observe({ ...observation, observationId: 'old-token-one', now: 1_000 });
+  learning.observe({ ...observation, observationId: 'old-token-two', now: 1_001 });
+
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5-codex',
+      input: 'hello',
+      max_output_tokens: 321
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(bodies.length, 1);
+    assert.equal(bodies[0].max_output_tokens, 321);
+    assert.equal(store.get(created.id).compatibility, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over after a successful same-account refresh is still rejected', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-auth-exhausted-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'refresh-token', email: 'first-exhausted@example.com', accountId: 'first-exhausted' }));
+  const second = store.create(codexInput({ email: 'second-exhausted@example.com', accountId: 'second-exhausted' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const secondToken = store.credentials(second.id).accessToken;
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://auth.openai.com/oauth/token') return new Response(JSON.stringify({ access_token: 'rotated-but-rejected', expires_in: 3600 }), { status: 200 });
+    providerCalls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${secondToken}`) return new Response(JSON.stringify({ id: 'auth-fallback', status: 'completed', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'auth fallback' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'auth-fallback');
+    assert.deepEqual(providerCalls, [`Bearer ${firstToken}`, 'Bearer rotated-but-rejected', `Bearer ${secondToken}`]);
+    assert.equal(store.get(first.id).health.status, 'reauth_required');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects a policy failure returned after credential refresh without failing over', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-auth-policy-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'refresh-policy', email: 'first-policy@example.com', accountId: 'first-policy' }));
+  const second = store.create(codexInput({ email: 'second-policy@example.com', accountId: 'second-policy' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://auth.openai.com/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'rotated-policy-token', expires_in: 3600 }), { status: 200 });
+    }
+    providerCalls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    }
+    if (options.headers.authorization === 'Bearer rotated-policy-token') {
+      return new Response(JSON.stringify({
+        error: {
+          code: 'misalignment_policy_violation',
+          message: 'Blocked after refresh.',
+          param: 'must-not-leak'
+        }
+      }), { status: 403, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 'should-not-run', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'policy after refresh' });
+    assert.equal(result.response.status, 403);
+    assert.deepEqual(result.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Blocked after refresh.'
+      }
+    });
+    assert.deepEqual(providerCalls, [`Bearer ${firstToken}`, 'Bearer rotated-policy-token']);
+    assert.equal(store.get(first.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not fail over when the selected Codex credential refresh fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-auth-no-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'bad-refresh', email: 'first-auth@example.com', accountId: 'first-auth' }));
+  const second = store.create(codexInput({ email: 'second-auth@example.com', accountId: 'second-auth' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://auth.openai.com/oauth/token') throw new Error('refresh unavailable');
+    providerCalls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) return new Response('{}', { status: 401, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'should-not-run', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'auth' });
+    assert.equal(result.response.status, 502);
+    assert.deepEqual(providerCalls, [`Bearer ${firstToken}`]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not fail over after an expired Codex credential refresh is rejected', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-expired-auth-no-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'expired-refresh', email: 'first-expired@example.com', accountId: 'first-expired' }));
+  const second = store.create(codexInput({ email: 'second-expired@example.com', accountId: 'second-expired' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.persistCredentials(first.id, store.credentials(first.id), new Date(Date.now() - 1_000).toISOString());
+  const providerCalls = [];
+  const fetchImpl = async (url, options = {}) => {
+    if (url === 'https://auth.openai.com/oauth/token') return new Response(JSON.stringify({ error: 'invalid_grant' }), { status: 400, headers: { 'content-type': 'application/json' } });
+    providerCalls.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'should-not-run', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'expired' });
+    assert.equal(result.response.status, 502);
+    assert.deepEqual(providerCalls, []);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('proxies Compass Chat, Responses, and Anthropic Messages directly and settles reported cost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-proxy-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ id: 'compass-1', model: 'claude-fable-5-1', content: [{ type: 'text', text: 'hello' }], usage: { price_cost_usd: 1 } }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'project-1', projectKey: 'project-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    for (const path of ['/v1/chat/completions', '/v1/responses', '/v1/messages']) {
+      const payload = path === '/v1/responses'
+        ? { model: 'claude-fable-5-1', input: 'hello' }
+        : { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hello' }] };
+      const response = await request(base, path, payload, { 'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01' });
+      assert.equal(response.response.status, 200);
+    }
+    assert.deepEqual(calls.map(({ url }) => new URL(url).pathname), [
+      '/compass-api/v1/chat/completions',
+      '/compass-api/v1/responses',
+      '/compass-api/v1/messages'
+    ]);
+    assert.equal(calls[0].options.headers.authorization, 'Bearer project-secret');
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('passes Compass-only OpenAI options through without Codex adapter rejection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-openai-options-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ path: new URL(url).pathname, body: JSON.parse(options.body) });
+    return new Response(JSON.stringify({ id: 'compass-options', choices: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'options-project', projectKey: 'options-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const chat = await request(base, '/v1/chat/completions', {
+      model: 'claude-sonnet-4-6',
+      messages: [{ role: 'user', content: 'hello' }],
+      n: 2
+    }, { 'x-upstream-type': 'compass' });
+    assert.equal(chat.response.status, 200);
+
+    const responses = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello',
+      background: true
+    }, { 'x-upstream-type': 'compass' });
+    assert.equal(responses.response.status, 200);
+    assert.deepEqual(calls, [
+      {
+        path: '/compass-api/v1/chat/completions',
+        body: {
+          model: 'claude-sonnet-4-6',
+          messages: [{ role: 'user', content: 'hello' }],
+          n: 2
+        }
+      },
+      {
+        path: '/compass-api/v1/responses',
+        body: {
+          model: 'claude-sonnet-4-6',
+          input: 'hello',
+          background: true
+        }
+      }
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('learns Compass OpenAI sampling rejections independently per route', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-openai-learning-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    const path = new URL(url).pathname;
+    const body = JSON.parse(options.body);
+    calls.push({ path, body });
+    if (Object.hasOwn(body, 'temperature')) {
+      return new Response(JSON.stringify({
+        error: { type: 'invalid_request_error', param: 'temperature', message: 'Unsupported parameter: temperature' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({ id: 'compass-learning', choices: [], output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'learning-project', projectKey: 'learning-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const result = await request(base, '/v1/chat/completions', {
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+        temperature: 0.4
+      }, { 'x-upstream-type': 'compass' });
+      assert.equal(result.response.status, 200);
+    }
+    assert.deepEqual(calls.slice(0, 5).map(({ body }) => Object.hasOwn(body, 'temperature')), [
+      true, false, true, false, false
+    ]);
+
+    calls.length = 0;
+    for (let index = 0; index < 3; index += 1) {
+      const result = await request(base, '/v1/responses', {
+        model: 'claude-sonnet-4-6',
+        input: 'hello',
+        temperature: 0.4
+      }, { 'x-upstream-type': 'compass' });
+      assert.equal(result.response.status, 200);
+    }
+    assert.deepEqual(calls.map(({ body }) => Object.hasOwn(body, 'temperature')), [
+      true, false, true, false, false
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over Compass after an invalid project key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-auth-failover-'));
+  const store = new Store(dir);
+  const first = store.create({ type: 'compass', projectId: 'first-project', projectKey: 'first-secret' });
+  const second = store.create({ type: 'compass', projectId: 'second-project', projectKey: 'second-secret' });
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const calls = [];
+  const { server, base } = await runningServer(store, async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (calls.length === 1) return new Response(JSON.stringify({ retcode: 40101, message: 'API key not found' }), { status: 401 });
+    return new Response(JSON.stringify({ id: 'compass-ok', content: [], model: 'claude-sonnet-4-6' }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const result = await request(base, '/v1/messages', { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'hello' }] });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(calls, ['Bearer first-secret', 'Bearer second-secret']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('redacts provider 5xx bodies, passes valid Anthropic 4xx, and rejects failed Codex SSE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-errors-'));
+  const store = new Store(dir);
+  const codex = store.create(codexInput());
+  const compass = store.create({ type: 'compass', projectId: 'errors-project', projectKey: 'secret' });
+  store.setCap(codex.id, { capDollars: 100 });
+  store.setCap(compass.id, { capDollars: 100 });
+  let mode = 'compass-500';
+  const fetchImpl = async () => {
+    if (mode === 'compass-500') return new Response(JSON.stringify({ secret: 'provider-internal-secret' }), { status: 500, headers: { 'content-type': 'application/json' } });
+    if (mode === 'compass-400') return new Response(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', message: 'bad request' } }), { status: 400, headers: { 'content-type': 'application/json' } });
+    const status = mode === 'codex-failed-no-status' ? '' : '"status":"failed",';
+    return new Response(`data: {"type":"response.failed","response":{${status}"error":{"message":"sensitive upstream details"}}}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    let result = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-type': 'compass' });
+    assert.equal(result.response.status, 502);
+    assert.equal(JSON.stringify(result.body).includes('provider-internal-secret'), false);
+    mode = 'compass-400';
+    result = await request(base, '/v1/messages', { model: 'claude-fable-5-1', messages: [] }, { 'x-upstream-type': 'compass' });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.body.error.message, 'bad request');
+    mode = 'codex-failed';
+    result = await request(base, '/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], stream: false }, { 'x-upstream-type': 'codex' });
+    assert.equal(result.response.status, 502);
+    assert.equal(JSON.stringify(result.body).includes('sensitive upstream details'), false);
+    mode = 'codex-failed-no-status';
+    const failedWithoutStatus = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hi', stream: false }, { 'x-upstream-type': 'codex' });
+    assert.equal(failedWithoutStatus.response.status, 502);
+    assert.equal(JSON.stringify(failedWithoutStatus.body).includes('sensitive upstream details'), false);
+    mode = 'codex-failed';
+    const streamed = await fetch(base + '/v1/chat/completions', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], stream: true })
+    });
+    const streamText = await streamed.text();
+    assert.match(streamText, /upstream_response_failed/);
+    assert.equal(streamText.includes('sensitive upstream details'), false);
+    assert.equal(streamText.includes('[DONE]'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects misalignment policy failures without refreshing or poisoning the account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-policy-failure-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput({ refreshToken: 'must-not-refresh' }));
+  store.setCap(created.id, { capDollars: 100 });
+  let calls = 0;
+  const { server, base } = await runningServer(store, async (url) => {
+    calls += 1;
+    assert.equal(new URL(url).pathname, '/backend-api/codex/responses');
+    return new Response(JSON.stringify({
+      error: {
+        type: 'provider_policy_type',
+        code: 'misalignment_policy_violation',
+        message: 'Request blocked by policy.',
+        param: 'must-not-leak',
+        sibling: 'must-not-leak'
+      },
+      provider_body: 'must-not-leak'
+    }), { status: 403, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol',
+      input: 'blocked'
+    });
+    assert.equal(result.response.status, 403);
+    assert.deepEqual(result.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Request blocked by policy.'
+      }
+    });
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+    assert.equal(store.get(created.id).tokenRefresh?.status, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays bounded misalignment guidance only through direct native HTTP', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-policy-details-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: {
+      code: 'misalignment_policy_violation',
+      message: 'Continue with the requested correction.',
+      misalignment: {
+        error_type: 'policy',
+        detailed_explanation: 'Use the requested safe direction.',
+        steer: { message: 'Continue safely.' },
+        provider_field: 'drop'
+      },
+      provider_field: 'drop'
+    }
+  }), { status: 403, headers: { 'content-type': 'application/json' } }));
+  try {
+    const native = await request(base, '/backend-api/codex/responses', { model: 'gpt-5.6-sol', input: 'blocked' });
+    assert.equal(native.response.status, 403);
+    assert.deepEqual(native.body, {
+      error: {
+        code: 'misalignment_policy_violation',
+        message: 'Continue with the requested correction.',
+        misalignment: {
+          error_type: 'policy',
+          detailed_explanation: 'Use the requested safe direction.',
+          steer: { message: 'Continue safely.' }
+        }
+      }
+    });
+
+    const publicResult = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'blocked' });
+    assert.deepEqual(publicResult.body, {
+      error: {
+        type: 'invalid_request_error',
+        code: 'misalignment_policy_violation',
+        message: 'Continue with the requested correction.'
+      }
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays bounded misalignment guidance in direct native SSE terminals', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-policy-stream-details-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(
+    'event: response.failed\ndata: {"type":"response.failed","response":{"status":"failed","error":{"code":"misalignment_policy_violation","message":"Continue safely.","misalignment":{"detailed_explanation":"Use the safe path.","provider_field":"drop"}}}}\n\n',
+    { headers: { 'content-type': 'text/event-stream' } }
+  ));
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'blocked', stream: true })
+    });
+    const text = await response.text();
+    assert.match(text, /Use the safe path\./);
+    assert.doesNotMatch(text, /provider_field/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('projects streamed misalignment policy failures and settles them once', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-policy-stream-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(
+    'event: response.failed\ndata: {"type":"response.failed","sequence_number":7,"response":{"id":"resp-policy","status":"failed","error":{"type":"provider_policy","code":"misalignment_policy_violation","message":"Stream blocked.","param":"drop","sibling":"drop"}},"provider_sibling":"drop"}\n\n',
+    { headers: { 'content-type': 'text/event-stream' } }
+  ), 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer local-client-key' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'blocked', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /misalignment_policy_violation/);
+    assert.match(text, /Stream blocked\./);
+    assert.doesNotMatch(text, /provider_policy|provider_sibling|"param"/);
+    assert.equal(store.get(created.id).health, undefined);
+    const [requestRecord] = store.load().gatewayRequests;
+    assert.equal(requestRecord.status, 'failed');
+    assert.equal(requestRecord.lastErrorCode, 'misalignment_policy_violation');
+    assert.equal(store.gatewayAttempts(requestRecord.id).length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normalizes and collects non-streaming public Codex Responses and Chat SSE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-collect-'));
+  const bodies = [];
+  const fetchImpl = async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response('data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}}\n\ndata: {"type":"response.completed","response":{"id":"resp-live","model":"gpt-5.6-sol","output":[],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\ndata: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const responses = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'OK', stream: false });
+    assert.equal(responses.response.status, 200);
+    assert.equal(responses.body.object, 'response');
+    assert.equal(responses.body.output[0].content[0].text, 'OK');
+    assert.deepEqual(bodies[0].input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'OK' }] }]);
+    assert.equal(bodies[0].store, false);
+    assert.equal(bodies[0].stream, true);
+
+    const chat = await request(base, '/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'OK' }], stream: false });
+    assert.equal(chat.response.status, 200);
+    assert.equal(chat.body.choices[0].message.content, 'OK');
+    assert.equal(bodies[1].store, false);
+    assert.equal(bodies[1].stream, true);
+
+    const compact = await request(base, '/v1/responses/compact', { model: 'gpt-5.6-sol', input: [] });
+    assert.equal(compact.response.status, 404);
+    assert.equal(compact.body.error.code, 'unsupported_endpoint');
+    assert.equal(bodies.length, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('settles streamed Codex usage when the upstream omits its content type', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-headerless-sse-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const terminal = { type: 'response.completed', response: { id: 'resp-headerless', status: 'completed', model: 'gpt-5.6-luna', output: [], usage: { input_tokens: 9, input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 }, output_tokens: 5, total_tokens: 14 } } };
+  const { server, base } = await runningServer(store, async () => new Response(`event: response.completed\ndata: ${JSON.stringify(terminal)}\n\n`, { status: 200 }));
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-luna', input: 'hello', stream: true }) });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /text\/event-stream/);
+    await response.text();
+    assert.equal(store.get(created.id).spending.spentCostMicros, 8);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('finalizes Codex streaming accounting when the upstream returns no body', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-empty-stream-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(null, { status: 200 }), 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'empty', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /"code":"server_error"/);
+    const requests = store.load().gatewayRequests;
+    assert.equal(requests.some(({ status }) => status === 'in_progress'), false);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].status, 'failed');
+    assert.equal(requests[0].lastErrorCode, 'upstream_stream_failed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('normalizes Codex envelopes and scopes metadata headers to backend routes', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-envelope-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options, body: options.body ? JSON.parse(options.body) : null });
+    if (new URL(url).pathname === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-envelope","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream', 'x-codex-turn-state': 'next-turn' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const metadata = JSON.stringify({ code_mode_tool_names: ['shell'], safe: true });
+    const backend = await fetch(base + '/backend-api/codex/v1/responses', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer local-client-key',
+        'content-type': 'application/json',
+        'x-codex-turn-metadata': metadata,
+        'x-codex-window-id': 'window-1',
+        'x-codex-parent-thread-id': 'parent-1',
+        'x-codex-installation-id': 'install-1',
+        'x-codex-turn-state': 'turn-1',
+        'x-openai-subagent': 'subagent-1',
+        'x-openai-memgen-request': 'true',
+        'x-codex-guardian': 'reviewer',
+        'x-codex-inference-call-id': 'trace-1',
+        'x-codex-session-id': 'must-not-forward',
+        'session-id': 'native-session',
+        'thread-id': 'native-thread',
+        'x-client-request-id': 'native-request'
+      },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol', input: 'hello', stream: true, service_tier: ' fast ',
+        reasoningEffort: 'minimal', reasoning_summary: 'concise',
+        include: ['reasoning.encrypted_content', 'custom', 'reasoning.encrypted_content']
+      })
+    });
+    await backend.text();
+    assert.equal(backend.status, 200);
+    assert.equal(backend.headers.get('x-codex-turn-state'), 'next-turn');
+    assert.match(backend.headers.get('x-models-etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
+
+    const backendCall = calls.find((call) => new URL(call.url).pathname === '/backend-api/codex/responses');
+    assert.equal(backendCall.body.input, 'hello');
+    assert.equal(backendCall.body.instructions, '');
+    assert.deepEqual(backendCall.body.reasoning, { effort: 'low', summary: 'concise' });
+    assert.equal('reasoningEffort' in backendCall.body, false);
+    assert.equal(backendCall.body.service_tier, 'priority');
+    assert.deepEqual(backendCall.body.include, ['reasoning.encrypted_content', 'custom']);
+    assert.equal(backendCall.options.headers['x-codex-window-id'], 'window-1');
+    assert.equal(backendCall.options.headers['x-openai-memgen-request'], 'true');
+    assert.equal(backendCall.options.headers['x-codex-guardian'], 'reviewer');
+    assert.equal(backendCall.options.headers['x-codex-inference-call-id'], 'trace-1');
+    assert.deepEqual(JSON.parse(backendCall.options.headers['x-codex-turn-metadata']), { safe: true });
+    assert.equal('x-codex-session-id' in backendCall.options.headers, false);
+    assert.equal(backendCall.options.headers['session-id'], 'native-session');
+    assert.equal(backendCall.options.headers['thread-id'], 'native-thread');
+    assert.equal(backendCall.options.headers['x-client-request-id'], 'native-request');
+
+    calls.length = 0;
+    const publicResponse = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer local-client-key',
+        'content-type': 'application/json',
+        'x-codex-turn-state': 'must-not-forward'
+      },
+      body: JSON.stringify({
+        model: 'gpt-5.6-sol', input: 'hello', stream: true, service_tier: 'auto', prompt_cache_key: 'public-cache-key',
+        reasoning: { effort: 'ultra', summary: 'detailed' }
+      })
+    });
+    await publicResponse.text();
+    assert.equal(publicResponse.headers.get('x-codex-turn-state'), null);
+    assert.equal(publicResponse.headers.get('x-models-etag'), null);
+    assert.deepEqual(calls[0].body.reasoning, { effort: 'max', summary: 'detailed' });
+    assert.equal('service_tier' in calls[0].body, false);
+    assert.deepEqual(calls[0].body.include, ['reasoning.encrypted_content']);
+    assert.equal('x-codex-turn-state' in calls[0].options.headers, false);
+    assert.match(calls[0].options.headers['session-id'], /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('derives scoped provider sessions for native HTTP only when no valid session-id survives', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-session-locality-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const sessions = [];
+  const fetchImpl = async (_url, options) => {
+    sessions.push(options.headers['session-id']);
+    return new Response('data: {"type":"response.completed","response":{"id":"resp_session","status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const scope = { scopeId: 'default', apiKeyId: store.authenticateApiKey('local-client-key').id };
+    const send = async (path, headers, body = {}) => {
+      const response = await fetch(base + path, {
+        method: 'POST',
+        headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json', ...headers },
+        body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true, ...body })
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+    };
+    await send('/backend-api/codex/responses', { 'session-id': 'provider-session', 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/v1/responses', { 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/responses/compact', { 'x-session-id': 'local-alias' }, { prompt_cache_key: 'cache-key' });
+    await send('/backend-api/codex/responses', { 'x-session-id': 'local-alias' });
+    await send('/backend-api/codex/responses', { 'x-session-id': 'local-alias' });
+    await send('/backend-api/codex/responses', { 'x-client-request-id': 'per-request' });
+    assert.deepEqual(sessions, [
+      'provider-session',
+      promptCacheSessionId(scope, 'cache-key'),
+      promptCacheSessionId(scope, 'cache-key'),
+      continuityAliasSessionId(scope, 'local-alias'),
+      continuityAliasSessionId(scope, 'local-alias'),
+      undefined
+    ]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not settle native spend-limit incomplete terminals as success', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-spend-incomplete-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const terminal = { type: 'response.incomplete', response: { id: 'resp_spend', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, usage: { input_tokens: 10, output_tokens: 5 } } };
+  const visible = 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n';
+  const { server, base } = await runningServer(store, async () => new Response(`${visible}event: response.incomplete\ndata: ${JSON.stringify(terminal)}\n\n`, { headers: { 'content-type': 'text/event-stream' } }), 'local-client-key');
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /credit_balance_exhausted/);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a pre-output spend-limit incomplete terminal without billing the exhausted account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-spend-incomplete-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'incomplete-first@example.com' }));
+  const second = store.create(codexInput({ email: 'incomplete-second@example.com' }));
+  for (const upstream of [first, second]) store.setCap(upstream.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    const event = options.headers.authorization === `Bearer ${firstToken}`
+      ? { type: 'response.incomplete', response: { id: 'resp_spend', status: 'incomplete', incomplete_details: { reason: 'project_spend_limit_exceeded' } } }
+      : { type: 'response.completed', response: { id: 'resp_recovered', status: 'completed', output: [] } };
+    return new Response(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /resp_recovered/);
+    assert.equal(calls.length, 2);
+    assert.equal(store.get(first.id).health.status, 'cooldown');
+    assert.equal(store.get(first.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a collected spend-limit response and does not pin or bill the exhausted account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-collected-spend-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'collected-first@example.com' }));
+  const second = store.create(codexInput({ email: 'collected-second@example.com' }));
+  for (const upstream of [first, second]) store.setCap(upstream.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    const body = options.headers.authorization === `Bearer ${firstToken}`
+      ? { id: 'resp_exhausted', status: 'incomplete', incomplete_details: { reason: 'organization_spend_limit_exceeded' }, usage: { input_tokens: 10, output_tokens: 5 } }
+      : { id: 'resp_recovered', status: 'completed', output: [] };
+    return new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hello' }, { authorization: 'Bearer local-client-key' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'resp_recovered');
+    assert.equal(calls.length, 2);
+    assert.equal(store.get(first.id).health.status, 'cooldown');
+    assert.equal(store.get(first.id).spending.spentCostMicros, 0);
+    assert.equal(store.responseUpstream('resp_exhausted', 'default', store.authenticateApiKey('local-client-key').id), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects native JSON spend-limit responses without successful accounting', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-native-json-spend-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const body = { id: 'resp_exhausted', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, usage: { input_tokens: 10, output_tokens: 5 } };
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } }), 'local-client-key');
+  try {
+    const result = await request(base, '/backend-api/codex/responses', { model: 'gpt-5.6-sol', input: 'hello', stream: false }, { authorization: 'Bearer local-client-key' });
+    assert.equal(result.response.status, 502);
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds newer native Codex metadata headers before upstream dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-metadata-bounds-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    if (new URL(url).pathname === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol' }] }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-metadata-bounds","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl, 'local-client-key');
+  try {
+    const response = await fetch(base + '/backend-api/codex/responses', {
+      method: 'POST',
+      headers: {
+        authorization: 'Bearer local-client-key',
+        'content-type': 'application/json',
+        'x-openai-memgen-request': 'false',
+        'x-codex-guardian': 'operator',
+        'x-codex-inference-call-id': 'not valid'
+      },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    await response.text();
+    const call = calls.find(({ url }) => new URL(url).pathname === '/backend-api/codex/responses');
+    assert.equal(call.options.headers['x-openai-memgen-request'], undefined);
+    assert.equal(call.options.headers['x-codex-guardian'], undefined);
+    assert.equal(call.options.headers['x-codex-inference-call-id'], undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('defaults legacy Compass Messages thinking to adaptive thinking', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-adaptive-thinking-'));
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    calls.push({ body, headers: options.headers });
+    if (body.model === 'claude-legacy-99') {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: '"thinking.type.adaptive" is not supported on this model' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    if (body.thinking?.type === 'enabled') {
+      return new Response(JSON.stringify({
+        type: 'error',
+        error: { type: 'invalid_request_error', message: '"thinking.type.enabled" is not supported on this model' }
+      }), { status: 400, headers: { 'content-type': 'application/json' } });
+    }
+    for (const field of ['temperature', 'top_p', 'top_k']) {
+      if (Object.hasOwn(body, field)) {
+        return new Response(JSON.stringify({
+          type: 'error',
+          error: { type: 'invalid_request_error', message: `"${field}" is not supported for this model` }
+        }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+    }
+    return new Response(JSON.stringify({ id: 'msg-1', content: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'thinking-project', projectKey: 'thinking-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const result = await request(base, '/v1/messages', {
+        model: 'claude-future-99',
+        messages: [],
+        thinking: { type: 'enabled', budget_tokens: 2048, extra: true },
+        temperature: 0.4,
+        top_p: 0.8,
+        top_k: 20
+      });
+      assert.equal(result.response.status, 200);
+    }
+    assert.equal(calls.length, 9);
+    assert.deepEqual(calls.map(({ body }) => body.thinking), Array(9).fill({ type: 'adaptive', extra: true }));
+    assert.deepEqual(calls.map(({ body }) => body.output_config), Array(9).fill({ effort: 'medium' }));
+    assert.deepEqual(calls.map(({ body }) => [
+      Object.hasOwn(body, 'temperature'),
+      Object.hasOwn(body, 'top_p'),
+      Object.hasOwn(body, 'top_k')
+    ]), [
+      [true, true, true],
+      [false, true, true],
+      [false, false, true],
+      [false, false, false],
+      [true, true, true],
+      [false, true, true],
+      [false, false, true],
+      [false, false, false],
+      [false, false, false]
+    ]);
+    assert.deepEqual(calls.map(({ headers }) => headers['anthropic-version']), Array(9).fill('2023-06-01'));
+
+    const unsupportedAdaptive = await request(base, '/v1/messages', {
+      model: 'claude-legacy-99',
+      messages: [],
+      thinking: { type: 'enabled', budget_tokens: 2048 }
+    });
+    assert.equal(unsupportedAdaptive.response.status, 400);
+    assert.deepEqual(calls.at(-1).body.thinking, { type: 'adaptive' });
+    assert.deepEqual(calls.at(-1).body.output_config, { effort: 'medium' });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('validates Compass Anthropic negotiation headers before dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-anthropic-headers-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'headers-project', projectKey: 'headers-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: 'msg-headers', content: [] }), { headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const invalidVersion = await request(base, '/v1/messages', {
+      model: 'claude-fable-5-1', messages: [], max_tokens: 16
+    }, { 'anthropic-version': '2026-02-30' });
+    assert.equal(invalidVersion.response.status, 400);
+    assert.equal(invalidVersion.body.type, 'error');
+
+    const invalidBeta = await request(base, '/v1/messages', {
+      model: 'claude-fable-5-1', messages: [], max_tokens: 16
+    }, { 'anthropic-beta': 'valid-beta,bad beta' });
+    assert.equal(invalidBeta.response.status, 400);
+    assert.equal(invalidBeta.body.type, 'error');
+    assert.equal(calls, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('learns explicit compatibility rejections from the withheld first SSE event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-compatibility-'));
+  const bodies = [];
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    if (Object.hasOwn(body, 'temperature')) {
+      return new Response(
+        'event: error\ndata: {"type":"error","error":{"type":"invalid_request_error","param":"temperature","message":"Unsupported parameter: temperature"}}\n\n',
+        { headers: { 'content-type': 'text/event-stream' } }
+      );
+    }
+    return new Response(
+      'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp-sse-compatible","status":"completed","output":[]}}\n\n',
+      { headers: { 'content-type': 'text/event-stream' } }
+    );
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', input: 'hello', temperature: 0.2
+    });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'resp-sse-compatible');
+    assert.equal(bodies.length, 2);
+    assert.equal(bodies[0].temperature, 0.2);
+    assert.equal('temperature' in bodies[1], false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('settles the latest reported Compass streaming cost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-stream-cost-'));
+  const fetchImpl = async () => new Response([
+    'data: {"type":"message_start","usage":{"price_cost_usd":1}}',
+    'data: {"type":"message_delta","usage":{"price_cost_usd":2}}',
+    'data: [DONE]', ''
+  ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'stream-project', projectKey: 'stream-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('treats chunk-split Compass message_stop as a successful priced terminal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-message-stop-'));
+  const chunks = [
+    'event: message_start\r',
+    '\ndata: {"type":"message_start","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"price_cost_usd":1}}}\r\n\r',
+    '\nevent: message_delta\r\ndata: {"type":"message_delta","usage":{"output_tokens":20}}\r\n\r\n',
+    'event: message_stop\rdata: {"type":"message_stop"}\r\r'
+  ];
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'message-stop-project', projectKey: 'message-stop-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/messages', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        messages: [{ role: 'user', content: 'hello' }],
+        stream: true
+      })
+    });
+    assert.equal(response.status, 200);
+    const text = await response.text();
+    assert.match(text, /"type":"message_start"/);
+    assert.match(text, /"type":"message_delta"/);
+    assert.match(text, /"type":"message_stop"/);
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 1);
+    assert.equal(Object.keys(store.get(created.id).circuits || {}).length, 0);
+    assert.ok(store.get(created.id).lastSuccessfulAt);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('settles priced Codex and streamed Anthropic usage, preferring reported costs', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-priced-settlement-'));
+  const store = new Store(dir);
+  const codex = store.create(codexInput());
+  const compass = store.create({ type: 'compass', projectId: 'priced-project', projectKey: 'priced-secret' });
+  store.setCap(codex.id, { capDollars: 100 });
+  store.setCap(compass.id, { capDollars: 100 });
+  let reported = false;
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    if (body.model.startsWith('claude-')) {
+      return new Response([
+        'data: {"type":"message_start","message":{"usage":{"input_tokens":100,"cache_read_input_tokens":10,"cache_creation_input_tokens":50}}}',
+        'data: {"type":"message_delta","usage":{"output_tokens":20}}',
+        'data: [DONE]', ''
+      ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response(JSON.stringify({
+      id: 'priced-codex', model: 'gpt-5.6-sol', output: [],
+      usage: { input_tokens: 1_000, input_tokens_details: { cached_tokens: 200 }, output_tokens: 100, total_tokens: 1_100, ...(reported ? { price_cost_usd: '2' } : {}) }
+    }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    let response = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'price', stream: false });
+    assert.equal(response.response.status, 200);
+    let settlements = Object.values(store.get(codex.id).spending.settlements);
+    assert.equal(settlements[0].settledCostMicros, 5_280);
+    assert.equal(settlements[0].costSource, 'pricing_snapshot');
+
+    reported = true;
+    response = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'reported', stream: false });
+    assert.equal(response.response.status, 200);
+    settlements = Object.values(store.get(codex.id).spending.settlements);
+    assert.equal(settlements[1].settledCostMicros, 2_000_000);
+    assert.equal(settlements[1].costSource, 'upstream_reported');
+
+    const stream = await fetch(base + '/v1/messages', { method: 'POST', headers: { 'content-type': 'application/json', 'x-upstream-type': 'compass' }, body: JSON.stringify({ model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'price' }], stream: true }) });
+    assert.equal(stream.status, 200);
+    await stream.text();
+    settlements = Object.values(store.get(compass.id).spending.settlements);
+    assert.equal(settlements[0].settledCostMicros, 791);
+    assert.equal(settlements[0].costSource, 'pricing_snapshot');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over only safe pre-output failures while preserving explicit pins and soft session preferences', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-failover@example.com', accountId: 'first-failover' }));
+  const second = store.create(codexInput({ email: 'second-failover@example.com', accountId: 'second-failover' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  let firstStatus = 503;
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) return new Response(JSON.stringify({ error: { code: 'model_not_found', type: 'invalid_request_error', param: 'model' } }), { status: firstStatus, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ id: 'fallback', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    let result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(calls, [`Bearer ${firstToken}`, `Bearer ${store.credentials(second.id).accessToken}`]);
+
+    calls.length = 0;
+    firstStatus = 429;
+    result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' }, { 'x-upstream-id': first.id });
+    assert.equal(result.response.status, 429);
+    assert.equal(result.body.error.type, 'rate_limit_error');
+    assert.deepEqual(calls, [`Bearer ${firstToken}`]);
+
+    calls.length = 0;
+    store.pinSession('pinned-failover', first.id);
+    result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' }, { 'x-codex-session-id': 'pinned-failover' });
+    assert.equal(result.response.status, 200);
+    assert.deepEqual(calls, [`Bearer ${store.credentials(second.id).accessToken}`]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over pre-output transport, rate-limit, and model-unavailable failures', async () => {
+  for (const failure of ['network', 429, 404]) {
+    const dir = mkdtempSync(join(tmpdir(), `codex-pooler-node-pre-output-${failure}-`));
+    const store = new Store(dir);
+    const first = store.create(codexInput({ email: `first-${failure}@example.com`, accountId: `first-${failure}` }));
+    const second = store.create(codexInput({ email: `second-${failure}@example.com`, accountId: `second-${failure}` }));
+    store.setCap(first.id, { capDollars: 100 });
+    store.setCap(second.id, { capDollars: 100 });
+    const firstToken = store.credentials(first.id).accessToken;
+    const calls = [];
+    const fetchImpl = async (_url, options) => {
+      calls.push(options.headers.authorization);
+      if (options.headers.authorization !== `Bearer ${firstToken}`) return new Response(JSON.stringify({ id: 'fallback', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+      if (failure === 'network') throw Object.assign(new Error('connection reset'), { name: 'TimeoutError' });
+      const error = failure === 404 ? { code: 'model_not_found', type: 'invalid_request_error', param: 'model' } : { type: 'rate_limit_error' };
+      return new Response(JSON.stringify({ error }), { status: failure, headers: { 'content-type': 'application/json' } });
+    };
+    const { server, base } = await runningServer(store, fetchImpl);
+    try {
+      const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry' });
+      assert.equal(result.response.status, 200, String(failure));
+      assert.equal(calls.length, 2, String(failure));
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('caps candidate failover and finalizes exhausted gateway diagnostics', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-failover-budget-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 12; index += 1) {
+    const upstream = store.create({
+      type: 'compass',
+      projectId: `failover-budget-${index}`,
+      projectKey: `secret-${index}`
+    });
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    throw Object.assign(new Error('connection reset'), { code: 'ECONNRESET' });
+  }, 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello'
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 502);
+    assert.equal(calls, 8);
+    const diagnostics = store.gatewayDiagnostics();
+    assert.equal(diagnostics.runtime.activeAttemptCount, 0);
+    assert.equal(diagnostics.failures.length, 1);
+    assert.equal(diagnostics.failures[0].retryCount, 8);
+    assert.equal(diagnostics.failures[0].attemptCount, 8);
+    assert.equal(diagnostics.failures[0].errorCode, 'upstream_transport_failed');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays safe public Codex parameter validation without provider text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-validation-relay-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'unsupported_value', param: 'reasoning.effort', message: "Rejected 'private-value'. Supported values are: 'low', 'high'." }
+  }), { status: 400, headers: { 'content-type': 'application/json' } }), 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', input: 'hello', reasoning: { effort: 'private-value' }
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 400);
+    assert.deepEqual(result.body.error, {
+      type: 'invalid_request_error', code: 'unsupported_value', param: 'reasoning.effort',
+      message: 'upstream rejected parameter reasoning.effort (unsupported_value); supported values: low, high'
+    });
+    assert.equal(JSON.stringify(result.body).includes('private-value'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('relays bounded detail validation and maps Chat input paths to messages', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-detail-validation-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  let detail = 'Unsupported parameter: tool_choice';
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({ detail }), { status: 400 }), 'validation-key');
+  const auth = { authorization: 'Bearer validation-key' };
+  try {
+    for (const path of ['/v1/responses', '/backend-api/codex/responses']) {
+      const result = await request(base, path, { model: 'gpt-5.6-sol', input: 'hello' }, auth);
+      assert.equal(result.response.status, 400);
+      assert.deepEqual(result.body.error, {
+        type: 'invalid_request_error', code: 'unsupported_parameter', param: 'tool_choice',
+        message: 'upstream rejected parameter tool_choice (unsupported_parameter)'
+      });
+    }
+    detail = 'Unsupported parameter: previous_response_id';
+    const native = await request(base, '/backend-api/codex/responses', {
+      model: 'gpt-5.6-sol', previous_response_id: 'resp_old',
+      input: [{ type: 'function_call_output', call_id: 'call-1', output: 'ok' }]
+    }, auth);
+    assert.equal(native.response.status, 400);
+    assert.deepEqual(native.body.error, {
+      type: 'invalid_request_error', code: 'unsupported_parameter', param: 'previous_response_id',
+      message: 'upstream rejected parameter previous_response_id (unsupported_parameter)'
+    });
+    detail = 'Unsupported parameter: tool_choice; secret';
+    const malformed = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hello' }, auth);
+    assert.equal(malformed.response.status, 502);
+    assert.equal(JSON.stringify(malformed.body).includes('secret'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('maps upstream Responses input validation to Chat messages without provider text', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-chat-validation-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'invalid_type', param: 'input[2].content', message: 'private rewritten input' }
+  }), { status: 400 }), 'validation-key');
+  try {
+    const result = await request(base, '/v1/chat/completions', {
+      model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hello' }]
+    }, { authorization: 'Bearer validation-key' });
+    assert.equal(result.response.status, 400);
+    assert.deepEqual(result.body.error, {
+      type: 'invalid_request_error', code: 'invalid_type', param: 'messages',
+      message: 'upstream rejected parameter messages (invalid_type)'
+    });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('classifies upstream 400 diagnostics as request rejections', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-upstream-rejection-diagnostic-'));
+  const store = new Store(dir);
+  const upstream = store.create({
+    type: 'compass',
+    projectId: 'rejection-project',
+    projectKey: 'rejection-secret'
+  });
+  store.setCap(upstream.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(JSON.stringify({
+    error: { type: 'invalid_request_error', code: 'invalid_request', message: 'private provider detail' }
+  }), { status: 400, headers: { 'content-type': 'application/json' } }), 'diagnostics-key');
+  try {
+    const result = await request(base, '/v1/responses', {
+      model: 'claude-sonnet-4-6',
+      input: 'hello'
+    }, { authorization: 'Bearer diagnostics-key' });
+    assert.equal(result.response.status, 502);
+    const failure = store.gatewayDiagnostics().failures[0];
+    assert.equal(failure.responseStatusCode, 400);
+    assert.equal(failure.errorCode, 'upstream_request_rejected');
+    assert.equal(failure.retryCount, 0);
+    assert.equal(JSON.stringify(failure).includes('private provider detail'), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('stops a shared DNS outage before iterating every Codex account without penalizing accounts', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-'));
+  const store = new Store(dir);
+  const upstreams = Array.from({ length: 4 }, (_, index) => {
+    const upstream = store.create(codexInput({ email: `host-${index}@example.com`, accountId: `host-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+    return upstream;
+  });
+  let calls = 0;
+  const hostHealth = new CodexHostHealth({ failureThreshold: 2, cooldownMs: 30_000 });
+  const fetchImpl = async () => {
+    calls += 1;
+    throw codedFetchError('ENOTFOUND');
+  };
+  const { server, base } = await runningServerWithOptions(store, { fetchImpl, codexHostHealth: hostHealth });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'dns outage' });
+    assert.equal(result.response.status, 503);
+    assert.equal(result.response.headers.get('retry-after'), '30');
+    assert.equal(result.body.error.code, 'codex_host_unavailable');
+    assert.equal(calls, 2);
+    const blocked = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'still blocked' });
+    assert.equal(blocked.response.status, 503);
+    assert.equal(blocked.response.headers.get('retry-after'), '30');
+    assert.equal(calls, 2);
+    for (const upstream of upstreams) {
+      assert.equal(store.get(upstream.id).health, undefined);
+    }
+    assert.equal(hostHealth.status().openOriginCount, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skips remaining Codex accounts after a host outage but still permits Compass fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-compass-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 3; index += 1) {
+    const upstream = store.create(codexInput({ email: `mixed-${index}@example.com`, accountId: `mixed-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  const compass = store.create({ type: 'compass', projectId: 'host-fallback', projectKey: 'compass-secret' });
+  store.setCap(compass.id, { capDollars: 100 });
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(new URL(url).origin);
+    if (new URL(url).hostname === 'chatgpt.com') throw codedFetchError('ENOTFOUND');
+    return new Response(JSON.stringify({ id: 'compass-fallback', output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    codexHostHealth: new CodexHostHealth({ failureThreshold: 2, cooldownMs: 30_000 })
+  });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'fallback' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'compass-fallback');
+    assert.deepEqual(calls, ['https://chatgpt.com', 'https://chatgpt.com', 'https://compass.llm.shopee.io']);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('disabled shared host health preserves ordinary account failover', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-host-health-disabled-'));
+  const store = new Store(dir);
+  for (let index = 0; index < 3; index += 1) {
+    const upstream = store.create(codexInput({ email: `disabled-${index}@example.com`, accountId: `disabled-${index}` }));
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    throw codedFetchError('ENOTFOUND');
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    codexHostHealth: new CodexHostHealth({ enabled: false })
+  });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'ordinary failover' });
+    assert.equal(result.response.status, 502);
+    assert.equal(calls, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function codedFetchError(code) {
+  return new TypeError('fetch failed', { cause: Object.assign(new Error('connect failed'), { code }) });
+}
+
+test('rejects oversized session IDs before dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-session-id-limit-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  let calls = 0;
+  const { server, base } = await runningServer(store, async () => { calls += 1; return new Response('{}'); });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'no dispatch' }, { 'x-codex-session-id': 'x'.repeat(201) });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.body.error.code, 'invalid_session_id');
+    assert.equal(calls, 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over malformed non-streaming Codex responses before output', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-invalid-collection-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'error-object@example.com', accountId: 'error-object' }));
+  const second = store.create(codexInput({ email: 'invalid-collection@example.com', accountId: 'invalid-collection' }));
+  const third = store.create(codexInput({ email: 'valid-collection@example.com', accountId: 'valid-collection' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.setCap(third.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const secondToken = store.credentials(second.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) return new Response('{"error":{"message":"provider-secret"}}', { headers: { 'content-type': 'application/json' } });
+    if (options.headers.authorization === `Bearer ${secondToken}`) return new Response('data: {"type":"response.output_text.delta","delta":"incomplete"}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+    return new Response('data: {"type":"response.completed","response":{"id":"valid-fallback","status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'fallback', stream: false });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'valid-fallback');
+    assert.equal(calls.length, 3);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ignores SSE heartbeat comments before valid public events', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-heartbeat-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async () => new Response(': keepalive\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"id":"heartbeat","status":"completed","output":[]}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'heartbeat', stream: true }) });
+    const text = await response.text();
+    assert.match(text, /"id":"heartbeat"/);
+    assert.doesNotMatch(text, /"type":"error"/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over only an initial retryable SSE terminal event', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-first-event-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-sse@example.com', accountId: 'first-sse' }));
+  const second = store.create(codexInput({ email: 'second-sse@example.com', accountId: 'second-sse' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response('event: response.failed\ndata: {"type":"response.failed","error":{"code":"rate_limit_exceeded"}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"fallback","status":"completed","output":[]}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'retry', stream: true }) });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(text, /"id":"fallback"/);
+    assert.doesNotMatch(text, /rate_limit_exceeded/);
+
+    calls.length = 0;
+    const collected = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'retry', stream: false });
+    assert.equal(collected.response.status, 200);
+    assert.equal(collected.body.id, 'fallback');
+    assert.equal(calls.length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a retryable SSE terminal behind a zero-output preamble in one upstream read', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-preamble-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-preamble@example.com', accountId: 'first-preamble' }));
+  const second = store.create(codexInput({ email: 'second-preamble@example.com', accountId: 'second-preamble' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"first","status":"in_progress"}}',
+        'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"first","status":"in_progress"}}',
+        'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}', ''
+      ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"preamble-fallback","status":"completed","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'retry', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(text, /preamble-fallback/);
+    assert.doesNotMatch(text, /"id":"first"|server_is_overloaded/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over Codex overloads delivered after the SSE handshake when bootstrap buffering is enabled', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-bootstrap-failover-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-bootstrap@example.com', accountId: 'first-bootstrap' }));
+  const second = store.create(codexInput({ email: 'second-bootstrap@example.com', accountId: 'second-bootstrap' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization === `Bearer ${firstToken}`) {
+      return new Response([
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"overloaded","status":"in_progress"}}',
+        'event: response.in_progress\ndata: {"type":"response.in_progress","response":{"id":"overloaded","status":"in_progress"}}',
+        'event: response.failed\ndata: {"type":"response.failed","error":{"code":"server_is_overloaded"}}', ''
+      ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    return new Response('event: response.completed\ndata: {"type":"response.completed","response":{"id":"bootstrap-fallback","status":"completed","output":[]}}\n\n', {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const { server, base } = await runningServerWithOptions(store, {
+    fetchImpl,
+    ingress: { streamBootstrapBuffering: true, streamBootstrapTimeoutMs: 500 }
+  });
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'bootstrap', stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal(calls.length, 2);
+    assert.match(text, /bootstrap-fallback/);
+    assert.doesNotMatch(text, /server_is_overloaded/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sanitizes committed public SSE failures without replaying another upstream', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-sanitized-failure-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-sse-failure@example.com', accountId: 'first-sse-failure' }));
+  const second = store.create(codexInput({ email: 'second-sse-failure@example.com', accountId: 'second-sse-failure' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization !== `Bearer ${firstToken}`) throw new Error('must not replay');
+    return new Response([
+      'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"visible"}',
+      'event: response.failed\ndata: {"type":"response.failed","error":{"code":"provider_secret","message":"provider-secret"}}', ''
+    ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'stream', stream: true }) });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, [`Bearer ${firstToken}`]);
+    assert.match(text, /visible/);
+    assert.match(text, /"code":"server_error"/);
+    assert.doesNotMatch(text, /provider_secret|provider-secret/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('sequences public Responses events and drops data after a terminal', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-sequence-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async () => new Response([
+    'event: response.created\ndata: {"type":"response.created","response":{"id":"seq","status":"in_progress"}}',
+    'event: response.completed\ndata: {"type":"response.completed","response":{"id":"seq","status":"completed","output":[]}}',
+    'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"must-not-appear"}', ''
+  ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'sequence', stream: true }) });
+    const events = (await response.text()).trim().split('\n\n').map((block) => JSON.parse(block.split('\n').find((line) => line.startsWith('data: ')).slice(6)));
+    assert.deepEqual(events.map((event) => event.sequence_number), [0, 1]);
+    assert.equal(events.at(-1).type, 'response.completed');
+    assert.doesNotMatch(JSON.stringify(events), /must-not-appear/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds oversized incomplete public SSE events without exposing their content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-size-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const secret = 'oversized-provider-content';
+  const fetchImpl = async () => new Response(`event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"${secret.repeat(400_000)}`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'large', stream: true }) });
+    const text = await response.text();
+    assert.match(text, /"code":"server_error"/);
+    assert.doesNotMatch(text, /oversized-provider-content/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('bounds oversized completed public SSE events without exposing their content', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-complete-sse-size-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const secret = 'completed-oversized-provider-content';
+  const fetchImpl = async () => new Response(
+    `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"${secret.repeat(300_000)}"}\r\n\r\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } }
+  );
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'large', stream: true })
+    });
+    const text = await response.text();
+    assert.match(text, /"code":"server_error"/);
+    assert.doesNotMatch(text, /completed-oversized-provider-content/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not replay an SSE request after output has started', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-no-stream-replay-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'first-stream@example.com', accountId: 'first-stream' }));
+  const second = store.create(codexInput({ email: 'second-stream@example.com', accountId: 'second-stream' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  const firstToken = store.credentials(first.id).accessToken;
+  const calls = [];
+  const fetchImpl = async (_url, options) => {
+    calls.push(options.headers.authorization);
+    if (options.headers.authorization !== `Bearer ${firstToken}`) return new Response('unexpected retry', { status: 200 });
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"visible"}\n\n'));
+        setTimeout(() => controller.error(new Error('upstream stream broke')), 30);
+      }
+    }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const text = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'stream', stream: true }) }).then((response) => response.text()).catch(() => null);
+    assert.deepEqual(calls, [`Bearer ${firstToken}`]);
+    assert.match(text, /"code":"server_error"/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('cancels the upstream SSE reader when the downstream client disconnects', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-sse-disconnect-'));
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  let cancelled = false;
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) { controller.enqueue(new TextEncoder().encode('event: response.created\ndata: {"type":"response.created","response":{"id":"disconnect","status":"in_progress"}}\n\n')); },
+    cancel() { cancelled = true; }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'disconnect', stream: true }) });
+    await response.body.cancel();
+    for (let attempt = 0; attempt < 20 && !cancelled; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(cancelled, true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects oversized non-streaming upstream responses', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-large-response-'));
+  const huge = JSON.stringify({ id: 'too-large', padding: 'x'.repeat(17 * 1024 * 1024) });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => new Response(huge, { status: 200, headers: { 'content-type': 'application/json' } }));
+  try {
+    const response = await fetch(base + '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello' }) });
+    assert.equal(response.status, 502);
+    assert.deepEqual((await response.json()).error, { type: 'server_error', code: 'upstream_error', message: 'Upstream request failed', param: null });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('survives an upstream error after streaming response headers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-midstream-error-'));
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"hi"}\n\n'));
+      setTimeout(() => controller.error(new Error('midstream failure')), 1);
+    }
+  }), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    await fetch(base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], stream: true }) }).then((response) => response.text()).catch(() => null);
+    const health = await fetch(base + '/healthz');
+    assert.equal(health.status, 200);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('maps incomplete Codex Chat SSE to finish_reason length', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-incomplete-stream-'));
+  const fetchImpl = async () => new Response('data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/chat/completions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], stream: true }) });
+    assert.match(await response.text(), /"finish_reason":"length"/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('withholds a pre-output quota-incomplete turn and cools the selected Codex account', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-quota-incomplete-stream-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const event = {
+    type: 'response.incomplete',
+    response: { id: 'resp_quota_stream', status: 'incomplete', incomplete_details: { reason: 'project_spend_limit_exceeded' }, output: [] }
+  };
+  const { server, base } = await runningServer(store, async () => new Response(
+    `event: response.created\ndata: {"type":"response.created","response":{"id":"resp_quota_stream","status":"in_progress"}}\n\nevent: response.incomplete\ndata: ${JSON.stringify(event)}\n\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } }
+  ), 'quota-key');
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST',
+      headers: { authorization: 'Bearer quota-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello', stream: true })
+    });
+    const body = await response.json();
+    assert.equal(response.status, 429);
+    assert.equal(body.error.type, 'rate_limit_error');
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('converts split UTF-8 Codex SSE to Chat Completions SSE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-stream-'));
+  const bytes = new TextEncoder().encode('data: {"type":"response.output_text.delta","delta":"hello 🌏"}\n\ndata: {"type":"response.completed","response":{"output":[]}}\n\n');
+  const emoji = new TextEncoder().encode('🌏');
+  const emojiAt = bytes.findIndex((value, index) => emoji.every((part, offset) => bytes[index + offset] === part));
+  const stream = new ReadableStream({ start(controller) { controller.enqueue(bytes.slice(0, emojiAt + 2)); controller.enqueue(bytes.slice(emojiAt + 2)); controller.close(); } });
+  const fetchImpl = async () => new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-codex', messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /chat\.completion\.chunk/);
+    assert.match(text, /"content":"hello 🌏"/);
+    assert.match(text, /"finish_reason":"stop"/);
+    assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('emits one Chat completion sentinel when Codex terminates with only DONE', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-chat-done-only-'));
+  const fetchImpl = async () => new Response('data: [DONE]\n\n', {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' }
+  });
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5-codex', messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.equal((text.match(/data: \[DONE\]/g) || []).length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refuses a public HTTP response anchor before dispatch and accepts a full resend', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-continuation-cap-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ email: 'pin@example.com', accountId: 'acct-pin' }));
+  store.setCap(first.id, { capDollars: 100 });
+  const authHeaders = [];
+  const fetchImpl = async (_url, options) => {
+    authHeaders.push(options.headers.authorization);
+    return new Response(JSON.stringify({ id: 'resp_pinned01', output: [] }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const auth = { authorization: 'Bearer pin-key' };
+  const { server, base } = await runningServer(store, fetchImpl, 'pin-key');
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'one' }, auth)).response.status, 200);
+    const continued = await request(base, '/v1/responses', {
+      model: 'gpt-5.6-sol', previous_response_id: 'resp_pinned01',
+      input: [{ type: 'function_call_output', call_id: 'call-1', output: 'ok' }]
+    }, auth);
+    assert.equal(continued.response.status, 400);
+    assert.equal(continued.body.error.code, 'previous_response_not_found');
+    assert.equal(continued.body.error.param, 'previous_response_id');
+    assert.equal(authHeaders.length, 1);
+    const resend = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'full history' }, auth);
+    assert.equal(resend.response.status, 200);
+    assert.equal(authHeaders.length, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a collected quota-incomplete response without reporting it as success', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-collected-quota-incomplete-'));
+  const store = new Store(dir);
+  for (const [email, accountId] of [['first@example.com', 'acct-first'], ['second@example.com', 'acct-second']]) {
+    const upstream = store.create(codexInput({ email, accountId }));
+    store.setCap(upstream.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const event = calls === 1
+      ? { type: 'response.incomplete', response: { id: 'resp_quota', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, output: [] } }
+      : { type: 'response.completed', response: { id: 'resp_success', status: 'completed', output: [] } };
+    return new Response(`event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`, {
+      status: 200, headers: { 'content-type': 'text/event-stream' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl, 'quota-key');
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-6-sol', input: 'hello' }, { authorization: 'Bearer quota-key' });
+    assert.equal(result.response.status, 200);
+    assert.equal(result.body.id, 'resp_success');
+    assert.equal(calls, 2);
+    assert.equal(store.list().filter((entry) => entry.health?.status === 'cooldown').length, 1);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not re-pin a cooled account after a collected quota-incomplete response', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-collected-quota-session-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const event = {
+    type: 'response.incomplete',
+    response: { id: 'resp_quota', status: 'incomplete', incomplete_details: { reason: 'credit_balance_exhausted' }, output: [] }
+  };
+  const { server, base } = await runningServer(store, async () => new Response(
+    `event: response.incomplete\ndata: ${JSON.stringify(event)}\n\n`,
+    { status: 200, headers: { 'content-type': 'text/event-stream' } }
+  ), 'quota-key');
+  try {
+    const apiKeyId = store.listApiKeys()[0].id;
+    const result = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'hello' }, {
+      authorization: 'Bearer quota-key', 'x-codex-session-id': 'quota-session'
+    });
+    assert.equal(result.response.status, 429);
+    assert.equal(result.body.error.type, 'rate_limit_error');
+    assert.equal(store.get(upstream.id).health.status, 'cooldown');
+    assert.equal(store.sessionUpstream('quota-session', undefined, apiKeyId), null);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('fails over a retryable first SSE event and keeps the public sequence past an interruption', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-first-event-retry-'));
+  const store = new Store(dir);
+  for (const account of ['one', 'two']) {
+    const created = store.create(codexInput({ email: `${account}@example.com`, accountId: `acct-${account}` }));
+    store.setCap(created.id, { capDollars: 100 });
+  }
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    const body = calls === 1
+      ? 'event: error\ndata: {"type":"error","error":{"type":"server_error","code":"server_error","message":"boom"}}\n\n'
+      : [
+        'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_seq","status":"in_progress"}}',
+        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}', ''
+      ].join('\n\n');
+    return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'stream', stream: true })
+    });
+    const events = (await response.text()).trim().split('\n\n').map((block) => JSON.parse(block.split('\n').find((line) => line.startsWith('data: ')).slice(6)));
+    assert.equal(calls, 2);
+    assert.deepEqual(events.map((event) => [event.type, event.sequence_number]), [['response.created', 0], ['response.output_text.delta', 1], ['error', 2]]);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('strips unsupported explicit prompt cache controls before Codex egress while keeping prompt_cache_key', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-prompt-cache-'));
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, body: JSON.parse(options.body) });
+    return new Response('data: {"type":"response.completed","response":{"id":"resp-cache","output":[]}}\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const store = new Store(dir);
+  const created = store.create(codexInput());
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  const buildPayload = () => ({
+    model: 'gpt-5.6-sol',
+    prompt_cache_key: 'cache-key-fixture',
+    prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+    input: [{
+      type: 'message', role: 'user',
+      content: [
+        { type: 'input_text', text: 'fixture', prompt_cache_breakpoint: { mode: 'explicit' } },
+        { type: 'input_file', file_id: 'file-1', prompt_cache_breakpoint: { mode: 'explicit' } }
+      ]
+    }]
+  });
+  try {
+    for (const path of ['/v1/responses', '/backend-api/codex/responses/compact']) {
+      calls.length = 0;
+      const response = await fetch(base + path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(buildPayload()) });
+      await response.text();
+      assert.equal(response.status, 200, path);
+      const body = calls[0].body;
+      assert.equal(body.prompt_cache_key, 'cache-key-fixture', path);
+      assert.equal('prompt_cache_options' in body, false, path);
+      assert.equal('prompt_cache_breakpoint' in body.input[0].content[0], false, path);
+      assert.equal('prompt_cache_breakpoint' in body.input[0].content[1], false, path);
+    }
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns local pacing 429s, cancels queued requests, and preserves account health', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-http-pacing-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({
+    ...codexInput(),
+    pacing: { enabled: true, minStartIntervalMs: 60_000, maxQueueDepth: 1, maxQueueAgeMs: 120_000 }
+  });
+  store.setCap(created.id, { capDollars: 100 });
+  const fetchImpl = async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: `resp-${calls}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' })).response.status, 200);
+    const controller = new AbortController();
+    const queued = fetch(base + '/v1/responses', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'queued' })
+    });
+    const pacer = upstreamPacerForStore(store);
+    const queueDeadline = Date.now() + 2_000;
+    while (pacer.status()[0]?.queueDepth !== 1 && Date.now() < queueDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(pacer.status()[0]?.queueDepth, 1);
+    const overflow = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'overflow' });
+    assert.equal(overflow.response.status, 429);
+    assert.equal(overflow.body.error.code, 'local_pacing_queue_full');
+    assert.ok(Number(overflow.response.headers.get('retry-after')) >= 1);
+    assert.equal(calls, 1);
+    controller.abort();
+    await assert.rejects(queued, /abort/i);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('returns a local pacing 429 when a queued HTTP request expires', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-http-pacing-expired-'));
+  let calls = 0;
+  const store = new Store(dir);
+  const created = store.create({
+    ...codexInput(),
+    pacing: { enabled: true, minStartIntervalMs: 5_000, maxQueueDepth: 2, maxQueueAgeMs: 100 }
+  });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, async () => {
+    calls += 1;
+    return new Response(JSON.stringify({ id: `resp-${calls}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  });
+  try {
+    assert.equal((await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' })).response.status, 200);
+    const expired = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'expire' });
+    assert.equal(expired.response.status, 429);
+    assert.equal(expired.body.error.code, 'local_pacing_queue_expired');
+    assert.ok(Number(expired.response.headers.get('retry-after')) >= 1);
+    assert.equal(calls, 1);
+    assert.equal(store.get(created.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('skips a paced automatic candidate when another account can start immediately', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-pacing-failover-'));
+  const store = new Store(dir);
+  const first = store.create({
+    ...codexInput({ email: 'paced-first@example.com', accountId: 'acct-paced-first' }),
+    pacing: { enabled: true, minStartIntervalMs: 5_000, maxQueueDepth: 2, maxQueueAgeMs: 10_000 }
+  });
+  const second = store.create(codexInput({ email: 'paced-second@example.com', accountId: 'acct-paced-second' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  store.setPriorityList([first.id, second.id]);
+  const accounts = [];
+  const fetchImpl = async (_url, options) => {
+    accounts.push(options.headers['chatgpt-account-id']);
+    return new Response(JSON.stringify({ id: `resp-${accounts.length}`, output: [] }), {
+      status: 200,
+      headers: { 'content-type': 'application/json' }
+    });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const prime = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'prime' }, { 'x-upstream-id': first.id });
+    assert.equal(prime.response.status, 200);
+    const fallback = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'fallback' });
+    assert.equal(fallback.response.status, 200);
+    assert.deepEqual(accounts, ['acct-paced-first', 'acct-paced-second']);
+    assert.equal(store.get(first.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
