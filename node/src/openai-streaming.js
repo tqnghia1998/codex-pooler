@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { publicMisalignmentError } from './policy-failures.js';
 
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
@@ -116,7 +116,7 @@ export function normalizePublicResponsesEvent(source, state) {
 }
 
 export function createChatStreamState(payload) {
-  return { id: `chatcmpl-${randomUUID()}`, created: Math.floor(Date.now() / 1000), model: typeof payload?.model === 'string' ? payload.model : 'unknown', serviceTier: null, roleSent: false, visible: false, terminal: false, toolCalls: false, includeUsage: payload?.stream_options?.include_usage === true };
+  return { id: `chatcmpl-${randomUUID()}`, created: Math.floor(Date.now() / 1000), model: typeof payload?.model === 'string' ? payload.model : 'unknown', serviceTier: null, roleSent: false, visible: false, terminal: false, toolCalls: false, toolArguments: new Map(), reconciliationFailed: false, includeUsage: payload?.stream_options?.include_usage === true };
 }
 
 export function normalizeChatEvent(event, state) {
@@ -138,21 +138,51 @@ export function normalizeChatEvent(event, state) {
     state.visible = true;
     state.toolCalls = true;
     const index = integer(event.item.output_index) ?? integer(event.output_index) ?? 0;
+    if (state.toolArguments.has(index)) state.reconciliationFailed = true;
+    else registerChatTool(state, index, event.item, 'arguments');
     chunks.push(chatChunk(state, { tool_calls: [{ index, id: string(event.item.call_id) || string(event.item.id) || string(event.item_id) || `call_${index}`, type: 'function', function: { name: string(event.item.name) || 'tool', arguments: typeof event.item.arguments === 'string' ? event.item.arguments : '' } }] }, null));
   } else if (event.type === 'response.output_item.added' && event.item?.type === 'custom_tool_call') {
     state.visible = true;
     state.toolCalls = true;
     const index = integer(event.item.output_index) ?? integer(event.output_index) ?? 0;
+    if (state.toolArguments.has(index)) state.reconciliationFailed = true;
+    else registerChatTool(state, index, event.item, 'input');
     chunks.push(chatChunk(state, { tool_calls: [{ index, id: string(event.item.call_id) || string(event.item.id) || string(event.item_id) || `call_${index}`, type: 'custom', custom: { name: string(event.item.name) || 'tool', input: typeof event.item.input === 'string' ? event.item.input : '' } }] }, null));
   } else if (event.type === 'response.function_call_arguments.delta') {
     state.visible = true;
     state.toolCalls = true;
-    chunks.push(chatChunk(state, { tool_calls: [{ index: integer(event.output_index) ?? 0, function: { arguments: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
+    const index = integer(event.output_index);
+    if (index !== null && state.toolArguments.has(index)) {
+      appendChatTool(state, index, event.delta);
+      chunks.push(chatChunk(state, { tool_calls: [{ index, function: { arguments: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
+    }
   } else if (event.type === 'response.custom_tool_call_input.delta') {
     state.visible = true;
     state.toolCalls = true;
-    chunks.push(chatChunk(state, { tool_calls: [{ index: integer(event.output_index) ?? 0, custom: { input: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
+    const index = integer(event.output_index);
+    if (index !== null && state.toolArguments.has(index)) {
+      appendChatTool(state, index, event.delta);
+      chunks.push(chatChunk(state, { tool_calls: [{ index, custom: { input: typeof event.delta === 'string' ? event.delta : '' } }] }, null));
+    }
+  } else if (event.type === 'response.function_call_arguments.done' || event.type === 'response.custom_tool_call_input.done') {
+    const type = event.type === 'response.function_call_arguments.done' ? 'function_call' : 'custom_tool_call';
+    const field = type === 'function_call' ? 'arguments' : 'input';
+    if (typeof event.item_id === 'string') reconcileChatTool(state, integer(event.output_index), { type, id: event.item_id }, event[field], chunks);
+  } else if (event.type === 'response.output_item.done' && plain(event.item)) {
+    const field = event.item.type === 'function_call' ? 'arguments' : event.item.type === 'custom_tool_call' ? 'input' : null;
+    if (field) completeChatTool(state, integer(event.output_index), event.item, field, chunks);
   } else if (terminal === 'completed' || terminal === 'incomplete') {
+    if (terminal === 'completed' && Array.isArray(event.response?.output)) {
+      event.response.output.forEach((item, index) => {
+        if (state.reconciliationFailed || !plain(item)) return;
+        const field = item.type === 'function_call' ? 'arguments' : item.type === 'custom_tool_call' ? 'input' : null;
+        if (field) completeChatTool(state, index, item, field, chunks);
+      });
+    }
+    if (state.reconciliationFailed) {
+      state.terminal = true;
+      return [chatReconciliationError()];
+    }
     role();
     state.toolCalls ||= Array.isArray(event.response?.output) && event.response.output.some((item) => ['function_call', 'custom_tool_call'].includes(item?.type));
     const finish = terminal === 'incomplete'
@@ -164,7 +194,72 @@ export function normalizeChatEvent(event, state) {
     state.terminal = true;
     chunks.push('[DONE]');
   }
+  if (state.reconciliationFailed) {
+    state.terminal = true;
+    return [chatReconciliationError()];
+  }
   return chunks;
+}
+
+function registerChatTool(state, index, item, field) {
+  const initial = typeof item[field] === 'string' ? item[field] : '';
+  const hash = createHash('sha256').update(initial);
+  state.toolArguments.set(index, { identity: { type: item.type, id: item.id, call_id: item.call_id, name: item.name }, bytes: Buffer.byteLength(initial), hash });
+}
+
+function appendChatTool(state, index, value) {
+  const entry = state.toolArguments.get(index);
+  if (entry && typeof value === 'string') {
+    entry.hash.update(value);
+    entry.bytes += Buffer.byteLength(value);
+  }
+}
+
+function completeChatTool(state, index, item, field, chunks) {
+  if (index === null) return;
+  if (state.toolArguments.has(index)) {
+    reconcileChatTool(state, index, item, item[field], chunks);
+    return;
+  }
+  if (!['id', 'call_id', 'name'].every((key) => string(item[key]))) return;
+  state.visible = true;
+  state.toolCalls = true;
+  registerChatTool(state, index, item, field);
+  const target = field === 'arguments' ? 'function' : 'custom';
+  chunks.push(chatChunk(state, { tool_calls: [{
+    index, id: item.call_id, type: target, [target]: { name: item.name, [field]: typeof item[field] === 'string' ? item[field] : '' }
+  }] }, null));
+}
+
+function reconcileChatTool(state, index, identity, value, chunks) {
+  const entry = state.toolArguments.get(index);
+  if (!entry || typeof value !== 'string') return;
+  const shared = ['id', 'call_id'].some((key) => typeof identity[key] === 'string' && identity[key] && identity[key] === entry.identity[key]);
+  if (!shared) return;
+  if (Object.entries(identity).some(([key, candidate]) => candidate !== undefined && entry.identity[key] !== undefined && candidate !== entry.identity[key])) {
+    state.reconciliationFailed = true;
+    return;
+  }
+  const bytes = Buffer.from(value);
+  if (bytes.length < entry.bytes || !createHash('sha256').update(bytes.subarray(0, entry.bytes)).digest().equals(entry.hash.copy().digest())) {
+    state.reconciliationFailed = true;
+    return;
+  }
+  const suffix = bytes.toString('utf8', entry.bytes);
+  if (!suffix) return;
+  if (Buffer.byteLength(suffix) !== bytes.length - entry.bytes) {
+    state.reconciliationFailed = true;
+    return;
+  }
+  appendChatTool(state, index, suffix);
+  const field = identity.type === 'function_call' ? 'function' : 'custom';
+  const name = field === 'function' ? 'arguments' : 'input';
+  state.visible = true;
+  chunks.push(chatChunk(state, { tool_calls: [{ index, [field]: { [name]: suffix } }] }, null));
+}
+
+function chatReconciliationError() {
+  return { error: { type: 'server_error', code: 'upstream_tool_snapshot_inconsistent', message: 'Upstream tool call snapshot is inconsistent', param: null } };
 }
 
 function canonical(event) {

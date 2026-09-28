@@ -9,7 +9,8 @@ import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 import { compatibilityContext, compatibilityLearningForStore } from '../src/compatibility-learning.js';
-import { gatewayCandidateAttempts } from '../src/proxy.js';
+import { gatewayCandidateAttempts, projectPublicWebSocketFrame } from '../src/proxy.js';
+import { adaptResponsesRequest } from '../src/openai-adapters.js';
 import { continuityAliasSessionId, promptCacheSessionId } from '../src/codex-compatibility.js';
 
 test('lazy attempt planning preserves mixed-provider retry rounds and the last pacing slot', () => {
@@ -155,6 +156,77 @@ test('proxies Codex Responses and translates Chat Completions', async () => {
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('serializes validated access programs and Chat tool defaults to Codex', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 3) });
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const bodies = [];
+  const { server, base } = await runningServer(store, async (_url, options) => {
+    bodies.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ id: 'resp-compat', output: [] }), { headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    const response = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'test', access_programs: { cyber: 'daybreak_blue' } });
+    assert.equal(response.response.status, 200);
+    assert.deepEqual(bodies[0].access_programs, { cyber: 'daybreak_blue' });
+    const chat = await request(base, '/v1/chat/completions', {
+      model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'test' }], reasoning: 'low',
+      tools: [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object', properties: { q: { type: 'string' } } } } }]
+    });
+    assert.equal(chat.response.status, 200);
+    assert.equal(bodies[1].reasoning.effort, 'low');
+    assert.equal(bodies[1].tools[0].strict, false);
+    const invalid = await request(base, '/v1/responses', { model: 'gpt-5.6-sol', input: 'test', access_programs: { cyber: 'unapproved' } });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.body.error.param, 'access_programs.cyber');
+    assert.equal(bodies.length, 2);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
+  }
+});
+
+test('projects validated access programs into public WebSocket turns', () => {
+  const payload = adaptResponsesRequest({
+    model: 'gpt-5.6-sol', input: 'hello', access_programs: { cyber: 'daybreak_red' }
+  });
+  const frame = projectPublicWebSocketFrame(payload);
+  assert.equal(frame.type, 'response.create');
+  assert.deepEqual(frame.access_programs, { cyber: 'daybreak_red' });
+});
+
+test('fails a divergent streamed Chat tool snapshot without successful accounting', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const events = [
+    { type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{"q":' } },
+    { type: 'response.completed', response: { id: 'resp_divergent', status: 'completed', output: [{ type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{"other":1}' }], usage: { input_tokens: 2, output_tokens: 1 } } }
+  ];
+  const storeKey = store.configureApiKey('local-client-key');
+  const { server, base } = await runningServer(store, async () => new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } }), 'local-client-key');
+  try {
+    const response = await fetch(base + '/v1/chat/completions', {
+      method: 'POST', headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    const text = await response.text();
+    assert.equal(response.status, 200);
+    assert.match(text, /upstream_tool_snapshot_inconsistent/);
+    assert.doesNotMatch(text, /"finish_reason":"tool_calls"|data: \[DONE\]/);
+    const failure = store.gatewayDiagnostics().failures[0];
+    assert.equal(failure.errorCode, 'upstream_tool_snapshot_inconsistent');
+    assert.equal(store.load().gatewayRequests[0].status, 'failed');
+    assert.equal(store.load().gatewayRequests[0].lastErrorCode, 'upstream_tool_snapshot_inconsistent');
+    assert.equal(store.load().gatewayRequests[0].usageStatus, 'usage_known');
+    assert.equal(store.gatewayUsage(storeKey.scopeId, storeKey.id).request_count, 1);
+    assert.ok(store.get(upstream.id).spending.spentCostMicros > 0);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
   }
 });
 

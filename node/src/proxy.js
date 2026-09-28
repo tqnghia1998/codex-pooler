@@ -2051,15 +2051,23 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         model: payload?.model
       };
     }
-    if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
-    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     if (transformChat) {
       for (const chunk of normalizeChatEvent(parsed, chatState)) await writeChunk(res, chunk === '[DONE]' ? 'data: [DONE]\n\n' : `data: ${JSON.stringify(chunk)}\n\n`);
       visible ||= chatState.visible;
       terminal ||= chatState.terminal;
-      completed ||= successfulTerminal;
+      if (chatState.reconciliationFailed) {
+        completed = false;
+        healthOutcome = { class: 'neutral', retryable: false, errorCode: 'upstream_tool_snapshot_inconsistent' };
+        void reader.cancel('Upstream tool call snapshot is inconsistent').catch(() => {});
+      } else if (successfulTerminal) {
+        onSuccessfulTerminal?.(parsed.response);
+        healthOutcome = { class: 'success', retryable: false };
+        completed = true;
+      }
       return;
     }
+    if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
+    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     if (sanitizePublicResponses) {
       for (const chunk of normalizePublicResponsesEvent(parsed, publicState)) await writeChunk(res, chunk);
       visible ||= publicState.visible;
@@ -2131,12 +2139,18 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (upstream.type === 'claude' && completed) commitClaudeDiagnostics(claudeDiagnosticsState, claudeMessageId);
     if (completed) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
     else {
-      accounting.sharingStore?.releaseReservation(
-        attemptId,
-        downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
-      );
-      if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
-      else if (response.ok && usage && !failedIncompleteTerminal) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+      if (chatState?.reconciliationFailed && usage) {
+        settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
+          errorCode: 'upstream_tool_snapshot_inconsistent'
+        });
+      } else {
+        accounting.sharingStore?.releaseReservation(
+          attemptId,
+          downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
+        );
+        if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
+        else if (response.ok && usage && !failedIncompleteTerminal) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+      }
     }
     if (admission) {
       const outcome = healthOutcome || (downstreamClosed
@@ -2186,13 +2200,13 @@ function logProxyFailure(logger, stage, upstreamId, error) {
   logger?.warn?.(`proxy ${stage} failed for upstream ${upstreamId}: ${error?.name || 'Error'}`);
 }
 
-function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, accounting = {}, lifecycle = null, responseStatusCode = null) {
+function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, accounting = {}, lifecycle = null, responseStatusCode = null, failure = null) {
   const usage = body?.inputTokens !== undefined || body?.upstreamCostMicros !== undefined ? body : extractUsage(body);
   const settlement = usage?.upstreamCostMicros === undefined
     ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier)
     : { settledCostMicros: usage.upstreamCostMicros, costSource: 'upstream_reported' };
   try {
-    if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: 'succeeded', responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
+    if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: failure ? 'failed' : 'succeeded', errorCode: failure?.errorCode, responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
     else {
       if (!accounting.shareSessionId) store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
       if (settlement) store.addUsage(upstream.id, { attemptId, startedAt, ...settlement });
@@ -2201,7 +2215,7 @@ function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, 
     if (settlement && accounting.shareSessionId) {
       accounting.sharingStore?.settleSession(accounting.shareSessionId, attemptId, settlement.settledCostMicros);
     } else if (accounting.shareSessionId) {
-      accounting.sharingStore?.releaseReservation(attemptId, null);
+      accounting.sharingStore?.releaseReservation(attemptId, failure?.errorCode || null);
     }
   } catch {
     if (accounting.shareSessionId) accounting.sharingStore?.releaseReservation(attemptId, 'accounting_failed');

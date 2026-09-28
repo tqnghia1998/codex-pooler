@@ -58,11 +58,73 @@ test('adapts Chat fallback and rich multimodal tool requests', () => {
     { type: 'function_call', call_id: 'call-1', name: 'lookup', arguments: '{}' },
     { type: 'function_call_output', call_id: 'call-1', output: 'done' }
   ]);
-  assert.deepEqual(adapted.tools, [{ type: 'function', name: 'lookup', parameters: { type: 'object', properties: { query: { type: 'string' } } } }]);
+  assert.deepEqual(adapted.tools, [{ type: 'function', name: 'lookup', parameters: { type: 'object', properties: { query: { type: 'string' } } }, strict: false }]);
   assert.deepEqual(adapted.tool_choice, { type: 'function', name: 'lookup' });
   assert.equal(adapted.max_output_tokens, 30);
   assert.deepEqual(adapted.reasoning, { effort: 'minimal' });
   assert.deepEqual(adapted.text, { format: { type: 'json_object' }, verbosity: 'high' });
+});
+
+test('validates Responses access programs and preserves Chat reasoning aliases and tool defaults', () => {
+  for (const cyber of ['standard', 'daybreak_blue', 'daybreak_red']) {
+    assert.deepEqual(adaptResponsesRequest({ model: 'gpt', input: 'hello', access_programs: { cyber } }).access_programs, { cyber });
+  }
+  assert.deepEqual(adaptResponsesRequest({ model: 'gpt', input: 'hello', access_programs: {} }).access_programs, {});
+  for (const value of [null, [], 'standard', { extra: true }]) {
+    assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'hello', access_programs: value }), { param: 'access_programs' });
+  }
+  assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'hello', access_programs: { cyber: 'other' } }), { param: 'access_programs.cyber' });
+
+  const request = { model: 'gpt', messages: [{ role: 'user', content: 'hello' }], reasoning: ' LOW ', tools: [
+    { type: 'function', function: { name: 'optional', parameters: { type: 'object' } } },
+    { type: 'function', function: { name: 'nullable', parameters: { type: 'object' }, strict: null } },
+    { type: 'function', function: { name: 'exact', parameters: { type: 'object', properties: {}, required: [], additionalProperties: false }, strict: true } }
+  ] };
+  const adapted = adaptChatRequest(request);
+  assert.equal(adapted.reasoning.effort, 'low');
+  assert.deepEqual(adapted.tools.map((tool) => tool.strict), [false, false, true]);
+  assertAdapterError(() => adaptChatRequest({ ...request, reasoning_effort: 'high' }), { param: 'reasoning' });
+  assertAdapterError(() => adaptChatRequest({ ...request, reasoning: 'invalid effort' }), { param: 'reasoning' });
+  assertAdapterError(() => adaptChatRequest({ ...request, reasoning: { effort: 'low' } }), { param: 'reasoning' });
+});
+
+test('normalizes long Chat call IDs and splits oversized UTF-8 text without changing replay order', () => {
+  const longId = 'call_' + 'é'.repeat(35);
+  const text = `  ${'🙂'.repeat(2_621_441)}  `;
+  const adapted = adaptChatRequest({ model: 'gpt', messages: [
+    { role: 'developer', content: text },
+    { role: 'assistant', content: null, tool_calls: [{ id: longId, type: 'function', function: { name: 'lookup', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: longId, content: text }
+  ] });
+  assert.equal(adapted.instructions, '');
+  assert.equal(adapted.input[0].role, 'developer');
+  assert.equal(adapted.input[0].content.map((part) => part.text).join(''), text.trim());
+  assert.ok(adapted.input[0].content.every((part) => Buffer.byteLength(part.text) <= 262_144));
+  assert.equal(adapted.input[1].call_id, adapted.input[2].call_id);
+  assert.ok(Buffer.byteLength(adapted.input[1].call_id) <= 64);
+  assert.equal(adapted.input[2].output.map((part) => part.text).join(''), text);
+  const reordered = adaptChatRequest({ model: 'gpt', messages: [
+    { role: 'tool', tool_call_id: longId, content: 'done' },
+    { role: 'assistant', content: null, tool_calls: [{ id: longId, type: 'function', function: { name: 'lookup', arguments: '{}' } }] }
+  ] });
+  assert.equal(reordered.input[0].call_id, adapted.input[1].call_id);
+  assertAdapterError(() => adaptChatRequest({ model: 'gpt', messages: [
+    { role: 'tool', tool_call_id: adapted.input[1].call_id, content: 'done' },
+    { role: 'tool', tool_call_id: longId, content: 'done' }
+  ] }), { param: 'messages' });
+});
+
+test('lifts oversized and short Chat instructions in their original order', () => {
+  const first = `${'a'.repeat(10_485_761)} ending `;
+  const adapted = adaptChatRequest({ model: 'gpt', messages: [
+    { role: 'system', content: first },
+    { role: 'developer', content: '  final directive  ' },
+    { role: 'user', content: 'hello' }
+  ] });
+  assert.equal(adapted.instructions, '');
+  assert.equal(adapted.input[0].role, 'developer');
+  assert.equal(adapted.input[0].content.map((part) => part.text).join(''), `${first.trim()}\nfinal directive`);
+  assert.equal(adapted.input[1].role, 'user');
 });
 
 test('drops unbound turn metadata from id-less compaction replay', () => {

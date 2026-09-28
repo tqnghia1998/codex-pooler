@@ -659,6 +659,9 @@ export class Store {
     const attempt = attemptId ? findGatewayAttempt(db, requestId, attemptId) : null;
     if (attempt && attempt.status !== 'in_progress') throw new Error('attempt is already finalized');
     if (status === 'succeeded' && !attempt) throw new Error('successful request requires an attempt');
+    const usageScope = request.scopeId;
+    const usageKey = request.apiKeyId;
+    const usageUpstream = attempt?.upstreamId;
     if (attempt) {
       const measured = gatewayDiagnosticsForStore(this).finishAttempt(attemptId, { status, errorCode });
       Object.assign(attempt, {
@@ -687,18 +690,20 @@ export class Store {
       delete request.apiKeyId;
       delete request.model;
     }
-    if (status === 'succeeded') {
-      addGatewayUsage(db, { scopeId: request.scopeId, apiKeyId: request.apiKeyId, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
-      if (Number.isSafeInteger(settledCostMicros)) {
-        const upstream = findOrThrow(db, attempt.upstreamId);
+    if (status === 'succeeded' || usage && attempt) {
+      addGatewayUsage(db, { scopeId: usageScope, apiKeyId: usageKey, attemptId: attempt.id, startedAt: attempt.startedAt, usage, settledCostMicros });
+      if (Number.isSafeInteger(settledCostMicros) && usageUpstream) {
+        const upstream = findOrThrow(db, usageUpstream);
         ensureSpending(upstream);
         recordUsage(upstream, { attemptId: attempt.id, startedAt: attempt.startedAt, settledCostMicros, costSource });
       }
+    }
+    if (status === 'succeeded') {
       deleteGatewayRequest(db, requestId);
     }
     pruneGatewayHistory(db, true);
     this.saveChanges(db, {
-      upstreams: status === 'succeeded' && Number.isSafeInteger(settledCostMicros) ? [findOrThrow(db, attempt.upstreamId)] : [],
+      upstreams: Number.isSafeInteger(settledCostMicros) && usageUpstream ? [findOrThrow(db, usageUpstream)] : [],
       collections: ['gatewayUsage', 'gatewayRequests', 'gatewayAttempts']
     });
     this.notifyUpstreamsChange();

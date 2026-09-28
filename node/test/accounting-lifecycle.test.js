@@ -61,6 +61,31 @@ test('persists terminal failures with their retry diagnostics', () => {
   }
 });
 
+test('retains provider usage on a failed translated turn without losing its diagnostics', () => {
+  const { dir, store } = tempStore();
+  try {
+    const key = store.configureApiKey('accounting-key');
+    const upstream = store.create(codexInput());
+    store.setCap(upstream.id, { capDollars: 100 });
+    const request = store.reserveGatewayRequest({ scopeId: key.scopeId, apiKeyId: key.id, endpoint: '/v1/chat/completions' });
+    const attempt = store.beginGatewayAttempt(request.id, upstream.id);
+    store.finalizeGatewayRequest({
+      requestId: request.id, attemptId: attempt.id, status: 'failed',
+      errorCode: 'upstream_tool_snapshot_inconsistent', usage: { inputTokens: 12, outputTokens: 4 },
+      settledCostMicros: 50, costSource: 'pricing_snapshot'
+    });
+    const reopened = new Store(dir);
+    assert.equal(reopened.gatewayRequest(request.id).status, 'failed');
+    assert.equal(reopened.gatewayRequest(request.id).usageStatus, 'usage_known');
+    assert.equal(reopened.gatewayUsage(key.scopeId, key.id).request_count, 1);
+    assert.equal(reopened.gatewayUsage(key.scopeId, key.id).total_cost_usd, 0.00005);
+    assert.equal(reopened.get(upstream.id).spending.spentCostMicros, 50);
+    assert.equal(reopened.gatewayAttempts(request.id)[0].upstreamId, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('bounds retained attempt details and derives legacy terminal duration', () => {
   const { dir, store } = tempStore();
   try {

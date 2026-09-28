@@ -222,3 +222,63 @@ test('translates Chat tool arguments, moderation, incomplete usage, and early fa
   const completedTool = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed' } }, completedToolState);
   assert.equal(completedTool.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
 });
+
+test('completes partial Chat tool arguments from matching final snapshots without duplicates', () => {
+  const state = createChatStreamState({ model: 'gpt' });
+  normalizeChatEvent({ type: 'response.output_item.added', output_index: 2, item: { type: 'function_call', id: 'item_2', call_id: 'call_2', name: 'lookup', arguments: '{"city":' } }, state);
+  normalizeChatEvent({ type: 'response.function_call_arguments.delta', output_index: 2, delta: '"東京"' }, state);
+  const done = normalizeChatEvent({ type: 'response.function_call_arguments.done', output_index: 2, item_id: 'item_2', arguments: '{"city":"東京"}' }, state);
+  assert.equal(done[0].choices[0].delta.tool_calls[0].function.arguments, '}');
+  assert.deepEqual(normalizeChatEvent({ type: 'response.output_item.done', output_index: 2, item: { type: 'function_call', id: 'item_2', call_id: 'call_2', name: 'lookup', arguments: '{"city":"東京"}' } }, state), []);
+  const terminal = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [null, null, { type: 'function_call', id: 'item_2', call_id: 'call_2', name: 'lookup', arguments: '{"city":"東京"}' }] } }, state);
+  assert.equal(terminal.at(-1), '[DONE]');
+  assert.equal(state.reconciliationFailed, false);
+
+  const custom = createChatStreamState({ model: 'gpt' });
+  normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'custom_tool_call', id: 'item_0', call_id: 'call_0', name: 'exec', input: 'print(' } }, custom);
+  const recovered = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [{ type: 'custom_tool_call', id: 'item_0', call_id: 'call_0', name: 'exec', input: 'print(1)' }] } }, custom);
+  assert.equal(recovered[0].choices[0].delta.tool_calls[0].custom.input, '1)');
+  assert.equal(recovered.at(-1), '[DONE]');
+});
+
+test('fails a divergent Chat tool snapshot without emitting a success terminal', () => {
+  const state = createChatStreamState({ model: 'gpt' });
+  normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{"q":' } }, state);
+  const failure = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [{ type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{"x":1}' }] } }, state);
+  assert.deepEqual(failure, [{ error: { type: 'server_error', code: 'upstream_tool_snapshot_inconsistent', message: 'Upstream tool call snapshot is inconsistent', param: null } }]);
+  assert.equal(state.terminal, true);
+  assert.equal(state.reconciliationFailed, true);
+});
+
+test('emits a tool first seen in a finalized item exactly once', () => {
+  const state = createChatStreamState({ model: 'gpt' });
+  const item = { type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{"ok":true}' };
+  const [added] = normalizeChatEvent({ type: 'response.output_item.done', output_index: 0, item }, state);
+  assert.deepEqual(added.choices[0].delta.tool_calls[0], {
+    index: 0, id: 'call_0', type: 'function', function: { name: 'lookup', arguments: '{"ok":true}' }
+  });
+  const terminal = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [item] } }, state);
+  assert.equal(terminal.length, 3);
+  assert.equal(terminal.at(-1), '[DONE]');
+  const terminalOnly = normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [item] } }, createChatStreamState({ model: 'gpt' }));
+  assert.equal(terminalOnly[0].choices[0].delta.tool_calls[0].function.arguments, '{"ok":true}');
+  assert.equal(terminalOnly.at(-2).choices[0].finish_reason, 'tool_calls');
+});
+
+test('rejects a repeated added tool instead of resetting its streamed prefix', () => {
+  const state = createChatStreamState({ model: 'gpt' });
+  const item = { type: 'function_call', id: 'item_0', call_id: 'call_0', name: 'lookup', arguments: '{' };
+  normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item }, state);
+  normalizeChatEvent({ type: 'response.function_call_arguments.delta', output_index: 0, delta: '"q":' }, state);
+  const repeated = normalizeChatEvent({ type: 'response.output_item.added', output_index: 0, item }, state);
+  assert.equal(repeated[0].error.code, 'upstream_tool_snapshot_inconsistent');
+  assert.equal(state.terminal, true);
+  assert.deepEqual(normalizeChatEvent({ type: 'response.completed', response: { status: 'completed', output: [item] } }, state), []);
+});
+
+test('ignores unidentified tool deltas instead of inventing a call at index zero', () => {
+  const state = createChatStreamState({ model: 'gpt' });
+  assert.deepEqual(normalizeChatEvent({ type: 'response.function_call_arguments.delta', delta: 'private' }, state), []);
+  assert.deepEqual(normalizeChatEvent({ type: 'response.custom_tool_call_input.delta', output_index: 9, delta: 'private' }, state), []);
+  assert.equal(state.toolArguments.size, 0);
+});

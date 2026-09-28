@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+
 const RESPONSES_FORWARDED_FIELDS = new Set([
-  'client_metadata', 'include', 'input', 'instructions', 'max_output_tokens', 'metadata', 'model',
+  'access_programs', 'client_metadata', 'include', 'input', 'instructions', 'max_output_tokens', 'metadata', 'model',
   'moderation', 'parallel_tool_calls', 'previous_response_id', 'prompt_cache_key', 'prompt_cache_options',
   'prompt_cache_retention', 'reasoning', 'safety_identifier', 'service_tier', 'store', 'stream',
   'stream_options', 'temperature', 'text', 'tool_choice', 'tools', 'top_p'
@@ -9,7 +11,7 @@ const CHAT_FIELDS = new Set([
   'audio', 'frequency_penalty', 'function_call', 'functions', 'input', 'instructions', 'logit_bias',
   'logprobs', 'max_completion_tokens', 'max_tokens', 'messages', 'metadata', 'modalities', 'model',
   'moderation', 'n', 'parallel_tool_calls', 'prediction', 'presence_penalty', 'prompt_cache_key',
-  'prompt_cache_options', 'prompt_cache_retention', 'reasoning_effort', 'response_format',
+  'prompt_cache_options', 'prompt_cache_retention', 'reasoning', 'reasoning_effort', 'response_format',
   'safety_identifier', 'seed', 'service_tier', 'stop', 'store', 'stream', 'stream_options',
   'temperature', 'tool_choice', 'tools', 'top_logprobs', 'top_p', 'user', 'verbosity', 'web_search_options'
 ]);
@@ -21,6 +23,9 @@ const AUDIO_MIMES = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', web
 const IMAGE_MIMES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
 const FILE_MIMES = new Set(['application/pdf', 'text/plain']);
 const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'shell_call_output', 'tool_search_output']);
+const MAX_CHAT_TEXT_BYTES = 10_485_760;
+const CHAT_TEXT_CHUNK_BYTES = 262_144;
+const MAX_CHAT_CALL_ID_BYTES = 64;
 
 export class AdapterError extends Error {
   constructor(message, param = null, code = 'invalid_request') {
@@ -39,6 +44,7 @@ export function adaptResponsesRequest(payload) {
   }
   if (normalized.store !== undefined && normalized.store !== false) unsupported('store');
   requireModel(normalized);
+  validateAccessPrograms(normalized.access_programs);
   validatePromptCacheOptions(normalized.prompt_cache_options);
   validatePositiveInteger(normalized, 'max_output_tokens');
   validateReasoning(normalized.reasoning);
@@ -78,6 +84,19 @@ export function adaptChatRequest(payload) {
     if (CHAT_LOCAL_FIELDS.has(field)) unsupported(field);
   }
   requireModel(normalized);
+  if (Array.isArray(normalized.messages) && normalized.messages.length && typeof normalized.reasoning === 'string') {
+    validateReasoningEffort(normalized.reasoning, 'reasoning');
+    const effort = normalized.reasoning.trim().toLowerCase();
+    if (normalized.reasoning_effort !== undefined &&
+      (typeof normalized.reasoning_effort !== 'string' || normalized.reasoning_effort.trim().toLowerCase() !== effort)) {
+      invalid('reasoning and reasoning_effort must match', 'reasoning');
+    }
+    normalized.reasoning_effort = effort;
+    delete normalized.reasoning;
+  }
+  if (Array.isArray(normalized.messages) && normalized.messages.length && normalized.reasoning !== undefined) {
+    invalid('reasoning must be a reasoning effort for Chat messages', 'reasoning');
+  }
   validateReasoningEffort(normalized.reasoning_effort, 'reasoning_effort');
   normalizeServiceTier(normalized);
   if (normalized.service_tier === 'ultrafast') invalid('service_tier is not supported', 'service_tier');
@@ -102,7 +121,68 @@ export function adaptChatRequest(payload) {
   } else {
     invalid('messages must be a non-empty array', 'messages');
   }
-  return adaptResponsesRequest(responsePayload);
+  const adapted = adaptResponsesRequest(responsePayload);
+  return Array.isArray(normalized.messages) && normalized.messages.length ? normalizeChatHistory(adapted) : adapted;
+}
+
+function validateAccessPrograms(programs) {
+  if (programs === undefined) return;
+  if (!plainObject(programs)) invalid('access_programs must be an object', 'access_programs');
+  if (Object.keys(programs).some((key) => key !== 'cyber')) invalid('access_programs contains unsupported fields', 'access_programs');
+  if (programs.cyber !== undefined && !['standard', 'daybreak_blue', 'daybreak_red'].includes(programs.cyber)) {
+    invalid('access_programs.cyber is not supported', 'access_programs.cyber');
+  }
+}
+
+function normalizeChatHistory(payload) {
+  const ids = new Map();
+  payload.input = payload.input.map((item) => {
+    if (!['function_call', 'custom_tool_call', 'function_call_output', 'custom_tool_call_output'].includes(item.type) || typeof item.call_id !== 'string') return item;
+    const id = item.call_id;
+    const normalized = Buffer.byteLength(id) > MAX_CHAT_CALL_ID_BYTES
+      ? `call_${createHash('sha256').update('codex-pooler:chat-call-id:v1\0').update(id).digest('base64url')}`
+      : id;
+    if (ids.has(normalized) && ids.get(normalized) !== id) invalid('tool call IDs collide after normalization', 'messages');
+    ids.set(normalized, id);
+    return { ...item, call_id: normalized };
+  });
+  payload.input = payload.input.map((item) => {
+    if (item.type === 'message' && Array.isArray(item.content)) return { ...item, content: splitChatParts(item.content) };
+    if (['function_call_output', 'custom_tool_call_output'].includes(item.type)) {
+      if (typeof item.output === 'string' && Buffer.byteLength(item.output) > MAX_CHAT_TEXT_BYTES) {
+        return { ...item, output: splitChatPart({ type: 'input_text', text: item.output }) };
+      }
+      if (Array.isArray(item.output)) return { ...item, output: splitChatParts(item.output) };
+    }
+    return item;
+  });
+  if (typeof payload.instructions === 'string' && Buffer.byteLength(payload.instructions) > MAX_CHAT_TEXT_BYTES) {
+    payload.input.unshift({ type: 'message', role: 'developer', content: splitChatPart({ type: 'input_text', text: payload.instructions }) });
+    payload.instructions = '';
+  }
+  return payload;
+}
+
+function splitChatParts(parts) {
+  return parts.flatMap(splitChatPart);
+}
+
+function splitChatPart(part) {
+  if (!plainObject(part) || !['input_text', 'output_text'].includes(part.type) ||
+    typeof part.text !== 'string' || Buffer.byteLength(part.text) <= MAX_CHAT_TEXT_BYTES) return [part];
+  if (part.annotations?.length || part.logprobs?.length) invalid('oversized annotated text cannot be split losslessly', 'messages');
+  const bytes = Buffer.from(part.text);
+  if (bytes.toString('utf8') !== part.text) invalid('oversized text must be valid UTF-8', 'messages');
+  const chunks = [];
+  for (let start = 0; start < bytes.length;) {
+    let end = Math.min(start + CHAT_TEXT_CHUNK_BYTES, bytes.length);
+    while (end < bytes.length && (bytes[end] & 0xc0) === 0x80) end -= 1;
+    const chunk = { ...part, text: bytes.toString('utf8', start, end) };
+    if (end < bytes.length) delete chunk.prompt_cache_breakpoint;
+    chunks.push(chunk);
+    start = end;
+  }
+  return chunks;
 }
 
 function chatMessagesToResponses(payload) {
@@ -239,7 +319,7 @@ function translateChatTools(tools) {
     if (tool?.type === 'function' && plainObject(tool.function)) {
       const name = cleanString(tool.function.name);
       if (!name || !plainObject(tool.function.parameters)) invalid('function tool requires nested function name and parameters', 'tools');
-      return { type: 'function', name, parameters: tool.function.parameters, ...(tool.function.description !== undefined ? { description: tool.function.description } : {}), ...(tool.function.strict !== undefined ? { strict: tool.function.strict } : {}) };
+      return { type: 'function', name, parameters: tool.function.parameters, ...(tool.function.description !== undefined ? { description: tool.function.description } : {}), strict: tool.function.strict ?? false };
     }
     if (tool?.type === 'custom' && plainObject(tool.custom)) {
       exactKeys(tool, ['type', 'custom'], 'tools');
