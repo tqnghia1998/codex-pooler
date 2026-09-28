@@ -21,13 +21,16 @@ export function resolveClaudeModelListId(value) {
   return `${model}${suffix ? `(${suffix})` : ''}`;
 }
 
-export function buildClaudeModelsResponse(store, scopeId = 'default', claudeConfig = null) {
-  const upstreams = typeof store?.listForModelCatalog === 'function'
+export function buildClaudeModelsResponse(store, scopeId = 'default', claudeConfig = null, { upstreamIds = null } = {}) {
+  const allowed = upstreamIds === null ? null : new Set(upstreamIds);
+  const visible = typeof store?.listForModelCatalog === 'function'
     ? store.listForModelCatalog(scopeId).filter((entry) => entry?.type === 'claude')
     : (store?.list?.(scopeId) || [])
       .filter((entry) => entry?.type === 'claude')
       .map((entry) => store.get(entry.id, scopeId))
       .filter(Boolean);
+  const upstreams = allowed === null ? visible : visible.filter((entry) => allowed.has(entry.id));
+  const compassAllowed = allowed !== null && [...allowed].some((id) => store?.get?.(id, scopeId)?.type === 'compass');
   const rows = new Map();
   const staticModels = STATIC_MODEL_CATALOG.filter((model) => model.id.startsWith('claude-'));
   const staticById = new Map(staticModels.map((model) => [model.id, model]));
@@ -60,39 +63,38 @@ export function buildClaudeModelsResponse(store, scopeId = 'default', claudeConf
     }
   };
 
-  if (!upstreams.length) {
+  if (compassAllowed || (allowed === null && !upstreams.length)) {
     for (const model of staticModels) add(model.id, model, { owned_by: 'claude' });
-  } else {
-    for (const upstream of upstreams) {
-      const configuredModels = claudeMetadataModelConfigs(upstream);
-      if (configuredModels.length) {
-        // CPA's non-empty ClaudeKey.models list replaces the provider catalog;
-        // it is not merely an allowlist. The request path still uses the same
-        // alias records, so listing and dispatch cannot disagree.
-        for (const configured of configuredModels) {
-          if (!claudeMetadataModelExcluded(upstream, configured.alias || configured.name, claudeConfig)) {
-            addModelWithAliases(upstream, configured.name, {
-              ...(staticById.get(configured.name) || {}),
-              owned_by: 'claude',
-              ...(configured.displayName ? { display_name: configured.displayName } : {}),
-              ...(configured.maxContextLength ? {
-                context_window: configured.maxContextLength,
-                max_input_tokens: configured.maxContextLength
-              } : {})
-            });
-          }
+  }
+  for (const upstream of upstreams) {
+    const configuredModels = claudeMetadataModelConfigs(upstream);
+    if (configuredModels.length) {
+      // CPA's non-empty ClaudeKey.models list replaces the provider catalog;
+      // it is not merely an allowlist. The request path still uses the same
+      // alias records, so listing and dispatch cannot disagree.
+      for (const configured of configuredModels) {
+        if (!claudeMetadataModelExcluded(upstream, configured.alias || configured.name, claudeConfig)) {
+          addModelWithAliases(upstream, configured.name, {
+            ...(staticById.get(configured.name) || {}),
+            owned_by: 'claude',
+            ...(configured.displayName ? { display_name: configured.displayName } : {}),
+            ...(configured.maxContextLength ? {
+              context_window: configured.maxContextLength,
+              max_input_tokens: configured.maxContextLength
+            } : {})
+          });
         }
-      } else {
-        for (const model of staticModels) {
-          if (!claudeMetadataModelExcluded(upstream, model.id, claudeConfig)) {
-            addModelWithAliases(upstream, model.id, model);
-          }
+      }
+    } else {
+      for (const model of staticModels) {
+        if (!claudeMetadataModelExcluded(upstream, model.id, claudeConfig)) {
+          addModelWithAliases(upstream, model.id, model);
         }
-        const configured = Array.isArray(upstream.routing?.models) ? upstream.routing.models : [];
-        for (const model of configured) {
-          if (!String(model).includes('*') && !claudeMetadataModelExcluded(upstream, model, claudeConfig)) {
-            addModelWithAliases(upstream, model);
-          }
+      }
+      const configured = Array.isArray(upstream.routing?.models) ? upstream.routing.models : [];
+      for (const model of configured) {
+        if (!String(model).includes('*') && !claudeMetadataModelExcluded(upstream, model, claudeConfig)) {
+          addModelWithAliases(upstream, model);
         }
       }
     }
