@@ -75,7 +75,7 @@ The Node proxy covers the client-visible local compatibility path:
 - Compatibility fixtures are deliberately content-free. They reject credentials, hosts, real model/account/project IDs, request text, provider messages, and unknown schema fields. Fixture drift never updates runtime compatibility facts or fallback allowlists automatically.
 - Compatibility intake reads raw captures only from a local file. Reports and drafts replace content, credentials, IDs, URLs, binary data, dynamic schema/tool-argument keys, and provider messages with deterministic markers. A review suggestion is never permission to expand a fallback allowlist.
 - The client release gate executes only reviewed, integrity-pinned npm packages inside a supported loopback-only network sandbox. A newer registry release is reported but not executed; unsupported isolation fails closed.
-- Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility. Claude Enterprise OAuth upstreams forward native Messages inference directly; first-party `POST /v1/messages/count_tokens` uses Anthropic's native counter, while custom Claude origins use CPA's local O200kBase estimator.
+- Only the routes listed below are supported. Other OpenAI endpoints return the deterministic `unsupported_endpoint` envelope rather than attempting partial compatibility. Claude Enterprise OAuth upstreams forward native Messages inference directly; first-party `POST /v1/messages/count_tokens` uses Anthropic's native counter, while custom Claude origins and Compass use the local O200kBase estimator.
 - The encrypted local SQLite store is suitable for one local process, not concurrent replicas or production high-availability storage.
 
 ## Run
@@ -224,7 +224,7 @@ POST   /v1/responses
 GET    /v1/responses                # WebSocket upgrade
 POST   /v1/chat/completions
 POST   /v1/messages                 # Compass or Claude; native Anthropic Messages
-POST   /v1/messages/count_tokens    # Claude; native first-party or local O200k count
+POST   /v1/messages/count_tokens    # Claude native/local or Compass local O200k count
 POST   /v1/responses/compact        # deterministic unsupported_endpoint, matching origin
 GET    /v1/models
 GET    /v1/files
@@ -285,7 +285,7 @@ and uses an in-memory account-ID index for scope-checked lookups. Each attempt
 still checks current account admission, and the eight-attempt request limit,
 Claude retry order, final-attempt pacing, and durable settlement are unchanged.
 
-For `count_tokens`, first-party Anthropic is called natively; custom Claude origins use the local O200kBase estimator and never receive a network call.
+For `count_tokens`, first-party Anthropic is called natively; custom Claude origins and Compass use the local O200kBase estimator and never receive a network call.
 
 The Node host also accepts the CPA global Claude controls through
 `CODEX_POOLER_CLAUDE_CONFIG_JSON` (a bounded JSON object). It supports
@@ -308,7 +308,7 @@ Request pacing is disabled by default and configured per upstream through create
 
 `GET /api/compatibility` and the dashboard **Compatibility** dialog expose only protocol fingerprint version/hash, aggregate active/stale counts, counters, and allowlisted fact metadata. They do not expose upstream/account IDs, model IDs, hostnames, credentials, request/response bodies, or raw errors. Persisted compatibility state is limited to 100 facts per upstream; credential identity replacement clears it.
 
-Proxy routing prefers Codex, prefers Compass for `claude-*` models, and supports Compass or Claude for `/v1/messages`; `/v1/messages/count_tokens` is Claude-only. Type preference is soft except for native protocol boundaries: `/v1/messages` never reaches Codex, `/v1/messages/count_tokens` never reaches Codex or Compass, `/backend-api/codex/*` never reaches Compass or Claude, and Claude upstreams are not selected for OpenAI Chat/Responses routes until a dedicated translation adapter exists. Use `x-upstream-type: claude` or `x-upstream-id` to select Claude explicitly when both direct Anthropic upstream types are configured.
+Proxy routing prefers Codex, prefers Compass for `claude-*` models, and supports Compass or Claude for `/v1/messages` and `/v1/messages/count_tokens`. Type preference is soft except for native protocol boundaries: `/v1/messages` never reaches Codex, `/v1/messages/count_tokens` never reaches Codex and uses local counting for Compass, `/backend-api/codex/*` never reaches Compass or Claude, and Claude upstreams are not selected for OpenAI Chat/Responses routes until a dedicated translation adapter exists. Use `x-upstream-type: claude` or `x-upstream-id` to select Claude explicitly when both direct Anthropic upstream types are configured.
 
 The persisted routing strategy defaults to `least-recent-success`, preserving the existing behavior. `most-remaining-quota` is optional and compares normalized remaining percentages only within the same strict priority tier. Quota observations are fresh for five minutes for routing decisions; this is separate from provider refresh scheduling and does not cache successful quota requests. Missing or stale quota remains eligible and receives the median fresh score in its tier, so unknown providers are not categorically placed last; least-recent-success and stable persisted order break ties. Configure the strategy in dashboard **Routing** or with `GET/PUT /api/routing`. `POST /api/routing/dry-run` uses the live planner and returns sanitized ordered candidates, quota freshness, and exclusion codes without credentials or provider bodies.
 

@@ -115,3 +115,20 @@ test('recognizes Anthropic and Claude Code model-list requests', () => {
   assert.equal(isClaudeModelsRequest({ headers: { 'user-agent': 'claude-cli/2.1.220 (external, cli)' } }), true);
   assert.equal(isClaudeModelsRequest({ headers: { 'user-agent': 'curl/8.0' } }), false);
 });
+
+test('scoped model lists keep Compass defaults alongside allowed Claude models', () => {
+  const claude = { id: 'claude', type: 'claude', metadata: { models: [{ name: 'tenant-only' }] } };
+  const compass = { id: 'compass', type: 'compass' };
+  const store = {
+    listForModelCatalog: () => [claude, compass],
+    get: (id) => [claude, compass].find((upstream) => upstream.id === id)
+  };
+  const ids = (upstreamIds) => buildClaudeModelsResponse(store, 'default', null, { upstreamIds })
+    .data.map(({ id }) => id);
+  assert.deepEqual(ids(['claude']), ['claude-fable-5-1-dd-ylno-tnanet']);
+  assert.ok(ids(['compass']).includes('claude-sonnet-5'));
+  assert.ok(!ids(['compass']).includes('claude-fable-5-1-dd-ylno-tnanet'));
+  assert.ok(ids(['claude', 'compass']).includes('claude-sonnet-5'));
+  assert.ok(ids(['claude', 'compass']).includes('claude-fable-5-1-dd-ylno-tnanet'));
+  assert.deepEqual(ids([]), []);
+});
