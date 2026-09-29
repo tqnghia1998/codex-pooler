@@ -75,6 +75,13 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 272_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0 }).settledCostMicros, 1_088_000);
   assert.equal(priceUsage(['claude-sonnet-5-20260101'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-08-31T23:59:59Z').settledCostMicros, 1_200);
   assert.equal(priceUsage(['claude-sonnet-5-20260101'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-09-01T00:00:00Z').settledCostMicros, 1_800);
+  assert.deepEqual(priceUsage(['claude-sonnet-5-5'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }, '2026-09-29T00:00:00Z'), {
+    settledCostMicros: 2_870,
+    costSource: 'pricing_snapshot',
+    model: 'claude-sonnet-5-5',
+    priceVersion: 'anthropic-list-2026-09-28'
+  });
+  assert.equal(priceUsage(['claude-sonnet-5-5-20260928'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-09-29T00:00:00Z').settledCostMicros, 3_000);
   assert.equal(priceUsage(['claude-3-sonnet'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 1, outputTokens: 100 }), null);
   // A model priced only at standard rates still bills on a priority request instead of escaping the spending cap.
   assert.equal(priceUsage(['claude-sonnet-4-6'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'priority' }).settledCostMicros, 4_500);
