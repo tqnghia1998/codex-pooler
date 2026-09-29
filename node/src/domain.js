@@ -10,7 +10,7 @@ const GPT_1050K_MODELS = new Set([
   'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'
 ]);
 const CLAUDE_1M_MODELS = new Set([
-  'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5'
+  'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5', 'claude-sonnet-5-5'
 ]);
 export const STATIC_MODEL_CATALOG = Object.freeze([
   ...OPENAI_MODEL_IDS,
