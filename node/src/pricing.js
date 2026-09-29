@@ -23,6 +23,7 @@ const ANTHROPIC_PRICES = [
 const PRICES = [
   ...OPENAI_PRICES,
   ...ANTHROPIC_PRICES,
+  price('claude-sonnet-5-5', [2, 0.2, 2.5, 10], 'anthropic-list-2026-09-28', 'standard', '2026-09-28T00:00:00Z'),
   price('claude-sonnet-5', [2, 0.2, 2.5, 10], 'anthropic-list-2026-05-27-intro', 'standard', '2026-01-01T00:00:00Z'),
   price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z')
 ];
