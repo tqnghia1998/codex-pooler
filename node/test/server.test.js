@@ -808,7 +808,7 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
       accountCount: 0,
       attemptedAccountCount: 0,
       freshAccountCount: 0,
-      modelCount: 12,
+      modelCount: 13,
       lastSuccessAt: null,
       lastFailureAt: null,
       lastFailureClass: null
@@ -865,7 +865,7 @@ test('tests Codex and Compass connections through the shared proxy path', async 
         return new Response(JSON.stringify({
           id: 'message-test',
           type: 'message',
-          model: 'claude-sonnet-5',
+          model: 'claude-sonnet-5-5',
           content: [{ type: 'text', text: 'The current time is now.' }],
           usage: { input_tokens: 5, output_tokens: 6 }
         }), { headers: { 'content-type': 'application/json' } });
@@ -898,12 +898,12 @@ test('tests Codex and Compass connections through the shared proxy path', async 
     assert.equal(result.response.status, 200);
     assert.equal(result.data.connection.type, 'compass');
     assert.equal(result.data.connection.endpoint, '/v1/messages');
-    assert.equal(result.data.connection.model, 'claude-sonnet-5');
+    assert.equal(result.data.connection.model, 'claude-sonnet-5-5');
     assert.equal(result.data.connection.answer, 'The current time is now.');
 
     const compassRequest = calls.find(({ path }) => path === '/compass-api/v1/messages');
     assert.deepEqual(JSON.parse(compassRequest.options.body), {
-      model: 'claude-sonnet-5',
+      model: 'claude-sonnet-5-5',
       max_tokens: 64,
       messages: [{ role: 'user', content: 'What is the current time?' }],
       stream: false
