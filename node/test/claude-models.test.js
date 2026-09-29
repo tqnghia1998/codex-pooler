@@ -7,7 +7,7 @@ test('lists the documented limits for every static Claude model', () => {
   assert.deepEqual(response.data.map(({ id, max_input_tokens, max_output_tokens }) => (
     { id, max_input_tokens, max_output_tokens }
   )), [
-    'claude-fable-5-1', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5'
+    'claude-fable-5-1', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5'
   ].map((id) => ({ id, max_input_tokens: 1_000_000, max_output_tokens: 128_000 })));
 });
 
