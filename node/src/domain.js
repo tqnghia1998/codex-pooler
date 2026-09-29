@@ -14,7 +14,7 @@ const CLAUDE_1M_MODELS = new Set([
 ]);
 export const STATIC_MODEL_CATALOG = Object.freeze([
   ...OPENAI_MODEL_IDS,
-  'claude-opus-5-5', 'claude-fable-5-1', 'claude-opus-5', 'claude-sonnet-5',
+  'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-sonnet-5',
   'glm-5.3-flash', 'kimi-k3'
 ].map((id) => Object.freeze({
   id,

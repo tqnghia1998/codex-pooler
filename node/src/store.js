@@ -1589,7 +1589,8 @@ function orderRoutingCandidates(upstreams, strategy, now) {
 }
 
 function quotaOrderingMetadata(upstream, now) {
-  const raw = Number(upstream.quota?.remainingPercent);
+  const value = upstream.quota?.remainingPercent;
+  const raw = value === null || value === undefined || value === '' ? NaN : Number(value);
   if (!Number.isFinite(raw)) return { status: 'unknown', remainingPercent: null, observedAt: null };
   const observedAt = Date.parse(upstream.quota?.observedAt);
   const remainingPercent = Math.max(0, Math.min(100, raw));
@@ -1612,13 +1613,13 @@ function candidateExclusionCode(upstream, model, requirements, { ignoreModelRest
   if (upstream.type === 'claude' && !allowLegacyClaudeApiKey && !isSupportedClaudeOAuthUpstream(upstream)) return 'claude_oauth_required';
   if (upstream.type === 'claude' && !ignoreModelRestrictions && claudeModelPrefixMismatch(upstream, model)) return 'upstream_model_prefix_mismatch';
   if (!ignoreQuotaCooldown && !claudeCoolingDisabled(upstream, claudeConfig) && modelCooldownBlocks(upstream, model, now)) return 'upstream_model_cooldown';
-  if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions, claudeConfig })) {
+  if (!candidateEligible(upstream, model, requirements, { ignoreModelRestrictions, claudeConfig, now })) {
     const routing = normalizeRouting(upstream.routing);
     const modelNotAllowed = routing.models.length && !(upstream.type === 'claude'
       ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig)
       : routing.models.includes(String(model || '').toLowerCase()));
     if (!ignoreModelRestrictions && (modelNotAllowed || claudeMetadataModelExcluded(upstream, model, claudeConfig))) return 'upstream_model_not_allowed';
-    if (!isAisUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return 'quota_exhausted';
+    if (quotaBlocksRouting(upstream, now)) return 'quota_exhausted';
     return 'capability_not_supported';
   }
   if (!dynamicallySupportsModel(upstream, model, modelSupport)) return 'model_not_supported';
@@ -1665,14 +1666,26 @@ function routingPlanResult(upstreams, strategy, exclusions, now) {
   };
 }
 
-function candidateEligible(upstream, model, requirements, { ignoreModelRestrictions = false, claudeConfig = null } = {}) {
+function candidateEligible(upstream, model, requirements, { ignoreModelRestrictions = false, claudeConfig = null, now = Date.now() } = {}) {
   if (!upstream) return false;
   const routing = normalizeRouting(upstream.routing);
   if (!ignoreModelRestrictions && routing.models.length && !(upstream.type === 'claude' ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig) : routing.models.includes(String(model || '').toLowerCase()))) return false;
   if (!ignoreModelRestrictions && claudeMetadataModelExcluded(upstream, model, claudeConfig)) return false;
-  if (!isAisUpstream(upstream) && Number.isFinite(Number(upstream.quota?.remainingPercent)) && Number(upstream.quota.remainingPercent) <= 0) return false;
+  if (quotaBlocksRouting(upstream, now)) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
+}
+
+function quotaBlocksRouting(upstream, now) {
+  if (isAisUpstream(upstream)) return false;
+  const quota = upstream.quota;
+  if (quotaOrderingMetadata(upstream, now).remainingPercent !== 0) return false;
+  const resetAt = Date.parse(quota.resetAt);
+  if (Number.isFinite(resetAt)) return resetAt > now;
+  // A non-recurring Compass project balance does not replenish with time.
+  if (quota.source === 'compass_project_api') return true;
+  const observedAt = Date.parse(quota.observedAt);
+  return !Number.isFinite(observedAt) || observedAt + ROUTING_QUOTA_FRESHNESS_MS > now;
 }
 
 function configuredClaudeModelMatches(models, model, upstream = null, claudeConfig = null) {
