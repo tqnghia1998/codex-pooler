@@ -6,7 +6,7 @@ export const DEFAULT_COMPASS_BASE_URL = 'https://compass.llm.shopee.io/compass-a
 export const DEFAULT_CLAUDE_BASE_URL = 'https://api.anthropic.com';
 // Published model limits are static fallbacks; live Codex discovery can override them.
 const GPT_1050K_MODELS = new Set([
-  'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna',
+  'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna',
   'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'
 ]);
 const CLAUDE_1M_MODELS = new Set([
