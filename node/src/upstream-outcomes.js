@@ -53,6 +53,11 @@ export function classifyHttpResponse(response, structuredBody = null, { allowMis
       errorCode: structured.code || structured.type || 'rate_limit_error'
     };
   }
+  if (status === 403 && upstreamType === 'codex'
+    && !['invalid_api_key', 'invalid_token', 'token_expired', 'authentication_error'].includes(structured.code)
+    && structured.type !== 'authentication_error') {
+    return { class: 'caller', retryable: false, status, errorCode: 'upstream_permission_denied' };
+  }
   return outcomeForStatus(status, {
     retryAfter: headerValue(response?.headers, 'retry-after'),
     resetAt: resetHeaderValues(response?.headers),
