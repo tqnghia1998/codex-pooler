@@ -191,6 +191,13 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   const routingPlan = chooseUpstreamPlan(store, req, sourcePath, dispatchPayload, path, modelCatalog);
   let candidates = routingPlan.candidates;
+  const codexCatalogDenied = ['/v1/responses', '/v1/chat/completions'].includes(path)
+    && STATIC_MODEL_CATALOG.some((entry) => entry.id === model && entry.owned_by === 'codex')
+    && !header(req, 'x-upstream-type') && !header(req, 'x-upstream-id')
+    && !isShareCredential(req.proxyAuth)
+    && !candidates.some((candidate) => candidate.type === 'codex')
+    && routingPlan.diagnostics.exclusions.some(({ type, code }) => type === 'codex' && code === 'model_not_supported');
+  if (codexCatalogDenied) candidates = [];
   if (codexAdapterError) {
     candidates = candidates.filter((candidate) => ['compass', 'claude'].includes(store.get(candidate.id, authScopeId)?.type));
     if (!candidates.length) {
