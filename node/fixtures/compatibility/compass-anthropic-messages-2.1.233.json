@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "id": "compass-anthropic-messages-2.1.233-3d59e9b9cc",
+  "client": {
+    "family": "claude-code",
+    "version": "2.1.233"
+  },
+  "profile": "compass-anthropic-messages",
+  "negotiation": {
+    "headers": {
+      "anthropic-beta": "claude-code-20250219,context-management-2025-06-27,effort-2025-11-24,interleaved-thinking-2025-05-14,mid-conversation-system-2026-04-07,prompt-caching-scope-2026-01-05,thinking-token-count-2026-05-13",
+      "anthropic-version": "2023-06-01"
+    }
+  },
+  "request": {
+    "sourcePath": "/v1/messages",
+    "originalPath": "/v1/messages",
+    "body": {
+      "context_management": {
+        "edits": [
+          {
+            "keep": "fixture-value",
+            "type": "clear_thinking_20251015"
+          }
+        ]
+      },
+      "max_tokens": 256,
+      "messages": [
+        {
+          "content": [
+            {
+              "text": "fixture-text",
+              "type": "text"
+            },
+            {
+              "cache_control": {
+                "type": "ephemeral"
+              },
+              "text": "fixture-text",
+              "type": "text"
+            }
+          ],
+          "role": "user"
+        }
+      ],
+      "metadata": {
+        "fixture-field-1": "fixture-value"
+      },
+      "model": "fixture-model",
+      "output_config": {
+        "effort": "high"
+      },
+      "stream": true,
+      "system": [
+        {
+          "text": "fixture-text",
+          "type": "text"
+        },
+        {
+          "cache_control": {
+            "type": "ephemeral"
+          },
+          "text": "fixture-text",
+          "type": "text"
+        }
+      ],
+      "thinking": {
+        "display": "fixture-value",
+        "type": "adaptive"
+      },
+      "tools": []
+    }
+  },
+  "expected": {
+    "targetPath": "/messages",
+    "fingerprint": {
+      "version": 1,
+      "hash": "87767d06efd61da4bd55e90eba4af6e9",
+      "values": {
+        "version": "2023-06-01",
+        "beta": [
+          "claude-code-20250219",
+          "context-management-2025-06-27",
+          "effort-2025-11-24",
+          "interleaved-thinking-2025-05-14",
+          "mid-conversation-system-2026-04-07",
+          "prompt-caching-scope-2026-01-05",
+          "thinking-token-count-2026-05-13"
+        ]
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.context_management",
+          "type": "object"
+        },
+        {
+          "path": "$.context_management.edits",
+          "type": "array"
+        },
+        {
+          "path": "$.context_management.edits[]",
+          "type": "object"
+        },
+        {
+          "path": "$.context_management.edits[].keep",
+          "type": "string"
+        },
+        {
+          "path": "$.context_management.edits[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.max_tokens",
+          "type": "number"
+        },
+        {
+          "path": "$.messages",
+          "type": "array"
+        },
+        {
+          "path": "$.messages[]",
+          "type": "object"
+        },
+        {
+          "path": "$.messages[].content",
+          "type": "array"
+        },
+        {
+          "path": "$.messages[].content[]",
+          "type": "object"
+        },
+        {
+          "path": "$.messages[].content[].cache_control",
+          "type": "object"
+        },
+        {
+          "path": "$.messages[].content[].cache_control.type",
+          "type": "string"
+        },
+        {
+          "path": "$.messages[].content[].text",
+          "type": "string"
+        },
+        {
+          "path": "$.messages[].content[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.messages[].role",
+          "type": "string"
+        },
+        {
+          "path": "$.metadata",
+          "type": "object"
+        },
+        {
+          "path": "$.metadata.fixture-field-1",
+          "type": "string"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.output_config",
+          "type": "object"
+        },
+        {
+          "path": "$.output_config.effort",
+          "type": "string"
+        },
+        {
+          "path": "$.stream",
+          "type": "boolean"
+        },
+        {
+          "path": "$.system",
+          "type": "array"
+        },
+        {
+          "path": "$.system[]",
+          "type": "object"
+        },
+        {
+          "path": "$.system[].cache_control",
+          "type": "object"
+        },
+        {
+          "path": "$.system[].cache_control.type",
+          "type": "string"
+        },
+        {
+          "path": "$.system[].text",
+          "type": "string"
+        },
+        {
+          "path": "$.system[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.thinking",
+          "type": "object"
+        },
+        {
+          "path": "$.thinking.display",
+          "type": "string"
+        },
+        {
+          "path": "$.thinking.type",
+          "type": "string"
+        },
+        {
+          "path": "$.tools",
+          "type": "array"
+        }
+      ],
+      "typeValues": [
+        {
+          "path": "$.context_management.edits[].type",
+          "value": "clear_thinking_20251015"
+        },
+        {
+          "path": "$.messages[].content[].cache_control.type",
+          "value": "ephemeral"
+        },
+        {
+          "path": "$.messages[].content[].type",
+          "value": "text"
+        },
+        {
+          "path": "$.system[].cache_control.type",
+          "value": "ephemeral"
+        },
+        {
+          "path": "$.system[].type",
+          "value": "text"
+        },
+        {
+          "path": "$.thinking.type",
+          "value": "adaptive"
+        }
+      ]
+    }
+  }
+}
