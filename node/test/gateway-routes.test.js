@@ -145,6 +145,59 @@ test('routes a discovered model only to accounts known to support it', async () 
   }
 });
 
+test('rejects a model excluded by every live Codex catalog before dispatch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-unavailable-'));
+  const { store } = configuredStore(dir);
+  const calls = [];
+  const { server, base } = await start(store, async (url) => {
+    calls.push(new URL(url).pathname);
+    assert.equal(new URL(url).pathname, '/backend-api/codex/models');
+    return new Response(JSON.stringify({ models: [{ slug: 'gpt-6-sol' }] }), { status: 200 });
+  });
+  try {
+    assert.equal((await gatewayFetch(base, '/v1/models')).status, 200);
+    const response = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'hello' })
+    });
+    assert.equal(response.status, 403);
+    assert.deepEqual((await response.json()).error, {
+      type: 'permission_error', code: 'model_not_available',
+      message: 'Model is not available on any eligible upstream', param: 'model'
+    });
+    assert.deepEqual(calls, ['/backend-api/codex/models']);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('reports unavailable model when other Codex accounts are blocked for separate reasons', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-mixed-'));
+  const store = new Store(dir);
+  const first = store.create(codex({ email: 'first-mixed@example.com', accountId: 'first-mixed' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.create(codex({ email: 'second-mixed@example.com', accountId: 'second-mixed' }));
+  const { server, base } = await start(store, async (url) => {
+    assert.equal(new URL(url).pathname, '/backend-api/codex/models');
+    return new Response(JSON.stringify({ models: [{ slug: 'gpt-6-sol' }] }), { status: 200 });
+  });
+  try {
+    assert.equal((await gatewayFetch(base, '/v1/models')).status, 200);
+    const response = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'hello' })
+    });
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).error.code, 'model_not_available');
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('returns authenticated OpenAI-shaped errors for explicit unsupported routes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-unsupported-routes-'));
   const { store } = configuredStore(dir);
