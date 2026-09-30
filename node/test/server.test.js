@@ -808,7 +808,7 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
       accountCount: 0,
       attemptedAccountCount: 0,
       freshAccountCount: 0,
-      modelCount: 13,
+      modelCount: 14,
       lastSuccessAt: null,
       lastFailureAt: null,
       lastFailureClass: null
