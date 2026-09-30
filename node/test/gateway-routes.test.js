@@ -79,11 +79,11 @@ test('discovers and caches Codex models while preserving the static fallback', a
     assert.equal(response.status, 200);
     const listed = (await response.json()).data;
     assert.deepEqual(listed.map((model) => model.id), [
-      'gpt-6-astra', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+      'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
       'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-sonnet-5', 'glm-5.3-flash', 'kimi-k3',
       'gpt-new-live'
     ]);
-    for (const id of ['gpt-6-astra', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+    for (const id of ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
       assert.equal(listed.find((model) => model.id === id).context_window, 1_050_000);
       assert.equal(listed.find((model) => model.id === id).max_output_tokens, 128_000);
     }
@@ -119,7 +119,7 @@ test('routes a discovered model only to accounts known to support it', async () 
     const path = new URL(url).pathname;
     const accountId = options.headers['chatgpt-account-id'];
     if (path === '/backend-api/codex/models') {
-      const models = accountId === 'acct-model-a' ? [{ slug: 'gpt-account-a' }] : [{ slug: 'gpt-account-b' }];
+      const models = accountId === 'acct-model-a' ? [{ slug: 'gpt-6.1-sol' }] : [{ slug: 'gpt-account-b' }];
       return new Response(JSON.stringify({ models }), { status: 200, headers: { 'content-type': 'application/json' } });
     }
     assert.equal(path, '/backend-api/codex/responses');
@@ -135,7 +135,7 @@ test('routes a discovered model only to accounts known to support it', async () 
     const response = await gatewayFetch(base, '/v1/responses', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-account-a', input: 'hello' })
+      body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'hello' })
     });
     assert.equal(response.status, 200);
     assert.deepEqual(dispatchedAccounts, ['acct-model-a']);
