@@ -173,6 +173,51 @@ test('rejects a model excluded by every live Codex catalog before dispatch', asy
   }
 });
 
+test('does not fall through to Compass when live Codex catalogs exclude a Codex model', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-compass-fallback-'));
+  const { store } = configuredStore(dir, { compass: true });
+  const calls = [];
+  const { server, base } = await start(store, async (url) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({ models: [{ slug: 'gpt-6-sol' }] }), { status: 200 });
+    }
+    assert.equal(path, '/compass-api/v1/responses');
+    return new Response(JSON.stringify({ id: 'compass-response', output: [] }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    });
+  });
+  try {
+    assert.equal((await gatewayFetch(base, '/v1/models')).status, 200);
+    for (const sessionId of ['', 'ais-switch-session']) {
+      for (const path of ['/v1/responses', '/v1/chat/completions']) {
+        const response = await gatewayFetch(base, path, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', ...(sessionId ? { 'x-codex-session-id': sessionId } : {}) },
+          body: JSON.stringify(path === '/v1/responses'
+            ? { model: 'gpt-6.1-sol', input: 'hello', stream: true }
+            : { model: 'gpt-6.1-sol', messages: [{ role: 'user', content: 'hello' }] })
+        });
+        assert.equal(response.status, 403, `${path} with session ${sessionId}`);
+        assert.equal((await response.json()).error.code, 'model_not_available');
+      }
+    }
+    assert.deepEqual(calls, ['/backend-api/codex/models']);
+
+    const explicit = await gatewayFetch(base, '/v1/responses', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-upstream-type': 'compass' },
+      body: JSON.stringify({ model: 'gpt-6.1-sol', input: 'hello' })
+    });
+    assert.equal(explicit.status, 200);
+    assert.deepEqual(calls, ['/backend-api/codex/models', '/compass-api/v1/responses']);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('reports unavailable model when other Codex accounts are blocked for separate reasons', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-mixed-'));
   const store = new Store(dir);
