@@ -462,6 +462,69 @@ test('retries Codex proxy requests with a rotated access token after 401', async
   }
 });
 
+test('returns a generic Codex permission denial without refreshing or failing over', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-permission-'));
+  const store = new Store(dir);
+  const first = store.create(codexInput({ refreshToken: 'must-not-refresh', email: 'first-permission@example.com', accountId: 'first-permission' }));
+  const second = store.create(codexInput({ email: 'second-permission@example.com', accountId: 'second-permission' }));
+  store.setCap(first.id, { capDollars: 100 });
+  store.setCap(second.id, { capDollars: 100 });
+  let calls = 0;
+  const { server, base } = await runningServer(store, async (url) => {
+    calls += 1;
+    assert.equal(new URL(url).pathname, '/backend-api/codex/responses');
+    return new Response(JSON.stringify({
+      error: { type: 'permission_error', message: 'private upstream detail', account: 'private' }
+    }), { status: 403, headers: { 'content-type': 'application/json' } });
+  });
+  try {
+    for (const stream of [false, true]) {
+      const result = await request(base, '/v1/responses', { model: 'gpt-6.1-sol', input: 'hello', stream });
+      assert.equal(result.response.status, 403);
+      assert.deepEqual(result.body.error, {
+        type: 'permission_error', code: 'upstream_permission_denied',
+        message: 'Upstream denied access to this request', param: null
+      });
+    }
+    assert.equal(calls, 2);
+    assert.equal(store.get(first.id).health, undefined);
+    assert.equal(store.get(first.id).tokenRefresh?.status, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not turn a permission denial after Codex token refresh into a 502', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-refreshed-permission-'));
+  const store = new Store(dir);
+  const upstream = store.create(codexInput({ refreshToken: 'refresh-permission' }));
+  store.setCap(upstream.id, { capDollars: 100 });
+  const calls = [];
+  const { server, base } = await runningServer(store, async (url) => {
+    const path = new URL(url).pathname;
+    calls.push(path);
+    if (path === '/oauth/token') {
+      return new Response(JSON.stringify({ access_token: 'rotated-permission-token', expires_in: 3600 }), { status: 200 });
+    }
+    return calls.length === 1
+      ? new Response('{}', { status: 401 })
+      : new Response(JSON.stringify({ error: { type: 'permission_error', message: 'private upstream detail' } }), {
+        status: 403, headers: { 'content-type': 'application/json' }
+      });
+  });
+  try {
+    const result = await request(base, '/v1/responses', { model: 'gpt-6.1-sol', input: 'hello' });
+    assert.equal(result.response.status, 403);
+    assert.equal(result.body.error.code, 'upstream_permission_denied');
+    assert.deepEqual(calls, ['/backend-api/codex/responses', '/oauth/token', '/backend-api/codex/responses']);
+    assert.equal(store.get(upstream.id).health, undefined);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('rebuilds compatibility projection after automatic Codex credential refresh', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compatibility-refresh-'));
   const bodies = [];
