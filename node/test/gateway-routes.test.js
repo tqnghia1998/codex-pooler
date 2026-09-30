@@ -793,6 +793,50 @@ test('normalizes public transcription multipart fields and response', async () =
   }
 });
 
+test('renders validated transcription text without changing settlement or JSON errors', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-audio-text-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  let calls = 0;
+  const { server, base } = await start(store, async (_url, options) => {
+    calls += 1;
+    const upstreamForm = await new Request('http://upstream', { method: 'POST', body: options.body }).formData();
+    assert.equal(upstreamForm.has('response_format'), false);
+    if (calls === 2) return new Response('private provider failure', { status: 500 });
+    return new Response(JSON.stringify({ text: 'hello\nworld', languages: ['en'], usage: { input_tokens: 2, output_tokens: 3, price_cost_usd: '0.25' } }), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    });
+  });
+  try {
+    const form = new FormData();
+    form.append('model', 'gpt-4o-transcribe');
+    form.append('file', new Blob(['audio']), 'audio.wav');
+    form.append('response_format', 'text');
+    const response = await gatewayFetch(base, '/v1/audio/transcriptions', { method: 'POST', body: form });
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get('content-type'), /^text\/plain/);
+    assert.equal(await response.text(), 'hello\nworld');
+    assert.equal(store.get(codexUpstream.id).spending.spentCredits, 6.25);
+
+    const failed = await gatewayFetch(base, '/v1/audio/transcriptions', { method: 'POST', body: form });
+    assert.equal(failed.status, 502);
+    assert.match(failed.headers.get('content-type'), /^application\/json/);
+    assert.equal((await failed.text()).includes('private provider failure'), false);
+
+    const invalid = new FormData();
+    invalid.append('model', 'gpt-4o-transcribe');
+    invalid.append('file', new Blob(['audio']), 'audio.wav');
+    invalid.append('response_format', 'srt');
+    const rejected = await gatewayFetch(base, '/v1/audio/transcriptions', { method: 'POST', body: invalid });
+    assert.equal(rejected.status, 400);
+    assert.match(rejected.headers.get('content-type'), /^application\/json/);
+    assert.equal((await rejected.json()).error.param, 'response_format');
+    assert.equal(calls, 2);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('translates public image generations and edits through Responses SSE', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-images-'));
   const { store } = configuredStore(dir);
