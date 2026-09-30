@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "profile": "codex-public-http",
+  "client": {
+    "family": "codex",
+    "version": "0.200.0"
+  },
+  "request": {
+    "path": "/v1/responses",
+    "headers": {
+      "authorization": "fixture-auth-value"
+    },
+    "body": {
+      "model": "gpt-private-preview",
+      "input": "synthetic customer prompt",
+      "stream": false,
+      "tools": [
+        {
+          "type": "mcp",
+          "server_url": "https://private.example.test/mcp",
+          "authorization": "fixture-nested-auth"
+        }
+      ]
+    }
+  }
+}
