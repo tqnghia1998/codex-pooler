@@ -130,6 +130,8 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines,
   }
   const file = form.get('file');
   if (!(file instanceof Blob)) return invalid(res, 'file is required', 'file');
+  const format = form.get('response_format') ?? 'json';
+  if (format !== 'json' && format !== 'text') return invalid(res, 'response_format must be json or text', 'response_format');
   const provider = await codexContext(store, req, res, fetchImpl, upstreamDeadlines, { codexHostHealth });
   if (!provider) return noCodex(res);
 
@@ -147,10 +149,15 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines,
   const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm }, { pacingModel: 'gpt-4o-transcribe' });
   const responseBody = await responseJson(response, provider.upstreamDeadlines, provider);
   if (!response.ok) return sendFailure(res, retryAfterHeader(response));
-  if (!responseBody) return sendFailure(res);
+  if (!responseBody || typeof responseBody.text !== 'string') return sendFailure(res);
   pinCompatibilitySession(provider);
-  delete responseBody.languages;
   settleCost(store, provider.upstream, responseBody, req);
+  if (format === 'text') {
+    res.writeHead(response.status, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', ...responseHeaders(response) });
+    res.end(responseBody.text);
+    return;
+  }
+  delete responseBody.languages;
   sendJson(res, response.status, responseBody, responseHeaders(response));
 }
 
