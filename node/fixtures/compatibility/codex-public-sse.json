@@ -35,11 +35,11 @@
     "targetPath": "/backend-api/codex/responses",
     "fingerprint": {
       "version": 1,
-      "hash": "110106f215f05616cb78fce9a4d717f3",
+      "hash": "b64c3fc07d898955c19a1023fcc1b18a",
       "values": {
-        "user-agent": "codex_cli_rs/0.157.0",
+        "user-agent": "codex_cli_rs/0.159.2",
         "originator": "codex_cli_rs",
-        "version": "0.157.0"
+        "version": "0.159.2"
       }
     },
     "projection": {

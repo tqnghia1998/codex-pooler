@@ -10,9 +10,11 @@ import {
   compatibilityContext
 } from '../src/compatibility-learning.js';
 import {
+  codexProtocolHeaders,
   compatibilityProtocolFingerprint,
   defaultProtocolFingerprints
 } from '../src/protocol-compat.js';
+import { CLAUDE_CODE_VERSION, DEFAULT_CLAUDE_CODE_VERSION } from '../src/claude-client-version.js';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
 
@@ -31,6 +33,18 @@ function evidence(service, upstream, context, field, observationId, now) {
     now
   });
 }
+
+test('gateway-generated CLI fingerprints use reviewed versions', () => {
+  assert.deepEqual(codexProtocolHeaders(null, { env: {} }), {
+    'user-agent': 'codex_cli_rs/0.159.2',
+    originator: 'codex_cli_rs',
+    version: '0.159.2'
+  });
+  assert.equal(DEFAULT_CLAUDE_CODE_VERSION, '2.1.285');
+  if (!process.env.CODEX_POOLER_CLAUDE_CODE_VERSION) {
+    assert.equal(CLAUDE_CODE_VERSION, DEFAULT_CLAUDE_CODE_VERSION);
+  }
+});
 
 test('normalizes public protocol fingerprints without secrets or unstable beta ordering', () => {
   const codex = compatibilityProtocolFingerprint('codex', {
