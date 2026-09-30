@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 1,
+  "id": "codex-native-http-0.146.1",
+  "client": {
+    "family": "codex",
+    "version": "0.146.1"
+  },
+  "profile": "codex-native-http",
+  "negotiation": {
+    "headers": {
+      "version": "0.146.1",
+      "originator": "codex_cli_rs",
+      "openai-beta": "future_responses=2026-08-01"
+    }
+  },
+  "request": {
+    "sourcePath": "/v1/responses",
+    "originalPath": "/backend-api/codex/responses",
+    "body": {
+      "model": "fixture-model",
+      "input": [
+        {
+          "type": "message",
+          "id": "fixture-message",
+          "role": "user",
+          "content": "fixture-text"
+        },
+        {
+          "type": "item_reference",
+          "id": "fixture-reference"
+        }
+      ],
+      "previous_response_id": "fixture-response",
+      "stream": true,
+      "include": [
+        "reasoning.encrypted_content",
+        "reasoning.encrypted_content"
+      ]
+    }
+  },
+  "expected": {
+    "targetPath": "/backend-api/codex/responses",
+    "fingerprint": {
+      "version": 1,
+      "hash": "8cba4ffc4889dd0abd1524b23ceeee02",
+      "values": {
+        "user-agent": "codex_cli_rs/0.146.1",
+        "originator": "codex_cli_rs",
+        "version": "0.146.1",
+        "openai-beta": "future_responses=2026-08-01"
+      }
+    },
+    "projection": {
+      "paths": [
+        {
+          "path": "$",
+          "type": "object"
+        },
+        {
+          "path": "$.include",
+          "type": "array"
+        },
+        {
+          "path": "$.include[]",
+          "type": "string"
+        },
+        {
+          "path": "$.input",
+          "type": "array"
+        },
+        {
+          "path": "$.input[]",
+          "type": "object"
+        },
+        {
+          "path": "$.input[].content",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].id",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].role",
+          "type": "string"
+        },
+        {
+          "path": "$.input[].type",
+          "type": "string"
+        },
+        {
+          "path": "$.instructions",
+          "type": "string"
+        },
+        {
+          "path": "$.model",
+          "type": "string"
+        },
+        {
+          "path": "$.reasoning",
+          "type": "object"
+        },
+        {
+          "path": "$.stream",
+          "type": "boolean"
+        }
+      ],
+      "typeValues": [
+        {
+          "path": "$.input[].type",
+          "value": "item_reference"
+        },
+        {
+          "path": "$.input[].type",
+          "value": "message"
+        }
+      ]
+    }
+  }
+}
