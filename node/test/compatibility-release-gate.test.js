@@ -189,8 +189,8 @@ test('discovers newer releases without executing an unreviewed version', async (
     });
     assert.equal(report.status, 'review');
     assert.equal(report.results[0].releaseState, 'new_release');
-    assert.equal(preparedVersion, '0.147.0-darwin-arm64');
-    assert.equal(executedVersion, '0.147.0');
+    assert.equal(preparedVersion, selected.platforms['darwin-arm64'].version);
+    assert.equal(executedVersion, selected.version);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
