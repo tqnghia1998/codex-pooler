@@ -46,6 +46,19 @@ test('does not permanently disable AIS for an ambiguous permission denial', () =
   }).class, 'credential');
 });
 
+test('treats ambiguous Codex 403 as request denial but retains explicit credential errors', () => {
+  const response = new Response(null, { status: 403 });
+  assert.deepEqual(classifyHttpResponse(response, { error: { type: 'permission_error', message: 'private detail' } }, {
+    upstreamType: 'codex'
+  }), { class: 'caller', retryable: false, status: 403, errorCode: 'upstream_permission_denied' });
+  assert.equal(classifyHttpResponse(response, { error: { code: 'invalid_token' } }, {
+    upstreamType: 'codex'
+  }).class, 'credential');
+  assert.equal(classifyHttpResponse(new Response(null, { status: 401 }), null, {
+    upstreamType: 'codex'
+  }).class, 'credential');
+});
+
 test('classifies structured SSE and WebSocket terminal frames', () => {
   assert.equal(classifySseEvent({ type: 'response.completed' }).class, 'success');
   assert.equal(classifySseEvent({ type: 'response.failed', error: { code: 'rate_limit_exceeded' } }).class, 'quota');

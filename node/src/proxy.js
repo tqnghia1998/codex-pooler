@@ -212,11 +212,21 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     ? store.reserveGatewayRequest({ scopeId: authScopeId, apiKeyId: accounting.apiKeyId, endpoint: path, model, transport: payload?.stream === true ? 'http_sse' : 'http_json' })
     : null;
   if (!candidates.length) {
+    const modelUnavailable = model
+      && normalizedServiceTier(dispatchPayload?.service_tier) !== 'ultrafast'
+      && routingPlan.diagnostics.exclusions.some(({ type, code }) => type === 'codex' && code === 'model_not_supported');
     finalizeGatewayFailure(store, lifecycle, null, {
-      errorCode: 'no_compatible_backend',
-      responseStatusCode: 503,
+      errorCode: modelUnavailable ? 'model_not_available' : 'no_compatible_backend',
+      responseStatusCode: modelUnavailable ? 403 : 503,
       exclusionReasons: routingPlan.diagnostics.exclusions.map(({ code }) => code)
     });
+    if (modelUnavailable) {
+      sendJson(res, 403, { error: {
+        type: 'permission_error', code: 'model_not_available',
+        message: 'Model is not available on any eligible upstream', param: 'model'
+      } });
+      return;
+    }
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
   const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth, claudeConfig, codexOptions });
@@ -265,6 +275,12 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     else if (response.status === 429) sendJson(res, 429, { error: {
       type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null
     } }, retryAfterHeader(response));
+    else if (response.status === 403 && outcome.class === 'caller' && upstream.type === 'codex') {
+      sendJson(res, 403, { error: {
+        type: 'permission_error', code: 'upstream_permission_denied',
+        message: 'Upstream denied access to this request', param: null
+      } });
+    }
     else sendFailure(res, retryAfterHeader(response));
     return;
   }
@@ -854,7 +870,12 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       const initialPolicyFailure = policyRoute(path, sourcePath) && [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
         : null;
-      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
+      const initialCodexDenial = response.status === 403 && upstream.type === 'codex'
+        ? classifyHttpResponse(response, parseJson(await readBoundedResponse(response.clone())), { upstreamType: 'codex' })
+        : null;
+      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure
+        && (!initialCodexDenial || initialCodexDenial.class === 'credential')
+        && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
         try {
           const refreshed = await refreshProviderCredentials(upstream, credentials, {
             fetchImpl,
@@ -975,19 +996,21 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           releaseShareRequest(req, attemptId, outcome.errorCode);
           return { upstream, attemptId, startedAt, response, admission: null };
         }
-        await readBoundedResponse(response);
-        store.settleUpstreamAttempt(upstream.id, admission, outcome);
-        releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
-        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
-        terminalFailure = {
-          upstream,
-          attemptId: null,
-          startedAt,
-          response: new Response(null, { status: 502 }),
-          admission: null,
-          failureCode: 'upstream_authentication_failed'
-        };
-        continue;
+        if (outcome.class === 'credential') {
+          await readBoundedResponse(response);
+          store.settleUpstreamAttempt(upstream.id, admission, outcome);
+          releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
+          retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
+          terminalFailure = {
+            upstream,
+            attemptId: null,
+            startedAt,
+            response: new Response(null, { status: 502 }),
+            admission: null,
+            failureCode: 'upstream_authentication_failed'
+          };
+          continue;
+        }
       }
       const publicCodexCollection = response.ok
         && upstream.type === 'codex'
