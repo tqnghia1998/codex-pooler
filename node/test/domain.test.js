@@ -130,7 +130,7 @@ test('keeps WHAM percentage-only quotas when absolute totals are unavailable', (
   assert.equal(quota.resetAt, '2026-08-22T03:37:51.000Z');
 });
 
-test('uses Codex spend control as the monthly usage quota', () => {
+test('uses legacy unitless Codex spend control as the monthly usage quota', () => {
   const quota = parseCodexQuota({
     rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 18_000 } },
     spend_control: { individual_limit: {
@@ -146,6 +146,58 @@ test('uses Codex spend control as the monthly usage quota', () => {
   assert.equal(quota.remainingDollars, 1226.703941602707);
   assert.equal(quota.limitDollars, 1300);
   assert.equal(quota.resetAt, '2026-09-01T00:00:00.000Z');
+});
+
+test('reads Codex USD spend limits without converting them from credits', () => {
+  const quota = parseCodexQuota({
+    rate_limit: { primary_window: { used_percent: 0, limit_window_seconds: 18_000 } },
+    credits: { has_credits: true, balance: '250' },
+    spend_control: { reached: false, individual_limit: {
+      source: 'group_based_spend_controls', unit: 'usd', limit: '1300.00',
+      used: '192.9142850637436', remaining: '1107.0857149362564',
+      used_percent: 15, remaining_percent: 85,
+      reset_after_seconds: 2_323_140, reset_at: 1_793_491_201
+    }}
+  });
+  assert.equal(quota.label, 'Monthly usage');
+  assert.equal(quota.remainingUnits, 1107.0857149362564);
+  assert.equal(quota.limitUnits, 1300);
+  assert.equal(quota.remainingDollars, 1107.0857149362564);
+  assert.equal(quota.limitDollars, 1300);
+  assert.equal(quota.usedPercent, 15);
+  assert.equal(quota.remainingPercent, 85);
+  assert.equal(quota.capacity.spendControl.remainingPercent, 85);
+  assert.equal(quota.resetAt, new Date(1_793_491_201_000).toISOString());
+});
+
+test('converts explicit Codex credit limits and leaves unknown units without dollar estimates', () => {
+  for (const [unit, expected] of [['credits', 1300], ['tokens', null]]) {
+    const quota = parseCodexQuota({ spend_control: { individual_limit: {
+      unit, limit: 32500, remaining: 32500, used_percent: 0
+    }}});
+    assert.equal(quota.remainingDollars, expected);
+    assert.equal(quota.limitDollars, expected);
+    assert.equal(quota.remainingPercent, 100);
+  }
+});
+
+test('does not substitute provider credits or coerce missing USD spend totals to zero', () => {
+  for (const value of [undefined, null, '', ' ', 'invalid', false]) {
+    const quota = parseCodexQuota({
+      credits: { has_credits: true, balance: '250' },
+      spend_control: { individual_limit: { unit: 'usd', limit: value, remaining: value, used_percent: 15 }}
+    });
+    assert.equal(quota.remainingUnits, null);
+    assert.equal(quota.limitUnits, null);
+    assert.equal(quota.remainingDollars, null);
+    assert.equal(quota.limitDollars, null);
+    assert.equal(quota.remainingPercent, 85);
+  }
+  const exhausted = parseCodexQuota({ spend_control: { individual_limit: {
+    unit: 'usd', limit: 1300, remaining: '0', used_percent: 100
+  }}});
+  assert.equal(exhausted.remainingDollars, 0);
+  assert.equal(exhausted.limitDollars, 1300);
 });
 
 test('marks CQP upstreams as AIS and keeps them eligible despite zero quota', () => {
