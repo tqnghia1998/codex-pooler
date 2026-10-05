@@ -27,12 +27,15 @@ export async function refreshUpstreamQuota(store, id, { notify = true, ...option
 }
 
 async function refreshUpstreamQuotaOnce(store, id, upstream, entry, options) {
+  let credentialEpoch = upstream.credentialEpoch;
   const quota = await refreshQuota(upstream, store.credentials(id), {
     ...options,
-    saveCredentials: (updated, accessTokenExpiresAt) => store.persistCredentials(id, updated, accessTokenExpiresAt)
+    saveCredentials: (updated, accessTokenExpiresAt) => {
+      if (store.persistCredentials(id, updated, accessTokenExpiresAt)) credentialEpoch = store.get(id)?.credentialEpoch;
+    }
   });
   if (quota === upstream.quota) return store.getPublic(id);
-  return store.setQuota(id, quota, { notify: entry.notify });
+  return store.setQuota(id, quota, { notify: entry.notify, expectedCredentialEpoch: credentialEpoch });
 }
 
 export async function refreshAllUpstreamQuotas(store, {
