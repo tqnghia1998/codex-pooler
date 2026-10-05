@@ -29,6 +29,7 @@ import { safeCompatibilityValue, validCompatibilityFeature } from './compatibili
 import { claudeCoolingDisabled, quotaCooldown } from './upstream-outcomes.js';
 import { normalizePacingPolicy } from './upstream-pacer.js';
 import { gatewayDiagnosticsForStore, sanitizeAttemptTimings, sanitizeExclusionReasons } from './gateway-diagnostics.js';
+import { codexCapacityDecision, providerCreditsPolicy } from './provider-credits.js';
 
 const SESSION_LIMIT = 1_000;
 const SESSION_ID_MAX_LENGTH = 200;
@@ -92,6 +93,14 @@ export class Store {
   configureClaudeRuntime(config = {}) {
     this.claudeRuntimeConfig = config && typeof config === 'object' && !Array.isArray(config) ? config : {};
     return this.claudeRuntimeConfig;
+  }
+
+  setDurabilityBarrier(barrier) {
+    this.durabilityBarrier = barrier;
+  }
+
+  async flushDurability() {
+    await this.durabilityBarrier?.();
   }
 
   notifyUpstreamsChange() {
@@ -244,6 +253,10 @@ export class Store {
     }
 
     upstream.scopeId = scopeId;
+    if (upstream.type === 'codex' && upstream.accountId) {
+      const sibling = db.upstreams.find((entry) => entry.type === 'codex' && entry.scopeId === scopeId && entry.accountId === upstream.accountId);
+      if (sibling) upstream.allowProviderCredits = sibling.allowProviderCredits === true;
+    }
     upstream.routing = normalizeRouting(input.routing);
     upstream.pacing = normalizePacingPolicy(input.pacing);
     upstream.credentials = encryptCredentials(upstream.credentials, this.key);
@@ -256,13 +269,23 @@ export class Store {
   update(id, input) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
+    if (input.allowProviderCredits !== undefined) {
+      if (upstream.type !== 'codex') throw new Error('Provider credits are only supported for Codex accounts');
+      providerCreditsPolicy(input.allowProviderCredits);
+    }
     ensureSpending(upstream);
     const previousCredentials = decryptCredentials(upstream.credentials, this.key);
+    const previousAccountId = upstream.accountId;
     upstream.credentials = previousCredentials;
     updateUpstream(upstream, input, { allowLegacyClaudeApiKey: this.allowLegacyClaudeApiKey });
+    if (upstream.type === 'codex' && upstream.accountId !== previousAccountId && input.allowProviderCredits === undefined) {
+      const sibling = db.upstreams.find((entry) => entry.id !== id && entry.type === 'codex' && entry.scopeId === upstream.scopeId && entry.accountId === upstream.accountId);
+      upstream.allowProviderCredits = sibling?.allowProviderCredits === true;
+    }
     if (['codex', 'claude'].includes(upstream.type) && (input.authJson || input.accessToken || input.projectKey !== undefined)) {
       upstream.quota = null;
       upstream.credentialEpoch = (Number(upstream.credentialEpoch) || 0) + 1;
+      upstream.nativeRecoveryEpoch = (Number(upstream.nativeRecoveryEpoch) || 1) + 1;
       upstream.compatibilityEpoch = (Number(upstream.compatibilityEpoch) || 0) + 1;
       if (upstream.type === 'codex') upstream.modelCatalogEpoch = (Number(upstream.modelCatalogEpoch) || 0) + 1;
       delete upstream.tokenRefresh;
@@ -284,6 +307,11 @@ export class Store {
     }
     if (input.routing !== undefined) upstream.routing = normalizeRouting(input.routing);
     if (input.pacing !== undefined) upstream.pacing = normalizePacingPolicy(input.pacing);
+    if (input.allowProviderCredits !== undefined && upstream.accountId) {
+      for (const sibling of db.upstreams) {
+        if (sibling.type === 'codex' && sibling.scopeId === upstream.scopeId && sibling.accountId === upstream.accountId) sibling.allowProviderCredits = upstream.allowProviderCredits;
+      }
+    }
     this.saveCredentials(upstream);
     this.save(db);
     this.notifyUpstreamsChange();
@@ -400,11 +428,12 @@ export class Store {
     this.notifyUpstreamsChange();
   }
 
-  setQuota(id, quota, { notify = true } = {}) {
+  setQuota(id, quota, { notify = true, expectedCredentialEpoch = null } = {}) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
+    if (expectedCredentialEpoch !== null && upstream.credentialEpoch !== expectedCredentialEpoch) return publicUpstream(upstream);
     ensureSpending(upstream);
-    upstream.quota = quota;
+    upstream.quota = quota && { ...quota, ...(quota.capacity ? { capacity: { ...quota.capacity, credentialEpoch: upstream.credentialEpoch } } : {}) };
     if (!isAisUpstream(upstream)) upstream.quotaSource = quota?.source || null;
     if (upstream.health?.status === 'reauth_required') {
       upstream.healthGeneration = Math.max(0, Number(upstream.health.generation ?? upstream.healthGeneration) || 0) + 1;
@@ -831,10 +860,11 @@ export class Store {
     if (automatic) {
       const preferred = candidates.filter((upstream) => upstream.type === preferredType);
       candidates = [
-        ...orderRoutingCandidates(preferred, selectedStrategy, now),
-        ...orderRoutingCandidates(candidates.filter((upstream) => upstream.type !== preferredType), selectedStrategy, now)
+        ...orderRoutingCandidates(preferred, selectedStrategy, now, model),
+        ...orderRoutingCandidates(candidates.filter((upstream) => upstream.type !== preferredType), selectedStrategy, now, model)
       ];
-      if (affinityId) {
+      const affinity = candidates.find((candidate) => candidate.id === affinityId);
+      if (affinity && !candidates.some((candidate) => capacityTier(candidate, now, model) < capacityTier(affinity, now, model))) {
         candidates = [
           ...candidates.filter((upstream) => upstream.id === affinityId),
           ...candidates.filter((upstream) => upstream.id !== affinityId)
@@ -847,6 +877,7 @@ export class Store {
   beginUpstreamAttempt(id, scope, now = Date.now()) {
     const db = this.load();
     const upstream = findOrThrow(db, id);
+    if (!scope?.ignoreQuotaCooldown && quotaBlocksRouting(upstream, now, scope?.model)) return null;
     let health = upstream.health || {};
     let generation = Math.max(0, Number(health.generation ?? upstream.healthGeneration) || 0);
     if (scope?.ignoreQuotaCooldown && health.status === 'cooldown') {
@@ -885,6 +916,34 @@ export class Store {
       circuitGeneration: circuitLease.generation,
       scope: { ...scope }
     };
+  }
+
+  assertCodexCapacity(id, model = '', now = Date.now()) {
+    const upstream = this.get(id);
+    if (!upstream) throw Object.assign(new Error('Codex account was removed before dispatch'), { codexCapacityChanged: true });
+    if (upstream.type !== 'codex') return;
+    const decision = codexCapacityDecision(upstream, model, now);
+    if (decision && !decision.eligible) {
+      throw Object.assign(new Error('Codex capacity changed before dispatch'), { codexCapacityChanged: true });
+    }
+  }
+
+  nativeTurnReceipt(key) {
+    return this.load().nativeTurnReceipts[key] || null;
+  }
+
+  saveNativeTurnReceipt(key, receipt) {
+    const db = this.load();
+    if (!db.nativeTurnReceipts[key] && Object.keys(db.nativeTurnReceipts).length >= 1_000 && Object.values(db.nativeTurnReceipts).every((value) => value.status === 'in_progress')) {
+      throw Object.assign(new Error('Native recovery capacity is unavailable'), { statusCode: 503, code: 'native_recovery_capacity' });
+    }
+    db.nativeTurnReceipts[key] = { ...receipt, items: [...receipt.items] };
+    const entries = Object.entries(db.nativeTurnReceipts).sort(([, left], [, right]) => Date.parse(left.updatedAt) - Date.parse(right.updatedAt));
+    // Retain successful fences for a day; interrupted recovery remains 330 s.
+    for (const [id, value] of entries) {
+      if (id !== key && (Date.parse(value.updatedAt) + 86_400_000 < Date.now() || Object.keys(db.nativeTurnReceipts).length > 1_000 && value.status !== 'in_progress')) delete db.nativeTurnReceipts[id];
+    }
+    this.saveChanges(db, { collections: ['nativeTurnReceipts'] });
   }
 
   settleUpstreamAttempt(id, admission, outcome, now = Date.now()) {
@@ -1286,7 +1345,7 @@ export class Store {
 }
 
 function emptyDatabase() {
-  return { upstreams: [], files: [], sessions: {}, responsePins: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [], routingPolicy: { strategy: 'least-recent-success' } };
+  return { upstreams: [], files: [], sessions: {}, responsePins: {}, nativeTurnReceipts: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [], routingPolicy: { strategy: 'least-recent-success' } };
 }
 
 function normalizeDatabase(parsed) {
@@ -1299,6 +1358,7 @@ function normalizeDatabase(parsed) {
   parsed.gatewayRequests ||= [];
   parsed.gatewayAttempts ||= [];
   parsed.responsePins ||= {};
+  parsed.nativeTurnReceipts ||= {};
   parsed.routingPolicy = normalizeRoutingPolicy(parsed.routingPolicy);
   if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
   parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
@@ -1325,6 +1385,7 @@ function normalizeDatabase(parsed) {
   for (const upstream of parsed.upstreams) {
     upstream.scopeId ||= DEFAULT_SCOPE_ID;
     upstream.credentialEpoch = Math.max(1, Number(upstream.credentialEpoch) || 1);
+    upstream.nativeRecoveryEpoch = Math.max(1, Number(upstream.nativeRecoveryEpoch) || 1);
     upstream.compatibilityEpoch = Math.max(1, Number(upstream.compatibilityEpoch) || 1);
     upstream.modelCatalogEpoch = Math.max(1, Number(upstream.modelCatalogEpoch) || 1);
     upstream.routing = normalizeRouting(upstream.routing);
@@ -1354,6 +1415,7 @@ function databaseRecords(db) {
   for (const attempt of db.gatewayAttempts) add('gatewayAttempts', attempt.id, attempt);
   for (const [key, value] of Object.entries(db.sessions)) add('sessions', key, value);
   for (const [key, value] of Object.entries(db.responsePins)) add('responsePins', key, value);
+  for (const [key, value] of Object.entries(db.nativeTurnReceipts)) add('nativeTurnReceipts', key, value);
   for (const [key, value] of Object.entries(normalizeRoutingPolicy(db.routingPolicy))) add('routingPolicy', key, value);
   return records;
 }
@@ -1559,12 +1621,12 @@ function leastRecentRank(upstream) {
   return Date.parse(upstream.lastSuccessfulAt) || 0;
 }
 
-function orderRoutingCandidates(upstreams, strategy, now) {
+function orderRoutingCandidates(upstreams, strategy, now, model = '') {
   const stableOrder = new Map(upstreams.map((upstream, index) => [upstream.id, index]));
   const tieBreak = (left, right) => leastRecentRank(left) - leastRecentRank(right)
     || stableOrder.get(left.id) - stableOrder.get(right.id);
   if (strategy === 'least-recent-success') {
-    return [...upstreams].sort((left, right) => priorityTier(left) - priorityTier(right) || tieBreak(left, right));
+    return [...upstreams].sort((left, right) => capacityTier(left, now, model) - capacityTier(right, now, model) || priorityTier(left) - priorityTier(right) || tieBreak(left, right));
   }
   const medians = new Map();
   for (const tier of new Set(upstreams.map(priorityTier))) {
@@ -1582,7 +1644,7 @@ function orderRoutingCandidates(upstreams, strategy, now) {
     return quota.status === 'known' ? quota.remainingPercent : medians.get(priorityTier(upstream));
   };
   return [...upstreams].sort((left, right) => (
-    priorityTier(left) - priorityTier(right)
+    capacityTier(left, now, model) - capacityTier(right, now, model) || priorityTier(left) - priorityTier(right)
     || score(right) - score(left)
     || tieBreak(left, right)
   ));
@@ -1619,7 +1681,7 @@ function candidateExclusionCode(upstream, model, requirements, { ignoreModelRest
       ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig)
       : routing.models.includes(String(model || '').toLowerCase()));
     if (!ignoreModelRestrictions && (modelNotAllowed || claudeMetadataModelExcluded(upstream, model, claudeConfig))) return 'upstream_model_not_allowed';
-    if (quotaBlocksRouting(upstream, now)) return 'quota_exhausted';
+    if (quotaBlocksRouting(upstream, now, model)) return 'quota_exhausted';
     return 'capability_not_supported';
   }
   if (!dynamicallySupportsModel(upstream, model, modelSupport)) return 'model_not_supported';
@@ -1671,13 +1733,19 @@ function candidateEligible(upstream, model, requirements, { ignoreModelRestricti
   const routing = normalizeRouting(upstream.routing);
   if (!ignoreModelRestrictions && routing.models.length && !(upstream.type === 'claude' ? configuredClaudeModelMatches(routing.models, model, upstream, claudeConfig) : routing.models.includes(String(model || '').toLowerCase()))) return false;
   if (!ignoreModelRestrictions && claudeMetadataModelExcluded(upstream, model, claudeConfig)) return false;
-  if (quotaBlocksRouting(upstream, now)) return false;
+  if (quotaBlocksRouting(upstream, now, model)) return false;
   if (requirements.responses && !routing.responses || requirements.streaming && !routing.streaming || requirements.tools && !routing.tools || requirements.imageInput && !routing.imageInput || requirements.reasoning && !routing.reasoning) return false;
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
 }
 
-function quotaBlocksRouting(upstream, now) {
+function capacityTier(upstream, now, model = '') {
+  return codexCapacityDecision(upstream, model, now)?.basis === 'provider_credits' ? 1 : 0;
+}
+
+function quotaBlocksRouting(upstream, now, model = '') {
   if (isAisUpstream(upstream)) return false;
+  const capacity = codexCapacityDecision(upstream, model, now);
+  if (capacity) return !capacity.eligible;
   const quota = upstream.quota;
   if (quotaOrderingMetadata(upstream, now).remainingPercent !== 0) return false;
   const resetAt = Date.parse(quota.resetAt);
