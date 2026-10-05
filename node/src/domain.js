@@ -841,6 +841,11 @@ export function filterSpendCapEligible(upstreams, { continuationId = null, allow
 
 export function parseCodexQuota(payload, observedAt = new Date()) {
   const candidates = [];
+  const amount = (value) => {
+    if (typeof value !== 'number' && !(typeof value === 'string' && value.trim() !== '')) return null;
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  };
   const rateLimitReached = payload?.rate_limit?.limit_reached === true;
   const addWindow = (window, source = 'primary', monthly = false) => {
     if (!window || typeof window !== 'object') return;
@@ -849,8 +854,8 @@ export function parseCodexQuota(payload, observedAt = new Date()) {
     const usedPercent = Number.isFinite(reportedUsedPercent) ? reportedUsedPercent : (rateLimitReached ? 100 : NaN);
     if (!Number.isFinite(usedPercent)) return;
     const seconds = Number(window.limit_window_seconds);
-    const remainingUnits = Number(window.remaining);
-    const limitUnits = Number(window.limit);
+    const remainingUnits = amount(window.remaining);
+    const limitUnits = amount(window.limit);
     candidates.push({
       window,
       source,
@@ -877,18 +882,26 @@ export function parseCodexQuota(payload, observedAt = new Date()) {
   const selected = candidates.find((candidate) => candidate.source === 'spend_control')
     || [...(monthly.length ? monthly : candidates)].sort((a, b) => b.seconds - a.seconds)[0];
   const resetAt = resetTime(selected.window, observedAt);
-  const balance = payload?.credits?.balance;
-  const creditBalance = typeof balance === 'number' || (typeof balance === 'string' && balance.trim() !== '') ? Number(balance) : null;
-  const remainingUnits = selected.remainingUnits ?? (Number.isFinite(creditBalance) ? creditBalance : null);
+  const spendControl = selected.source === 'spend_control';
+  // Older WHAM spend controls omitted the unit and reported credits.
+  const unit = selected.window.unit ?? 'credits';
+  const creditBalance = amount(payload?.credits?.balance);
+  // A provider credit balance cannot fill in a missing USD spend balance.
+  const remainingUnits = selected.remainingUnits ?? (!spendControl || unit === 'credits' ? creditBalance : null);
   const limitUnits = selected.limitUnits;
+  const toDollars = (value) => {
+    if (!spendControl || !Number.isFinite(value)) return null;
+    if (unit === 'usd') return value;
+    return unit === 'credits' ? creditsToDollars(value) : null;
+  };
   return {
     label: selected.source === 'spend_control' ? 'Monthly usage' : (monthly.length ? 'Monthly quota' : 'Provider quota window'),
     usedPercent: selected.usedPercent,
     remainingPercent: selected.remainingPercent ?? Math.max(0, 100 - selected.usedPercent),
     remainingUnits,
     limitUnits,
-    remainingDollars: selected.source === 'spend_control' && Number.isFinite(remainingUnits) ? creditsToDollars(remainingUnits) : null,
-    limitDollars: selected.source === 'spend_control' && Number.isFinite(limitUnits) ? creditsToDollars(limitUnits) : null,
+    remainingDollars: toDollars(remainingUnits),
+    limitDollars: toDollars(limitUnits),
     windowSeconds: selected.seconds || null,
     resetAt,
     observedAt: new Date(observedAt).toISOString(),
