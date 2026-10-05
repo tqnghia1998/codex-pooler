@@ -301,14 +301,15 @@ test('automatically refreshes Codex quotas for all stored upstreams', async () =
     await refreshAllQuotas(store, {
       fetchImpl: async () => new Response(JSON.stringify({
         spend_control: { individual_limit: {
-          limit: '32500', remaining: '30667.5', used_percent: 6, remaining_percent: 94,
+          unit: 'usd', limit: '1300.00', remaining: '1107.0857149362564', used_percent: 15, remaining_percent: 85,
           reset_at: 1_788_220_800
         }}
       }), { status: 200 })
     });
     const quota = store.getPublic(created.id).quota;
-    assert.equal(quota.remainingPercent, 94);
-    assert.equal(quota.remainingDollars, 1226.7);
+    assert.equal(quota.remainingPercent, 85);
+    assert.equal(quota.remainingDollars, 1107.0857149362564);
+    assert.equal(quota.limitDollars, 1300);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
