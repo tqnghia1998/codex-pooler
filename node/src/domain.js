@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { OPENAI_MODEL_IDS } from './openai-pricing-snapshot.js';
+import { parseCodexCapacity, providerCreditsPolicy } from './provider-credits.js';
 
 export const DEFAULT_CODEX_BASE_URL = 'https://chatgpt.com';
 export const DEFAULT_COMPASS_BASE_URL = 'https://compass.llm.shopee.io/compass-api/v1';
@@ -501,10 +502,12 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
     email: '',
     accessTokenExpiresAt: null,
     credentialEpoch: 1,
+    nativeRecoveryEpoch: 1,
     compatibilityEpoch: 1,
     modelCatalogEpoch: 1,
     projectId: '',
     quota: null,
+    allowProviderCredits: type === 'codex' ? providerCreditsPolicy(input.allowProviderCredits) : false,
     quotaSource,
     spending: newSpending(),
     priority: null,
@@ -568,6 +571,10 @@ export function createUpstream(input, { allowLegacyClaudeApiKey = false } = {}) 
 }
 
 export function updateUpstream(upstream, input, { allowLegacyClaudeApiKey = false } = {}) {
+  if (input.allowProviderCredits !== undefined) {
+    if (upstream.type !== 'codex') throw new Error('Provider credits are only supported for Codex accounts');
+    upstream.allowProviderCredits = providerCreditsPolicy(input.allowProviderCredits);
+  }
   if (upstream.type === 'claude' && !allowLegacyClaudeApiKey) {
     const policyError = claudeOAuthInputError(input);
     if (policyError) throw new Error(policyError.message);
@@ -885,7 +892,8 @@ export function parseCodexQuota(payload, observedAt = new Date()) {
     windowSeconds: selected.seconds || null,
     resetAt,
     observedAt: new Date(observedAt).toISOString(),
-    source: 'codex_usage_api'
+    source: 'codex_usage_api',
+    capacity: parseCodexCapacity(payload, observedAt, resetTime)
   };
 }
 
@@ -1118,6 +1126,7 @@ export function publicUpstream(upstream) {
     hasCredentials: Object.values(upstream.credentials || {}).some(Boolean),
     metadata: upstream.metadata && typeof upstream.metadata === 'object' ? upstream.metadata : null,
     quota: upstream.quota,
+    allowProviderCredits: upstream.allowProviderCredits === true,
     advisoryQuota: upstream.advisoryQuota && typeof upstream.advisoryQuota === 'object' ? upstream.advisoryQuota : null,
     quotaSource: isAisUpstream(upstream) ? 'ais' : upstream.quotaSource || null,
     pacing: upstream.pacing,

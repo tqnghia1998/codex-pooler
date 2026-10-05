@@ -7,9 +7,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
+import { Readable } from 'node:stream';
+import { readRequestBody } from '../src/http-ingress.js';
 
 const API_KEY = 'ingress-key';
 const ZSTD_BODY = Buffer.from('KLUv/SAmMQEAeyJtb2RlbCI6ImdwdC01LjYtc29sIiwiaW5wdXQiOiJ6c3RkIn0=', 'base64');
+
+test('accepts a long native history above the former 64 MiB budget and retains explicit limits', async () => {
+  const chunk = Buffer.alloc(1024 * 1024, 'x');
+  const request = () => Object.assign(Readable.from(Array(65).fill(chunk)), { headers: { 'content-type': 'application/json' } });
+  assert.equal((await readRequestBody(request())).length, 65 * 1024 * 1024);
+  await assert.rejects(readRequestBody(request(), { maxDecompressedBodyBytes: 64 * 1024 * 1024 }), { code: 'decompressed_request_too_large' });
+});
 
 function configuredStore(dir) {
   const store = new Store(dir);
@@ -131,7 +140,7 @@ test('rejects an oversized Zstd window before invoking the decoder', async () =>
   let calls = 0;
   const { server, base } = await runningServer(configuredStore(dir), async () => { calls += 1; return new Response('{}'); });
   try {
-    const oversizedWindow = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x88]); // 128 MiB window, no payload.
+    const oversizedWindow = Buffer.from([0x28, 0xb5, 0x2f, 0xfd, 0x00, 0xa0]); // 1 GiB window, no payload.
     for (const bytes of [oversizedWindow, Buffer.concat([ZSTD_BODY, oversizedWindow])]) {
       const result = await compressedRequest(base, 'zstd', bytes);
       assert.equal(result.response.status, 413);
