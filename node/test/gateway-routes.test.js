@@ -2738,3 +2738,152 @@ test('counts a native WebSocket handshake failure once when a turn is already qu
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+
+test('projects only unpoisoned V2 compaction quota terminals and cools the account', async (t) => {
+  const event = { type: 'response.failed', response: { error: { code: 'insufficient_quota', message: 'private provider detail' } } };
+  const terminal = `event: response.failed\ndata: ${JSON.stringify(event)}\n\n`;
+  for (const path of ['/backend-api/codex/responses', '/backend-api/codex/responses/compact', '/backend-api/codex/v1/responses/compact']) {
+  for (const [suffix, expected] of [['', 429], ['data: malformed', 502], ['malformed', 502], ['data: {}\n\n', 502], ['data: [DONE]\n\n', 502]]) {
+    await t.test(`${path} suffix ${JSON.stringify(suffix)}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'codex-compact-quota-'));
+      const { store, codexUpstream } = configuredStore(dir);
+      const { server, base } = await start(store, async () => new Response(terminal + suffix, { headers: { 'content-type': 'text/event-stream' } }));
+      try {
+        const response = await gatewayFetch(base, path, {
+          method: 'POST', headers: { 'content-type': 'application/json', 'x-codex-turn-metadata': JSON.stringify({ compaction: { implementation: 'responses_compaction_v2' } }) },
+          body: JSON.stringify({ model: 'gpt-5.6-sol', input: [{ role: 'user', content: 'visible' }, ...(path.endsWith('/compact') ? [] : [{ type: 'compaction_trigger' }])], stream: true })
+        });
+        assert.equal(response.status, expected);
+        const body = await response.json();
+        assert.equal(body.error.code, expected === 429 ? 'insufficient_quota' : 'invalid_compaction_response');
+        assert.doesNotMatch(JSON.stringify(body), /private provider/);
+        assert.equal(store.get(codexUpstream.id).health?.status === 'cooldown', expected === 429);
+      } finally { await close(server); store.sqlite.close(); rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+  }
+});
+
+test('recovers native HTTP mailbox history from durable delivery proof and fences completed duplicates', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-native-recovery-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const item = { type: 'reasoning', id: 'rs_mailbox', summary: [], encrypted_content: 'private encrypted output' };
+  const mail = { type: 'agent_message', author: '/root/worker', recipient: '/root', content: [{ type: 'input_text', text: 'new mail' }] };
+  const payload = { model: 'gpt-5.6-sol', stream: true, input: [{ type: 'message', role: 'user', content: 'original' }], client_metadata: { 'x-codex-turn-metadata': { turn_id: 'turn-mail', request_kind: 'turn', agent_name: '/root' } } };
+  let calls = 0;
+  const { server, base } = await start(store, async (url) => {
+    if (new URL(url).pathname.endsWith('/models')) return new Response('{}');
+    calls++;
+    return new Response(calls === 1
+      ? `data: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\n`
+      : `data: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' } })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const post = (body) => gatewayFetch(base, '/backend-api/codex/responses', { method: 'POST', headers: { 'content-type': 'application/json', 'thread-id': 'thread-mail' }, body: JSON.stringify(body) });
+  try {
+    assert.match(await (await post(payload)).text(), /private encrypted output/);
+    store.load().sessions = {};
+    store.saveChanges(store.load(), { collections: ['sessions'] });
+    store.clearUpstreamCooldown(codexUpstream.id);
+    const changed = await post({ ...payload, instructions: 'changed', input: [...payload.input, item, mail] });
+    assert.equal(changed.status, 409);
+    assert.equal(calls, 1);
+    const grown = { ...payload, input: [...payload.input, item, mail] };
+    const accepted = await post(grown);
+    assert.equal(accepted.status, 200);
+    assert.match(await accepted.text(), /response.completed/);
+    const duplicate = await post(grown);
+    assert.equal(duplicate.status, 409);
+    assert.equal(calls, 2);
+    assert.equal(store.get(codexUpstream.id).spending.spentCostMicros, 0);
+  } finally { await close(server); store.sqlite.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('fences a native HTTP turn while its first upstream dispatch is still live', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-native-live-'));
+  const { store } = configuredStore(dir);
+  let release, started;
+  const sending = new Promise((resolve) => { started = resolve; });
+  const waiting = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const { server, base } = await start(store, async () => {
+    calls++; started(); await waiting;
+    return new Response('data: {"type":"response.completed","response":{"status":"completed"}}\n\n', { headers: { 'content-type': 'text/event-stream' } });
+  });
+  const post = () => gatewayFetch(base, '/backend-api/codex/responses', { method: 'POST', headers: { 'content-type': 'application/json', 'thread-id': 'live-thread' }, body: JSON.stringify({ model: 'gpt-5.6-sol', stream: true, input: [], client_metadata: { 'x-codex-turn-metadata': { turn_id: 'live-turn' } } }) });
+  try {
+    const first = post(); await sending;
+    const second = await post(); assert.equal(second.status, 409);
+    assert.equal(calls, 1);
+    release(); await (await first).text();
+  } finally { release(); await close(server); store.sqlite.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('recovers native WebSocket mail after reconnect and retains the original account across priority changes', { timeout: 5000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-native-ws-mail-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const other = store.create(codex({ email: 'other@example.com', accountId: 'acct-other' }));
+  store.setCap(other.id, { capDollars: 100 });
+  store.setPriorityList([codexUpstream.id, other.id]);
+  const item = { type: 'reasoning', id: 'rs_ws_mail', summary: [], encrypted_content: 'encrypted' };
+  const payload = { type: 'response.create', model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: 'original' }], client_metadata: { 'x-codex-turn-metadata': { turn_id: 'ws-turn', agent_name: '/root' } } };
+  const mail = { type: 'agent_message', author: '/root/worker', recipient: '/root', content: [{ type: 'input_text', text: 'new mail' }] };
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  let frames = 0;
+  const accounts = [];
+  target.on('connection', (socket, req) => socket.once('message', () => {
+    frames++; accounts.push(req.headers['chatgpt-account-id']);
+    if (frames === 1) socket.send(JSON.stringify({ type: 'response.output_item.done', item }), () => socket.close(1000, 'cut'));
+    else socket.send(JSON.stringify({ type: 'response.completed', response: { status: 'completed' } }));
+  }));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl: async () => new Response('{}') }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl: async () => new Response('{}'), websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const clients = new Set();
+  const turn = (body, expected) => new Promise((resolve, reject) => {
+    const client = new WebSocket(`ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`, { headers: { authorization: `Bearer ${API_KEY}`, 'thread-id': 'ws-thread' } });
+    clients.add(client);
+    let observed;
+    client.once('open', () => client.send(JSON.stringify(body)));
+    client.on('message', (data) => { const event = JSON.parse(data); if (event.type === expected) { observed = event; if (expected !== 'response.output_item.done') client.close(); } });
+    client.once('error', reject);
+    client.once('close', () => observed ? resolve(observed) : reject(new Error('Expected terminal or output event')));
+  });
+  try {
+    await turn(payload, 'response.output_item.done');
+    store.setPriorityList([other.id, codexUpstream.id]);
+    const next = { ...payload, input: [...payload.input, item, mail] };
+    await turn(next, 'response.completed');
+    const error = await turn(next, 'error');
+    assert.equal(error.code, 'duplicate_turn');
+    assert.equal(frames, 2);
+    assert.deepEqual(accounts, ['acct-routes', 'acct-routes']);
+  } finally {
+    for (const client of clients) client.terminate();
+    for (const socket of relay.clients) socket.terminate();
+    relay.close(); for (const socket of target.clients) socket.terminate();
+    await close(gateway); await new Promise((resolve) => target.close(resolve));
+    store.sqlite.close(); rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('preserves verified native JSON tool-result rounds under the duplicate fence', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-native-json-tools-'));
+  const { store } = configuredStore(dir);
+  const call = { type: 'function_call', id: 'fc_json', call_id: 'call_json', name: 'lookup', arguments: '{}' };
+  let calls = 0;
+  const { server, base } = await start(store, async () => {
+    calls++;
+    return new Response(JSON.stringify({ id: `resp_${calls}`, status: 'completed', output: calls === 1 ? [call] : [] }), { headers: { 'content-type': 'application/json' } });
+  });
+  const payload = { model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: 'lookup' }], client_metadata: { 'x-codex-turn-metadata': { turn_id: 'json-tool-turn' } } };
+  const post = (body) => gatewayFetch(base, '/backend-api/codex/responses', { method: 'POST', headers: { 'content-type': 'application/json', 'thread-id': 'json-thread' }, body: JSON.stringify(body) });
+  try {
+    assert.equal((await (await post(payload)).json()).output[0].call_id, 'call_json');
+    const next = { ...payload, input: [...payload.input, call, { type: 'function_call_output', call_id: 'call_json', output: 'result' }] };
+    const continued = await post(next); assert.equal(continued.status, 200); await continued.json();
+    assert.equal((await post(next)).status, 409);
+    assert.equal(calls, 2);
+  } finally { await close(server); store.sqlite.close(); rmSync(dir, { recursive: true, force: true }); }
+});
