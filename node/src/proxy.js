@@ -21,6 +21,7 @@ import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-comp
 import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
 import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, nativeMisalignmentError, publicMisalignmentError } from './policy-failures.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
+import { beginNativeTurn, bindNativeTurnUpstream, finishNativeTurn, nativeTurnIdentity, nativeRecoveryUpstream, nativeWriteStarted, nativeEventWritten } from './native-turn-recovery.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 import {
   isShareCredential,
@@ -134,6 +135,15 @@ const POLICY_ROUTES = new Set([
 ]);
 
 export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null, codexOptions = codexGatewayOptions() }) {
+  try {
+    return await proxyRequestWithRecovery({ req, res, path, payload, store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth, claudeConfig, codexOptions });
+  } finally {
+    finishNativeTurn(req.nativeTurnLease);
+    delete req.nativeTurnLease;
+  }
+}
+
+async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth, claudeConfig, codexOptions }) {
   if (!validApiKey(req, apiKey)) {
     sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
     return;
@@ -156,9 +166,9 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     return;
   }
   const sourcePath = compactionBridge ? '/v1/responses/compact' : normalizeProxyPath(path);
-  const v2Compaction = compactionBridge && v2CompactionRequest(req);
+  const v2Compaction = (compactionBridge || sourcePath === '/v1/responses/compact') && v2CompactionRequest(req);
   let dispatchPayload = v2Compaction
-    ? { ...compactionBridge.payload, stream: true }
+    ? { ...(compactionBridge?.payload || payload), stream: true }
     : compactionBridge?.payload || payload;
   if (CLAUDE_MESSAGES_PATHS.has(sourcePath) && typeof dispatchPayload?.model === 'string') {
     const resolvedModel = resolveClaudeModelListId(dispatchPayload.model);
@@ -191,6 +201,9 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   const routingPlan = chooseUpstreamPlan(store, req, sourcePath, dispatchPayload, path, modelCatalog);
   let candidates = routingPlan.candidates;
+  const nativeIdentity = isBackendResponsesRoute(path) && !compactionBridge ? nativeTurnIdentity(store, req, payload) : null;
+  const recoveryUpstream = nativeRecoveryUpstream(store, nativeIdentity);
+  if (recoveryUpstream) candidates = candidates.filter((candidate) => candidate.id === recoveryUpstream);
   const codexCatalogDenied = ['/v1/responses', '/v1/chat/completions'].includes(path)
     && STATIC_MODEL_CATALOG.some((entry) => entry.id === model && entry.owned_by === 'codex')
     && !header(req, 'x-upstream-type') && !header(req, 'x-upstream-id')
@@ -236,12 +249,15 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     }
     return sendRoutingError(res, store, req, 'No compatible backend is available', 'no_compatible_backend');
   }
+  if (nativeIdentity) req.nativeTurnLease = beginNativeTurn(store, nativeIdentity, payload, store.get(candidates[0].id));
+  if (req.nativeTurnLease) await store.flushDurability();
   const dispatched = await dispatchCandidates({ store, candidates, sourcePath, payload: dispatchPayload, req, res, path, codexPayload, fetchImpl, lifecycle, upstreamDeadlines, logger, modelCatalog, codexHostHealth, claudeConfig, codexOptions });
   if (!dispatched) {
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
   const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState, codexMultiAgentOptimized } = dispatched;
+  if (response.ok) bindNativeTurnUpstream(req.nativeTurnLease, store.get(upstream.id));
   if (pacingError) {
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
     const failure = pacingUnavailable(pacingError);
@@ -264,6 +280,7 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   const modelsEtag = isBackendResponsesRoute(path) ? modelCatalog.snapshot(authScopeId).etag : null;
 
   if (!response.ok) {
+    finishNativeTurn(req.nativeTurnLease, 'failed');
     const errorBytes = await readBoundedResponse(response);
     const policyError = policyErrorForRoute(errorBytes, path, sourcePath);
     const outcome = classifyHttpResponse(response, parseJson(errorBytes), {
@@ -291,10 +308,17 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
     else sendFailure(res, retryAfterHeader(response));
     return;
   }
-  if (compactionBridge) {
+  if (compactionBridge || v2Compaction && isEventStream(response)) {
     const compactResult = v2Compaction && isEventStream(response)
       ? await collectV2CompactionResponse(response, upstreamDeadlines)
       : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines));
+    if (compactResult?.quotaFailure) {
+      if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: false, errorCode: 'insufficient_quota' });
+      releaseShareRequest(req, attemptId, 'insufficient_quota');
+      finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'insufficient_quota', responseStatusCode: 429 });
+      sendJson(res, 429, { error: { type: 'insufficient_quota', code: 'insufficient_quota', message: 'Upstream rejected the compact request', param: null } });
+      return;
+    }
     const compact = compactionBridgeResult(compactResult, path === '/v1/responses');
     if (!compact) {
       if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'transient', retryable: true });
@@ -340,7 +364,8 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
       claudeToolAliases: dispatchedToolAliases,
       claudeModelAlias: dispatchedModelAlias,
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId, req) : null,
-      logger
+      logger,
+      nativeTurnLease: req.nativeTurnLease
     });
     return;
   }
@@ -386,7 +411,27 @@ export async function proxyRequest({ req, res, path, payload, store, apiKey = pr
   }
   if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
   settleUsage(store, upstream, attemptId, startedAt, terminalBody, payload, accounting, lifecycle, response.status);
-  writeResponse(res, response, output, responseOptions);
+  const nativeLease = req.nativeTurnLease;
+  if (nativeLease) {
+    nativeWriteStarted(nativeLease);
+    await new Promise((resolve, reject) => {
+      const cleanup = () => { res.off('close', closed); res.off('finish', delivered); };
+      const closed = () => { cleanup(); reject(new Error('Downstream closed during response')); };
+      const delivered = () => {
+        cleanup();
+        nativeEventWritten(nativeLease, { type: 'response.created' });
+        for (const item of Array.isArray(terminalBody?.output) ? terminalBody.output : []) {
+          nativeWriteStarted(nativeLease);
+          nativeEventWritten(nativeLease, { type: 'response.output_item.done', item });
+        }
+        finishNativeTurn(nativeLease, 'succeeded');
+        resolve();
+      };
+      res.once('close', closed);
+      res.once('finish', delivered);
+      writeResponse(res, response, output, responseOptions);
+    });
+  } else writeResponse(res, response, output, responseOptions);
 }
 
 export async function testUpstreamConnection({
@@ -641,13 +686,24 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
   let parser = createSseParserState();
   let item = null;
   let terminal = null;
+  let quotaFailure = false;
   let invalid = false;
   const collect = (block) => {
     const { kind, event } = decodeSseBlock(block);
-    if (kind !== 'event') return;
-    if (terminal) { invalid = true; return; }
+    if (!hasSseData(block)) {
+      if (block.split(/\r?\n/).some((line) => line.trim() && !line.startsWith(':'))) invalid = true;
+      return;
+    }
+    if (kind !== 'event') { invalid = true; return; }
+    const data = block.split(/\r?\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
+    const rawEvent = parseJson(Buffer.from(data));
+    if (!plainObject(rawEvent) || typeof rawEvent.type !== 'string') { invalid = true; return; }
+    if (terminal || quotaFailure) { invalid = true; return; }
+    const namedEvent = block.split(/\r?\n/).find((line) => line.startsWith('event:'))?.slice(6).trim();
+    if (namedEvent && namedEvent !== event.type) { invalid = true; return; }
     if (event.type === 'response.output_item.done' && plainObject(event.item) && ['compaction', 'compaction_summary'].includes(event.item.type) && !item) item = event.item;
     if (event.type === 'response.completed' && plainObject(event.response)) terminal = event.response;
+    else if (['response.failed', 'error'].includes(event.type) && (event.response?.error?.code || event.error?.code || event.code) === 'insufficient_quota') quotaFailure = true;
     else if (['response.failed', 'response.incomplete', 'error'].includes(event.type)) invalid = true;
   };
   try {
@@ -666,7 +722,9 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
   } finally {
     reader.releaseLock();
   }
-  if (invalid || !terminal) return null;
+  if (invalid) return null;
+  if (quotaFailure) return { quotaFailure: true };
+  if (!terminal) return null;
   return { ...terminal, output: item ? [item] : terminal.output };
 }
 
@@ -1075,6 +1133,13 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         }
       }
     } catch (error) {
+      if (error?.codexCapacityChanged) {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        releaseShareRequest(req, attemptId, 'quota_exhausted');
+        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'quota_exhausted', responseStatusCode: 503 });
+        terminalFailure = { upstream, attemptId: null, startedAt, response: new Response(null, { status: 503 }), admission: null, failureCode: 'quota_exhausted' };
+        continue;
+      }
       if (error instanceof HttpError) {
         store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
         releaseShareRequest(req, attemptId, error.code || 'invalid_request');
@@ -1482,6 +1547,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
       diagnostics?.queueWaited(pacing.attemptId, pacingResult.waitedMs);
     }
     diagnostics?.connectionStarted(pacing.attemptId);
+    if (request.upstreamType === 'codex' && pacing?.store) pacing.store.assertCodexCapacity(pacing.upstreamId, pacing.model);
     const wireHeaders = request.upstreamType === 'claude'
       ? claudeWireHeaders(request.headers)
       : request.headers;
@@ -1510,6 +1576,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
     diagnostics?.responseHeaders(pacing.attemptId);
     return response;
   } catch (error) {
+    if (error?.codexCapacityChanged) throw error;
     if (error instanceof PacingError) throw error;
     if (error?.codexHostCircuitOpen) throw error;
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
@@ -2015,7 +2082,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null, nativeTurnLease = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -2040,6 +2107,17 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   // Synthetic terminals continue the stream's own sequence so a client never sees it restart.
   const nextPublicSequence = () => publicState ? (publicState.sequence = Math.min(Number.MAX_SAFE_INTEGER, publicState.sequence + 1)) : 0;
   const chatState = transformChat ? createChatStreamState(payload) : null;
+  const writeNative = async (block, parsed) => {
+    if (!nativeTurnLease) return writeChunk(res, block);
+    nativeWriteStarted(nativeTurnLease);
+    await new Promise((resolve, reject) => {
+      const onClose = () => { cleanup(); reject(new Error('Downstream closed during write')); };
+      const cleanup = () => res.off('close', onClose);
+      res.once('close', onClose);
+      if (res.destroyed) return onClose();
+      res.write(block, (error) => { cleanup(); if (error) reject(error); else { nativeEventWritten(nativeTurnLease, parsed); resolve(); } });
+    });
+  };
   res.once('close', () => {
     if (!res.writableEnded) downstreamClosed = true;
     void reader.cancel('Downstream closed').catch(() => {});
@@ -2064,7 +2142,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         if (transformChat) await writeChunk(res, chatStreamFailure());
         else await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       } else {
-        await writeChunk(res, `${event}\n\n`);
+        await writeNative(`${event}\n\n`, null);
       }
       return;
     }
@@ -2121,7 +2199,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else {
         const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-        await writeChunk(res, claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`);
+        await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`, nativeEvent);
       }
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
@@ -2132,7 +2210,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     }
     if (parsed) visible = true;
     const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-    await writeChunk(res, claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`);
+    await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`, nativeEvent);
     if (successfulTerminal) void reader.cancel('Upstream terminal event').catch(() => {});
   };
   try {
@@ -2165,6 +2243,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
     }
   } finally {
+    finishNativeTurn(nativeTurnLease, completed ? 'succeeded' : 'interrupted');
     reader.releaseLock();
     if (!res.writableEnded && !res.destroyed) res.end();
     if (upstream.type === 'claude' && completed) commitClaudeDiagnostics(claudeDiagnosticsState, claudeMessageId);
@@ -2180,7 +2259,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
           downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
         );
         if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
-        else if (response.ok && usage && !failedIncompleteTerminal) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+        else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
       }
     }
     if (admission) {
@@ -3019,6 +3098,26 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     const task = async () => {
       if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
       const model = framePacingModel(frame);
+      if (!publicResponses && frame.nativePayload) {
+        let recoveryId;
+        try { recoveryId = nativeRecoveryUpstream(store, nativeTurnIdentity(store, req, frame.nativePayload)); } catch (error) {
+          client.send(JSON.stringify({ type: 'error', code: error.code, message: error.message }));
+          return;
+        }
+        if (recoveryId && recoveryId !== candidate.id) {
+          const eligible = chooseUpstreams(store, req, '/backend-api/codex/responses', frame.nativePayload, '/backend-api/codex/responses', modelCatalog).find((entry) => entry.id === recoveryId);
+          if (!eligible) return closeBoth(1013, 'The original Codex upstream is unavailable');
+          settleNativeAdmission({ class: 'neutral', retryable: false });
+          retireUpstreamSocket(socket);
+          upstream = store.get(recoveryId);
+          credentials = store.credentials(recoveryId);
+          await ensureProviderCredentials(upstream, credentials, { fetchImpl, saveCredentials: (updated, expiresAt) => store.persistCredentials(recoveryId, updated, expiresAt) });
+          pending.push(frame);
+          pendingBytes += frame.data.byteLength;
+          await connect(false, upstream, credentials);
+          return;
+        }
+      }
       if (model && !disablePacing) {
         const pacingResult = await upstreamPacerForStore(store).acquire(candidate.id, {
           model,
@@ -3027,16 +3126,37 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         gatewayDiagnosticsForStore(store).queueWaited(attemptId, pacingResult.waitedMs);
       }
       if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
+      try { store.assertCodexCapacity(candidate.id, model); } catch {
+        if (publicResponses) failActiveTurn('quota_exhausted', 'No eligible Codex capacity is available', { class: 'neutral', retryable: false });
+        else closeBoth(1013, 'No eligible Codex capacity is available');
+        return;
+      }
       if (socket.bufferedAmount + frame.data.byteLength > codexOptions.websocketBackpressureBytes) {
         closeBoth(1009, 'Websocket backpressure limit exceeded');
         return;
       }
+      if (!publicResponses && frame.nativePayload) {
+        try {
+          const identity = nativeTurnIdentity(store, req, frame.nativePayload);
+          if (identity && nativeTurnLease && !nativeTurnLease.finished) throw new HttpError(409, 'duplicate_turn', 'An earlier native turn is still active');
+          if (identity) nativeTurnLease = beginNativeTurn(store, identity, frame.nativePayload, store.get(candidate.id));
+        } catch (error) {
+          client.send(JSON.stringify({ type: 'error', code: error.code || 'invalid_request', message: error.message, error: { type: 'invalid_request_error', code: error.code || 'invalid_request', message: error.message } }));
+          return;
+        }
+      }
+      if (nativeTurnLease) await store.flushDurability();
       socket.send(frame.data, { binary: frame.isBinary });
     };
     sendChain = sendChain.then(task, task);
     return sendChain;
   };
   const handleFramePacingFailure = (error) => {
+    if (!(error instanceof PacingError)) {
+      if (!publicResponses) closeBoth(1011, 'Native upstream dispatch failed');
+      else failActiveTurn('upstream_dispatch_failed', 'Upstream dispatch failed');
+      return;
+    }
     if (!(error instanceof PacingError) || error.code === 'aborted') return;
     const removed = error.code === 'account_removed';
     if (publicResponses && publicTurnActive) {
@@ -3156,7 +3276,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       if (client.readyState === WebSocket.OPEN) client.emit('message', next, false);
     });
   };
+  let nativeTurnLease = null;
   const closeBoth = (code = 1000, reason = '') => {
+    finishNativeTurn(nativeTurnLease);
     if (client.readyState === WebSocket.OPEN) client.close(code, reason);
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(code, reason);
   };
@@ -3295,10 +3417,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       if (!admission) return client.close(1013, 'No eligible Codex upstream is available');
       nativeAdmission = { upstreamId: upstream.id, admission };
     }
+    let nativePayloadForRecovery = null;
     if (!publicResponses && !isBinary) {
       try {
         const nativeFrame = JSON.parse(data.toString());
         if (nativeFrame?.type === 'response.create') {
+          nativePayloadForRecovery = nativeFrame;
           const prepared = prepareCodexMultiAgentRequest(nativeFrame, req, codexOptions);
           const sanitized = sanitizeCodexInputItemIds(prepared.payload);
           nativeMultiAgentOptimized = prepared.optimized;
@@ -3307,15 +3431,16 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       } catch {}
     }
     if (targetSocket?.readyState === WebSocket.OPEN) {
-      const frame = { data, isBinary };
+      const frame = { data, isBinary, nativePayload: nativePayloadForRecovery };
       void sendFrame(targetSocket, frame, upstream).catch(handleFramePacingFailure);
     } else {
       pendingBytes += data.byteLength;
       if (pendingBytes > codexOptions.websocketPendingBytes) client.close(1009, 'Pending websocket data exceeded limit');
-      else pending.push({ data, isBinary });
+      else pending.push({ data, isBinary, nativePayload: nativePayloadForRecovery });
     }
   });
   client.on('close', () => {
+    finishNativeTurn(nativeTurnLease);
     pacingAbort.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     if (targetSocket) socketPacingAborts.get(targetSocket)?.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     clearIdle();
@@ -3730,7 +3855,14 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       const sanitized = sanitizeNativeResponseControlFrame(nativeResponseData, isBinary);
       if (client.bufferedAmount + sanitized.byteLength > codexOptions.websocketBackpressureBytes) closeBoth(1009, 'Websocket backpressure limit exceeded');
-      else client.send(sanitized, { binary: isBinary });
+      else {
+        const lease = nativeTurnLease;
+        nativeWriteStarted(lease);
+        client.send(sanitized, { binary: isBinary }, (error) => {
+          if (error) finishNativeTurn(lease);
+          else nativeEventWritten(lease, nativeFrame);
+        });
+      }
     });
     socket.on('unexpected-response', async (_request, response) => {
       settleHostResponse();
@@ -3822,7 +3954,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       settleNativeConnectionAdmission(outcome);
       settleNativeAdmission(outcome);
-      client.close(code, reason);
+      finishNativeTurn(nativeTurnLease);
+      client.close(code === 1005 || code === 1006 ? 1011 : code, reason);
     });
     socket.on('error', (error) => {
       if (socket !== targetSocket || refreshingConnection) return;
