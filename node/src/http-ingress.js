@@ -2,8 +2,8 @@ import { createGunzip, createInflate } from 'node:zlib';
 import { Decompress as ZstdDecompress } from 'fzstd';
 
 export const DEFAULT_INGRESS_LIMITS = Object.freeze({
-  maxCompressedBodyBytes: 32 * 1024 * 1024,
-  maxDecompressedBodyBytes: 64 * 1024 * 1024,
+  maxCompressedBodyBytes: 128 * 1024 * 1024,
+  maxDecompressedBodyBytes: 256 * 1024 * 1024,
   maxDecompressionRatio: 200,
   decompressionTimeoutMs: 10_000
 });
