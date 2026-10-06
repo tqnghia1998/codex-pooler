@@ -261,17 +261,21 @@ POST   /backend-api/codex/images/edits
 
 The dashboard's bulk-cap dialog starts with the original quota presets: quota left above $1,000/$500/$200/$100/$50/$0 maps to caps of $100/$50/$20/$10/$5/$0. Rules are editable, and one-cap targets remain available.
 
-`GET /v1/models`, `GET /backend-api/codex/models`, and `GET /backend-api/codex/v1/models` aggregate the static catalog with model metadata discovered from every currently usable Codex account. Discovery uses the configured Codex protocol fingerprint and normal credential-refresh path, caches each account for five minutes, coalesces concurrent requests, suppresses repeated failures for 30 seconds, and retains the last-known-good catalog when refresh fails. Cold start, no-account, and all-account discovery failures continue serving the static catalog. Native routes preserve bounded, sanitized upstream metadata; `/v1/models` returns stable OpenAI-shaped rows.
+`GET /v1/models`, `GET /backend-api/codex/models`, and `GET /backend-api/codex/v1/models` attempt live model discovery from every currently usable Codex account before returning their catalog, even when the cached catalog is fresh. Discovery uses the configured Codex protocol fingerprint and normal credential-refresh path, coalesces concurrent requests, suppresses repeated failures for 30 seconds, and retains the last-known-good catalog when refresh fails. Internal capability lookups reuse discovered metadata for five minutes. No-account and discovery failures without a last-known-good catalog use the static catalog. Missing or invalid live token limits use the corresponding static defaults; valid live limits always take precedence. Native routes preserve bounded, sanitized upstream metadata; `/v1/models` returns stable OpenAI-shaped rows. Relaydeck never reads the Codex client's `~/.codex/models_cache.json`.
 
 The static catalog includes context windows for every listed model and documented output limits where available. Public `/v1/models` rows expose these limits; live Codex metadata takes precedence over the static fallback. Claude model listings use the same published limits, while a credential's explicit `max-context-length` takes precedence. The static values were reviewed on September 28, 2026 against the [OpenAI model pages](https://developers.openai.com/api/docs/models), [Claude models overview](https://platform.claude.com/docs/en/models/overview), [Claude Opus 5 page](https://platform.claude.com/docs/en/models/opus-5/overview), [GLM 5.3 Flash page](https://docs.z.ai/guides/vlm/glm-5.3-flash), and [Kimi model list](https://platform.kimi.ai/docs/models).
 
-Native Responses WebSocket handshakes use a cached, scope-filtered model catalog
-immediately, refreshing stale entries in the background. Cold handshakes wait at
-most 250 ms for discovery before using the available static/partial snapshot;
+Native Responses WebSocket handshakes attempt live discovery and wait at
+most 250 ms before using the available cached/static/partial snapshot;
 discovery continues through the shared cache with at most three concurrent
 accounts per discovery pass. Share credentials restrict both discovery and the
 handshake ETag to their authorized accounts. Credential replacement and account
 removal invalidate cached account metadata as before.
+
+When accounts advertise different metadata for the same model, fresh successful
+discovery takes precedence over expired or failed-refresh caches. Token limits
+are selected independently from the highest-ranked account that provides each
+valid limit, using static defaults only when no discovered account provides it.
 
 Discovered capability is account-specific. Once an account has an authoritative catalog, a model absent from that catalog is not routed to that account; accounts without authoritative discovery remain eligible. Scope model policy, per-upstream model restrictions, spending caps, explicit pins, continuation affinity, and circuit state remain authoritative. Provider `model_not_found` failures create an immediate bounded negative capability and force that account's catalog to refresh on the next discovery attempt. Public image compatibility uses the selected account's catalog, prefers an explicitly image-capable host model, and skips the account when its metadata authoritatively rules image input out. `GET /api/model-catalog` exposes only sanitized source, freshness, model count, timestamps, and failure class.
 
