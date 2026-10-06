@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createApp } from '../src/server.js';
-import { attachWebSocketProxy } from '../src/proxy.js';
+import { attachWebSocketProxy, proxyModelsRequest } from '../src/proxy.js';
 import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
 import { modelCatalogForStore } from '../src/codex-model-catalog.js';
@@ -57,7 +57,7 @@ async function close(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test('discovers and caches Codex models while preserving the static fallback', async () => {
+test('refreshes live Codex models on each listing while preserving the static fallback', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-models-'));
   const { store } = configuredStore(dir, { compass: true });
   let calls = 0;
@@ -70,7 +70,7 @@ test('discovers and caches Codex models while preserving the static fallback', a
     return new Response(JSON.stringify({
       models: [
         { slug: 'gpt-new-live', input_modalities: ['text'], token: 'must-not-leak' },
-        { slug: 'gpt-6-sol', context_window: 500_000, max_output_tokens: 64_000 }
+        { slug: 'gpt-6-sol', context_window: calls === 1 ? 500_000 : 272_000, max_output_tokens: 64_000 }
       ]
     }), { status: 200 });
   });
@@ -100,10 +100,85 @@ test('discovers and caches Codex models while preserving the static fallback', a
     assert.match(backend.headers.get('etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
     const backendBody = await backend.json();
     assert.equal(backendBody.models.find(({ id }) => id === 'gpt-new-live').token, undefined);
-    assert.equal(calls, 1);
+    assert.equal(backendBody.models.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    const alias = await gatewayFetch(base, '/backend-api/codex/v1/models');
+    assert.equal((await alias.json()).models.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(calls, 3);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('model listings retain discovered context on refresh failure before using static fallback', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-model-fallback-'));
+  const { store } = configuredStore(dir);
+  let calls = 0;
+  const { server, base } = await start(store, async () => {
+    calls += 1;
+    if (calls > 1) return new Response('{}', { status: 503 });
+    return new Response(JSON.stringify({ models: [{ slug: 'gpt-6-sol', context_window: 272_000 }] }));
+  });
+  try {
+    const live = await gatewayFetch(base, '/v1/models');
+    assert.equal((await live.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    const cached = await gatewayFetch(base, '/v1/models');
+    assert.equal((await cached.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(calls, 2);
+    const backoff = await gatewayFetch(base, '/v1/models');
+    assert.equal((await backoff.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(calls, 2);
+    modelCatalogForStore(store).invalidate();
+    const fallback = await gatewayFetch(base, '/v1/models');
+    assert.equal((await fallback.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 1_050_000);
+    assert.equal(calls, 3);
+  } finally {
+    await close(server);
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('share and personal-share model listings refresh only authorized accounts', async () => {
+  for (const kind of ['share_session', 'personal_share']) {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-share-model-refresh-'));
+    const { store, codexUpstream } = configuredStore(dir);
+    const other = store.create(codex({ email: 'other-model@example.com', accountId: 'acct-other' }));
+    store.setCap(other.id, { capDollars: 100 });
+    let calls = 0;
+    const fetchImpl = async (_url, options) => {
+      calls += 1;
+      assert.equal(options.headers['chatgpt-account-id'], 'acct-routes');
+      return new Response(JSON.stringify({ models: [
+        { slug: 'gpt-6-sol', context_window: calls === 1 ? 400_000 : 272_000 }
+      ] }));
+    };
+    const server = createServer((req, res) => {
+      req.proxyAuth = {
+        kind,
+        scopeId: 'default',
+        upstreamId: codexUpstream.id,
+        personalShareSessions: [{ upstreamId: codexUpstream.id }]
+      };
+      void proxyModelsRequest({ req, res, path: '/v1/models', store, fetchImpl });
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      for (const expected of [400_000, 272_000]) {
+        const response = await gatewayFetch(base, '/v1/models');
+        assert.equal(response.status, 200);
+        const models = (await response.json()).data;
+        assert.equal(models.find(({ id }) => id === 'gpt-6-sol').context_window, expected);
+        assert.equal(models.some(({ id }) => id.startsWith('claude-')), false);
+      }
+      assert.equal(calls, 2);
+      assert.equal(modelCatalogForStore(store).entries.has(other.id), false);
+    } finally {
+      await close(server);
+      store.sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
