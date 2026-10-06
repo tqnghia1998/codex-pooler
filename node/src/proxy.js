@@ -2710,16 +2710,17 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
     return;
   }
   const modelCatalog = modelCatalogForStore(store);
+  const discoveryOptions = { fetchImpl, upstreamDeadlines, codexHostHealth, refresh: true };
   let catalog;
   if (req.proxyAuth?.kind === 'share_session') {
-    await modelCatalog.discoverAccount(req.proxyAuth.upstreamId, { fetchImpl, upstreamDeadlines, codexHostHealth });
+    await modelCatalog.discoverAccount(req.proxyAuth.upstreamId, discoveryOptions);
     catalog = modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, requestScopeId(req));
   } else if (req.proxyAuth?.kind === 'personal_share') {
     const sessions = personalShareSessions(req);
-    await Promise.all(sessions.map(({ upstreamId }) => modelCatalog.discoverAccount(upstreamId, { fetchImpl, upstreamDeadlines, codexHostHealth })));
+    await Promise.all(sessions.map(({ upstreamId }) => modelCatalog.discoverAccount(upstreamId, discoveryOptions)));
     catalog = modelCatalog.scopedAccountsCatalog(sessions.map(({ upstreamId }) => upstreamId), requestScopeId(req));
   } else {
-    catalog = await modelCatalog.resolve(requestScopeId(req), { fetchImpl, upstreamDeadlines, codexHostHealth });
+    catalog = await modelCatalog.resolve(requestScopeId(req), discoveryOptions);
   }
   if (!catalog) {
     sendJson(res, 503, { error: { type: 'server_error', code: 'share_session_upstream_unavailable', message: 'The share session upstream is unavailable' } });

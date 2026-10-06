@@ -87,14 +87,12 @@ export class CodexModelCatalog {
     const ids = upstreamIds === null ? null
       : [...new Set(upstreamIds)].filter((id) => this.store.get(id, scopeId));
     const snapshot = () => ids === null ? this.snapshot(scopeId) : this.scopedAccountsCatalog(ids, scopeId);
-    const cached = snapshot();
+    const discoveryOptions = { ...options, refresh: true };
     const refresh = (ids === null
-      ? this.resolve(scopeId, options)
-      : mapConcurrent(ids, this.concurrency, (id) => this.discoverAccount(id, options)))
+      ? this.resolve(scopeId, discoveryOptions)
+      : mapConcurrent(ids, this.concurrency, (id) => this.discoverAccount(id, discoveryOptions)))
       .catch(() => {});
-    // Discovery is advisory: stale catalogs can serve immediately, and a cold
-    // handshake must not wait through every account's network deadline.
-    if (cached?.status.accountCount) return cached;
+    // Prefer live metadata, but keep advisory discovery within the handshake budget.
     let timer;
     try {
       await Promise.race([
@@ -119,8 +117,8 @@ export class CodexModelCatalog {
     });
     const accountCatalogs = accountEntries.filter(({ entry }) => entry.hasCatalog);
     const aggregated = this.cachedAggregation(
-      `scope:${scopeCatalogSignature(this.store, scopeId)}:${accountCatalogs.map(({ id, entry }) => `${id}:${entry.revision}`).join(',')}`,
-      accountCatalogs.map(({ entry }) => entry.models),
+      `scope:${scopeCatalogSignature(this.store, scopeId)}:${accountCatalogs.map(({ id, entry }) => `${id}:${entry.revision}:${catalogIsFresh(entry, now, this.freshTtlMs)}`).join(',')}`,
+      accountCatalogs.map(({ entry }) => ({ models: entry.models, fresh: catalogIsFresh(entry, now, this.freshTtlMs) })),
       (id) => this.store.modelAllowed(scopeId, id)
     );
     const status = catalogStatus(
@@ -146,16 +144,18 @@ export class CodexModelCatalog {
       .map((upstreamId) => this.store.get(upstreamId, scopeId))
       .filter(Boolean);
     if (!upstreams.length) return null;
+    const now = this.now();
     const entries = upstreams.map(({ id }) => this.currentEntry(id));
-    const accountModels = entries.flatMap((entry) => entry?.hasCatalog ? [entry.models] : []);
+    const accountModels = entries.flatMap((entry) => entry?.hasCatalog
+      ? [{ models: entry.models, fresh: catalogIsFresh(entry, now, this.freshTtlMs) }] : []);
     const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
       && !upstreams.some((upstream) => upstream.type === 'codex' && STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by === 'compass');
     const aggregated = this.cachedAggregation(
-      `accounts:${scopeCatalogSignature(this.store, scopeId)}:${upstreams.map((upstream, index) => `${upstream.id}:${upstream.type}:${entries[index]?.revision || 0}`).join(',')}`,
+      `accounts:${scopeCatalogSignature(this.store, scopeId)}:${upstreams.map((upstream, index) => `${upstream.id}:${upstream.type}:${entries[index]?.revision || 0}:${catalogIsFresh(entries[index], now, this.freshTtlMs)}`).join(',')}`,
       accountModels,
       providerAllowed
     );
-    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, this.now(), this.freshTtlMs);
+    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, now, this.freshTtlMs);
     return {
       ...aggregated,
       status
@@ -170,7 +170,7 @@ export class CodexModelCatalog {
     const existing = this.entryFor(upstreamId, generation);
     const now = this.now();
     existing.lastUsedAt = now;
-    if (existing.hasCatalog && existing.lastSuccessAt && now - existing.lastSuccessAt < this.freshTtlMs) return accountResult(existing, true);
+    if (!options.refresh && catalogIsFresh(existing, now, this.freshTtlMs)) return accountResult(existing, true);
     if (existing.lastFailureAt && now - existing.lastFailureAt < this.failureSuppressionMs) {
       return existing.hasCatalog ? accountResult(existing, false) : null;
     }
@@ -326,7 +326,7 @@ export class CodexModelCatalog {
 
   accountSnapshot(upstreamId) {
     const entry = this.currentEntry(upstreamId);
-    return entry?.hasCatalog ? accountResult(entry, this.now() - entry.lastSuccessAt < this.freshTtlMs) : null;
+    return entry?.hasCatalog ? accountResult(entry, catalogIsFresh(entry, this.now(), this.freshTtlMs)) : null;
   }
 
   discoveryCandidates(scopeId) {
@@ -504,6 +504,9 @@ function sanitizeModel(row) {
   if (!id) return null;
   const native = sanitizeValue(row, 0);
   if (!plainObject(native)) return null;
+  for (const key of ['context_window', 'max_input_tokens', 'max_output_tokens']) {
+    if (!Number.isInteger(native[key]) || native[key] <= 0) delete native[key];
+  }
   native.id = id;
   native.slug = id;
   return { id, native };
@@ -566,11 +569,11 @@ function advertisedServiceTiers(row) {
 
 function aggregateCatalog(accountModels, modelAllowed) {
   const liveById = new Map();
-  for (const models of accountModels) {
+  for (const { models, fresh } of accountModels) {
     for (const model of models) {
       if (!modelAllowed(model.id)) continue;
       const candidates = liveById.get(model.id) || [];
-      candidates.push(model.native);
+      candidates.push({ native: model.native, fresh });
       liveById.set(model.id, candidates);
     }
   }
@@ -599,7 +602,15 @@ function aggregateCatalog(accountModels, modelAllowed) {
 }
 
 function chooseNativeRow(rows) {
-  return [...rows].sort(compareNativeRows)[0] || null;
+  const ranked = [...rows].sort((left, right) => Number(right.fresh) - Number(left.fresh)
+    || compareNativeRows(left.native, right.native));
+  if (!ranked.length) return null;
+  const selected = { ...ranked[0].native };
+  for (const key of ['context_window', 'max_input_tokens', 'max_output_tokens']) {
+    const available = ranked.find(({ native }) => Number.isInteger(native[key]) && native[key] > 0);
+    if (available) selected[key] = available.native[key];
+  }
+  return selected;
 }
 
 function compareNativeRows(left, right) {
@@ -608,8 +619,13 @@ function compareNativeRows(left, right) {
   return Buffer.byteLength(rightJson) - Buffer.byteLength(leftJson) || leftJson.localeCompare(rightJson);
 }
 
+function catalogIsFresh(entry, now, freshTtlMs) {
+  return Boolean(entry?.hasCatalog && entry.lastSuccessAt && !entry.lastFailureAt
+    && now - entry.lastSuccessAt < freshTtlMs);
+}
+
 function catalogStatus(entries, authoritativeAccountCount, modelCount, now, freshTtlMs) {
-  const fresh = entries.filter((entry) => entry.hasCatalog && entry.lastSuccessAt && now - entry.lastSuccessAt < freshTtlMs);
+  const fresh = entries.filter((entry) => catalogIsFresh(entry, now, freshTtlMs));
   const successes = entries.map(({ lastSuccessAt }) => lastSuccessAt).filter(Boolean);
   const failures = entries.filter(({ lastFailureAt }) => lastFailureAt).sort((left, right) => right.lastFailureAt - left.lastFailureAt);
   return {
