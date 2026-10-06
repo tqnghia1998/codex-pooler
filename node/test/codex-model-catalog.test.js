@@ -72,10 +72,10 @@ test('cold handshake discovery is bounded and continues through the shared cache
   }
 });
 
-test('stale handshake catalogs return without awaiting refresh and survive provider failure', { timeout: 3_000 }, async () => {
+test('stale handshake catalogs fall back after the discovery budget and survive provider failure', { timeout: 3_000 }, async () => {
   const { dir, store } = fixture();
   let now = Date.now();
-  const catalog = new CodexModelCatalog(store, { now: () => now, freshTtlMs: 100, handshakeWaitMs: 10_000 });
+  const catalog = new CodexModelCatalog(store, { now: () => now, freshTtlMs: 100, handshakeWaitMs: 10 });
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
   const fetchImpl = async () => { await pending; throw new Error('synthetic outage'); };
@@ -91,6 +91,191 @@ test('stale handshake catalogs return without awaiting refresh and survive provi
   } finally {
     release();
     await catalog.resolve('default', { fetchImpl });
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('handshakes prefer a completed live refresh over a fresh cached context window', async () => {
+  const { dir, store } = fixture();
+  const catalog = new CodexModelCatalog(store);
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return modelsResponse([{ slug: 'gpt-6-sol', context_window: calls === 1 ? 272_000 : 400_000 }]);
+  };
+  try {
+    const initial = await catalog.resolve('default', { fetchImpl });
+    const refreshed = await catalog.forHandshake('default', { fetchImpl });
+    assert.equal(calls, 2);
+    assert.equal(initial.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(refreshed.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 400_000);
+    assert.notEqual(refreshed.etag, initial.etag);
+  } finally {
+    await Promise.all(catalog.inflight.values());
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('explicit refresh retains the last live context on failure and respects retry backoff', async () => {
+  const { dir, store } = fixture();
+  let now = 1_000;
+  let calls = 0;
+  const catalog = new CodexModelCatalog(store, { now: () => now, failureSuppressionMs: 50 });
+  const fetchImpl = async () => {
+    calls += 1;
+    if (calls === 1 || calls === 3) {
+      return modelsResponse([{ slug: 'gpt-6-sol', context_window: calls === 1 ? 272_000 : 400_000 }]);
+    }
+    throw new Error('offline');
+  };
+  try {
+    await catalog.resolve('default', { fetchImpl });
+    const failed = await catalog.resolve('default', { fetchImpl, refresh: true });
+    assert.equal(calls, 2);
+    assert.equal(failed.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(failed.status.lastFailureClass, 'transport');
+    await catalog.resolve('default', { fetchImpl, refresh: true });
+    assert.equal(calls, 2);
+    now += 51;
+    const recovered = await catalog.resolve('default', { fetchImpl, refresh: true });
+    assert.equal(calls, 3);
+    assert.equal(recovered.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 400_000);
+    assert.equal(recovered.status.lastFailureClass, null);
+  } finally {
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('unavailable live token limits use static defaults without replacing valid live limits', async () => {
+  for (const unavailable of [undefined, null, 0, -1, '272000', 1.5]) {
+    const { dir, store } = fixture();
+    const catalog = new CodexModelCatalog(store);
+    try {
+      const result = await catalog.resolve('default', { fetchImpl: async () => modelsResponse([
+        { slug: 'gpt-6-sol', context_window: unavailable, max_output_tokens: unavailable },
+        { slug: 'gpt-6.1-sol', context_window: 272_000, max_output_tokens: 32_000 }
+      ]) });
+      const fallback = result.publicModels.find(({ id }) => id === 'gpt-6-sol');
+      assert.equal(fallback.context_window, 1_050_000);
+      assert.equal(fallback.max_output_tokens, 128_000);
+      const live = result.publicModels.find(({ id }) => id === 'gpt-6.1-sol');
+      assert.equal(live.context_window, 272_000);
+      assert.equal(live.max_output_tokens, 32_000);
+    } finally {
+      store.sqlite.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('successful live metadata outranks richer cached metadata after another account fails', async () => {
+  const { dir, store, upstreams } = fixture(2);
+  const catalog = new CodexModelCatalog(store);
+  const ids = upstreams.map(({ id }) => id);
+  const findModel = (result) => result.publicModels.find(({ id }) => id === 'gpt-6-sol');
+  try {
+    await catalog.resolve('default', { fetchImpl: async () => modelsResponse([
+      { slug: 'gpt-6-sol', context_window: 400_000, description: 'richer cached metadata' }
+    ]) });
+    const result = await catalog.resolve('default', {
+      refresh: true,
+      fetchImpl: async (_url, options) => {
+        if (options.headers['chatgpt-account-id'] === 'acct-0') throw new Error('offline');
+        return modelsResponse([{ slug: 'gpt-6-sol', context_window: 272_000 }]);
+      }
+    });
+    assert.equal(findModel(result).context_window, 272_000);
+    assert.equal(findModel(catalog.scopedAccountsCatalog(ids)).context_window, 272_000);
+    assert.equal(findModel(catalog.scopedAccountCatalog(ids[0])).context_window, 400_000);
+    assert.equal(result.status.source, 'mixed');
+    assert.equal(result.status.freshAccountCount, 1);
+    assert.equal(catalog.scopedAccountCatalog(ids[0]).status.freshness, 'stale');
+  } finally {
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('valid discovered limits from another account take precedence over static defaults', async () => {
+  const { dir, store } = fixture(2);
+  const catalog = new CodexModelCatalog(store);
+  try {
+    const result = await catalog.resolve('default', {
+      fetchImpl: async (_url, options) => modelsResponse([
+        options.headers['chatgpt-account-id'] === 'acct-0'
+          ? { slug: 'gpt-6-sol', description: 'richer metadata without any token limits'.repeat(5) }
+          : { slug: 'gpt-6-sol', context_window: 272_000, max_input_tokens: 258_400, max_output_tokens: 32_000 }
+      ])
+    });
+    for (const models of [result.publicModels, result.nativeModels]) {
+      const row = models.find(({ id }) => id === 'gpt-6-sol');
+      assert.equal(row.context_window, 272_000);
+      assert.equal(row.max_input_tokens, 258_400);
+      assert.equal(row.max_output_tokens, 32_000);
+    }
+    assert.equal(result.nativeModels.find(({ id }) => id === 'gpt-6-sol').description, 'richer metadata without any token limits'.repeat(5));
+  } finally {
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('aggregation refreshes its ranking when a richer cached catalog expires', async () => {
+  const { dir, store, upstreams } = fixture(2);
+  let now = 1_000;
+  const catalog = new CodexModelCatalog(store, { now: () => now, freshTtlMs: 100 });
+  const ids = upstreams.map(({ id }) => id);
+  try {
+    await catalog.discoverAccount(ids[0], { fetchImpl: async () => modelsResponse([
+      { slug: 'gpt-6-sol', context_window: 400_000, description: 'richer older catalog' }
+    ]) });
+    now += 50;
+    await catalog.discoverAccount(ids[1], { fetchImpl: async () => modelsResponse([
+      { slug: 'gpt-6-sol', context_window: 272_000 }
+    ]) });
+    const initial = catalog.snapshot();
+    const scoped = catalog.scopedAccountsCatalog(ids);
+    assert.equal(initial.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 400_000);
+    now += 51;
+    for (const result of [catalog.snapshot(), catalog.scopedAccountsCatalog(ids)]) {
+      assert.equal(result.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+      assert.notEqual(result.etag, initial.etag);
+      assert.notEqual(result.etag, scoped.etag);
+    }
+  } finally {
+    store.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coalesces explicit live refreshes even when an existing catalog is fresh', async () => {
+  const { dir, store } = fixture();
+  const catalog = new CodexModelCatalog(store);
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    await pending;
+    return modelsResponse([{ slug: 'gpt-6-sol', context_window: 272_000 }]);
+  };
+  try {
+    await catalog.resolve('default', { fetchImpl: async () => modelsResponse([
+      { slug: 'gpt-6-sol', context_window: 400_000 }
+    ]) });
+    const requests = Array.from({ length: 10 }, () => catalog.resolve('default', { fetchImpl, refresh: true }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls, 1);
+    release();
+    const results = await Promise.all(requests);
+    assert.equal(calls, 1);
+    assert.ok(results.every(({ publicModels }) => publicModels.find(({ id }) => id === 'gpt-6-sol').context_window === 272_000));
+  } finally {
+    release();
+    await Promise.all(catalog.inflight.values());
     store.sqlite.close();
     rmSync(dir, { recursive: true, force: true });
   }
