@@ -63,6 +63,37 @@ The Node proxy covers the client-visible local compatibility path:
 | SSE | Incremental UTF-8/SSE parsing across LF, CRLF, standalone CR, and transport boundaries; bounded complete and incomplete events; quota-incomplete failure and account cooldown; OpenAI and Anthropic terminal recognition; first-event failover; optional bounded Codex bootstrap buffering before headers; public Responses sequencing; Chat translation with verified final tool-argument recovery and inconsistent-snapshot failure; cancellation and usage settlement | `test/openai-streaming.test.js`, `test/proxy.test.js`, `test/codex-compatibility.test.js` |
 | Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, independent frame/queue/backpressure limits, keepalive pings, pre-output reconnect, request-scoped `1009` handling, sanitized terminals and terminal usage settlement; native Codex frames remain opaque on one upstream connection unless guarded compatibility is enabled | `test/gateway-routes.test.js`, `test/codex-compatibility.test.js` |
 
+### Responses stream and request contracts
+
+Public Responses SSE and WebSocket terminals recover empty or missing `output`
+from the delivered `response.output_item.done` items, ordered by output index
+(or arrival order when indexes are absent). Announcements are never used as
+completed output, and nonempty provider output is preserved. Recovery retains
+at most 8 MiB of decoded done events per turn. Function/custom tool completion
+must correlate indexes and item/call IDs and finish with a done item whose status
+is absent or `completed`; malformed or unfinished calls turn a claimed success
+into a failure without successful settlement or response pinning. Provider
+incomplete/failure outcomes remain authoritative.
+
+Public replay preserves assistant `commentary`, `partial_answer`, and
+`final_answer` phases; native mailbox recovery accepts the first two but never
+the terminal phase. `web_search` uses `indexed_web_access`, location and context
+options, and text/image content types. `tool_search` declarations accept optional
+execution, description, and parameters and validate call/output replay items.
+`web_search_preview` is refused rather than rewritten. Node serves Full Responses,
+so public `programmatic_tool_calling` declarations are refused; native requests
+still relay provider decisions. Public metadata is validated as at most 16
+string-valued properties with 64-code-point names and 512-code-point values (or
+null), then removed before Codex HTTP/WebSocket dispatch, including native routes.
+Direct Compass payloads retain their provider-specific metadata behavior.
+
+Provider validation refusals preserve allowlisted codes (including
+`unknown_parameter` and `invalid_parameter`) and bounded field paths, never raw
+provider messages. Codeless WebSocket refusal templates are recognized with the
+same privacy boundary and remain non-retryable. Every method under `/v1/agents`
+and `/v1/vaults` returns an authenticated `404 unsupported_endpoint` explaining
+that the beta Agents API is not supported.
+
 ### Intentional limitations
 
 - The server is single-process. It does not implement distributed WebSocket owners, leases, takeover, remote forwarding, or cross-process in-flight continuity.

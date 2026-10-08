@@ -44,6 +44,7 @@ export function adaptResponsesRequest(payload) {
   }
   if (normalized.store !== undefined && normalized.store !== false) unsupported('store');
   requireModel(normalized);
+  validateMetadata(normalized.metadata);
   validateAccessPrograms(normalized.access_programs);
   validatePromptCacheOptions(normalized.prompt_cache_options);
   validatePositiveInteger(normalized, 'max_output_tokens');
@@ -385,6 +386,17 @@ function normalizeInputItem(item) {
     if (item.tools.some((tool) => tool?.type === 'mcp')) invalid('remote MCP tools are not supported', 'input');
     return [item];
   }
+  if (['tool_search_call', 'tool_search_output'].includes(item.type)) {
+    const payloadField = item.type === 'tool_search_call' ? 'arguments' : 'tools';
+    exactKeys(item, ['type', 'id', 'call_id', 'execution', 'status', payloadField], 'input');
+    if (['id', 'call_id'].some((key) => item[key] !== undefined && item[key] !== null && !cleanString(item[key]))
+      || item.execution !== undefined && !['server', 'client'].includes(item.execution)
+      || item.status !== undefined && item.status !== null && !['in_progress', 'completed', 'incomplete'].includes(item.status)) invalid('input item shape is not translatable', 'input');
+    if (payloadField === 'arguments' && !plainObject(item.arguments)
+      || payloadField === 'tools' && (!Array.isArray(item.tools) || item.tools.some((tool) => !plainObject(tool)))) invalid('input item shape is not translatable', 'input');
+    if (item.tools?.some((tool) => tool.type === 'mcp')) invalid('remote MCP tools are not supported', 'input');
+    return [item];
+  }
   if (item.role === 'assistant' && Array.isArray(item.tool_calls)) return item.tool_calls.map(normalizeAssistantToolCall);
   if (item.role === 'tool') {
     const callId = cleanString(item.tool_call_id) || cleanString(item.call_id);
@@ -469,13 +481,13 @@ function validReplayCaller(caller) {
 }
 
 function normalizeResponseMessage(item) {
-  const allowed = ['type', 'id', 'role', 'content', 'name', 'tool_call_id', 'status', 'metadata', 'internal_chat_message_metadata_passthrough'];
-  const dropped = ['phase'];
-  if (Object.keys(item).some((key) => !allowed.includes(key) && !dropped.includes(key))) invalid('message input item shape is not translatable', 'input');
+  const allowed = ['type', 'id', 'role', 'content', 'name', 'tool_call_id', 'status', 'phase', 'metadata', 'internal_chat_message_metadata_passthrough'];
+  if (Object.keys(item).some((key) => !allowed.includes(key))) invalid('message input item shape is not translatable', 'input');
   const role = item.role ?? 'user';
   if (!['system', 'user', 'assistant', 'developer', 'tool'].includes(role)) invalid('message input items require role and content', 'input');
+  if (item.phase !== undefined && item.phase !== null && (role !== 'assistant' || !['commentary', 'partial_answer', 'final_answer'].includes(item.phase))) invalid('message phase is not translatable', 'input');
   const normalizedRole = role === 'system' ? 'developer' : role;
-  const message = Object.fromEntries(Object.entries(item).filter(([key]) => allowed.includes(key)));
+  const message = Object.fromEntries(Object.entries(item).filter(([key, value]) => allowed.includes(key) && value !== undefined));
   if (typeof item.content === 'string') return { ...message, type: 'message', role: normalizedRole, content: [{ type: role === 'assistant' ? 'output_text' : 'input_text', text: item.content }] };
   if (!Array.isArray(item.content) || !item.content.length) invalid('message content shape is not translatable', 'input');
   const content = item.content.map((part) => normalizeResponseContentPart(part, role)).filter(Boolean);
@@ -642,15 +654,15 @@ function validateTool(tool) {
   }
   if (tool.type === 'mcp') invalid('remote MCP tools are not supported', 'tools');
   if (tool.type === 'shell') invalid('hosted shell tools are not supported', 'tools');
-  if (['programmatic_tool_calling', 'web_search_preview'].includes(tool.type)) {
-    exactKeys(tool, ['type'], 'tools');
-    return tool;
-  }
+  if (tool.type === 'web_search_preview') invalid('web_search_preview tools are not supported; declare web_search', 'tools');
+  if (tool.type === 'programmatic_tool_calling') invalid('programmatic_tool_calling is not supported on a Full Responses backend', 'tools');
   if (tool.type === 'image_generation') return tool;
   if (tool.type === 'web_search') return validateWebSearch(tool);
   if (tool.type === 'tool_search') {
     exactKeys(tool, ['type', 'execution', 'description', 'parameters'], 'tools');
-    if (!cleanString(tool.execution) || !cleanString(tool.description) || !plainObject(tool.parameters)) invalid('tool_search tool requires execution, description, and parameters', 'tools');
+    if (tool.execution !== undefined && !['server', 'client'].includes(tool.execution)
+      || tool.description !== undefined && tool.description !== null && typeof tool.description !== 'string'
+      || tool.parameters !== undefined && tool.parameters !== null && !plainObject(tool.parameters)) invalid('tool_search shape is not translatable', 'tools');
     return tool;
   }
   // Any other native tool declaration (remote MCP is already rejected above) is
@@ -660,7 +672,7 @@ function validateTool(tool) {
   invalid('tool shape is not translatable', 'tools');
 }
 
-const ALLOWED_TOOLS_BUILTIN_TYPES = ['programmatic_tool_calling', 'web_search_preview', 'web_search', 'image_generation'];
+const ALLOWED_TOOLS_BUILTIN_TYPES = ['web_search', 'image_generation'];
 
 function isAllowedToolDeclared(allowedTool, tools) {
   if (!plainObject(allowedTool) || !Array.isArray(tools)) return false;
@@ -688,7 +700,8 @@ function validateToolChoice(payload) {
     }
     return;
   }
-  if (['image_generation', 'programmatic_tool_calling'].includes(choice.type)) {
+  if (choice.type === 'programmatic_tool_calling' || choice.type === 'web_search_preview') invalid('tool_choice shape is not translatable', 'tool_choice');
+  if (choice.type === 'image_generation') {
     exactKeys(choice, ['type'], 'tool_choice');
     return;
   }
@@ -974,17 +987,33 @@ function validateCompatibilityToken(value, message, param) {
 }
 
 function validateWebSearch(tool) {
-  exactKeys(tool, ['type', 'external_web_access', 'index_gated_web_access', 'filters', 'search_content_types'], 'tools');
+  exactKeys(tool, ['type', 'external_web_access', 'indexed_web_access', 'filters', 'search_content_types', 'user_location', 'search_context_size'], 'tools');
   optionalBoolean(tool, 'external_web_access', 'tools');
-  optionalBoolean(tool, 'index_gated_web_access', 'tools');
-  if (tool.index_gated_web_access === false || tool.index_gated_web_access === true && tool.external_web_access === undefined || tool.index_gated_web_access === true && tool.external_web_access === false) invalid('tool shape is not translatable', 'tools');
+  optionalBoolean(tool, 'indexed_web_access', 'tools');
+  if (tool.indexed_web_access === false || tool.indexed_web_access === true && tool.external_web_access !== true) invalid('tool shape is not translatable', 'tools');
   if (tool.filters !== undefined) {
     if (!plainObject(tool.filters) || !Object.keys(tool.filters).length) invalid('tool shape is not translatable', 'tools');
     exactKeys(tool.filters, ['allowed_domains', 'blocked_domains'], 'tools');
     for (const value of Object.values(tool.filters)) if (!Array.isArray(value) || !value.length || value.length > 100 || value.some((domain) => !cleanString(domain) || /^https?:\/\//i.test(domain.trim()))) invalid('tool shape is not translatable', 'tools');
   }
-  if (tool.search_content_types !== undefined && (!Array.isArray(tool.search_content_types) || !tool.search_content_types.length || tool.search_content_types.some((type) => !cleanString(type)))) invalid('tool shape is not translatable', 'tools');
+  if (tool.search_content_types !== undefined && (!Array.isArray(tool.search_content_types) || !tool.search_content_types.length || tool.search_content_types.some((type) => !['text', 'image'].includes(type)))) invalid('tool shape is not translatable', 'tools');
+  if (tool.search_context_size !== undefined && !['low', 'medium', 'high'].includes(tool.search_context_size)) invalid('tool shape is not translatable', 'tools');
+  if (tool.user_location !== undefined) {
+    if (!plainObject(tool.user_location) || tool.user_location.type !== 'approximate') invalid('tool shape is not translatable', 'tools');
+    exactKeys(tool.user_location, ['type', 'country', 'region', 'city', 'timezone'], 'tools');
+    if (Object.entries(tool.user_location).some(([key, value]) => key !== 'type' && !cleanString(value))) invalid('tool shape is not translatable', 'tools');
+  }
   return tool;
+}
+
+function validateMetadata(metadata) {
+  if (metadata === undefined || metadata === null) return;
+  if (!plainObject(metadata)) invalid('metadata must be an object', 'metadata', 'invalid_type');
+  const entries = Object.entries(metadata);
+  if (entries.length > 16) invalid('metadata must have at most 16 properties', 'metadata', 'object_above_max_properties');
+  if (entries.some(([name]) => [...name].length > 64)) invalid('metadata property names must be at most 64 characters', 'metadata', 'property_name_above_max_length');
+  if (entries.some(([, value]) => typeof value !== 'string')) invalid('metadata values must be strings', 'metadata', 'invalid_type');
+  if (entries.some(([, value]) => [...value].length > 512)) invalid('metadata values must be at most 512 characters', 'metadata', 'string_above_max_length');
 }
 
 function validateCustomFormat(format) {
