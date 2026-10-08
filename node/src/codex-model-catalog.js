@@ -13,6 +13,7 @@ import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 
 const DEFAULT_SCOPE_ID = 'default';
 const FRESH_TTL_MS = 5 * 60_000;
+export const MODEL_LISTING_TTL_MS = 60 * 60_000;
 const FAILURE_SUPPRESSION_MS = 30_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_MODELS = 512;
@@ -80,7 +81,7 @@ export class CodexModelCatalog {
   async resolve(scopeId = DEFAULT_SCOPE_ID, options = {}) {
     const candidates = this.discoveryCandidates(scopeId);
     await mapConcurrent(candidates, this.concurrency, ({ id }) => this.discoverAccount(id, options));
-    return this.snapshot(scopeId);
+    return this.snapshot(scopeId, options.cacheTtlMs);
   }
 
   async forHandshake(scopeId = DEFAULT_SCOPE_ID, { upstreamIds = null, ...options } = {}) {
@@ -105,7 +106,7 @@ export class CodexModelCatalog {
     }
   }
 
-  snapshot(scopeId = DEFAULT_SCOPE_ID) {
+  snapshot(scopeId = DEFAULT_SCOPE_ID, freshTtlMs = this.freshTtlMs) {
     this.reconcile();
     const candidates = this.discoveryCandidates(scopeId);
     const now = this.now();
@@ -117,8 +118,8 @@ export class CodexModelCatalog {
     });
     const accountCatalogs = accountEntries.filter(({ entry }) => entry.hasCatalog);
     const aggregated = this.cachedAggregation(
-      `scope:${scopeCatalogSignature(this.store, scopeId)}:${accountCatalogs.map(({ id, entry }) => `${id}:${entry.revision}:${catalogIsFresh(entry, now, this.freshTtlMs)}`).join(',')}`,
-      accountCatalogs.map(({ entry }) => ({ models: entry.models, fresh: catalogIsFresh(entry, now, this.freshTtlMs) })),
+      `scope:${scopeCatalogSignature(this.store, scopeId)}:${accountCatalogs.map(({ id, entry }) => `${id}:${entry.revision}:${catalogIsFresh(entry, now, freshTtlMs)}`).join(',')}`,
+      accountCatalogs.map(({ entry }) => ({ models: entry.models, fresh: catalogIsFresh(entry, now, freshTtlMs) })),
       (id) => this.store.modelAllowed(scopeId, id)
     );
     const status = catalogStatus(
@@ -126,7 +127,7 @@ export class CodexModelCatalog {
       accountCatalogs.length,
       aggregated.publicModels.length,
       now,
-      this.freshTtlMs
+      freshTtlMs
     );
     return {
       ...aggregated,
@@ -134,11 +135,11 @@ export class CodexModelCatalog {
     };
   }
 
-  scopedAccountCatalog(upstreamId, scopeId = DEFAULT_SCOPE_ID) {
-    return this.scopedAccountsCatalog([upstreamId], scopeId);
+  scopedAccountCatalog(upstreamId, scopeId = DEFAULT_SCOPE_ID, freshTtlMs = this.freshTtlMs) {
+    return this.scopedAccountsCatalog([upstreamId], scopeId, freshTtlMs);
   }
 
-  scopedAccountsCatalog(upstreamIds, scopeId = DEFAULT_SCOPE_ID) {
+  scopedAccountsCatalog(upstreamIds, scopeId = DEFAULT_SCOPE_ID, freshTtlMs = this.freshTtlMs) {
     this.reconcile();
     const upstreams = [...new Set(upstreamIds)]
       .map((upstreamId) => this.store.get(upstreamId, scopeId))
@@ -147,15 +148,15 @@ export class CodexModelCatalog {
     const now = this.now();
     const entries = upstreams.map(({ id }) => this.currentEntry(id));
     const accountModels = entries.flatMap((entry) => entry?.hasCatalog
-      ? [{ models: entry.models, fresh: catalogIsFresh(entry, now, this.freshTtlMs) }] : []);
+      ? [{ models: entry.models, fresh: catalogIsFresh(entry, now, freshTtlMs) }] : []);
     const providerAllowed = (id) => this.store.modelAllowed(scopeId, id)
       && !upstreams.some((upstream) => upstream.type === 'codex' && STATIC_MODEL_CATALOG.find((row) => row.id === id)?.owned_by === 'compass');
     const aggregated = this.cachedAggregation(
-      `accounts:${scopeCatalogSignature(this.store, scopeId)}:${upstreams.map((upstream, index) => `${upstream.id}:${upstream.type}:${entries[index]?.revision || 0}:${catalogIsFresh(entries[index], now, this.freshTtlMs)}`).join(',')}`,
+      `accounts:${scopeCatalogSignature(this.store, scopeId)}:${upstreams.map((upstream, index) => `${upstream.id}:${upstream.type}:${entries[index]?.revision || 0}:${catalogIsFresh(entries[index], now, freshTtlMs)}`).join(',')}`,
       accountModels,
       providerAllowed
     );
-    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, now, this.freshTtlMs);
+    const status = catalogStatus(entries.filter(Boolean), accountModels.length, aggregated.publicModels.length, now, freshTtlMs);
     return {
       ...aggregated,
       status
@@ -170,7 +171,11 @@ export class CodexModelCatalog {
     const existing = this.entryFor(upstreamId, generation);
     const now = this.now();
     existing.lastUsedAt = now;
-    if (!options.refresh && catalogIsFresh(existing, now, this.freshTtlMs)) return accountResult(existing, true);
+    const listingCacheValid = options.cacheTtlMs !== undefined && existing.hasCatalog && existing.lastSuccessAt
+      && now - existing.lastSuccessAt < options.cacheTtlMs;
+    if (!options.refresh && (listingCacheValid || catalogIsFresh(existing, now, this.freshTtlMs))) {
+      return accountResult(existing, Boolean(listingCacheValid || !existing.lastFailureAt));
+    }
     if (existing.lastFailureAt && now - existing.lastFailureAt < this.failureSuppressionMs) {
       return existing.hasCatalog ? accountResult(existing, false) : null;
     }
