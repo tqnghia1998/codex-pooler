@@ -44,10 +44,14 @@ test('the shared dispatcher classifies every Relaydeck gateway route for both pr
 
   for (const [method, path] of [
     ['POST', '/v1/embeddings'],
+    ['PATCH', '/v1/agents/sessions/session_1/events'],
+    ['GET', '/v1/agents'],
+    ['DELETE', '/v1/vaults/vault_1'],
     ['GET', '/v1/responses/resp_123'],
     ['POST', '/v1/responses/resp_123/cancel']
   ]) {
     assert.equal(isUnsupportedV1Route(method, path), true, `${method} ${path} unsupported registration`);
     assert.equal(gatewayRequestKind(method, path), 'unsupported', `${method} ${path}`);
   }
+  assert.equal(gatewayRequestKind('GET', '/v1/agents-not-a-prefix'), null);
 });
