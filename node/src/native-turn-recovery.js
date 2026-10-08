@@ -176,7 +176,7 @@ function observePartialTool(lease, id) {
   }
 }
 
-function preemptible(item) { return item?.type === 'reasoning' || item?.type === 'message' && item.role === 'assistant' && item.phase === 'commentary'; }
+function preemptible(item) { return item?.type === 'reasoning' || item?.type === 'message' && item.role === 'assistant' && ['commentary', 'partial_answer'].includes(item.phase); }
 
 export function completedItemSeal(store, item) {
   if (!object(item) || !['reasoning', 'message', 'function_call', 'custom_tool_call'].includes(item.type)) return null;
@@ -189,7 +189,7 @@ export function completedItemSeal(store, item) {
     if (Array.isArray(projected.content)) projected.content = projected.content.some((part) => part.type === 'reasoning_text') ? projected.content.map((part) => pick(part, ['type', 'text'])) : undefined;
   } else if (item.type === 'message') {
     if (item.role !== 'assistant') return null;
-    if (item.phase === 'commentary' && typeof item.id === 'string' && item.content?.length && item.content.every((part) => part.type === 'output_text' && typeof part.text === 'string')) {
+    if (['commentary', 'partial_answer'].includes(item.phase) && typeof item.id === 'string' && item.content?.length && item.content.every((part) => part.type === 'output_text' && typeof part.text === 'string')) {
       projected = pick(item, ['type', 'id', 'role', 'phase']);
       projected.content = item.content.map((part) => pick(part, ['type', 'text']));
     } else if (Array.isArray(projected.content)) projected.content = projected.content.map((part) => {

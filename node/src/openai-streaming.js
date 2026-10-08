@@ -1,5 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { publicMisalignmentError } from './policy-failures.js';
+import { responseValidationError } from './response-validation.js';
+import { createResponsesIntegrityState, fillResponsesOutput, observeResponsesIntegrity, recordResponsesOutput, responsesCompletionFailure } from './responses-stream-integrity.js';
 
 const MAX_SEQUENCE = Number.MAX_SAFE_INTEGER;
 export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
@@ -85,13 +87,18 @@ export function retryableFirstSseEvent(event) {
   return RETRY_CODES.has(string(error.code) || string(error.type) || incompleteReason(event));
 }
 
-export function createPublicResponsesState(customToolNamespaces = {}, { websocket = false } = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces, websocket }; }
+export function createPublicResponsesState(customToolNamespaces = {}, { websocket = false, maxOutputBytes = MAX_SSE_EVENT_BYTES } = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces, websocket, integrity: createResponsesIntegrityState(maxOutputBytes), completionFailure: null }; }
 
 export function normalizePublicResponsesEvent(source, state) {
   if (state.terminal || !plain(source)) return [];
-  const event = canonical(source);
+  let event = canonical(source);
   if (!event || !publicResponsesEventType(event.type)) return [];
-  const terminal = terminalKind(event);
+  observeResponsesIntegrity(event, state.integrity);
+  let terminal = terminalKind(event);
+  if (terminal === 'completed' && (state.completionFailure = responsesCompletionFailure(state.integrity))) {
+    event = failed(event, state.completionFailure);
+    terminal = 'failed';
+  } else if (terminal === 'completed' || terminal === 'incomplete') event = fillResponsesOutput(event, state.integrity);
   const result = [];
   if ((terminal === 'completed' || terminal === 'incomplete') && state.visible) {
     if (!state.created) result.push(encode({ type: 'response.created', response: lifecycle(event.response) }, synthetic(state)));
@@ -104,6 +111,7 @@ export function normalizePublicResponsesEvent(source, state) {
   }
   const projected = terminal === 'failed' ? (state.websocket ? publicWebSocketError(event) : null) || failed(event) : project(event, terminal, state.customToolNamespaces);
   repairItem(projected, state.customToolNamespaces);
+  recordResponsesOutput(projected, state.integrity);
   state.sequence = sequence;
   result.push(encode(projected, sequence));
   if (projected.type === 'response.created') state.created = true;
@@ -308,14 +316,15 @@ function failed(event, reason = '') {
   };
 }
 function publicWebSocketError(event) {
-  const status = integer(event?.status) ?? integer(event?.status_code) ?? integer(event?.error?.status) ?? integer(event?.response?.error?.status);
+  const validationError = responseValidationError(event);
+  const status = integer(event?.status) ?? integer(event?.status_code) ?? integer(event?.error?.status) ?? integer(event?.response?.error?.status) ?? (validationError ? 400 : null);
   const error = event?.error || event?.response?.error || {};
   const code = string(error.code) || string(error.type);
   if (event?.type !== 'error' || status === null || status < 400 || status >= 500 || status === 429 || ['websocket_connection_limit_reached', 'previous_response_not_found'].includes(code)) return null;
   return {
     type: 'error',
     status,
-    error: publicMisalignmentError(event) || {
+    error: publicMisalignmentError(event) || validationError || {
       type: 'invalid_request_error',
       code: 'upstream_status',
       message: 'Upstream rejected the request',
