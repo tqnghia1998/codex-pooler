@@ -94,8 +94,8 @@ test('projects provider WebSocket 4xx terminals as public error events', () => {
     status: 400,
     error: {
       type: 'invalid_request_error',
-      code: 'upstream_status',
-      message: 'Upstream rejected the request',
+      code: 'unsupported_parameter',
+      message: 'upstream rejected the request (unsupported_parameter)',
       param: null
     },
     sequence_number: 0
@@ -178,7 +178,7 @@ test('projects policy failures with only the stable public contract', () => {
 
 test('synthesizes public lifecycle events and normalizes done/typeless success', () => {
   const state = createPublicResponsesState();
-  normalizePublicResponsesEvent({ type: 'response.output_item.added', item: { type: 'function_call', call_id: 'call_1' }, output_index: 2 }, state);
+  normalizePublicResponsesEvent({ type: 'response.output_item.added', item: { type: 'message', id: 'msg_1' }, output_index: 2 }, state);
   const events = normalizePublicResponsesEvent({ type: 'response.done', response: { id: 'resp_ok', output: [{ content: [{ text: 'answer' }] }] } }, state).map(decode);
   assert.deepEqual(events.map((event) => event.type), ['response.created', 'response.output_text.delta', 'response.completed']);
   assert.equal(events.at(-1).response.status, 'completed');
