@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { CodexModelCatalog } from '../src/codex-model-catalog.js';
+import { CodexModelCatalog, MODEL_LISTING_TTL_MS } from '../src/codex-model-catalog.js';
 import { Store } from '../src/store.js';
 import { upstreamPacerForStore } from '../src/upstream-pacer.js';
 
@@ -370,6 +370,41 @@ test('coalesces concurrent discovery and serves fresh cache hits', async () => {
     assert.equal(catalog.supports(upstreams[0].id, 'gpt-live'), true);
     assert.equal(catalog.supports(upstreams[0].id, 'gpt-missing'), false);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('listing cache revalidates after one hour without changing internal freshness', async () => {
+  const { dir, store, upstreams } = fixture();
+  let now = 1_000;
+  let calls = 0;
+  const catalog = new CodexModelCatalog(store, { now: () => now });
+  const fetchImpl = async () => {
+    calls += 1;
+    return modelsResponse([{ slug: 'gpt-6-sol', context_window: calls === 1 ? 272_000 : 400_000 }]);
+  };
+  try {
+    const options = { fetchImpl, cacheTtlMs: MODEL_LISTING_TTL_MS };
+    const first = await catalog.resolve('default', options);
+    now += 5 * 60_000 + 1;
+    assert.equal(catalog.snapshot('default').status.freshness, 'stale');
+    const cached = await catalog.resolve('default', options);
+    assert.equal(calls, 1);
+    assert.equal(cached.status.freshness, 'fresh');
+    assert.equal(cached.publicEtag, first.publicEtag);
+    assert.equal(catalog.supports(upstreams[0].id, 'gpt-6-sol'), true);
+
+    await catalog.resolve('default', { fetchImpl: async () => { throw new Error('offline'); }, refresh: true });
+    assert.equal((await catalog.resolve('default', options)).publicEtag, first.publicEtag);
+    assert.equal(calls, 1);
+
+    now = 1_000 + MODEL_LISTING_TTL_MS;
+    const refreshed = await catalog.resolve('default', options);
+    assert.equal(calls, 2);
+    assert.equal(refreshed.publicModels.find(({ id }) => id === 'gpt-6-sol').context_window, 400_000);
+    assert.notEqual(refreshed.publicEtag, first.publicEtag);
+  } finally {
+    store.sqlite.close();
     rmSync(dir, { recursive: true, force: true });
   }
 });

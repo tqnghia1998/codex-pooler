@@ -9,7 +9,7 @@ import { createApp } from '../src/server.js';
 import { attachWebSocketProxy, proxyModelsRequest } from '../src/proxy.js';
 import { Store } from '../src/store.js';
 import { CodexHostHealth } from '../src/codex-host-health.js';
-import { modelCatalogForStore } from '../src/codex-model-catalog.js';
+import { MODEL_LISTING_TTL_MS, modelCatalogForStore } from '../src/codex-model-catalog.js';
 
 const API_KEY = 'client-key';
 
@@ -57,7 +57,7 @@ async function close(server) {
   await new Promise((resolve) => server.close(resolve));
 }
 
-test('refreshes live Codex models on each listing while preserving the static fallback', async () => {
+test('caches live Codex models across listing routes while preserving the static fallback', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-models-'));
   const { store } = configuredStore(dir, { compass: true });
   let calls = 0;
@@ -100,10 +100,10 @@ test('refreshes live Codex models on each listing while preserving the static fa
     assert.match(backend.headers.get('etag'), /^W\/"cp-models-v1-[a-f0-9]{64}"$/);
     const backendBody = await backend.json();
     assert.equal(backendBody.models.find(({ id }) => id === 'gpt-new-live').token, undefined);
-    assert.equal(backendBody.models.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    assert.equal(backendBody.models.find(({ id }) => id === 'gpt-6-sol').context_window, 500_000);
     const alias = await gatewayFetch(base, '/backend-api/codex/v1/models');
-    assert.equal((await alias.json()).models.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
-    assert.equal(calls, 3);
+    assert.equal((await alias.json()).models.find(({ id }) => id === 'gpt-6-sol').context_window, 500_000);
+    assert.equal(calls, 1);
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });
@@ -122,6 +122,7 @@ test('model listings retain discovered context on refresh failure before using s
   try {
     const live = await gatewayFetch(base, '/v1/models');
     assert.equal((await live.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
+    modelCatalogForStore(store).entries.values().next().value.lastSuccessAt -= MODEL_LISTING_TTL_MS + 1;
     const cached = await gatewayFetch(base, '/v1/models');
     assert.equal((await cached.json()).data.find(({ id }) => id === 'gpt-6-sol').context_window, 272_000);
     assert.equal(calls, 2);
@@ -139,7 +140,7 @@ test('model listings retain discovered context on refresh failure before using s
   }
 });
 
-test('share and personal-share model listings refresh only authorized accounts', async () => {
+test('share and personal-share model listings cache only authorized accounts', async () => {
   for (const kind of ['share_session', 'personal_share']) {
     const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-share-model-refresh-'));
     const { store, codexUpstream } = configuredStore(dir);
@@ -165,14 +166,14 @@ test('share and personal-share model listings refresh only authorized accounts',
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const base = `http://127.0.0.1:${server.address().port}`;
     try {
-      for (const expected of [400_000, 272_000]) {
+      for (const expected of [400_000, 400_000]) {
         const response = await gatewayFetch(base, '/v1/models');
         assert.equal(response.status, 200);
         const models = (await response.json()).data;
         assert.equal(models.find(({ id }) => id === 'gpt-6-sol').context_window, expected);
         assert.equal(models.some(({ id }) => id.startsWith('claude-')), false);
       }
-      assert.equal(calls, 2);
+      assert.equal(calls, 1);
       assert.equal(modelCatalogForStore(store).entries.has(other.id), false);
     } finally {
       await close(server);
