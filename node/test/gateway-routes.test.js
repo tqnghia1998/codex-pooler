@@ -2318,8 +2318,8 @@ test('projects upstream public WebSocket 4xx refusals as sanitized error events'
       status: 400,
       error: {
         type: 'invalid_request_error',
-        code: 'upstream_status',
-        message: 'Upstream rejected the request',
+        code: 'unsupported_parameter',
+        message: 'upstream rejected the request (unsupported_parameter)',
         param: null
       },
       sequence_number: 0

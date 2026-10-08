@@ -13,6 +13,7 @@ import { ensureProviderCredentials, refreshProviderCredentials } from './provide
 import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools } from './openai-adapters.js';
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
+import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage } from './pricing.js';
 import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
@@ -91,7 +92,6 @@ const FORWARDED_HEADER_MAX_BYTES = 1024;
 const PROVIDER_SESSION_HEADERS = ['session-id', 'thread-id', 'x-client-request-id'];
 const PROVIDER_SESSION_HEADER_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const CODEX_GUARDIAN_VALUES = new Set(['reviewer', 'classifier']);
-const RELAYABLE_VALIDATION_CODES = new Set(['unsupported_value', 'invalid_value', 'unsupported_parameter', 'missing_required_parameter', 'invalid_type', 'string_above_max_length']);
 const CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS = 5 * 60_000;
 const CLAUDE_QUOTA_HEADER_NAMES = [
   'anthropic-ratelimit-unified-5h-utilization',
@@ -1775,6 +1775,7 @@ function directUpstreamPayload(payload, sourcePath) {
 
 function normalizeCodexInput(payload, { compact = false, native = false } = {}) {
   const normalized = normalizeReasoningAliases(payload);
+  delete normalized.metadata;
   if (!native && typeof normalized.input === 'string') {
     normalized.input = [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: normalized.input }] }];
   }
@@ -2175,15 +2176,24 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       }
       return;
     }
-    if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
-    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     if (sanitizePublicResponses) {
-      for (const chunk of normalizePublicResponsesEvent(parsed, publicState)) await writeChunk(res, chunk);
+      const projected = normalizePublicResponsesEvent(parsed, publicState);
+      for (const chunk of projected) await writeChunk(res, chunk);
       visible ||= publicState.visible;
       terminal ||= publicState.terminal;
-      completed ||= successfulTerminal;
+      if (publicState.completionFailure) {
+        completed = false;
+        healthOutcome = { class: 'neutral', retryable: false, errorCode: publicState.completionFailure };
+      } else if (projected.some((chunk) => ['response.completed', 'response.incomplete'].includes(decodeSseBlock(chunk).event?.type))) {
+        const terminalResponse = decodeSseBlock(projected.at(-1)).event?.response;
+        onSuccessfulTerminal?.(terminalResponse);
+        healthOutcome = { class: 'success', retryable: false };
+        completed = true;
+      }
       return;
     }
+    if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
+    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     const type = parsed.type;
     if (type === 'response.failed' || type === 'error' || failedIncompleteResponse(parsed)) {
       terminal = true;
@@ -2259,7 +2269,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
           downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
         );
         if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
-        else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
+        else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease && !publicState?.completionFailure) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
       }
     }
     if (admission) {
@@ -3426,6 +3436,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           nativePayloadForRecovery = nativeFrame;
           const prepared = prepareCodexMultiAgentRequest(nativeFrame, req, codexOptions);
           const sanitized = sanitizeCodexInputItemIds(prepared.payload);
+          delete sanitized.metadata;
           nativeMultiAgentOptimized = prepared.optimized;
           data = Buffer.from(JSON.stringify(sanitized));
         }
@@ -3798,11 +3809,13 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         publicTurnActive = false;
         activeFrame = null;
         if (['response.failed', 'error'].includes(terminal.type)) {
-          const outcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
+          const outcome = publicState.completionFailure
+            ? { class: 'neutral', retryable: false, errorCode: publicState.completionFailure }
+            : frameOutcome;
           settlePublicAdmission(outcome);
           releasePublicAttempt(outcome.errorCode || 'upstream_response_failed');
           finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, {
-            errorCode: outcome.errorCode === MISALIGNMENT_POLICY_CODE ? outcome.errorCode : 'upstream_response_failed'
+            errorCode: publicState.completionFailure || (outcome.errorCode === MISALIGNMENT_POLICY_CODE ? outcome.errorCode : 'upstream_response_failed')
           });
         }
         else {
@@ -4113,50 +4126,7 @@ function publicPolicyError(bytes, path, sourcePath) {
 function publicValidationError(response, bytes, path, sourcePath) {
   if (response.status !== 400 || (!['/v1/responses', '/v1/chat/completions'].includes(path) && !isBackendResponsesRoute(path))
     || sourcePath === '/v1/responses/compact' || bytes.length > 64 * 1024) return null;
-  const body = parseJson(bytes);
-  const detail = body?.detail;
-  const detailParam = typeof detail === 'string' && detail.startsWith('Unsupported parameter: ')
-    ? detail.slice('Unsupported parameter: '.length)
-    : null;
-  const error = body?.error || (validValidationParam(detailParam) ? {
-    type: 'invalid_request_error', code: 'unsupported_parameter', param: detailParam
-  } : null);
-  if (!error || error.type !== 'invalid_request_error' || !RELAYABLE_VALIDATION_CODES.has(error.code)) return null;
-  const param = validValidationParam(error.param) ? mapChatValidationParam(error.param, path) : null;
-  const supported = ['unsupported_value', 'invalid_value'].includes(error.code) ? supportedValidationValues(error.message) : null;
-  return {
-    type: 'invalid_request_error',
-    code: error.code,
-    param,
-    message: `upstream rejected${param ? ` parameter ${param}` : ' the request'} (${error.code})${supported ? `; supported values: ${supported.join(', ')}` : ''}`
-  };
-}
-
-function validValidationParam(value) {
-  return typeof value === 'string' && value.length <= 160
-    && /^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*|\[(?:0|[1-9][0-9]{0,3})\])*$/.test(value);
-}
-
-function mapChatValidationParam(param, path) {
-  if (path !== '/v1/chat/completions') return param;
-  if (/^input(?:[.[]|$)/.test(param)) return 'messages';
-  return {
-    'reasoning.effort': 'reasoning_effort',
-    max_output_tokens: 'max_completion_tokens',
-    'text.verbosity': 'verbosity',
-    'text.format': 'response_format'
-  }[param] || param;
-}
-
-function supportedValidationValues(message) {
-  if (typeof message !== 'string' || Buffer.byteLength(message) > 2_048) return null;
-  const marker = 'Supported values are: ';
-  if (message.split(marker).length !== 2) return null;
-  const values = message.match(/Supported values are: ('[A-Za-z0-9_.-]{1,32}'(?:(?:, and |, | and )'[A-Za-z0-9_.-]{1,32}')*)\.?$/)?.[1]
-    ?.match(/'([^']+)'/g)?.map((value) => value.slice(1, -1)) || [];
-  const quotedBefore = new Set((message.slice(0, message.indexOf(marker)).match(/'([^']+)'/g) || []).map((value) => value.slice(1, -1)));
-  const unique = [...new Set(values.filter((value) => !quotedBefore.has(value)))];
-  return unique.length && unique.length <= 12 ? unique : null;
+  return responseValidationError(parseJson(bytes), path);
 }
 
 function projectNativeMisalignmentEvent(event) {

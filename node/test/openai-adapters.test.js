@@ -478,3 +478,63 @@ test('rejects malformed adapter shapes deterministically', () => {
   ];
   for (const [payload, expected] of chatCases) assertAdapterError(() => adaptChatRequest(payload), expected);
 });
+test('preserves assistant phases including partial answers and rejects invalid phase roles', () => {
+  for (const phase of ['commentary', 'partial_answer', 'final_answer', null]) {
+    const input = [{ type: 'message', role: 'assistant', phase, content: 'answer' }];
+    assert.equal(adaptResponsesRequest({ model: 'gpt', input }).input[0].phase, phase);
+  }
+  for (const item of [{ role: 'assistant', phase: 'future' }, { role: 'user', phase: 'partial_answer' }]) {
+    assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: [{ ...item, content: 'answer' }] }), { param: 'input' });
+  }
+});
+
+test('validates metadata limits by Unicode code points without echoing names or values', () => {
+  const metadata = { ['😀'.repeat(64)]: '😀'.repeat(512) };
+  assert.deepEqual(adaptResponsesRequest({ model: 'gpt', input: 'hi', metadata }).metadata, metadata);
+  for (const value of [undefined, null, {}]) adaptResponsesRequest({ model: 'gpt', input: 'hi', metadata: value });
+  for (const [metadata, code] of [
+    [[], 'invalid_type'],
+    [{ secret: 42 }, 'invalid_type'],
+    [Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`key${index}`, 'secret'])), 'object_above_max_properties'],
+    [{ ['😀'.repeat(65)]: 'secret' }, 'property_name_above_max_length'],
+    [{ secret: '😀'.repeat(513) }, 'string_above_max_length']
+  ]) assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'hi', metadata }), { code, param: 'metadata' });
+});
+
+test('accepts current web-search keys and rejects obsolete spellings and invalid options', () => {
+  const tool = { type: 'web_search', external_web_access: true, indexed_web_access: true, user_location: { type: 'approximate', city: 'Singapore' }, search_context_size: 'low', search_content_types: ['text', 'image'], filters: { allowed_domains: ['example.com'] } };
+  assert.deepEqual(adaptResponsesRequest({ model: 'gpt', input: 'hi', tools: [tool] }).tools[0], tool);
+  for (const invalid of [
+    { type: 'web_search', index_gated_web_access: true },
+    { type: 'web_search', indexed_web_access: false },
+    { type: 'web_search', indexed_web_access: true },
+    { type: 'web_search', external_web_access: false, indexed_web_access: true },
+    { type: 'web_search', user_location: { city: 'Singapore' } },
+    { type: 'web_search', user_location: { type: 'approximate', city: '' } },
+    { type: 'web_search', search_context_size: 'huge' },
+    { type: 'web_search', search_content_types: ['audio'] },
+    { type: 'web_search_preview' },
+    { type: 'programmatic_tool_calling' }
+  ]) assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'hi', tools: [invalid] }), { param: 'tools' });
+});
+
+test('accepts optional tool-search declarations and validates replay payloads without rewriting them', () => {
+  const input = [
+    { type: 'tool_search_call', execution: 'server', status: 'completed', id: null, arguments: { paths: ['ops.lookup'] } },
+    { type: 'tool_search_output', tools: [{ type: 'function', name: 'lookup', parameters: {} }] }
+  ];
+  for (const tool of [{ type: 'tool_search' }, { type: 'tool_search', execution: 'server', description: null, parameters: null }]) {
+    const adapted = adaptResponsesRequest({ model: 'gpt', input, tools: [tool] });
+    assert.deepEqual(adapted.tools[0], tool);
+    assert.deepEqual(adapted.input, input);
+  }
+  for (const item of [
+    { type: 'tool_search_call', arguments: '{}' },
+    { type: 'tool_search_call', arguments: {}, execution: null },
+    { type: 'tool_search_call', arguments: {}, status: 'failed' },
+    { type: 'tool_search_output', tools: [], extra: true },
+    { type: 'tool_search_output', tools: [{ type: 'mcp' }] },
+    { type: 'tool_search_output', tools: [null] }
+  ]) assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: [item] }), { param: 'input' });
+  assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: 'hi', tools: [{ type: 'tool_search', execution: 'future' }] }), { param: 'tools' });
+});
