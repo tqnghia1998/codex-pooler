@@ -22,6 +22,20 @@ function fixture(t) {
   return { store, req, payload, upstream, identity, start, append, delivered };
 }
 
+test('recovers a serialized partial-answer mailbox prefix but never a final answer', (t) => {
+  for (const phase of ['partial_answer', 'final_answer']) {
+    const f = fixture(t);
+    const item = { ...commentary, phase };
+    const lease = f.start();
+    f.delivered(lease, item);
+    finishNativeTurn(lease);
+    const serialized = { ...item, content: item.content.map(({ annotations, ...part }) => part) };
+    delete serialized.status;
+    if (phase === 'partial_answer') finishNativeTurn(f.start(f.append(serialized, mail)));
+    else assert.throws(() => f.start(f.append(serialized, mail)), { code: 'duplicate_turn' });
+  }
+});
+
 test('fences active and completed duplicates, admits proven exact cuts without completed items', (t) => {
   const f = fixture(t);
   let lease = f.start();

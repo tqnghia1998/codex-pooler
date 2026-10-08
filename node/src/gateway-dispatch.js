@@ -49,7 +49,7 @@ export async function dispatchGatewayRequest({
       error: {
         type: 'invalid_request_error',
         code: 'unsupported_endpoint',
-        message: 'Unsupported OpenAI /v1 endpoint',
+        message: /^\/v1\/(?:agents|vaults)(?:\/|$)/.test(url.pathname) ? 'Unsupported OpenAI /v1 endpoint: the beta Agents API is not supported' : 'Unsupported OpenAI /v1 endpoint',
         param: null
       }
     });
