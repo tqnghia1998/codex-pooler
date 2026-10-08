@@ -1,4 +1,5 @@
 import { misalignmentPolicyFailure } from './policy-failures.js';
+import { responseValidationError } from './response-validation.js';
 import { isClaudeOAuthUpstream } from './domain.js';
 import { failedIncompleteResponse, quotaIncompleteReason } from './openai-streaming.js';
 
@@ -193,6 +194,8 @@ export function classifySseEvent(event, { allowMisalignmentPolicy = false, upstr
   const incompleteQuota = quotaIncompleteReason(event);
   if (incompleteQuota) return quotaOutcome({ errorCode: incompleteQuota });
   const status = finiteStatus(event?.status ?? event?.status_code ?? error.status);
+  const validation = ['error', 'response.failed'].includes(event?.type) && responseValidationError(event);
+  if (validation && (!status || status === 400)) return { class: 'caller', retryable: false, errorCode: validation.code };
   const claudeRateLimit = upstreamType === 'claude' && (status === 429 || quotaCode(error.code, error.type))
     ? claudeRateLimitDetails(headers)
     : null;
@@ -362,6 +365,7 @@ function callerCode(code, type) {
   return [
     'bad_request',
     'invalid_parameter',
+    'unknown_parameter',
     'invalid_request',
     'unsupported_parameter'
   ].includes(code) || [
