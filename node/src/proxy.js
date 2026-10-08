@@ -6,7 +6,7 @@ import { request as undiciRequest } from 'undici';
 import { defaultBaseUrl, isClaudeOAuthUpstream, normalizeClaudeBaseUrl, parseClaudeQuotaHeaders, STATIC_MODEL_CATALOG } from './domain.js';
 import { buildClaudeModelsResponse, isClaudeModelsRequest, resolveClaudeModelListId } from './claude-models.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
-import { modelCatalogForStore } from './codex-model-catalog.js';
+import { MODEL_LISTING_TTL_MS, modelCatalogForStore } from './codex-model-catalog.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
@@ -2720,15 +2720,15 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
     return;
   }
   const modelCatalog = modelCatalogForStore(store);
-  const discoveryOptions = { fetchImpl, upstreamDeadlines, codexHostHealth, refresh: true };
+  const discoveryOptions = { fetchImpl, upstreamDeadlines, codexHostHealth, cacheTtlMs: MODEL_LISTING_TTL_MS };
   let catalog;
   if (req.proxyAuth?.kind === 'share_session') {
     await modelCatalog.discoverAccount(req.proxyAuth.upstreamId, discoveryOptions);
-    catalog = modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, requestScopeId(req));
+    catalog = modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, requestScopeId(req), MODEL_LISTING_TTL_MS);
   } else if (req.proxyAuth?.kind === 'personal_share') {
     const sessions = personalShareSessions(req);
     await Promise.all(sessions.map(({ upstreamId }) => modelCatalog.discoverAccount(upstreamId, discoveryOptions)));
-    catalog = modelCatalog.scopedAccountsCatalog(sessions.map(({ upstreamId }) => upstreamId), requestScopeId(req));
+    catalog = modelCatalog.scopedAccountsCatalog(sessions.map(({ upstreamId }) => upstreamId), requestScopeId(req), MODEL_LISTING_TTL_MS);
   } else {
     catalog = await modelCatalog.resolve(requestScopeId(req), discoveryOptions);
   }
