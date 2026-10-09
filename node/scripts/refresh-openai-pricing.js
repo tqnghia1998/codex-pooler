@@ -107,7 +107,11 @@ async function main() {
       if (!response.ok) throw new Error(`Pricing fetch failed with HTTP ${response.status}`);
       return response.json();
     });
-  await writeFile(TARGET, buildOpenAiPricingSnapshot(payload, { sourceUrl, effectiveAt, models }));
+  await writeFile(TARGET, buildOpenAiPricingSnapshot(payload, {
+    sourceUrl: sourceUrl.startsWith('file:') ? DEFAULT_SOURCE_URL : sourceUrl,
+    effectiveAt,
+    models
+  }));
   process.stdout.write(`Updated ${TARGET}\n`);
 }
 

@@ -362,6 +362,7 @@ function chatTextOptions(payload) {
 
 function normalizeInput(input, previousResponseId) {
   rejectReservedMetadata(input);
+  validateInputUpdates(input);
   if (previousResponseId !== undefined && (!cleanString(previousResponseId) || !Array.isArray(input))) invalid('previous_response_id requires a tool-output continuation', 'previous_response_id');
   if (input === undefined) return { input: undefined, instructions: [] };
   if (typeof input === 'string') return { input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: input }] }], instructions: [] };
@@ -418,7 +419,7 @@ function normalizeInputItem(item) {
     if (!callId || !cleanString(item.name) || typeof item.arguments !== 'string' || item.status !== undefined && !['completed', 'incomplete'].includes(item.status)) invalid('input item shape is not translatable', 'input');
     const result = { ...item, call_id: callId };
     delete result.status;
-    if (Object.keys(result).some((key) => !['type', 'call_id', 'name', 'arguments', 'id', 'namespace', 'caller', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
+    if (Object.keys(result).some((key) => !['type', 'call_id', 'name', 'arguments', 'id', 'namespace', 'caller', 'async', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
     if (result.namespace !== undefined && !cleanString(result.namespace) || !validReplayCaller(result.caller)) invalid('input item shape is not translatable', 'input');
     return [result];
   }
@@ -430,7 +431,7 @@ function normalizeInputItem(item) {
     return [result];
   }
   if (item.type === 'custom_tool_call') {
-    if (!cleanString(item.call_id) || !cleanString(item.name) || !cleanString(item.input) || item.status !== undefined && !['completed', 'incomplete'].includes(item.status) || Object.keys(item).some((key) => !['type', 'call_id', 'name', 'input', 'id', 'status', 'namespace', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
+    if (!cleanString(item.call_id) || !cleanString(item.name) || !cleanString(item.input) || item.status !== undefined && !['completed', 'incomplete'].includes(item.status) || Object.keys(item).some((key) => !['type', 'call_id', 'name', 'input', 'id', 'status', 'namespace', 'async', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
     return [item.status ? stripKey(item, 'status') : item];
   }
   if (item.type === 'custom_tool_call_output') {
@@ -540,6 +541,7 @@ function rejectReservedMetadata(input) {
 }
 
 function liftInstructions(input) {
+  if (input.some((item) => item.type === 'configuration_update')) return { input, texts: [] };
   const kept = [];
   const texts = [];
   for (const item of input) {
@@ -579,7 +581,43 @@ function repairReplayCallIds(input) {
 function lowerAndValidateTools(tools) {
   if (tools === undefined) return undefined;
   if (!Array.isArray(tools)) invalid('tools must be an array', 'tools');
-  return tools.map((tool) => validateTool(lowerTool(tool)));
+  return tools.map((tool, index) => {
+    validateToolAsync(tool, `tools[${index}]`);
+    return validateTool(lowerTool(tool));
+  });
+}
+
+function validateToolAsync(tool, param) {
+  if (!plainObject(tool)) return;
+  if (tool.type === 'namespace') {
+    if (Object.hasOwn(tool, 'async')) invalid('namespace async is not supported', `${param}.async`, 'unknown_parameter');
+    if (Array.isArray(tool.tools)) tool.tools.forEach((child, index) => validateToolAsync(child, `${param}.tools[${index}]`));
+  } else if (['function', 'custom'].includes(tool.type)) validateAsync(tool, param);
+}
+
+function validateAsync(value, param) {
+  if (Object.hasOwn(value, 'async') && typeof value.async !== 'boolean') invalid('async must be a boolean', `${param}.async`, 'invalid_type');
+}
+
+function validateInputUpdates(input) {
+  if (!Array.isArray(input)) return;
+  input.forEach((item, index) => {
+    if (!plainObject(item)) return;
+    const param = `input[${index}]`;
+    if (item.type === 'configuration_update') {
+      if (!Object.hasOwn(item, 'reasoning')) invalid('reasoning is required', `${param}.reasoning`, 'missing_required_parameter');
+      if (!plainObject(item.reasoning)) invalid('reasoning must be an object', `${param}.reasoning`, 'invalid_type');
+      if (!Object.hasOwn(item.reasoning, 'effort')) invalid('effort is required', `${param}.reasoning.effort`, 'missing_required_parameter');
+      if (typeof item.reasoning.effort !== 'string') invalid('effort must be a string', `${param}.reasoning.effort`, 'invalid_type');
+      for (const [value, allowed, path] of [[item, ['type', 'reasoning'], param], [item.reasoning, ['effort'], `${param}.reasoning`]]) {
+        const extra = Object.keys(value).find((key) => !allowed.includes(key));
+        if (extra !== undefined) invalid('configuration update field is not supported', `${path}.${extra}`, 'unknown_parameter');
+      }
+    } else if (['function_call', 'custom_tool_call'].includes(item.type)) validateAsync(item, param);
+    else if (['additional_tools', 'tool_search_output'].includes(item.type) && Array.isArray(item.tools)) {
+      item.tools.forEach((tool, toolIndex) => validateToolAsync(tool, `${param}.tools[${toolIndex}]`));
+    }
+  });
 }
 
 export function lowerNonStrictFunctionTools(tools) {
@@ -624,7 +662,7 @@ function lowerSchema(schema, root = false) {
 function validateTool(tool) {
   if (!plainObject(tool)) invalid('tool shape is not translatable', 'tools');
   if (tool.type === 'function') {
-    exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema'], 'tools');
+    exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema', 'async'], 'tools');
     if (!cleanString(tool.name) || !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
     if (tool.strict === null) {
       delete tool.strict;
@@ -644,7 +682,7 @@ function validateTool(tool) {
     return tool;
   }
   if (tool.type === 'custom') {
-    exactKeys(tool, ['type', 'name', 'description', 'format', 'defer_loading', 'allowed_callers'], 'tools');
+    exactKeys(tool, ['type', 'name', 'description', 'format', 'defer_loading', 'allowed_callers', 'async'], 'tools');
     if (!cleanString(tool.name)) invalid('custom tool requires a non-empty name', 'tools');
     if (tool.description !== undefined && typeof tool.description !== 'string') invalid('tool shape is not translatable', 'tools');
     optionalBoolean(tool, 'defer_loading', 'tools');
@@ -916,12 +954,29 @@ function codepointLength(value, maximum = Infinity) {
 function validateMedia(value) {
   if (Array.isArray(value)) return value.forEach(validateMedia);
   if (!plainObject(value)) return;
+  if (['function_call_output', 'custom_tool_call_output'].includes(value.type)) {
+    validateToolOutputImages([value]);
+    return;
+  }
   if (value.type === 'input_image') {
     if (value.file_id !== undefined && !cleanString(value.file_id)) mediaError('unsupported_input_image_format', 'Responses input_image values must use https image URLs or supported image data URLs, or nonblank file_id references; Codex sediment:// references are unsupported');
     if (typeof value.image_url === 'string' && !validImageReference(value.image_url)) mediaError('unsupported_input_image_format', 'Responses input_image values must use https image URLs or supported image data URLs, or nonblank file_id references; Codex sediment:// references are unsupported');
   }
   if (value.type === 'input_file' && typeof value.file_data === 'string' && !validDataUrl(value.file_data, FILE_MIMES)) mediaError('unsupported_input_file_format', 'Responses input_file file_data values must use supported PDF or text data URLs');
   for (const child of Object.values(value)) validateMedia(child);
+}
+
+export function validateToolOutputImages(input) {
+  if (!Array.isArray(input)) return;
+  for (const item of input) {
+    if (!['function_call_output', 'custom_tool_call_output'].includes(item?.type) || !Array.isArray(item.output)) continue;
+    for (const part of item.output) {
+      if (part?.type === 'input_image' && typeof part.image_url === 'string'
+        && part.image_url.trim().split(/[;,]/, 1)[0].toLowerCase() === 'data:image/svg+xml') {
+        mediaError('unsupported_input_image_format', 'SVG image data URLs are not supported');
+      }
+    }
+  }
 }
 
 function normalizeAudioPart(part) {

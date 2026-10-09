@@ -36,9 +36,9 @@ function evidence(service, upstream, context, field, observationId, now) {
 
 test('gateway-generated CLI fingerprints use reviewed versions', () => {
   assert.deepEqual(codexProtocolHeaders(null, { env: {} }), {
-    'user-agent': 'codex_cli_rs/0.160.0',
+    'user-agent': 'codex_cli_rs/0.162.0',
     originator: 'codex_cli_rs',
-    version: '0.160.0'
+    version: '0.162.0'
   });
   assert.equal(DEFAULT_CLAUDE_CODE_VERSION, '2.1.289');
   if (!process.env.CODEX_POOLER_CLAUDE_CODE_VERSION) {

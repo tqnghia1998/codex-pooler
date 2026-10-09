@@ -38,7 +38,7 @@ export function isCompatibilityRoute(method, path) {
 }
 
 export function isUnsupportedV1Route(method, path) {
-  if (/^\/v1\/(?:agents|vaults)(?:\/|$)/.test(path)) return true;
+  if (/^\/v1\/(?:agents|vaults|decisions)(?:\/|$)/.test(path)) return true;
   if (method === 'POST' && ['/v1/images/variations', '/v1/embeddings', '/v1/batches', '/v1/moderations', '/v1/fine_tuning/jobs'].includes(path)) return true;
   if ((method === 'GET' || method === 'DELETE') && /^\/v1\/responses\/[^/]+$/.test(path)) return true;
   return method === 'POST' && /^\/v1\/responses\/[^/]+\/cancel$/.test(path);
