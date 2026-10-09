@@ -7,10 +7,11 @@ import { defaultBaseUrl, isClaudeOAuthUpstream, normalizeClaudeBaseUrl, parseCla
 import { buildClaudeModelsResponse, isClaudeModelsRequest, resolveClaudeModelListId } from './claude-models.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { MODEL_LISTING_TTL_MS, modelCatalogForStore } from './codex-model-catalog.js';
+import { projectCodexCatalog } from './codex-catalog-contract.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
-import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools } from './openai-adapters.js';
+import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages } from './openai-adapters.js';
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
@@ -23,6 +24,7 @@ import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpRe
 import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, nativeMisalignmentError, publicMisalignmentError } from './policy-failures.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { beginNativeTurn, bindNativeTurnUpstream, finishNativeTurn, nativeTurnIdentity, nativeRecoveryUpstream, nativeWriteStarted, nativeEventWritten } from './native-turn-recovery.js';
+import { NativeResponseSteering } from './native-response-steering.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 import {
   isShareCredential,
@@ -188,6 +190,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
   let codexPayload = payload;
   let codexAdapterError = null;
   try {
+    if (isBackendResponsesRoute(path)) validateToolOutputImages(payload?.input);
     if (path === '/v1/responses') codexPayload = adaptResponsesRequest(payload);
     else if (sourcePath === '/v1/chat/completions') codexPayload = adaptChatRequest(payload);
   } catch (error) {
@@ -277,7 +280,11 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     relayTurnState: isBackendMetadataRoute(path),
     nativeResponseControls: isBackendResponsesRoute(path)
   };
-  const modelsEtag = isBackendResponsesRoute(path) ? modelCatalog.snapshot(authScopeId).etag : null;
+  const modelsEtag = isBackendResponsesRoute(path) ? projectCodexCatalog(
+    req.proxyAuth?.kind === 'share_session' ? modelCatalog.scopedAccountCatalog(req.proxyAuth.upstreamId, authScopeId)
+      : req.proxyAuth?.kind === 'personal_share' ? modelCatalog.scopedAccountsCatalog(personalShareSessions(req).map(({ upstreamId }) => upstreamId), authScopeId)
+        : modelCatalog.snapshot(authScopeId), header(req, 'user-agent'))?.etag : null;
+  if (modelsEtag) responseOptions.modelsEtag = modelsEtag;
 
   if (!response.ok) {
     finishNativeTurn(req.nativeTurnLease, 'failed');
@@ -1774,6 +1781,7 @@ function directUpstreamPayload(payload, sourcePath) {
 }
 
 function normalizeCodexInput(payload, { compact = false, native = false } = {}) {
+  if (native) validateToolOutputImages(payload?.input);
   const normalized = normalizeReasoningAliases(payload);
   delete normalized.metadata;
   if (!native && typeof normalized.input === 'string') {
@@ -2739,7 +2747,8 @@ export async function proxyModelsRequest({ req, res, path, store, apiKey = proce
   if (path === '/v1/models') {
     sendJson(res, 200, { object: 'list', data: catalog.publicModels }, { etag: catalog.publicEtag });
   } else {
-    sendJson(res, 200, { models: catalog.nativeModels }, { etag: catalog.etag });
+    const projected = projectCodexCatalog(catalog, header(req, 'user-agent'));
+    sendJson(res, 200, { models: projected.nativeModels }, { etag: projected.etag, vary: 'User-Agent' });
   }
 }
 
@@ -2939,9 +2948,9 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
         const upstreamIds = req.proxyAuth.kind === 'share_session' ? [req.proxyAuth.upstreamId]
           : req.proxyAuth.kind === 'personal_share' ? personalShareSessions(req).map(({ upstreamId }) => upstreamId)
             : null;
-        req.codexModelsEtag = (await modelCatalog.forHandshake(requestScopeId(req), {
+        req.codexModelsEtag = projectCodexCatalog(await modelCatalog.forHandshake(requestScopeId(req), {
           upstreamIds, fetchImpl, codexHostHealth
-        }))?.etag;
+        }), header(req, 'user-agent'))?.etag;
       }
       if (socket.destroyed) return;
       wss.handleUpgrade(req, socket, head, (client) => {
@@ -2951,7 +2960,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   wss.on('connection', (client, req) => {
     if (beforeSend) deferWebSocketSends(client, beforeSend);
-    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing, ignoreQuotaCooldown);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing, ignoreQuotaCooldown, apiKey);
   });
   return wss;
 }
@@ -2959,21 +2968,45 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
 function deferWebSocketSends(client, beforeSend) {
   const send = client.send.bind(client);
   client.send = (...args) => {
-    void Promise.resolve(beforeSend()).then(
+    const callback = typeof args.at(-1) === 'function' ? args.at(-1) : null;
+    void Promise.resolve().then(beforeSend).then(
       () => {
         if (client.readyState === WebSocket.OPEN) send(...args);
+        else callback?.(new Error('Downstream websocket closed'));
       },
-      () => client.close(1011, 'QuotaHub persistence is unavailable')
+      () => {
+        callback?.(new Error('Persistence is unavailable'));
+        client.close(1011, 'QuotaHub persistence is unavailable');
+      }
     );
   };
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false, ignoreQuotaCooldown = false) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false, ignoreQuotaCooldown = false, apiKey = null) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
   const accounting = requestAccounting(req);
   let upstream = publicResponses ? null : chooseRawUpstream(store, req);
+  const nativeLane = publicResponses ? null : new NativeResponseSteering({
+    store, req,
+    authorize: () => {
+      const previous = req.proxyAuth;
+      const auth = authenticateProxyRequest(req, store, apiKey, { sharingStore: req.sharingStore, shareKeysOnly: isShareCredential(previous) });
+      if (!auth || auth.scopeId !== previous.scopeId
+        || (previous.kind !== 'personal_share' && auth.id !== previous.id) || auth.personalKeyId !== previous.personalKeyId
+        || (previous.kind === 'share_session' && auth.shareSessionId !== previous.shareSessionId)) return true;
+      const denial = refreshShareSessionAuthorization(req);
+      if (denial) return denial;
+      return previous.kind === 'personal_share' && !personalShareSessions(req)
+        .some((session) => session.shareSessionId === previous.shareSessionId && session.upstreamId === previous.upstreamId);
+    },
+    admit: (payload, candidate) => chooseUpstreams(store, req, '/backend-api/codex/responses', payload, '/backend-api/codex/responses', modelCatalog)
+      .some(({ id }) => id === candidate.id),
+    settle: (turn) => settleUsage(store, turn.upstream, turn.attempt.id, turn.attempt.startedAt,
+      { ...turn.usage, model: turn.servedModel }, turn.payload, accounting, turn.lifecycle, 200),
+    pin: (response, upstreamId) => learnResponsePin(store, response, upstreamId, scopeId, accounting.apiKeyId, req)
+  });
   if (!upstream && !publicResponses) {
     client.close(1013, 'No eligible Codex upstream is available');
     return;
@@ -3001,9 +3034,6 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let publicStreamId = null;
   let publicGenerate = true;
   let publicMultiAgentOptimized = false;
-  let nativeAttempt;
-  let nativePayload;
-  let nativeUsage;
   let nativeResponseControls = {};
   let nativeMetadataSent = false;
   let nativeMultiAgentOptimized = false;
@@ -3023,7 +3053,11 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let keepAliveTimer = null;
   const pacingAbort = new AbortController();
   let sendChain = Promise.resolve();
+  let receiveChain = Promise.resolve();
+  let receiveBytes = 0;
+  let receiveCount = 0;
   const socketPacingAborts = new WeakMap();
+  const socketCredentialEpochs = new WeakMap();
   const clearIdle = () => { if (idleTimer) clearTimeout(idleTimer); idleTimer = null; };
   const clearKeepAlive = () => { if (keepAliveTimer) clearInterval(keepAliveTimer); keepAliveTimer = null; };
   const settlePublicAdmission = (outcome) => {
@@ -3046,9 +3080,6 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
   const releasePublicAttempt = (errorCode) => {
     releaseShareRequest(req, publicAttempt?.id, errorCode);
-  };
-  const releaseNativeAttempt = (errorCode) => {
-    releaseShareRequest(req, nativeAttempt?.id, errorCode);
   };
   const renewPublicAdmission = (candidate) => {
     settlePublicAdmission({ class: 'neutral', retryable: false });
@@ -3148,15 +3179,15 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       if (!publicResponses && frame.nativePayload) {
         try {
-          const identity = nativeTurnIdentity(store, req, frame.nativePayload);
-          if (identity && nativeTurnLease && !nativeTurnLease.finished) throw new HttpError(409, 'duplicate_turn', 'An earlier native turn is still active');
-          if (identity) nativeTurnLease = beginNativeTurn(store, identity, frame.nativePayload, store.get(candidate.id));
+          nativeLane.dispatch(frame.nativePayload, { ...candidate, nativeRecoveryEpoch: socketCredentialEpochs.get(socket) });
         } catch (error) {
-          client.send(JSON.stringify({ type: 'error', code: error.code || 'invalid_request', message: error.message, error: { type: 'invalid_request_error', code: error.code || 'invalid_request', message: error.message } }));
+          const code = error instanceof HttpError ? error.code : 'upstream_dispatch_failed';
+          const message = error instanceof HttpError ? error.message : 'Native upstream dispatch failed';
+          client.send(JSON.stringify({ type: 'error', code, message, error: { type: 'invalid_request_error', code, message } }));
           return;
         }
       }
-      if (nativeTurnLease) await store.flushDurability();
+      if (!publicResponses) await store.flushDurability();
       socket.send(frame.data, { binary: frame.isBinary });
     };
     sendChain = sendChain.then(task, task);
@@ -3196,7 +3227,6 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       return;
     }
     settleNativeAdmission({ class: 'neutral', retryable: false });
-    releaseNativeAttempt(removed ? 'no_eligible_backend' : `local_pacing_${error.code}`);
     client.close(1013, 'Local pacing queue is unavailable');
   };
   const retryPublicWebSocketCompatibility = (frame, candidate) => {
@@ -3287,9 +3317,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       if (client.readyState === WebSocket.OPEN) client.emit('message', next, false);
     });
   };
-  let nativeTurnLease = null;
   const closeBoth = (code = 1000, reason = '') => {
-    finishNativeTurn(nativeTurnLease);
+    nativeLane?.close();
     if (client.readyState === WebSocket.OPEN) client.close(code, reason);
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(code, reason);
   };
@@ -3303,24 +3332,6 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     if (shareDenial) {
       if (!publicResponses) return client.close(1008, shareDenial.message);
       return publicWebSocketFailure(client, shareDenial.code, shareDenial.message, 0, null, null, 403);
-    }
-    if (!publicResponses && isShareCredential(req.proxyAuth) && req.proxyAuth.shareSessionId && !isBinary) {
-      let frame;
-      try { frame = JSON.parse(data.toString()); } catch {}
-      if (frame?.type === 'response.create') {
-        if (nativeAttempt) return client.close(1008, 'A share session allows one active WebSocket turn');
-        nativeAttempt = { id: randomUUID(), startedAt: new Date().toISOString() };
-        nativePayload = frame;
-        nativeUsage = null;
-        if (!reserveShareRequest(req, nativeAttempt.id, {
-          model: frame.model,
-          route: new URL(req.url, 'http://localhost').pathname
-        })) {
-          nativeAttempt = null;
-          nativePayload = null;
-          return client.close(1008, 'The share session quota is exhausted');
-        }
-      }
     }
     if (publicResponses) {
       try {
@@ -3422,25 +3433,32 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         );
       }
     }
-    if (!publicResponses && !nativeAdmission && upstream) {
-      settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
-      const admission = store.beginUpstreamAttempt(upstream.id, nativeCircuitScope);
-      if (!admission) return client.close(1013, 'No eligible Codex upstream is available');
-      nativeAdmission = { upstreamId: upstream.id, admission };
-    }
     let nativePayloadForRecovery = null;
     if (!publicResponses && !isBinary) {
       try {
         const nativeFrame = JSON.parse(data.toString());
-        if (nativeFrame?.type === 'response.create') {
+        if (['response.create', 'response.steer'].includes(nativeFrame?.type)) {
+          validateToolOutputImages(nativeFrame.input);
           nativePayloadForRecovery = nativeFrame;
-          const prepared = prepareCodexMultiAgentRequest(nativeFrame, req, codexOptions);
-          const sanitized = sanitizeCodexInputItemIds(prepared.payload);
-          delete sanitized.metadata;
+          const prepared = nativeFrame.type === 'response.create'
+            ? prepareCodexMultiAgentRequest(nativeFrame, req, codexOptions) : { payload: nativeFrame, optimized: nativeMultiAgentOptimized };
+          const sanitized = nativeFrame.type === 'response.create' ? sanitizeCodexInputItemIds(prepared.payload) : prepared.payload;
+          if (nativeFrame.type === 'response.create') delete sanitized.metadata;
           nativeMultiAgentOptimized = prepared.optimized;
           data = Buffer.from(JSON.stringify(sanitized));
         }
-      } catch {}
+      } catch (error) {
+        if (error instanceof AdapterError) {
+          client.send(JSON.stringify({ type: 'error', error: { type: 'invalid_request_error', code: error.code, message: error.message, param: error.param } }));
+          return;
+        }
+      }
+    }
+    if (!publicResponses && !nativePayloadForRecovery && !nativeLane.current && !nativeAdmission && upstream) {
+      settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+      const admission = store.beginUpstreamAttempt(upstream.id, nativeCircuitScope);
+      if (!admission) return client.close(1013, 'No eligible Codex upstream is available');
+      nativeAdmission = { upstreamId: upstream.id, admission };
     }
     if (targetSocket?.readyState === WebSocket.OPEN) {
       const frame = { data, isBinary, nativePayload: nativePayloadForRecovery };
@@ -3452,7 +3470,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     }
   });
   client.on('close', () => {
-    finishNativeTurn(nativeTurnLease);
+    nativeLane?.close();
     pacingAbort.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     if (targetSocket) socketPacingAborts.get(targetSocket)?.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     clearIdle();
@@ -3462,16 +3480,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       releasePublicAttempt('downstream_closed');
       finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'downstream_closed' });
     }
-    releaseNativeAttempt('downstream_closed');
     settleNativeAdmission({ class: 'neutral', retryable: false });
     settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
     publicTurnActive = false;
     publicLifecycle = null;
     publicAttempt = null;
     publicStreamId = null;
-    nativeAttempt = null;
-    nativePayload = null;
-    nativeUsage = null;
     pending.length = 0;
     pendingBytes = 0;
     queuedTurns.length = 0;
@@ -3741,6 +3755,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     let hostLease = hostAdmission.lease;
     const socketPacingAbort = new AbortController();
     socketPacingAborts.set(socket, socketPacingAbort);
+    socketCredentialEpochs.set(socket, connectionUpstream.nativeRecoveryEpoch);
     const settleHostResponse = () => {
       if (!hostLease) return;
       codexHostHealth.settleResponse(hostLease);
@@ -3774,7 +3789,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       for (const frame of pending.splice(0)) void sendFrame(socket, frame, connectionUpstream).catch(handleFramePacingFailure);
       pendingBytes = 0;
     });
-    socket.on('message', (data, isBinary) => {
+    const receiveFrame = async (data, isBinary) => {
       if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return;
       resetIdle();
       if (publicResponses) {
@@ -3835,22 +3850,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       if (!isBinary) {
         try { nativeFrame = JSON.parse(data.toString()); } catch {}
       }
-      if (nativeAttempt && nativeFrame) nativeUsage = mergeUsage(nativeUsage, extractUsage(nativeFrame));
-      if (nativeFrame && (['error', 'response.failed'].includes(nativeFrame.type) || failedIncompleteResponse(nativeFrame))) {
-        const outcome = classifySseEvent(nativeFrame);
-        if (outcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
-        settleNativeAdmission(outcome);
-        releaseNativeAttempt('upstream_response_failed');
-        nativeAttempt = null;
-        nativePayload = null;
-        nativeUsage = null;
-      } else if (nativeFrame && ['response.completed', 'response.incomplete'].includes(nativeFrame.type)) {
-        settleNativeAdmission({ class: 'success', retryable: false });
-        if (nativeAttempt) settleUsage(store, connectionUpstream, nativeAttempt.id, nativeAttempt.startedAt, nativeUsage, nativePayload, accounting);
-        nativeAttempt = null;
-        nativePayload = null;
-        nativeUsage = null;
-      }
+      const nativeTurn = nativeLane.event(nativeFrame, connectionUpstream);
+      if (nativeFrame && ['error', 'response.failed', 'response.completed', 'response.incomplete'].includes(nativeFrame.type)) settleNativeAdmission(classifySseEvent(nativeFrame));
+      if (classifySseEvent(nativeFrame).errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
       if (!nativeMetadataSent) {
         nativeMetadataSent = true;
         const metadata = JSON.stringify({
@@ -3870,13 +3872,28 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       const sanitized = sanitizeNativeResponseControlFrame(nativeResponseData, isBinary);
       if (client.bufferedAmount + sanitized.byteLength > codexOptions.websocketBackpressureBytes) closeBoth(1009, 'Websocket backpressure limit exceeded');
       else {
-        const lease = nativeTurnLease;
-        nativeWriteStarted(lease);
-        client.send(sanitized, { binary: isBinary }, (error) => {
-          if (error) finishNativeTurn(lease);
-          else nativeEventWritten(lease, nativeFrame);
-        });
+        await nativeLane.deliver(nativeTurn, nativeFrame, () => new Promise((resolve, reject) => {
+          if (client.readyState !== WebSocket.OPEN) return reject(new Error('Downstream closed'));
+          client.send(sanitized, { binary: isBinary }, (error) => error ? reject(error) : resolve());
+        }));
       }
+    };
+    socket.on('message', (data, isBinary) => {
+      if (publicResponses) {
+        void receiveFrame(data, isBinary).catch(() => closeBoth(1011, 'Upstream dispatch failed'));
+        return;
+      }
+      receiveBytes += data.byteLength;
+      receiveCount += 1;
+      if (receiveBytes > codexOptions.websocketBackpressureBytes || receiveCount > 1024) {
+        receiveBytes -= data.byteLength;
+        receiveCount -= 1;
+        closeBoth(1009, 'Websocket backpressure limit exceeded');
+        return;
+      }
+      receiveChain = receiveChain.then(() => receiveFrame(data, isBinary))
+        .catch(() => closeBoth(1011, 'Native upstream dispatch failed'))
+        .finally(() => { receiveBytes -= data.byteLength; receiveCount -= 1; });
     });
     socket.on('unexpected-response', async (_request, response) => {
       settleHostResponse();
@@ -3946,9 +3963,11 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       socketPacingAbort.abort(new DOMException('Upstream websocket closed', 'AbortError'));
       releaseHostLease();
       if (socket !== targetSocket || refreshingConnection || client.readyState !== WebSocket.OPEN) return;
-      targetSocket = undefined;
-      targetUpstreamId = null;
-      targetPromptCacheSessionId = null;
+      if (publicResponses) {
+        targetSocket = undefined;
+        targetUpstreamId = null;
+        targetPromptCacheSessionId = null;
+      }
       const outcome = code === 1009
         ? { class: 'neutral', retryable: false, requestScoped: true, status: 413, errorCode: 'request_too_large' }
         : socketTransportOutcome || classifyTransportError(new Error('Upstream WebSocket closed'));
@@ -3968,8 +3987,11 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       settleNativeConnectionAdmission(outcome);
       settleNativeAdmission(outcome);
-      finishNativeTurn(nativeTurnLease);
-      client.close(code === 1005 || code === 1006 ? 1011 : code, reason);
+      // Drain already received terminals before interrupting the last turn.
+      receiveChain = receiveChain.then(() => {
+        nativeLane.close('upstream_websocket_interrupted', outcome);
+        if (client.readyState === WebSocket.OPEN) client.close(code === 1005 || code === 1006 ? 1011 : code, reason);
+      }).catch(() => closeBoth(1011, 'Native upstream dispatch failed'));
     });
     socket.on('error', (error) => {
       if (socket !== targetSocket || refreshingConnection) return;
@@ -3996,6 +4018,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       settleNativeConnectionAdmission(outcome);
       settleNativeAdmission(outcome);
+      nativeLane.close('upstream_websocket_error', outcome);
       closeBoth(hostOutcome.open ? 1013 : 1011, hostOutcome.open ? 'Codex host is temporarily unreachable' : 'Upstream websocket error');
     });
   };
