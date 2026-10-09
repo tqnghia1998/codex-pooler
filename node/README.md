@@ -92,7 +92,32 @@ Provider validation refusals preserve allowlisted codes (including
 provider messages. Codeless WebSocket refusal templates are recognized with the
 same privacy boundary and remain non-retryable. Every method under `/v1/agents`
 and `/v1/vaults` returns an authenticated `404 unsupported_endpoint` explaining
-that the beta Agents API is not supported.
+that the beta Agents API is not supported. Every method under `/v1/decisions`,
+including nested paths, returns an authenticated unsupported envelope with a
+Decisions-specific explanation.
+
+Responses input accepts ordered `configuration_update` items containing exactly
+`reasoning.effort` as a string. Effort values and consecutive-update policy
+remain provider-owned. Developer/system messages stay in place whenever an
+update is present instead of being lifted into top-level instructions.
+Function/custom tool declarations and replay calls accept boolean `async`;
+namespace-level `async` is refused. These contracts apply to public HTTP and
+WebSocket projections. Native requests keep provider-owned options opaque.
+
+Only direct typed `input_image` parts in array-valued function/custom tool
+outputs are checked for declared SVG data URLs, which are refused before Codex
+dispatch on public and native HTTP/WebSocket routes. Text, JSON objects,
+nested values, and non-SVG references in tool outputs remain opaque.
+
+Native WebSockets support live `response.steer` on the producing connection,
+including provider-accepted late steering. Extra control fields stay on the
+wire. Accepted successors receive separate attempts, usage settlement, share
+reservations, and keyed delivery receipts; admission repeats authorization,
+credential-generation, model, capacity, and spending checks on the original
+account. Receipt writes are flushed before output and after delivery.
+Provider steering refusals do not terminate the original turn or reserve
+another request. Public `/v1/responses` steering remains unsupported, and
+steered successors cannot be recovered on a new connection.
 
 ### Intentional limitations
 
@@ -129,6 +154,8 @@ npm start
 By default, the server binds `127.0.0.1` and accepts only localhost Host headers. For a reverse proxy deployment, set `CODEX_POOLER_BIND_HOST` and `CODEX_POOLER_ALLOWED_HOSTS` (comma-separated). Optional `CODEX_POOLER_ALLOWED_ORIGINS`, `CODEX_POOLER_TRUSTED_PROXIES`, and `CODEX_POOLER_FIREWALL_ALLOWLIST` configure browser origins, trusted forwarding peers, and runtime CIDR/IP admission. External `/api/*` administration requests require the Bearer key; localhost administration remains dashboard-compatible.
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
+The fallback Codex wire identity is `0.162.0`; the separately reviewed,
+integrity-pinned executable release manifest is not automatically advanced.
 
 Codex Responses WebSockets send a ping every `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS` (30 seconds by default) and close an idle upstream after `CODEX_POOLER_CODEX_WEBSOCKET_IDLE_MS`. The upstream frame limit is independently configurable (16 MiB by default); the pending-turn queue remains 2 MiB and outbound backpressure remains 16 MiB. An upstream close with code `1009` is request-scoped and is returned as a 413-style `request_too_large` error without rotating credentials. A `websocket_connection_limit_reached` terminal retires its upstream socket before the next turn. Set `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS=0` to disable pings.
 
@@ -224,6 +251,9 @@ Spending caps use 25 credits per dollar, rounded to whole credits, and a positiv
 
 When Codex reports the `default` service tier for a request that explicitly asked for `priority`, snapshot accounting retains the requested priority rate. An explicitly reported different tier still takes precedence.
 
+The October 8 pricing snapshot includes exact GPT-6.1 Sol `ultrafast` input,
+cached-input, cache-write, and output rates for both ordinary and long contexts.
+
 ## API
 
 ```text
@@ -303,6 +333,16 @@ accounts per discovery pass. Share credentials restrict both discovery and the
 handshake ETag to their authorized accounts. Credential replacement and account
 removal invalidate cached account metadata as before.
 
+Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
+Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
+template exists. Builds in the upstream-qualified `0.154.0` through `0.162.0`
+window also omit entries that violate the mirrored decoder contract. Older
+or unknown clients keep the verbatim catalog; newer builds are not checked
+against an unqualified decoder. Static rows without the required native
+fields are omitted for checked clients, allowing their bundled fallback.
+Catalog GET ETags and native HTTP/WebSocket `x-models-etag` values hash the
+same served representation and remain scoped to authorized share accounts.
+
 When accounts advertise different metadata for the same model, fresh successful
 discovery takes precedence over expired or failed-refresh caches. Token limits
 are selected independently from the highest-ranked account that provides each
@@ -375,6 +415,13 @@ npm run pricing:refresh
 Use `--source=<url-or-file-url>`, `--effective-at=<ISO-8601>`, or `--models=<comma-separated-ids>` when updating from a different vetted source or model selection.
 
 ## Check
+
+To validate unpublished gateway changes in a downstream checkout without
+changing its vendor pin, preload `scripts/candidate-gateway-loader.js` with
+Node's `--loader` option and set `CODEX_GATEWAY_TEST_SOURCE` to this repository's
+absolute root. Run the downstream test command directly, including its normal
+identity and TypeScript preloads, never its publishing npm lifecycle. The
+loader redirects gateway package imports only and is not a runtime dependency.
 
 ```bash
 npm run compatibility:check
