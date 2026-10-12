@@ -49,7 +49,7 @@ const GATEWAY_ERROR_HISTORY_LIMIT = 100;
 const GATEWAY_DIAGNOSTIC_ATTEMPT_LIMIT = 8;
 const GATEWAY_USAGE_DAYS = 90;
 const GATEWAY_USAGE_ATTEMPT_LIMIT = 100;
-const ROUTING_STRATEGIES = new Set(['least-recent-success', 'most-remaining-quota']);
+const ROUTING_STRATEGIES = new Set(['least-recent-success', 'most-remaining-quota', 'cache-locality', 'deterministic-rotation']);
 export const ROUTING_QUOTA_FRESHNESS_MS = 5 * 60_000;
 export const DEFAULT_SCOPE_ID = 'default';
 
@@ -825,7 +825,7 @@ export class Store {
     };
   }
 
-  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, allowUnknownQuota = false, ignoreSpendingCap = false, routeClass = 'proxy_http', strategy = null, now = Date.now(), scopeId = null } = {}) {
+  candidatePlanDetails({ affinityId = '', pinnedId = null, requestedId = '', requestedType = '', preferredType = '', requiredType = '', rotateFromId = '', model = '', requirements = {}, modelSupport = null, ignoreModelRestrictions = false, ignoreQuotaCooldown = false, allowUnknownQuota = false, ignoreSpendingCap = false, routeClass = 'proxy_http', strategy = null, requestSeed = '', promptCacheKey = '', apiKeyId = '', now = Date.now(), scopeId = null } = {}) {
     const db = this.load();
     const selectedStrategy = normalizeRoutingStrategy(strategy ?? db.routingPolicy?.strategy);
     const upstreams = scoped(db.upstreams, scopeId);
@@ -858,10 +858,11 @@ export class Store {
       candidates = filterRoutingCandidates(candidates, (upstream) => upstream.id !== rotateFromId, exclude, 'session_rotation');
     }
     if (automatic) {
+      const seed = routingSeed({ requestSeed, promptCacheKey, scopeId, apiKeyId }, selectedStrategy);
       const preferred = candidates.filter((upstream) => upstream.type === preferredType);
       candidates = [
-        ...orderRoutingCandidates(preferred, selectedStrategy, now, model),
-        ...orderRoutingCandidates(candidates.filter((upstream) => upstream.type !== preferredType), selectedStrategy, now, model)
+        ...orderRoutingCandidates(preferred, selectedStrategy, now, model, seed),
+        ...orderRoutingCandidates(candidates.filter((upstream) => upstream.type !== preferredType), selectedStrategy, now, model, seed)
       ];
       const affinity = candidates.find((candidate) => candidate.id === affinityId);
       if (affinity && !candidates.some((candidate) => capacityTier(candidate, now, model) < capacityTier(affinity, now, model))) {
@@ -1621,12 +1622,38 @@ function leastRecentRank(upstream) {
   return Date.parse(upstream.lastSuccessfulAt) || 0;
 }
 
-function orderRoutingCandidates(upstreams, strategy, now, model = '') {
+function routingSeed({ requestSeed, promptCacheKey, scopeId, apiKeyId }, strategy) {
+  const cacheKey = typeof promptCacheKey === 'string' ? promptCacheKey.trim() : '';
+  const cache = strategy === 'cache-locality' && cacheKey && Buffer.byteLength(cacheKey) <= 256;
+  const value = cache ? cacheKey : typeof requestSeed === 'string' ? requestSeed.slice(0, 1024) : '';
+  if (!value) return null;
+  return createHash('sha256').update(JSON.stringify([scopeId || DEFAULT_SCOPE_ID, apiKeyId, cache ? 'cache' : 'request', value])).digest('hex');
+}
+
+function orderRoutingCandidates(upstreams, strategy, now, model = '', seed = null) {
   const stableOrder = new Map(upstreams.map((upstream, index) => [upstream.id, index]));
   const tieBreak = (left, right) => leastRecentRank(left) - leastRecentRank(right)
     || stableOrder.get(left.id) - stableOrder.get(right.id);
   if (strategy === 'least-recent-success') {
     return [...upstreams].sort((left, right) => capacityTier(left, now, model) - capacityTier(right, now, model) || priorityTier(left) - priorityTier(right) || tieBreak(left, right));
+  }
+  if (strategy === 'cache-locality' || strategy === 'deterministic-rotation') {
+    const tiers = new Map();
+    for (const upstream of upstreams) {
+      const tier = `${capacityTier(upstream, now, model)}:${priorityTier(upstream)}`;
+      if (!tiers.has(tier)) tiers.set(tier, []);
+      tiers.get(tier).push(upstream);
+    }
+    const ordered = [...tiers.values()].sort((left, right) => capacityTier(left[0], now, model) - capacityTier(right[0], now, model)
+      || priorityTier(left[0]) - priorityTier(right[0]));
+    return ordered.flatMap((tier) => {
+      if (!seed) return [...tier].sort(tieBreak);
+      const hash = (id) => createHash('sha256').update(JSON.stringify([seed, id])).digest('hex');
+      if (strategy === 'cache-locality') return [...tier].sort((left, right) => hash(right.id).localeCompare(hash(left.id)) || tieBreak(left, right));
+      const stable = [...tier].sort((left, right) => left.id.localeCompare(right.id));
+      const offset = parseInt(hash('rotation').slice(0, 8), 16) % stable.length;
+      return [...stable.slice(offset), ...stable.slice(0, offset)];
+    });
   }
   const medians = new Map();
   for (const tier of new Set(upstreams.map(priorityTier))) {
@@ -1866,34 +1893,45 @@ function beginCircuitLease(upstream, scope, now) {
   const circuits = upstream.circuits ||= {};
   const key = circuitKey(scope);
   const state = circuits[key] || {};
-  const generation = Math.max(0, Number(state.generation) || 0);
+  const generation = currentCircuitGeneration(upstream, state);
   if (!state.status || state.status === 'closed') return { generation };
   if (state.status === 'open') {
     if (!Number.isFinite(Date.parse(state.nextProbeAt)) || Date.parse(state.nextProbeAt) > now) return null;
-    circuits[key] = { ...state, status: 'half_open', probeInFlight: 1, generation, updatedAt: new Date(now).toISOString() };
-    return { generation };
+    const next = advanceCircuitGeneration(upstream, generation);
+    circuits[key] = { ...state, status: 'half_open', probeInFlight: 1, generation: next, updatedAt: new Date(now).toISOString() };
+    return { generation: next };
   }
   if (state.status === 'half_open') {
     const stale = !Number.isFinite(Date.parse(state.updatedAt)) || Date.parse(state.updatedAt) + CIRCUIT_COOLDOWN_MS <= now;
     if (state.probeInFlight && !stale) return null;
-    circuits[key] = { ...state, probeInFlight: 1, generation, updatedAt: new Date(now).toISOString() };
-    return { generation };
+    const next = advanceCircuitGeneration(upstream, generation);
+    circuits[key] = { ...state, probeInFlight: 1, generation: next, updatedAt: new Date(now).toISOString() };
+    return { generation: next };
   }
   return { generation };
+}
+
+function currentCircuitGeneration(upstream, state) {
+  return Math.max(0, Number(state.generation ?? upstream.circuitGenerationSequence) || 0);
+}
+
+// Keep generations unique even after the bounded per-model map evicts a row.
+function advanceCircuitGeneration(upstream, generation) {
+  return upstream.circuitGenerationSequence = Math.max(generation, Number(upstream.circuitGenerationSequence) || 0) + 1;
 }
 
 function recordCircuitLeaseFailure(upstream, admission, now, failureClass) {
   const circuits = upstream.circuits ||= {};
   const key = circuitKey(admission.scope);
   const prior = circuits[key] || {};
-  if (Math.max(0, Number(prior.generation) || 0) !== admission.circuitGeneration) return;
+  if (currentCircuitGeneration(upstream, prior) !== admission.circuitGeneration) return;
   const failures = Math.max(0, Number(prior.failures) || 0) + 1;
   const open = failures >= CIRCUIT_FAILURE_THRESHOLD;
   circuits[key] = {
     status: open ? 'open' : 'closed',
     failures,
     failureClass,
-    generation: admission.circuitGeneration + (open ? 1 : 0),
+    generation: open ? advanceCircuitGeneration(upstream, admission.circuitGeneration) : admission.circuitGeneration,
     probeInFlight: 0,
     updatedAt: new Date(now).toISOString(),
     ...(open ? { nextProbeAt: new Date(now + CIRCUIT_COOLDOWN_MS).toISOString() } : {})
@@ -1907,7 +1945,9 @@ function completeCircuitLease(upstream, admission, now) {
   const state = circuits[key];
   if (!state) return;
   if (Math.max(0, Number(state.generation) || 0) !== admission.circuitGeneration) return;
-  delete circuits[key];
+  circuits[key] = { status: 'closed', failures: 0, generation: state.status === 'half_open'
+    ? advanceCircuitGeneration(upstream, admission.circuitGeneration) : admission.circuitGeneration, probeInFlight: 0, updatedAt: new Date(now).toISOString() };
+  pruneCircuits(circuits);
 }
 
 function releaseCircuitLease(upstream, admission, now) {
@@ -1915,7 +1955,7 @@ function releaseCircuitLease(upstream, admission, now) {
   const key = circuitKey(admission.scope);
   const state = circuits[key];
   if (!state || Math.max(0, Number(state.generation) || 0) !== admission.circuitGeneration) return;
-  if (state.status === 'half_open') circuits[key] = { ...state, probeInFlight: 0, updatedAt: new Date(now).toISOString() };
+  if (state.status === 'half_open') circuits[key] = { ...state, generation: advanceCircuitGeneration(upstream, admission.circuitGeneration), probeInFlight: 0, updatedAt: new Date(now).toISOString() };
 }
 
 function clearSessionPinsForUpstream(db, upstreamId) {
