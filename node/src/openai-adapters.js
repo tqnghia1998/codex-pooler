@@ -44,6 +44,9 @@ export function adaptResponsesRequest(payload) {
   }
   if (normalized.store !== undefined && normalized.store !== false) unsupported('store');
   requireModel(normalized);
+  if (normalized.instructions !== undefined && normalized.instructions !== null && typeof normalized.instructions !== 'string') {
+    invalid('instructions must be a string or null', 'instructions');
+  }
   validateMetadata(normalized.metadata);
   validateAccessPrograms(normalized.access_programs);
   validatePromptCacheOptions(normalized.prompt_cache_options);
@@ -190,7 +193,7 @@ function chatMessagesToResponses(payload) {
   const input = payload.messages.flatMap(normalizeChatMessage);
   const result = { model: payload.model, input };
   for (const field of [
-    'parallel_tool_calls', 'metadata', 'moderation', 'prompt_cache_key', 'prompt_cache_options',
+    'instructions', 'parallel_tool_calls', 'metadata', 'moderation', 'prompt_cache_key', 'prompt_cache_options',
     'prompt_cache_retention', 'safety_identifier', 'service_tier', 'store', 'stream', 'temperature', 'top_p'
   ]) {
     if (payload[field] !== undefined) result[field] = payload[field];
@@ -398,7 +401,12 @@ function normalizeInputItem(item) {
     if (item.tools?.some((tool) => tool.type === 'mcp')) invalid('remote MCP tools are not supported', 'input');
     return [item];
   }
-  if (item.role === 'assistant' && Array.isArray(item.tool_calls)) return item.tool_calls.map(normalizeAssistantToolCall);
+  if (item.role === 'assistant' && Array.isArray(item.tool_calls)) {
+    const { tool_calls: calls, ...message } = item;
+    const messages = item.content === undefined || item.content === null || item.content === ''
+      || Array.isArray(item.content) && item.content.length === 0 ? [] : normalizeInputItem(message);
+    return [...messages, ...calls.map(normalizeAssistantToolCall)];
+  }
   if (item.role === 'tool') {
     const callId = cleanString(item.tool_call_id) || cleanString(item.call_id);
     if (!callId) invalid('input item shape is not translatable', 'input');
@@ -663,7 +671,7 @@ function validateTool(tool) {
   if (!plainObject(tool)) invalid('tool shape is not translatable', 'tools');
   if (tool.type === 'function') {
     exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema', 'async'], 'tools');
-    if (!cleanString(tool.name) || !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
+    if (!cleanString(tool.name) || tool.strict !== true && !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
     if (tool.strict === null) {
       delete tool.strict;
     } else {

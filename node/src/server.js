@@ -597,6 +597,9 @@ function routingDryRunInput(input = {}) {
   if (!Number.isFinite(now) || now < 0) throw new Error('now must be a non-negative timestamp');
   return {
     strategy,
+    requestSeed: string('requestSeed', 1024),
+    promptCacheKey: string('promptCacheKey', 256),
+    apiKeyId: string('apiKeyId'),
     affinityId: string('affinityId'),
     pinnedId: string('pinnedId'),
     requestedId: string('requestedId'),
