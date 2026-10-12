@@ -65,6 +65,19 @@ The Node proxy covers the client-visible local compatibility path:
 
 ### Responses stream and request contracts
 
+Chat requests retain top-level `instructions` when developer/system messages
+are lifted. Invalid instructions are rejected before lifting. Responses replay
+preserves nonempty assistant text and phase before assistant tool calls; strict
+function root errors report the indexed `tools.*.parameters` path.
+
+Native Codex HTTP SSE observes ordinary events up to 8 MiB and potential
+terminals up to 64 MiB. Larger events pass through unchanged without observation
+or settlement inferred from their suffixes. Created/in-progress/metadata
+preambles are held until output, with an aggregate 8 MiB admission limit;
+overflow is a local health-neutral failure. Successful terminal delivery must
+finish before successful settlement or response pinning. Public adapters retain
+their existing 8 MiB event limits.
+
 Public Responses SSE and WebSocket terminals recover empty or missing `output`
 from the delivered `response.output_item.done` items, ordered by output index
 (or arrival order when indexes are absent). Announcements are never used as
@@ -269,7 +282,7 @@ GET    /api/compatibility                # sanitized fingerprints, counts, and a
 DELETE /api/compatibility/facts          # reset all learned compatibility state
 DELETE /api/compatibility/facts/:id      # reset one opaque compatibility fact
 GET    /api/routing                       # persisted routing strategy
-PUT    /api/routing                       { "strategy": "least-recent-success|most-remaining-quota" }
+PUT    /api/routing                       { "strategy": "least-recent-success|most-remaining-quota|cache-locality|deterministic-rotation" }
 POST   /api/routing/dry-run               # sanitized live-planner candidate/exclusion diagnostics
 POST   /api/upstreams
 POST   /api/upstreams/refresh-quota         # all upstreams, concurrent batches of 10
@@ -336,7 +349,7 @@ removal invalidate cached account metadata as before.
 
 Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
 Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
-template exists. Builds in the upstream-qualified `0.154.0` through `0.162.0`
+template exists. Builds in the upstream-qualified `0.154.0` through `0.162.1`
 window also omit entries that violate the mirrored decoder contract. Older
 or unknown clients keep the verbatim catalog; newer builds are not checked
 against an unqualified decoder. Static rows without the required native
@@ -360,6 +373,10 @@ A `response.incomplete` naming insufficient quota, exhausted credit, or organiza
 Codex HTTP, compatibility, model-discovery, compaction, and WebSocket handshakes also share bounded in-memory origin reachability state. Proven DNS or pre-connect failures settle the selected account neutrally, preventing one local-network or ChatGPT-origin outage from opening every account circuit. Generation-fenced leases prevent an old half-open request from clearing a newer outage, while a real HTTP response of any status immediately restores normal host admission. The state is process-local and stores no credentials, request bodies, response bodies, or hostnames in diagnostics.
 
 Quota and reauthentication transitions clear ordinary session affinity so new work can route elsewhere, but committed response-continuation pins are retained and never silently moved. A failed scheduled OAuth refresh does not remove an account from routing while its saved access-token expiry remains in the future; runtime refresh failures, missing expiries, expired tokens, and reauthentication-required state remain ineligible. Credential replacement and generation-fenced attempt leases prevent stale in-flight success or failure from overwriting newer account state. Public upstream records expose only sanitized health fields. `POST /api/upstreams/:id/clear-cooldown` clears quota cooldown state without clearing reauthentication-required state or unrelated routing history.
+
+Model/route circuit probes have generation-fenced ownership. Replacement and
+neutral-release probes invalidate older leases, and completed probes retain a
+bounded closed generation marker so duplicate outcomes cannot reopen them.
 
 Create a Codex upstream with `{ "type": "codex", "authJson": "..." }`, a Compass upstream with `{ "type": "compass", "projectId": "...", "projectKey": "...", "quotaSource": "compass|ais" }`, or a Claude Enterprise OAuth upstream with `{ "type": "claude", "authJson": "{\"access_token\":\"...\",\"refresh_token\":\"...\"}" }`. The API endpoints `POST /api/claude/oauth/start` and `POST /api/claude/oauth/exchange` support the Claude Code PKCE flow; the dashboard supports importing OAuth credential JSON and manual OAuth quota/profile refresh. Claude OAuth profile metadata is hydrated best-effort on create or credential replacement; manually imported records can be updated with `POST /api/upstreams/:id/refresh-profile`. Claude requests are native `/v1/messages` and `/v1/messages/count_tokens` calls; use `x-upstream-type: claude` when Compass and Claude upstreams coexist. Names are derived server-side from masked account email or a generic Claude account label. Claude credential metadata may carry CPA-compatible `cloak_mode` (`never` preserves caller placement), `cloak_strict_mode`, `cloak_sensitive_words` (array or comma-separated string), IANA `timezone`, `fingerprint_profile: "claude-code-cli"`, opt-in `rebuild_mid_system_message`, `header:<name>` overrides (including `$<incoming-header>` substitutions, a nested `headers` object, or cookies), per-auth `model_aliases` entries such as `{ "name": "claude-sonnet-4-6", "alias": "team-sonnet", "force-mapping": true }`, and `request_scoped_errors` rules with CPA actions `stop`, `stop-and-cooldown`, `continue`, or `continue-and-cooldown`. The management API also accepts CPA-style top-level Claude fields: `headers`, `models`, `excluded-models`, `proxy-url`, `prefix`, `rebuild-mid-system-message`, `disable-cooling`, `request-retry`, `request-scoped-errors`, `fingerprint-profile`, and `cloak`; `models` replaces the default catalog for that credential and supports CPA `name`, `alias`, `display-name`, `max-context-length`, `force-mapping`, and `is-compat` fields. Claude model suffixes such as `claude-sonnet-4-6(8192)`, `(high)`, `(auto)`, and `(none)` are applied before direct Messages dispatch. Aliases rewrite the upstream model and force-mapped responses use the client alias; scoped rules can stop or fail over a matching HTTP/SSE error and optionally cool the credential. These are applied only to the Claude wire transformation and never to authentication. The single Claude OAuth device identity is persisted in exported credential metadata. Bulk caps accept either `{ "target": "all|cap_reached|uncapped", "capDollars": 100 }` or quota rules such as `{ "rules": [{ "minQuotaLeft": 1000, "capDollars": 100 }] }`. Quota rules may also carry `unknownQuotaDollars`, applied as the cap for upstreams whose remaining quota is unknown; omitting it skips those upstreams, and the dashboard pre-fills $5. Bulk updates are sequential, not atomic.
 
@@ -396,6 +413,19 @@ Request pacing is disabled by default and configured per upstream through create
 Proxy routing prefers Codex, prefers Compass for `claude-*` models, and supports Compass or Claude for `/v1/messages` and `/v1/messages/count_tokens`. Type preference is soft except for native protocol boundaries: `/v1/messages` never reaches Codex, `/v1/messages/count_tokens` never reaches Codex and uses local counting for Compass, `/backend-api/codex/*` never reaches Compass or Claude, and Claude upstreams are not selected for OpenAI Chat/Responses routes until a dedicated translation adapter exists. Use `x-upstream-type: claude` or `x-upstream-id` to select Claude explicitly when both direct Anthropic upstream types are configured.
 
 The persisted routing strategy defaults to `least-recent-success`, preserving the existing behavior. `most-remaining-quota` is optional and compares normalized remaining percentages only within the same strict priority tier. Quota observations are fresh for five minutes for routing decisions; this is separate from provider refresh scheduling and does not cache successful quota requests. Missing or stale quota remains eligible and receives the median fresh score in its tier, so unknown providers are not categorically placed last; least-recent-success and stable persisted order break ties. An exhausted quota window blocks routing until its reported reset; when no reset is known, a stale observation can be retried after five minutes, except for non-recurring Compass project balances, which remain blocked until refreshed. Spending caps and provider cooldowns still apply independently. Configure the strategy in dashboard **Routing** or with `GET/PUT /api/routing`. `POST /api/routing/dry-run` uses the live planner and returns sanitized ordered candidates, quota freshness, and exclusion codes without credentials or provider bodies.
+
+`cache-locality` uses rendezvous ordering from a trimmed `prompt_cache_key`
+(at most 256 UTF-8 bytes), falling back to the request seed.
+`deterministic-rotation` rotates stable account-ID order from the request seed,
+ignoring the cache key. Both isolate hashes by scope and API key, keep included
+capacity and strict priority tiers ahead of seeded ordering, and retain all hard
+eligibility, continuation and soft-affinity rules. Seeds prefer the session
+alias, then `idempotency-key`, then `x-client-request-id`, then a fresh request
+UUID (per public WebSocket turn). Without a seed the planner uses least-recent
+ordering. Seeds and cache keys are not persisted by the routing planner.
+Dry-run accepts `requestSeed`, `promptCacheKey`, and `apiKeyId` for reproducible
+diagnostics; it never mutates state. These operator profiles do not override
+QuotaHub's product-owned personal-key share selection.
 
 Codex provider credits are disabled by default. Create or patch an account with `{ "allowProviderCredits": true }` to enable them; duplicate records of the same account within one scope share this policy. Included quota is preferred ahead of credit-backed accounts, including soft affinity and priority order. Credit admission requires explicit provider `has_credits` plus a positive balance or unlimited capacity, observed within five minutes under the current credential generation. All included windows and matching model-specific windows are checked. Credentials, hard pins, spend caps, model capability, and cooldowns remain authoritative; capacity is rechecked after pacing immediately before each HTTP or WebSocket send. Provider quota evidence arriving after credential replacement is discarded. Banked reset redemption is not implemented in Node.
 
