@@ -1860,6 +1860,8 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
   const [strategy, setStrategy] = useState('least-recent-success');
   const [preferredType, setPreferredType] = useState('codex');
   const [model, setModel] = useState('');
+  const [promptCacheKey, setPromptCacheKey] = useState('');
+  const [requestSeed, setRequestSeed] = useState('');
   const [diagnostics, setDiagnostics] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState('');
@@ -1877,7 +1879,7 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
     try {
       const data = await api('/api/routing/dry-run', {
         method: 'POST',
-        body: JSON.stringify({ strategy, preferredType, model: model.trim() })
+        body: JSON.stringify({ strategy, preferredType, model: model.trim(), promptCacheKey, requestSeed })
       });
       setDiagnostics(data.routing);
     } catch (runError) {
@@ -1908,12 +1910,18 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
         <LayoutContent>
           <form id="routing-form" onSubmit={submit}>
             <VStack gap={4}>
-              <StackItem size="static" crossAlignSelf="start">
-                <SegmentedControl label="Strategy" value={strategy} layout="hug" onChange={setStrategy}>
-                  <SegmentedControlItem value="least-recent-success" label="Least recent success" />
-                  <SegmentedControlItem value="most-remaining-quota" label="Most remaining quota" />
-                </SegmentedControl>
-              </StackItem>
+              <Selector label="Strategy" value={strategy} onChange={setStrategy} options={[
+                { value: 'least-recent-success', label: 'Least recent success' },
+                { value: 'most-remaining-quota', label: 'Most remaining quota' },
+                { value: 'cache-locality', label: 'Cache locality' },
+                { value: 'deterministic-rotation', label: 'Deterministic rotation' }
+              ]} />
+              {['cache-locality', 'deterministic-rotation'].includes(strategy) && (
+                <HStack gap={2} wrap="wrap">
+                  <StackItem size="fill"><TextInput label="Request seed" value={requestSeed} onChange={setRequestSeed} /></StackItem>
+                  {strategy === 'cache-locality' && <StackItem size="fill"><TextInput label="Prompt cache key" value={promptCacheKey} onChange={setPromptCacheKey} /></StackItem>}
+                </HStack>
+              )}
               <HStack gap={2} vAlign="end" wrap="wrap">
                 <StackItem size="fill">
                   <Selector
