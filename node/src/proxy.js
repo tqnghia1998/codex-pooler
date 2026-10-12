@@ -26,6 +26,7 @@ import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { beginNativeTurn, bindNativeTurnUpstream, finishNativeTurn, nativeTurnIdentity, nativeRecoveryUpstream, nativeWriteStarted, nativeEventWritten } from './native-turn-recovery.js';
 import { NativeResponseSteering } from './native-response-steering.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
+import { consumeNativeSse, createNativeSseState, nativeSsePreamble, NATIVE_SSE_EVENT_BYTES } from './native-sse.js';
 import {
   isShareCredential,
   personalShareSessions,
@@ -821,6 +822,9 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
         : supported;
     },
     scopeId,
+    apiKeyId,
+    requestSeed: sessionId || header(req, 'idempotency-key') || header(req, 'x-client-request-id') || (req.gatewayRoutingSeed ||= randomUUID()),
+    promptCacheKey: payload?.prompt_cache_key,
     requirements: requestRequirements(path, payload),
     allowUnknownQuota: Boolean(req.allowUnknownQuota),
     ignoreSpendingCap: isShareCredential(req.proxyAuth),
@@ -984,6 +988,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       for (let retries = 0; retries < COMPATIBILITY_RETRY_LIMIT; retries += 1) {
         if (response.ok && isEventStream(response)) {
           inspectedSse = await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId), {
+            native: upstream.type === 'codex' && path.startsWith('/backend-api/codex/'),
             bootstrap: codexOptions.streamBootstrapBuffering && upstream.type === 'codex' && path === '/v1/responses' && payload?.stream === true,
             maxBytes: codexOptions.streamBootstrapBytes,
             maxEvents: codexOptions.streamBootstrapEvents,
@@ -1020,6 +1025,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       }
       if (response.ok && isEventStream(response)) {
         const inspected = inspectedSse || await inspectInitialSseEvent(response, upstreamDeadlines, () => diagnostics.firstSseEvent(attemptId), {
+          native: upstream.type === 'codex' && path.startsWith('/backend-api/codex/'),
           bootstrap: codexOptions.streamBootstrapBuffering && upstream.type === 'codex' && path === '/v1/responses' && payload?.stream === true,
           maxBytes: codexOptions.streamBootstrapBytes,
           maxEvents: codexOptions.streamBootstrapEvents,
@@ -1253,14 +1259,16 @@ async function retryableUpstreamResponse(response, upstream) {
   return modelNotFound ? { modelNotFound: true } : null;
 }
 
-export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstEvent = null, { bootstrap = false, maxBytes = 512 * 1024, maxEvents = 32, timeoutMs = 1_000 } = {}) {
+export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, onFirstEvent = null, { native = false, bootstrap = false, maxBytes = 512 * 1024, maxEvents = 32, timeoutMs = 1_000 } = {}) {
   if (!response.body) return { response, retryable: true };
   const [probe, downstream] = response.body.tee();
   const reader = probe.getReader();
   const decoder = new TextDecoder();
   let parserState = createSseParserState();
+  const nativeParser = native ? createNativeSseState() : null;
   let seenEvents = 0;
   let bootstrapBytes = 0;
+  let nativePreambleBytes = 0;
   const startedAt = Date.now();
   let firstEvent;
   let firstEventObserved = false;
@@ -1297,19 +1305,30 @@ export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, o
         return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
       }
       const { done, value } = read;
-      const result = consumeSseChunk(parserState, done ? decoder.decode() : decoder.decode(value, { stream: true }));
+      const text = done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const nativeParts = native ? consumeNativeSse(nativeParser, text, { eof: done }) : null;
+      const result = native ? { state: parserState, blocks: [] }
+        : consumeSseChunk(parserState, text);
       parserState = result.state;
       if (result.overflow) {
         void reader.cancel('Initial SSE event exceeded buffer limit').catch(() => {});
         void downstream.cancel('Initial SSE event exceeded buffer limit').catch(() => {});
         return { response: localSseFailure(response), retryable: false };
       }
-      const pending = done ? pendingSseBlock(parserState) : '';
-      const events = pending.trim()
+      const pending = done && !native ? pendingSseBlock(parserState) : '';
+      const events = native ? nativeParts : (pending.trim()
         ? [...result.blocks, pending]
-        : result.blocks;
+        : result.blocks).map((block) => ({ kind: 'block', block }));
       let retryPreambleSeen = false;
-      for (const event of events) {
+      for (const part of events) {
+        if (native && part.kind === 'block' && nativeSsePreamble(part.block)) nativePreambleBytes += Buffer.byteLength(part.wire);
+        if (part.kind === 'preamble_overflow' || nativePreambleBytes > NATIVE_SSE_EVENT_BYTES) {
+          void reader.cancel('Native SSE preamble exceeded buffer limit').catch(() => {});
+          void downstream.cancel('Native SSE preamble exceeded buffer limit').catch(() => {});
+          return { response: localSseFailure(response, 'native_preamble_limit_exceeded'), retryable: false };
+        }
+        if (part.kind === 'raw') return finish({ response: streamResponseClone(response, downstream), retryable: false, firstEvent });
+        const event = part.block;
         if (!hasSseData(event)) continue;
         seenEvents += 1;
         bootstrapBytes += Buffer.byteLength(event);
@@ -1362,8 +1381,8 @@ function streamResponseClone(response, body) {
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 }
 
-function localSseFailure(response) {
-  return new Response('event: error\ndata: {"type":"error","error":{"type":"server_error","code":"server_error","message":"Upstream stream event exceeded limit"}}\n\n', {
+function localSseFailure(response, code = 'server_error') {
+  return new Response(`event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'server_error', code, message: 'Upstream stream event exceeded limit' } })}\n\n`, {
     status: response.status,
     headers: { 'content-type': 'text/event-stream' }
   });
@@ -2111,27 +2130,42 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   let claudeMessageId = '';
   let healthOutcome = null;
   let parserState = createSseParserState();
+  const nativeSse = upstream.type === 'codex' && !transformChat && !sanitizePublicResponses;
+  const nativeParser = nativeSse ? createNativeSseState() : null;
+  let nativePreamble = [];
+  let nativePreambleBytes = 0;
+  let nativeOutputStarted = false;
   const decoder = new TextDecoder();
   const publicState = sanitizePublicResponses ? createPublicResponsesState(publicResponsesNamespaces) : null;
   // Synthetic terminals continue the stream's own sequence so a client never sees it restart.
   const nextPublicSequence = () => publicState ? (publicState.sequence = Math.min(Number.MAX_SAFE_INTEGER, publicState.sequence + 1)) : 0;
   const chatState = transformChat ? createChatStreamState(payload) : null;
   const writeNative = async (block, parsed) => {
-    if (!nativeTurnLease) return writeChunk(res, block);
-    nativeWriteStarted(nativeTurnLease);
+    if (!nativeSse && !nativeTurnLease) return writeChunk(res, block);
+    if (nativeTurnLease) {
+      nativeWriteStarted(nativeTurnLease);
+      await store.flushDurability();
+    }
     await new Promise((resolve, reject) => {
       const onClose = () => { cleanup(); reject(new Error('Downstream closed during write')); };
       const cleanup = () => res.off('close', onClose);
       res.once('close', onClose);
       if (res.destroyed) return onClose();
-      res.write(block, (error) => { cleanup(); if (error) reject(error); else { nativeEventWritten(nativeTurnLease, parsed); resolve(); } });
+      res.write(block, (error) => { cleanup(); if (error) reject(error); else { if (nativeTurnLease) nativeEventWritten(nativeTurnLease, parsed); resolve(); } });
     });
+    if (nativeTurnLease) await store.flushDurability();
+  };
+  const flushNativePreamble = async () => {
+    const held = nativePreamble;
+    nativePreamble = [];
+    nativePreambleBytes = 0;
+    for (const part of held) await writeNative(part.wire, eventData(part.block));
   };
   res.once('close', () => {
     if (!res.writableEnded) downstreamClosed = true;
     void reader.cancel('Downstream closed').catch(() => {});
   });
-  const relayEvent = async (event) => {
+  const relayEvent = async (event, wire = `${event}\n\n`) => {
     if (terminal || downstreamClosed) return;
     if (hasSseData(event)) gatewayDiagnosticsForStore(store).firstSseEvent(attemptId);
     const decoded = decodeSseBlock(event);
@@ -2141,17 +2175,17 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (!parsed) {
       if (!hasSseData(event)) return;
       if (event.includes('data: [DONE]')) {
+        if (sanitizePublicResponses) await writeChunk(res, `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' }, sequence_number: nextPublicSequence() })}\n\n`);
+        else if (!transformChat) await writeNative(wire, null);
         terminal = true;
         completed = true;
         void reader.cancel('Upstream terminal event').catch(() => {});
-        if (sanitizePublicResponses) await writeChunk(res, `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { status: 'completed' }, sequence_number: nextPublicSequence() })}\n\n`);
-        else if (!transformChat) await writeChunk(res, `${event}\n\n`);
       } else if (sanitizePublicResponses || transformChat) {
         terminal = true;
         if (transformChat) await writeChunk(res, chatStreamFailure());
         else await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       } else {
-        await writeNative(`${event}\n\n`, null);
+        await writeNative(wire, null);
       }
       return;
     }
@@ -2200,12 +2234,11 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       }
       return;
     }
-    if (successfulTerminal) onSuccessfulTerminal?.(parsed.response);
-    if (successfulTerminal) healthOutcome = { class: 'success', retryable: false };
     const type = parsed.type;
     if (type === 'response.failed' || type === 'error' || failedIncompleteResponse(parsed)) {
       terminal = true;
-      healthOutcome = {
+      healthOutcome = parsed.error?.code === 'native_preamble_limit_exceeded'
+        ? { class: 'neutral', retryable: false, errorCode: 'native_preamble_limit_exceeded' } : {
         ...classifySseEvent(parsed, {
           allowMisalignmentPolicy: transformChat || sanitizePublicResponses,
           upstreamType: upstream.type,
@@ -2217,30 +2250,68 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       else if (sanitizePublicResponses) await writeChunk(res, publicStreamFailure(nextPublicSequence()));
       else {
         const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-        await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`, nativeEvent);
+        await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : wire, nativeEvent);
       }
       void reader.cancel('Upstream terminal event').catch(() => {});
       return;
     }
+    const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
+    await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : wire, nativeEvent);
+    visible = true;
     if (successfulTerminal) {
+      onSuccessfulTerminal?.(parsed.response);
+      healthOutcome = { class: 'success', retryable: false };
       terminal = true;
       completed = true;
+      void reader.cancel('Upstream terminal event').catch(() => {});
     }
-    if (parsed) visible = true;
-    const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
-    await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : `${event}\n\n`, nativeEvent);
-    if (successfulTerminal) void reader.cancel('Upstream terminal event').catch(() => {});
+  };
+  const relayNativeParts = async (parts) => {
+    for (const part of parts) {
+      if (terminal || downstreamClosed) break;
+      if (part.kind === 'preamble_overflow' && !nativeOutputStarted) {
+        throw Object.assign(new Error('Native SSE preamble exceeded buffer limit'), { nativePreambleLimit: true });
+      }
+      if (!nativeOutputStarted && part.kind === 'block' && nativeSsePreamble(part.block)
+        && ['response.created', 'response.in_progress', 'response.metadata', 'codex.response.metadata'].includes(eventData(part.block)?.type)) {
+        const bytes = Buffer.byteLength(part.wire);
+        if (bytes > NATIVE_SSE_EVENT_BYTES - nativePreambleBytes) {
+          throw Object.assign(new Error('Native SSE preamble exceeded buffer limit'), { nativePreambleLimit: true });
+        }
+        nativePreamble.push(part);
+        nativePreambleBytes += bytes;
+        continue;
+      }
+      if (part.kind === 'raw' || part.kind === 'preamble_overflow') {
+        await flushNativePreamble();
+        nativeOutputStarted = true;
+        await writeNative(part.wire, null);
+        visible = true;
+      } else if (hasSseData(part.block)) {
+        await flushNativePreamble();
+        nativeOutputStarted = true;
+        await relayEvent(part.block, part.wire);
+      } else {
+        await writeNative(part.wire, null);
+      }
+    }
   };
   try {
     while (!downstreamClosed && !terminal) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (done) break;
-      const result = consumeSseChunk(parserState, decoder.decode(value, { stream: true }));
+      const text = decoder.decode(value, { stream: true });
+      if (nativeSse) {
+        await relayNativeParts(consumeNativeSse(nativeParser, text));
+        continue;
+      }
+      const result = consumeSseChunk(parserState, text);
       parserState = result.state;
       if (result.overflow) throw new Error('SSE event exceeded buffer limit');
       for (const event of result.blocks) await relayEvent(event);
     }
-    const final = consumeSseChunk(parserState, decoder.decode());
+    if (nativeSse) await relayNativeParts(consumeNativeSse(nativeParser, decoder.decode(), { eof: true }));
+    const final = consumeSseChunk(parserState, nativeSse ? '' : decoder.decode());
     parserState = final.state;
     if (final.overflow) throw new Error('SSE event exceeded buffer limit');
     for (const event of final.blocks) await relayEvent(event);
@@ -2254,7 +2325,9 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (transformChat && completed && !chatState.terminal && !downstreamClosed) await writeChunk(res, 'data: [DONE]\n\n');
   } catch (error) {
     logProxyFailure(logger, 'stream', upstream.id, error);
-    healthOutcome ||= classifyTransportError(error, { clientCancelled: downstreamClosed });
+    healthOutcome ||= error.nativePreambleLimit
+      ? { class: 'neutral', retryable: false, errorCode: 'native_preamble_limit_exceeded' }
+      : classifyTransportError(error, { clientCancelled: downstreamClosed });
     if (!downstreamClosed && visible && !terminal) {
       terminal = true;
       if (transformChat) await writeChunk(res, chatStreamFailure());
@@ -2773,6 +2846,8 @@ function chooseRawUpstream(store, req) {
     requiredType: 'codex',
     rotateFromId: pinnedId || requestedId ? '' : rotationUpstreamId,
     scopeId,
+    apiKeyId,
+    requestSeed: sessionId || header(req, 'idempotency-key') || header(req, 'x-client-request-id') || (req.gatewayRoutingSeed ||= randomUUID()),
     routeClass: 'raw_native'
   });
   const allowed = personalKey
@@ -3348,6 +3423,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         const generate = validateGenerate(frame.generate);
         const { type: _type, generate: _generate, stream_id: _streamId, ...request } = frame;
         const payload = adaptResponsesRequest({ ...request, stream: true });
+        req.gatewayRoutingSeed = randomUUID();
         const compactionBridge = prepareCompactionTriggerBridge('/v1/responses', payload);
         if (compactionBridge?.error) throw new AdapterError(compactionBridge.error.message, compactionBridge.error.param);
         turnCandidates = chooseUpstreams(store, req, '/v1/responses', payload, '/v1/responses', modelCatalog).map((entry) => store.get(entry.id, requestScopeId(req))).filter((entry) => entry?.type === 'codex');
