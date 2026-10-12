@@ -94,12 +94,12 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.162.0']);
-  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1']) {
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.162.1']);
+  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.162.1'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.162.2'), 'instructions_template');
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);
