@@ -33,7 +33,7 @@ function fixture(t, share = false) {
   let denied = false;
   const lane = new NativeResponseSteering({
     store, req, authorize: () => denied, admit: () => true,
-    settle: (turn) => { calls.settlements.push(turn); },
+    settle: (turn, failure) => { calls.settlements.push({ ...turn, failure }); },
     pin: (response) => calls.pins.push(response.id)
   });
   t.after(() => { lane.close(); store.sqlite.close(); });
@@ -64,6 +64,20 @@ test('steering successors get independent attempts, reservations and keyed deliv
   assert.equal(store.nativeTurnReceipt(successor.identity.key).pendingWrite, false);
   assert.equal(JSON.stringify(store.load().nativeTurnReceipts).includes('private'), false);
   assert.equal(JSON.stringify(store.load().nativeTurnReceipts).includes('resp_successor'), false);
+});
+
+test('retains measured native usage on interruption and preserves failure outcome', (t) => {
+  const { lane, upstream, calls } = fixture(t, true);
+  lane.dispatch(opener, upstream);
+  lane.event({ ...created('resp_original'), response: {
+    id: 'resp_original', status: 'in_progress',
+    usage: { input_tokens: 10, output_tokens: 2, price_cost_usd: 0.1 }
+  } }, upstream);
+  lane.close('downstream_closed');
+  assert.equal(calls.settlements.length, 1);
+  assert.equal(calls.settlements[0].usage.upstreamCostMicros, 100_000);
+  assert.deepEqual(calls.settlements[0].failure, { errorCode: 'downstream_closed' });
+  assert.deepEqual(calls.releases, []);
 });
 
 test('steer failure is a control refusal and does not terminate or reserve a second request', (t) => {
