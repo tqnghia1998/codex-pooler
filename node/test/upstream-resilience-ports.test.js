@@ -102,7 +102,7 @@ test('evicted circuit rows cannot recycle an old probe generation', (t) => {
   assert.equal(Object.keys(store.get(account.id).circuits).length, 100);
 });
 
-test('native terminal write failure preserves delivered receipts without successful settlement', async (t) => {
+test('native terminal write failure preserves receipts and measured usage without marking success', async (t) => {
   const store = fixture(t);
   const account = store.create({ type: 'codex', accessToken: 'synthetic' });
   store.setCap(account.id, { capDollars: 100 });
@@ -132,7 +132,7 @@ test('native terminal write failure preserves delivered receipts without success
   await proxyRequest({ req, res, path: '/backend-api/codex/responses', payload, store, apiKey: 'key',
     fetchImpl: async () => new Response(sse(preamble) + sse(done) + sse(terminal), { headers: { 'content-type': 'text/event-stream' } }) });
   assert.equal(wires.join(''), sse(preamble) + sse(done));
-  assert.equal(store.get(account.id).spending.spentCredits, 0);
+  assert.equal(store.get(account.id).spending.spentCredits, 2.5);
   const receipt = Object.values(store.load().nativeTurnReceipts)[0];
   assert.equal(receipt.status, 'interrupted');
   assert.equal(receipt.pendingWrite, true);
