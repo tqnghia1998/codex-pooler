@@ -36,7 +36,7 @@ function post(base, body, path = '/v1/responses') {
   return fetch(base + path, { method: 'POST', headers: { authorization: 'Bearer ports-key', 'content-type': 'application/json' }, body: JSON.stringify(body) });
 }
 
-test('SSE repairs terminal tool output and never settles a malformed tool success', async (t) => {
+test('SSE repairs terminal tool output and retains measured usage on malformed output', async (t) => {
   const { store, upstream, key } = fixture(t);
   let valid = false;
   let calls = 0;
@@ -48,8 +48,8 @@ test('SSE repairs terminal tool output and never settles a malformed tool succes
   const terminal = splitSseBlocks(await response.text()).map(decodeSseBlock).filter((block) => block.kind === 'event').at(-1).event;
   assert.equal(terminal.type, 'response.failed');
   assert.equal(calls, 1);
-  assert.equal(store.get(upstream.id).spending.spentCredits, 0);
-  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 0);
+  assert.equal(store.get(upstream.id).spending.spentCredits, 2.5);
+  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 1);
   assert.equal(store.load().gatewayRequests.at(-1).lastErrorCode, 'incomplete_tool_item');
   assert.equal(store.responseUpstream('resp_invalid', key.scopeId, key.id), null);
   valid = true;
@@ -57,8 +57,8 @@ test('SSE repairs terminal tool output and never settles a malformed tool succes
   const completed = splitSseBlocks(await success.text()).map(decodeSseBlock).filter((block) => block.kind === 'event').at(-1).event;
   assert.equal(completed.type, 'response.completed');
   assert.deepEqual(completed.response.output, [tool]);
-  assert.equal(store.get(upstream.id).spending.spentCredits, 2.5);
-  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 1);
+  assert.equal(store.get(upstream.id).spending.spentCredits, 5);
+  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 2);
   assert.equal(store.responseUpstream('resp_valid', key.scopeId, key.id), upstream.id);
 });
 
@@ -95,8 +95,8 @@ test('public WebSocket repairs output, fences malformed success, and permits the
   assert.deepEqual(terminals.map((event) => event.type), ['response.failed', 'response.completed']);
   assert.deepEqual(terminals[1].response.output, [tool]);
   assert.equal(turns, 2);
-  assert.equal(store.get(upstream.id).spending.spentCredits, 2.5);
-  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 1);
+  assert.equal(store.get(upstream.id).spending.spentCredits, 5);
+  assert.equal(store.gatewayUsage(key.scopeId, key.id).request_count, 2);
   assert.equal(store.load().gatewayRequests.at(-1).lastErrorCode, 'incomplete_tool_item');
   assert.equal(store.responseUpstream('resp_invalid', key.scopeId, key.id), null);
   assert.equal(store.responseUpstream('resp_valid', key.scopeId, key.id), upstream.id);
