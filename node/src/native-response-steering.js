@@ -2,7 +2,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { HttpError } from './http-ingress.js';
 import { beginNativeTurn, finishNativeTurn, nativeEventWritten, nativeTurnIdentity, nativeWriteStarted } from './native-turn-recovery.js';
 import { isShareCredential, releaseShareRequest, reserveShareRequest } from './share-authorization.js';
-import { extractUsage, mergeUsage } from './pricing.js';
+import { completeUsage, extractUsage, mergeUsage } from './pricing.js';
 import { classifySseEvent } from './upstream-outcomes.js';
 
 const RESPONSE_ID = /^resp_[A-Za-z0-9_-]{1,1020}$/;
@@ -133,11 +133,7 @@ export class NativeResponseSteering {
         this.settle(turn);
         this.pin(event.response, upstream.id);
       } else {
-        releaseShareRequest(this.req, turn.attempt.id, outcome.errorCode || 'upstream_response_failed');
-        if (turn.lifecycle) this.store.finalizeGatewayRequest({
-          requestId: turn.lifecycle.id, attemptId: turn.attempt.id, status: 'failed',
-          errorCode: outcome.errorCode || 'upstream_response_failed'
-        });
+        this.fail(turn, outcome.errorCode || 'upstream_response_failed');
       }
       this.current = null;
       this.predecessor = turn;
@@ -167,15 +163,23 @@ export class NativeResponseSteering {
     const turn = this.current;
     if (turn) {
       try { this.store.settleUpstreamAttempt(turn.upstream.id, turn.admission, outcome); } catch {}
-      releaseShareRequest(this.req, turn.attempt.id, code);
-      if (turn.lifecycle) this.store.finalizeGatewayRequest({
-        requestId: turn.lifecycle.id, attemptId: turn.attempt.id, status: 'failed', errorCode: code
-      });
+      this.fail(turn, code);
       finishNativeTurn(turn.lease);
     }
     for (const lease of this.leases) finishNativeTurn(lease);
     this.leases.clear();
     this.current = null;
     this.pending.clear();
+  }
+
+  fail(turn, code) {
+    if (completeUsage(turn.usage)) {
+      this.settle(turn, { errorCode: code });
+      return;
+    }
+    releaseShareRequest(this.req, turn.attempt.id, code);
+    if (turn.lifecycle) this.store.finalizeGatewayRequest({
+      requestId: turn.lifecycle.id, attemptId: turn.attempt.id, status: 'failed', errorCode: code
+    });
   }
 }

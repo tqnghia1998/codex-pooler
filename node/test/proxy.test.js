@@ -1297,7 +1297,7 @@ test('derives scoped provider sessions for native HTTP only when no valid sessio
   }
 });
 
-test('does not settle native spend-limit incomplete terminals as success', async () => {
+test('retains native spend-limit usage without settling the terminal as success', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-spend-incomplete-'));
   const store = new Store(dir);
   const upstream = store.create(codexInput());
@@ -1314,7 +1314,7 @@ test('does not settle native spend-limit incomplete terminals as success', async
     assert.equal(response.status, 200);
     assert.match(await response.text(), /credit_balance_exhausted/);
     assert.equal(store.get(upstream.id).health.status, 'cooldown');
-    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+    assert.equal(store.get(upstream.id).spending.spentCostMicros, 140);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage, upstreamCostMicros } from '../src/pricing.js';
+import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage, resolvePrice, upstreamCostMicros } from '../src/pricing.js';
 import { OPENAI_PRICING_VERSION } from '../src/openai-pricing-snapshot.js';
 
 test('selects the cheapest priced model and preserves provider order as fallback', () => {
@@ -51,6 +51,24 @@ test('accepts only plain decimal provider-reported cost', () => {
   for (const value of ['', ' ', '1e5', 'abc', [], true, -1, null, undefined]) {
     assert.equal(upstreamCostMicros({ price_cost_usd: value }), undefined, `rejects ${JSON.stringify(value)}`);
   }
+});
+
+test('selects context prices from one generation and leaves unknown rules unpriced', () => {
+  const row = (bucket, priceVersion, effectiveAt, contextRule) => ({
+    model: 'gpt-test', tier: 'standard', bucket, input: 1, output: 1,
+    cachedInput: 0.1, cacheWrite: 1.25, priceVersion, effectiveAt, contextRule
+  });
+  const old = [row('default', 'old', '2026-01-01T00:00:00Z', { status: 'legacy', longContextInputTokensGt: 272_000 }),
+    row('long_context', 'old', '2026-01-01T00:00:00Z', { status: 'legacy', longContextInputTokensGt: 272_000 })];
+  const currentRule = { status: 'known', longContextInputTokensGt: 100 };
+  const current = [row('short_context', 'current', '2026-10-01T00:00:00Z', currentRule),
+    row('long_context', 'current', '2026-10-01T00:00:00Z', currentRule)];
+  const prices = [...old, ...current];
+  assert.equal(resolvePrice('gpt-test', 'standard', Date.parse('2026-10-02'), 100, prices).bucket, 'short_context');
+  assert.equal(resolvePrice('gpt-test', 'standard', Date.parse('2026-10-02'), 101, prices).bucket, 'long_context');
+  assert.equal(resolvePrice('gpt-test', 'standard', Date.parse('2026-09-01'), 101, prices).priceVersion, 'old');
+  assert.equal(resolvePrice('gpt-test', 'standard', Date.parse('2026-10-02'), 101,
+    [...old, row('default', 'current', '2026-10-01T00:00:00Z', { status: 'unknown', reason: 'missing_source' })]), null);
 });
 
 test('merges partial stream usage and resolves dated model pricing by suffix', () => {
