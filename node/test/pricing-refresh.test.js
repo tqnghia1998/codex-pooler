@@ -38,6 +38,29 @@ test('rejects incomplete selected-model pricing data', () => {
   }, { models: ['gpt-test'] }), /missing a compatible gpt-test entry/);
 });
 
+test('imports per-tier context rules and allows a same-generation bucket fallback', () => {
+  const payload = {
+    schema_version: 2, generated_at: '2026-10-12T21:13:32Z',
+    models: { 'gpt-test': {
+      model: 'gpt-test', pricing_type: 'per_1m_tokens',
+      context_pricing: { version: 1, tiers: Object.fromEntries(['standard', 'flex', 'fast'].map((tier) => [tier, {
+        status: 'known', long_context_input_tokens_gt: tier === 'fast' ? 100 : 200,
+        provenance: { locator: `gpt-test/${tier}/context`, evidence_sha256: '0'.repeat(64) }
+      }])) },
+      prices: Object.fromEntries(['standard', 'flex', 'fast'].map((tier) => [tier, {
+        short_context: prices(1), long_context: prices(2)
+      }]))
+    } }
+  };
+  const snapshot = buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'] });
+  assert.match(snapshot, /"tier":"priority","bucket":"long_context"[^\n]*"longContextInputTokensGt":100/);
+  assert.match(snapshot, /"tier":"standard","bucket":"short_context"[^\n]*"longContextInputTokensGt":200/);
+  delete payload.models['gpt-test'].prices.fast.long_context;
+  assert.doesNotMatch(buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'] }), /"tier":"priority","bucket":"long_context"/);
+  delete payload.models['gpt-test'].context_pricing.tiers.fast;
+  assert.throws(() => buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'] }), /missing gpt-test fast context pricing rule/);
+});
+
 function prices(input) {
   return { input, cached_input: input / 10, cache_write: input * 1.25, output: input * 6 };
 }

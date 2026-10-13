@@ -2217,14 +2217,17 @@ test('cools a public WebSocket account after one quota failure', async () => {
 
 test('recovers a reusable public WebSocket after a post-output interruption', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-recover-'));
-  const { store } = configuredStore(dir);
+  const { store, codexUpstream } = configuredStore(dir);
   let connections = 0;
   const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
   target.on('connection', (socket) => {
     connections += 1;
     socket.once('message', () => {
       if (connections === 1) {
-        socket.send(JSON.stringify({ type: 'response.created', response: { id: 'interrupted', status: 'in_progress' } }));
+        socket.send(JSON.stringify({ type: 'response.created', response: {
+          id: 'interrupted', status: 'in_progress',
+          usage: { input_tokens: 10, output_tokens: 2, price_cost_usd: 0.1 }
+        } }));
         setTimeout(() => socket.close(1011, 'interrupted'), 5);
       } else socket.send(JSON.stringify({ type: 'response.completed', response: { id: 'recovered', status: 'completed', output: [] } }));
     });
@@ -2248,6 +2251,7 @@ test('recovers a reusable public WebSocket after a post-output interruption', as
     });
     assert.deepEqual(messages.map((message) => message.type), ['response.created', 'error', 'response.completed']);
     assert.equal(connections, 2);
+    assert.equal(store.get(codexUpstream.id).spending.spentCostMicros, 100_000);
   } finally {
     relay.close();
     await close(gateway);
@@ -2716,7 +2720,7 @@ test('treats native WebSocket spend-limit incomplete frames as quota failures', 
     });
     assert.equal(terminal.response.incomplete_details.reason, 'credit_balance_exhausted');
     assert.equal(store.get(codexUpstream.id).health.status, 'cooldown');
-    assert.equal(store.get(codexUpstream.id).spending.spentCostMicros, 0);
+    assert.equal(store.get(codexUpstream.id).spending.spentCostMicros, 140);
   } finally {
     relay.close();
     await close(gateway);
