@@ -1,14 +1,15 @@
 import {
   OPENAI_PRICE_ROWS,
   OPENAI_PRICING_EFFECTIVE_AT,
+  OPENAI_PRICING_GENERATED_AT,
   OPENAI_PRICING_VERSION
 } from './openai-pricing-snapshot.js';
 
 // OpenAI bills a separate long-context bucket once input exceeds this many tokens.
 const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
 
-const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket }) => (
-  price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket)
+const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket, contextRule }) => (
+  price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket, contextRule, OPENAI_PRICING_GENERATED_AT)
 ));
 
 const ANTHROPIC_PRICES = [
@@ -28,8 +29,8 @@ const PRICES = [
   price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z')
 ];
 
-function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default') {
-  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt, bucket };
+function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default', contextRule = { status: 'uniform' }, capturedAt = effectiveAt) {
+  return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt, capturedAt, bucket, contextRule };
 }
 
 export function extractUsage(body) {
@@ -81,8 +82,7 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   const tier = canonicalTier(requestedTier) === 'priority' && reportedTier === 'default'
     ? 'priority'
     : canonicalTier(reportedTier || requestedTier);
-  const bucket = usage.inputTokens > LONG_CONTEXT_INPUT_TOKEN_THRESHOLD ? 'long_context' : 'default';
-  const snapshot = resolvePrice(models, tier, timestamp, bucket);
+  const snapshot = resolvePrice(models, tier, timestamp, usage.inputTokens);
   if (!snapshot) return null;
   const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens);
   const cacheWrite = usage.cacheWriteTokens || 0;
@@ -102,7 +102,7 @@ export function cheapestPricedModel(models, startedAt = new Date().toISOString()
   if (!Number.isFinite(timestamp) || !candidates.length) return candidates[0] || null;
   let selected = null;
   for (const model of candidates) {
-    const snapshot = resolvePrice(model, 'standard', timestamp, 'default');
+    const snapshot = resolvePrice(model, 'standard', timestamp, 0);
     if (!snapshot) continue;
     const score = snapshot.input + snapshot.output;
     if (!selected || score < selected.score) selected = { model, score };
@@ -117,23 +117,34 @@ function usageObject(body) {
 
 // totalTokens is reporting only: providers disagree on whether it counts cache tokens, and a mismatch there
 // must not discard priced input/output tokens, which would let the request escape the spending cap.
-function completeUsage(usage) {
+export function completeUsage(usage) {
   return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens;
 }
 
-function resolvePrice(models, tier, timestamp, bucket) {
+export function resolvePrice(models, tier, timestamp, inputTokens, prices = PRICES) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
-    const dated = PRICES.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
-    if (tier === 'ultrafast') {
-      const exact = dated.filter((snapshot) => snapshot.tier === tier && snapshot.bucket === bucket);
-      if (exact.length) return exact.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
-      continue;
+    const dated = prices.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
+    const tierPrices = preferred(dated, 'tier', tier, tier === 'ultrafast' ? tier : 'standard');
+    if (!tierPrices.length) continue;
+    // Select one generation before selecting its physical bucket. A missing or
+    // unknown rule must not borrow a rate or cutoff from an older import.
+    const anchor = tierPrices.reduce((latest, row) => !latest
+      || Date.parse(row.effectiveAt) > Date.parse(latest.effectiveAt)
+      || row.effectiveAt === latest.effectiveAt && Date.parse(row.capturedAt || row.effectiveAt) > Date.parse(latest.capturedAt || latest.effectiveAt)
+      ? row : latest, null);
+    const generation = tierPrices.filter((row) => row.priceVersion === anchor.priceVersion && row.effectiveAt === anchor.effectiveAt && row.capturedAt === anchor.capturedAt);
+    const rule = anchor.contextRule;
+    if (rule?.status === 'unknown' || rule?.status === 'invalid') return null;
+    const bucket = rule?.status === 'uniform' ? 'default'
+      : inputTokens > (rule?.longContextInputTokensGt ?? LONG_CONTEXT_INPUT_TOKEN_THRESHOLD) ? 'long_context' : 'default';
+    const preferredBuckets = bucket === 'long_context'
+      ? ['long_context', 'default']
+      : ['default', 'short_context'];
+    for (const physicalBucket of preferredBuckets) {
+      const snapshot = generation.find((row) => row.bucket === physicalBucket);
+      if (snapshot) return snapshot;
     }
-    // A known model priced only at standard rates (no priority tier, no long-context bucket: all Anthropic entries)
-    // bills at those rates instead of going unpriced, which would let the request escape the spending cap.
-    const snapshots = preferred(preferred(dated, 'tier', tier, 'standard'), 'bucket', bucket, 'default');
-    if (snapshots.length) return snapshots.sort((left, right) => Date.parse(right.effectiveAt) - Date.parse(left.effectiveAt))[0];
   }
   return null;
 }
