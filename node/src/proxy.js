@@ -16,7 +16,7 @@ import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './publ
 import { HttpError } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
-import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage } from './pricing.js';
+import { cheapestPricedModel, completeUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
 import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
@@ -2344,6 +2344,10 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
           errorCode: 'upstream_tool_snapshot_inconsistent'
         });
+      } else if (completeUsage(usage)) {
+        settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
+          errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
+        });
       } else {
         accounting.sharingStore?.releaseReservation(
           attemptId,
@@ -2353,6 +2357,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease && !publicState?.completionFailure) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
       }
     }
+    if (!completed && completeUsage(usage)) await store.flushDurability().catch(() => {});
     if (admission) {
       const outcome = healthOutcome || (downstreamClosed
         ? { class: 'neutral', retryable: false, transport: 'cancelled' }
@@ -3078,8 +3083,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     },
     admit: (payload, candidate) => chooseUpstreams(store, req, '/backend-api/codex/responses', payload, '/backend-api/codex/responses', modelCatalog)
       .some(({ id }) => id === candidate.id),
-    settle: (turn) => settleUsage(store, turn.upstream, turn.attempt.id, turn.attempt.startedAt,
-      { ...turn.usage, model: turn.servedModel }, turn.payload, accounting, turn.lifecycle, 200),
+    settle: (turn, failure = null) => settleUsage(store, turn.upstream, turn.attempt.id, turn.attempt.startedAt,
+      { ...turn.usage, model: turn.servedModel }, turn.payload, accounting, turn.lifecycle, 200, failure),
     pin: (response, upstreamId) => learnResponsePin(store, response, upstreamId, scopeId, accounting.apiKeyId, req)
   });
   if (!upstream && !publicResponses) {
@@ -3155,6 +3160,15 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
   const releasePublicAttempt = (errorCode) => {
     releaseShareRequest(req, publicAttempt?.id, errorCode);
+  };
+  const settlePublicFailure = (errorCode, responseStatusCode = 200) => {
+    if (publicAttempt && upstream && completeUsage(publicUsage)) {
+      settleUsage(store, upstream, publicAttempt.id, publicAttempt.startedAt,
+        publicUsage, publicPayload, accounting, publicLifecycle, responseStatusCode, { errorCode });
+      return;
+    }
+    releasePublicAttempt(errorCode);
+    finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode, responseStatusCode });
   };
   const renewPublicAdmission = (candidate) => {
     settlePublicAdmission({ class: 'neutral', retryable: false });
@@ -3349,8 +3363,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     pending.length = 0;
     pendingBytes = 0;
     settlePublicAdmission(outcome);
-    releasePublicAttempt(code);
-    finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: code });
+    settlePublicFailure(code, publicError.status || 502);
     publicAttempt = null;
     publicLifecycle = null;
     publicUsage = null;
@@ -3546,6 +3559,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     }
   });
   client.on('close', () => {
+    const hadActiveTurn = publicTurnActive || Boolean(nativeLane?.current);
     nativeLane?.close();
     pacingAbort.abort(new DOMException('Downstream websocket closed', 'AbortError'));
     if (targetSocket) socketPacingAborts.get(targetSocket)?.abort(new DOMException('Downstream websocket closed', 'AbortError'));
@@ -3553,8 +3567,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     clearKeepAlive();
     if (publicTurnActive) {
       settlePublicAdmission({ class: 'neutral', retryable: false });
-      releasePublicAttempt('downstream_closed');
-      finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, { errorCode: 'downstream_closed' });
+      settlePublicFailure('downstream_closed', 499);
     }
     settleNativeAdmission({ class: 'neutral', retryable: false });
     settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
@@ -3570,6 +3583,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     targetSocket = undefined;
     targetUpstreamId = null;
     targetPromptCacheSessionId = null;
+    if (hadActiveTurn) void store.flushDurability().catch(() => {});
   });
   client.on('error', () => closeBoth(1011, 'Client websocket error'));
 
@@ -3904,10 +3918,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
             ? { class: 'neutral', retryable: false, errorCode: publicState.completionFailure }
             : frameOutcome;
           settlePublicAdmission(outcome);
-          releasePublicAttempt(outcome.errorCode || 'upstream_response_failed');
-          finalizeGatewayFailure(store, publicLifecycle, publicAttempt?.id, {
-            errorCode: publicState.completionFailure || (outcome.errorCode === MISALIGNMENT_POLICY_CODE ? outcome.errorCode : 'upstream_response_failed')
-          });
+          settlePublicFailure(publicState.completionFailure || (outcome.errorCode === MISALIGNMENT_POLICY_CODE ? outcome.errorCode : 'upstream_response_failed'));
         }
         else {
           settlePublicAdmission({ class: 'success', retryable: false });
