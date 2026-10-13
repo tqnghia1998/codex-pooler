@@ -6,7 +6,7 @@ const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
 const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
 const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', flex: 'flex', fast: 'priority' });
 const OPTIONAL_TIER_MAP = Object.freeze({ ultrafast: 'ultrafast' });
-const BUCKETS = ['default', 'long_context'];
+const BUCKETS = ['default', 'short_context', 'long_context'];
 const TARGET = fileURLToPath(new URL('../src/openai-pricing-snapshot.js', import.meta.url));
 
 export function buildOpenAiPricingSnapshot(payload, {
@@ -17,6 +17,8 @@ export function buildOpenAiPricingSnapshot(payload, {
   if (!plainObject(payload) || !plainObject(payload.models) || !validDate(payload.generated_at)) {
     throw new Error('Pricing feed must include generated_at and models');
   }
+  const schemaVersion = payload.schema_version ?? 1;
+  if (![1, 2].includes(schemaVersion)) throw new Error('Unsupported pricing schema version');
   if (!validDate(effectiveAt)) throw new Error('effectiveAt must be an ISO-8601 datetime');
   const modelIds = [...new Set(models.map(cleanString).filter(Boolean))];
   if (!modelIds.length) throw new Error('At least one model is required');
@@ -27,14 +29,11 @@ export function buildOpenAiPricingSnapshot(payload, {
       throw new Error(`Pricing feed is missing a compatible ${modelId} entry`);
     }
     for (const [sourceTier, tier] of Object.entries(REQUIRED_TIER_MAP)) {
-      for (const bucket of BUCKETS) {
-        const values = model.prices[sourceTier]?.[bucket];
-        rows.push(priceRow(modelId, tier, bucket, values));
-      }
+      rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
     for (const [sourceTier, tier] of Object.entries(OPTIONAL_TIER_MAP)) {
       if (model.prices[sourceTier] === undefined) continue;
-      for (const bucket of BUCKETS) rows.push(priceRow(modelId, tier, bucket, model.prices[sourceTier]?.[bucket]));
+      rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
   }
   const generatedAt = new Date(payload.generated_at).toISOString();
@@ -42,7 +41,71 @@ export function buildOpenAiPricingSnapshot(payload, {
   return renderSnapshot({ sourceUrl, generatedAt, effectiveAt: new Date(effectiveAt).toISOString(), version, modelIds, rows });
 }
 
-function priceRow(model, tier, bucket, values) {
+function tierRows(model, modelId, sourceTier, tier, schemaVersion) {
+  const prices = model.prices[sourceTier];
+  if (!plainObject(prices)) throw new Error(`Pricing feed is missing ${modelId} ${tier}`);
+  const contextRule = schemaVersion === 1
+    ? { status: 'legacy', longContextInputTokensGt: 272_000 }
+    : parseContextRule(model.context_pricing, sourceTier, modelId, prices);
+  if (!plainObject(prices.default) && !plainObject(prices.short_context)) {
+    throw new Error(`Pricing feed is missing ${modelId} ${tier} lower-context price`);
+  }
+  if (schemaVersion === 1 && !plainObject(prices.long_context)) {
+    throw new Error(`Pricing feed is missing ${modelId} ${tier} long_context`);
+  }
+  return BUCKETS.filter((bucket) => prices[bucket] !== undefined)
+    .map((bucket) => priceRow(modelId, tier, bucket, prices[bucket], contextRule));
+}
+
+function parseContextRule(contextPricing, tier, modelId, prices) {
+  if (!exactKeys(contextPricing, ['version', 'tiers']) || contextPricing.version !== 1 || !plainObject(contextPricing.tiers)) {
+    throw new Error(`Pricing feed is missing ${modelId} context pricing rules`);
+  }
+  const rule = contextPricing.tiers[tier];
+  if (!plainObject(rule)) throw new Error(`Pricing feed is missing ${modelId} ${tier} context pricing rule`);
+  const provenance = rule.provenance;
+  const validProvenance = exactKeys(provenance, ['locator', 'evidence_sha256'])
+    && cleanString(provenance.locator) && Buffer.byteLength(provenance.locator) <= 256
+    && typeof provenance.evidence_sha256 === 'string' && /^[0-9a-f]{64}$/.test(provenance.evidence_sha256);
+  if (!validProvenance) throw new Error(`Pricing feed has invalid ${modelId} ${tier} context pricing provenance`);
+  if (rule.status === 'known' && exactKeys(rule, ['status', 'long_context_input_tokens_gt', 'provenance'])
+    && Number.isSafeInteger(rule.long_context_input_tokens_gt) && rule.long_context_input_tokens_gt > 0) {
+    return { status: 'known', longContextInputTokensGt: rule.long_context_input_tokens_gt };
+  }
+  if (rule.status === 'uniform' && exactKeys(rule, ['status', 'provenance']) && prices.long_context === undefined) {
+    return { status: 'uniform' };
+  }
+  if (rule.status === 'unknown' && exactKeys(rule, ['status', 'reason', 'observed_rules', 'provenance'])
+    && ['missing_source', 'unsupported_source', 'conflicting_source'].includes(rule.reason)
+    && validObservations(rule.observed_rules)
+    && (rule.reason !== 'missing_source' || rule.observed_rules.length === 0)) {
+    return { status: 'unknown', reason: rule.reason };
+  }
+  throw new Error(`Pricing feed has invalid ${modelId} ${tier} context pricing rule`);
+}
+
+function validObservations(values) {
+  if (!Array.isArray(values)) return false;
+  const rows = values.map((value) => JSON.stringify(value));
+  if (new Set(rows).size !== rows.length) return false;
+  if (!values.every((value) => exactKeys(value, ['bucket', 'operator', 'input_tokens'])
+    && ['short_context', 'long_context'].includes(value.bucket)
+    && ['lt', 'lte', 'gt', 'gte'].includes(value.operator)
+    && Number.isSafeInteger(value.input_tokens) && value.input_tokens > 0)) return false;
+  return values.every((value, index) => {
+    if (index === 0) return true;
+    const previous = values[index - 1];
+    return previous.bucket < value.bucket || previous.bucket === value.bucket && (
+      previous.operator < value.operator || previous.operator === value.operator && previous.input_tokens <= value.input_tokens
+    );
+  });
+}
+
+function exactKeys(value, keys) {
+  return plainObject(value) && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
+}
+
+function priceRow(model, tier, bucket, values, contextRule) {
   if (!plainObject(values)) throw new Error(`Pricing feed is missing ${model} ${tier} ${bucket}`);
   const row = {
     model,
@@ -51,7 +114,8 @@ function priceRow(model, tier, bucket, values) {
     input: priceNumber(values.input, `${model} ${tier} ${bucket} input`),
     cachedInput: priceNumber(values.cached_input, `${model} ${tier} ${bucket} cached_input`),
     cacheWrite: priceNumber(values.cache_write, `${model} ${tier} ${bucket} cache_write`),
-    output: priceNumber(values.output, `${model} ${tier} ${bucket} output`)
+    output: priceNumber(values.output, `${model} ${tier} ${bucket} output`),
+    contextRule
   };
   return row;
 }
