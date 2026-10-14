@@ -80,6 +80,37 @@ test('retains measured native usage on interruption and preserves failure outcom
   assert.deepEqual(calls.releases, []);
 });
 
+test('steering retains billing context without prompt history or account snapshots', async (t) => {
+  const { store, lane, upstream, calls } = fixture(t, true);
+  store.update(upstream.id, { metadata: { large_catalog: 'private catalog'.repeat(100_000) } });
+  const payload = { ...opener, input: [{ role: 'user', content: 'private prompt'.repeat(100_000) }],
+    instructions: 'private instructions', tools: [{ type: 'function', name: 'private_tool' }],
+    client_metadata: { private: 'private metadata' }, reasoning: { effort: 'high' },
+    max_output_tokens: 1234, service_tier: 'priority' };
+  lane.dispatch(payload, upstream);
+  const context = { model: opener.model, reasoning: { effort: 'high' }, max_output_tokens: 1234, service_tier: 'priority' };
+  assert.deepEqual(lane.current.payload, context);
+  assert.deepEqual(lane.current.upstream, { id: upstream.id, nativeRecoveryEpoch: upstream.nativeRecoveryEpoch });
+  lane.event(created('resp_original'), upstream);
+  lane.event(terminal('resp_original'), upstream);
+  assert.deepEqual(lane.predecessor.payload, context);
+  lane.dispatch(steer, upstream);
+  lane.event(accepted, upstream);
+  const next = created('resp_successor');
+  const successor = lane.event(next, upstream);
+  assert.deepEqual(successor.payload, context);
+  assert.equal(successor.upstream.id, upstream.id);
+  assert.equal(calls.reserves.length, 2);
+  await lane.deliver(successor, next, async () => {});
+  const done = terminal('resp_successor', 0.2);
+  await lane.deliver(lane.event(done, upstream), done, async () => {});
+  assert.equal(calls.settlements.length, 2);
+  assert.equal(store.nativeTurnReceipt(successor.identity.key).status, 'succeeded');
+  lane.close();
+  assert.equal(lane.predecessor, null);
+  assert.equal(lane.acceptedIds.size, 0);
+});
+
 test('steer failure is a control refusal and does not terminate or reserve a second request', (t) => {
   const { lane, upstream, calls } = fixture(t, true);
   lane.dispatch(opener, upstream);
