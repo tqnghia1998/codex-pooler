@@ -6,7 +6,7 @@ const RESPONSES_FORWARDED_FIELDS = new Set([
   'prompt_cache_retention', 'reasoning', 'safety_identifier', 'service_tier', 'store', 'stream',
   'stream_options', 'temperature', 'text', 'tool_choice', 'tools', 'top_p'
 ]);
-const RESPONSES_LOCAL_FIELDS = new Set(['background', 'context_management', 'conversation', 'max_tool_calls', 'prompt', 'top_logprobs', 'user']);
+const RESPONSES_LOCAL_FIELDS = new Set(['background', 'context_management', 'conversation', 'max_tool_calls', 'prompt', 'top_logprobs']);
 const CHAT_FIELDS = new Set([
   'audio', 'frequency_penalty', 'function_call', 'functions', 'input', 'instructions', 'logit_bias',
   'logprobs', 'max_completion_tokens', 'max_tokens', 'messages', 'metadata', 'modalities', 'model',
@@ -17,7 +17,7 @@ const CHAT_FIELDS = new Set([
 ]);
 const CHAT_LOCAL_FIELDS = new Set([
   'audio', 'frequency_penalty', 'logit_bias', 'logprobs', 'modalities', 'n', 'prediction',
-  'presence_penalty', 'seed', 'stop', 'top_logprobs', 'user', 'web_search_options'
+  'presence_penalty', 'seed', 'stop', 'top_logprobs', 'web_search_options'
 ]);
 const AUDIO_MIMES = { wav: 'audio/wav', mp3: 'audio/mpeg', m4a: 'audio/mp4', webm: 'audio/webm', ogg: 'audio/ogg' };
 const IMAGE_MIMES = new Set(['image/gif', 'image/jpeg', 'image/png', 'image/webp']);
@@ -37,7 +37,7 @@ export class AdapterError extends Error {
 }
 
 export function adaptResponsesRequest(payload) {
-  const normalized = structuredClone(payload);
+  const normalized = structuredClone(withoutUserIdentifier(payload));
   if (Object.hasOwn(normalized, 'logprobs')) unsupported('logprobs');
   for (const field of Object.keys(normalized)) {
     if (RESPONSES_LOCAL_FIELDS.has(field)) unsupported(field);
@@ -80,7 +80,7 @@ export function adaptResponsesRequest(payload) {
 }
 
 export function adaptChatRequest(payload) {
-  const normalized = structuredClone(payload);
+  const normalized = structuredClone(withoutUserIdentifier(payload));
   rejectUnsupportedFields(normalized, CHAT_FIELDS);
   if (Object.hasOwn(normalized, 'functions')) invalid('legacy functions are not translatable', 'functions');
   if (Object.hasOwn(normalized, 'function_call')) invalid('legacy function_call is not translatable', 'function_call');
@@ -127,6 +127,13 @@ export function adaptChatRequest(payload) {
   }
   const adapted = adaptResponsesRequest(responsePayload);
   return Array.isArray(normalized.messages) && normalized.messages.length ? normalizeChatHistory(adapted) : adapted;
+}
+
+export function withoutUserIdentifier(payload) {
+  if (!Object.hasOwn(payload, 'user')) return payload;
+  if (payload.user !== null && typeof payload.user !== 'string') invalid('user must be a string or null', 'user');
+  const { user, ...normalized } = payload;
+  return normalized;
 }
 
 function validateAccessPrograms(programs) {
