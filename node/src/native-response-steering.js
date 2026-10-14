@@ -72,7 +72,12 @@ export class NativeResponseSteering {
         Object.assign(attempt, this.store.beginGatewayAttempt(lifecycle.id, upstream.id));
       }
       if (lease) this.leases.add(lease);
-      return { payload, upstream: { ...latest }, admission, attempt, lifecycle, lease, identity, usage: null, responseId: null, success: false, servedModel: null };
+      // Successors use the same account and current admission. Prompt history and
+      // account catalogs/credentials are unnecessary for settlement or that check.
+      const context = Object.fromEntries(['model', 'reasoning', 'max_output_tokens', 'service_tier']
+        .filter((field) => Object.hasOwn(payload, field)).map((field) => [field, payload[field]]));
+      return { payload: context, upstream: { id: latest.id, nativeRecoveryEpoch: latest.nativeRecoveryEpoch },
+        admission, attempt, lifecycle, lease, identity, usage: null, responseId: null, success: false, servedModel: null };
     } catch (error) {
       finishNativeTurn(lease, 'failed');
       releaseShareRequest(this.req, attempt.id, error.code || 'native_admission_failed');
@@ -169,6 +174,9 @@ export class NativeResponseSteering {
     for (const lease of this.leases) finishNativeTurn(lease);
     this.leases.clear();
     this.current = null;
+    this.predecessor = null;
+    this.accepted = false;
+    this.acceptedIds.clear();
     this.pending.clear();
   }
 
