@@ -93,6 +93,35 @@ function codexInput({ refreshToken, email = 'proxy@example.com', accountId = 'ac
   };
 }
 
+test('public HTTP discards legacy user identifiers and rejects invalid values before dispatch', async (t) => {
+  const store = new Store(null, { inMemory: true, encryptionKey: Buffer.alloc(32, 1) });
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const calls = [];
+  const { server, base } = await runningServer(store, async (_url, options) => {
+    calls.push(JSON.parse(options.body));
+    return new Response(JSON.stringify({ id: 'resp_user', status: 'completed', output: [] }), {
+      headers: { 'content-type': 'application/json' }
+    });
+  }, 'user-key');
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); store.sqlite.close(); });
+  for (const [path, body] of [
+    ['/v1/responses', { model: 'gpt-5.6-sol', input: 'hi' }],
+    ['/v1/chat/completions', { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }] }]
+  ]) {
+    for (const user of ['private-user', null]) {
+      const result = await request(base, path, { ...body, user }, { authorization: 'Bearer user-key' });
+      assert.equal(result.response.status, 200);
+      assert.equal(Object.hasOwn(calls.at(-1), 'user'), false);
+    }
+    const before = calls.length;
+    const invalid = await request(base, path, { ...body, user: { private: true } }, { authorization: 'Bearer user-key' });
+    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.body.error.param, 'user');
+    assert.equal(calls.length, before);
+  }
+});
+
 test('requires the configured single gateway API key', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-proxy-auth-'));
   const fetchImpl = async () => new Response('{"id":"auth-ok","output":[]}', { status: 200, headers: { 'content-type': 'application/json' } });
@@ -192,11 +221,12 @@ test('serializes validated access programs and Chat tool defaults to Codex', asy
 
 test('projects validated access programs into public WebSocket turns', () => {
   const payload = adaptResponsesRequest({
-    model: 'gpt-5.6-sol', input: 'hello', access_programs: { cyber: 'daybreak_red' }
+    model: 'gpt-5.6-sol', input: 'hello', access_programs: { cyber: 'daybreak_red' }, user: 'private-user'
   });
   const frame = projectPublicWebSocketFrame(payload);
   assert.equal(frame.type, 'response.create');
   assert.deepEqual(frame.access_programs, { cyber: 'daybreak_red' });
+  assert.equal(Object.hasOwn(frame, 'user'), false);
 });
 
 test('fails a divergent streamed Chat tool snapshot without successful accounting', async () => {
@@ -720,6 +750,7 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
       const payload = path === '/v1/responses'
         ? { model: 'claude-fable-5-1', input: 'hello' }
         : { model: 'claude-fable-5-1', messages: [{ role: 'user', content: 'hello' }] };
+      if (path !== '/v1/messages') payload.user = 'private-user';
       const response = await request(base, path, payload, { 'x-upstream-type': 'compass', 'anthropic-version': '2023-06-01' });
       assert.equal(response.response.status, 200);
     }
@@ -729,6 +760,7 @@ test('proxies Compass Chat, Responses, and Anthropic Messages directly and settl
       '/compass-api/v1/messages'
     ]);
     assert.equal(calls[0].options.headers.authorization, 'Bearer project-secret');
+    assert.ok(calls.slice(0, 2).every(({ body }) => !Object.hasOwn(body, 'user')));
     assert.equal(store.getPublic(created.id).spending.spentDollars, 3);
   } finally {
     await new Promise((resolve) => server.close(resolve));
