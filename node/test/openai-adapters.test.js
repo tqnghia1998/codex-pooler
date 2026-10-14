@@ -12,6 +12,23 @@ function assertAdapterError(fn, { code = 'invalid_request', param }) {
   });
 }
 
+test('accepts and discards legacy user identifiers without changing caller payloads', () => {
+  for (const [adapt, base] of [
+    [adaptResponsesRequest, { model: 'gpt-5.6-sol', input: 'hi' }],
+    [adaptChatRequest, { model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }] }],
+    [adaptChatRequest, { model: 'gpt-5.6-sol', input: 'hi' }]
+  ]) {
+    for (const user of ['', 'private-user', null]) {
+      const payload = { ...base, user };
+      assert.equal(Object.hasOwn(adapt(payload), 'user'), false);
+      assert.equal(payload.user, user);
+    }
+    for (const user of [42, false, {}, [], undefined]) {
+      assertAdapterError(() => adapt({ ...base, user }), { param: 'user' });
+    }
+  }
+});
+
 test('adapts Chat fallback and rich multimodal tool requests', () => {
   assert.deepEqual(adaptChatRequest({ model: 'gpt-5.6-sol', input: 'hello' }), {
     model: 'gpt-5.6-sol',

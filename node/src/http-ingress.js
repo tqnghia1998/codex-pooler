@@ -17,6 +17,16 @@ export class HttpError extends Error {
   }
 }
 
+// Node normalizes repeated Host fields to one value; admission must inspect the wire fields.
+export function hasDuplicateHost(req) {
+  let count = 0;
+  const headers = req.rawHeaders || [];
+  for (let index = 0; index < headers.length; index += 2) {
+    if (headers[index].toLowerCase() === 'host' && ++count > 1) return true;
+  }
+  return false;
+}
+
 export async function readRequestBody(req, options = {}) {
   const limits = { ...DEFAULT_INGRESS_LIMITS, ...options };
   const encoding = contentEncoding(req);

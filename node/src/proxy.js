@@ -11,9 +11,9 @@ import { projectCodexCatalog } from './codex-catalog-contract.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
-import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages } from './openai-adapters.js';
+import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages, withoutUserIdentifier } from './openai-adapters.js';
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
-import { HttpError } from './http-ingress.js';
+import { HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, completeUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
@@ -162,6 +162,13 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
   if (path === '/v1/responses/compact') {
     sendJson(res, 404, { error: { type: 'invalid_request_error', code: 'unsupported_endpoint', message: 'Unsupported OpenAI /v1 endpoint', param: null } });
     return;
+  }
+  if (['/v1/responses', '/v1/chat/completions'].includes(path)) {
+    try { payload = withoutUserIdentifier(payload); } catch (error) {
+      if (!(error instanceof AdapterError)) throw error;
+      sendJson(res, 400, { error: { type: 'invalid_request_error', code: error.code, message: error.message, param: error.param } });
+      return;
+    }
   }
   const compactionBridge = prepareCompactionTriggerBridge(path, payload);
   if (compactionBridge?.error) {
@@ -2998,6 +3005,10 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   server.on('upgrade', (req, socket, head) => {
     void (async () => {
+      if (hasDuplicateHost(req)) {
+        socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
+        return;
+      }
       const path = new URL(req.url, 'http://localhost').pathname;
       if (!hostAllowed(req.headers.host, admission) || !WEBSOCKET_ENDPOINTS.has(path) || !firewallAllowed(req, admission)) {
         socket.destroy();
@@ -3946,7 +3957,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           type: 'codex.response.metadata',
           headers: {
             ...(req.codexModelsEtag ? { 'x-models-etag': req.codexModelsEtag } : {}),
-            ...(nativeResponseControls['openai-model'] ? { 'openai-model': nativeResponseControls['openai-model'] } : {})
+            ...(nativeResponseControls['openai-model'] ? { 'openai-model': nativeResponseControls['openai-model'] } : {}),
+            ...(nativeResponseControls['x-reasoning-included'] ? { 'x-reasoning-included': nativeResponseControls['x-reasoning-included'] } : {})
           }
         });
         if (client.bufferedAmount + Buffer.byteLength(metadata) > codexOptions.websocketBackpressureBytes) return closeBoth(1009, 'Websocket backpressure limit exceeded');

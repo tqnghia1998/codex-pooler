@@ -65,6 +65,11 @@ The Node proxy covers the client-visible local compatibility path:
 
 ### Responses stream and request contracts
 
+Public Responses and Chat Completions accept the legacy `user` field as a
+string or null and discard it before routing or provider dispatch. Other types
+return `400 invalid_request` with `param: user`. The Responses adapter supports
+Home Assistant's message history and function-call replay shapes.
+
 Chat requests retain top-level `instructions` when developer/system messages
 are lifted. Invalid instructions are rejected before lifting. Responses replay
 preserves nonempty assistant text and phase before assistant tool calls; strict
@@ -128,9 +133,17 @@ wire. Accepted successors receive separate attempts, usage settlement, share
 reservations, and keyed delivery receipts; admission repeats authorization,
 credential-generation, model, capacity, and spending checks on the original
 account. Receipt writes are flushed before output and after delivery.
+The steering lane retains only model, reasoning, output limit, service tier,
+and account identity for admission and billing; prompt history, tools, client
+metadata, and account catalogs are not retained in its turn context.
 Provider steering refusals do not terminate the original turn or reserve
 another request. Public `/v1/responses` steering remains unsupported, and
 steered successors cannot be recovered on a new connection.
+
+Native `codex.response.metadata` includes `x-reasoning-included: true` only
+when the current upstream WebSocket handshake carries a valid presence flag.
+An absent flag stays absent, and no connection-wide downstream handshake flag
+is synthesized. Public Responses metadata remains unchanged.
 
 ### Intentional limitations
 
@@ -165,6 +178,12 @@ npm start
 `npm start` loads `node/.env`. Use `npm run dev` for Node's watch mode. Set one client key in `CODEX_POOLER_API_KEY`; startup fails without it. Proxy routes require `Authorization: Bearer ...`, except `POST /v1/messages`, which also accepts `x-api-key`.
 
 By default, the server binds `127.0.0.1` and accepts only localhost Host headers. For a reverse proxy deployment, set `CODEX_POOLER_BIND_HOST` and `CODEX_POOLER_ALLOWED_HOSTS` (comma-separated). Optional `CODEX_POOLER_ALLOWED_ORIGINS`, `CODEX_POOLER_TRUSTED_PROXIES`, and `CODEX_POOLER_FIREWALL_ALLOWLIST` configure browser origins, trusted forwarding peers, and runtime CIDR/IP admission. External `/api/*` administration requests require the Bearer key; localhost administration remains dashboard-compatible.
+
+Repeated Host fields are rejected with `400 Bad Request` and connection close
+before authentication, body parsing, or WebSocket admission, including requests
+with absolute-form targets and incomplete bodies. HTTP hosts consuming the
+gateway must call `hasDuplicateHost` from `http-ingress.js` before admission;
+`attachWebSocketProxy` applies the same check to upgrade requests.
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
 The fallback Codex wire identity is `0.162.0`; the separately reviewed,

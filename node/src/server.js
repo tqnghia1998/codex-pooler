@@ -13,7 +13,7 @@ import {
   TOKEN_REFRESH_INTERVAL_MS
 } from './codex-token-refresh.js';
 import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from './upstream-quota-refresh.js';
-import { HttpError } from './http-ingress.js';
+import { HttpError, hasDuplicateHost } from './http-ingress.js';
 import { dispatchGatewayRequest, gatewayRequestKind } from './gateway-dispatch.js';
 import { errorEnvelope } from './public-errors.js';
 import { admissionPolicy, firewallAllowed, hostAllowed, localHost, originAllowed } from './admission.js';
@@ -54,6 +54,11 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
   });
   return async function app(req, res) {
     try {
+      if (hasDuplicateHost(req)) {
+        res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8', 'content-length': 11, connection: 'close' });
+        res.end('Bad Request');
+        return;
+      }
       const url = new URL(req.url, 'http://localhost');
       if (!hostAllowed(req.headers.host, admission)) {
         sendJson(res, 403, { error: 'Invalid Host header' });
