@@ -12,6 +12,7 @@ import { modelCatalogForStore } from './codex-model-catalog.js';
 import { classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
+import { isEncodedImage } from './image-result.js';
 import {
   isShareCredential,
   personalShareSessions,
@@ -218,16 +219,18 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
   const events = parseSse(textBody);
   const terminal = events.findLast((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type));
   const outcome = terminal ? classifySseEvent(terminal) : { class: 'transient', retryable: true };
-  settleCodexFetch(provider, response, outcome);
+  const result = imageResponse(events);
+  settleCodexFetch(provider, response, result.error && outcome.class === 'success'
+    ? { class: 'transient', retryable: false } : outcome);
+  if (!result.error || result.costBody) settleCost(store, provider.upstream, result.costBody, req,
+    result.error ? 'image_generation_failed' : null);
   if (terminal?.type === 'response.incomplete' && outcome.class === 'quota') {
     return sendJson(res, 429, {
       error: { type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null }
     }, retryAfterHeader(response));
   }
-  const result = imageResponse(events);
   if (result.error) return sendError(res, result.error.status, result.error.code, result.error.message, result.error.param);
   pinCompatibilitySession(provider);
-  settleCost(store, provider.upstream, result.costBody, req);
   sendJson(res, 200, result.body);
 }
 
@@ -294,21 +297,29 @@ function imageResponse(events) {
     const output = event?.response?.output || event?.output;
     if (Array.isArray(output)) items.push(...output.filter((item) => item?.type === 'image_generation_call'));
     usage ||= event?.response?.tool_usage?.image_gen || event?.tool_usage?.image_gen;
-    if (extractCost(event) !== undefined) costBody = event;
+    if (extractCost(event) !== undefined || (extractCost(costBody) === undefined && extractUsage(event))) costBody = event;
   }
-  const uniqueItems = [...new Map(items.map((item, index) => [item.id || item.result || index, item])).values()];
+  const latestItems = new Map();
+  for (const item of items.slice().reverse()) {
+    const key = item.id || JSON.stringify(item);
+    if (!latestItems.has(key)) latestItems.set(key, item);
+  }
+  const uniqueItems = [...latestItems.values()].reverse();
   const failed = uniqueItems.find((item) => item.status === 'failed');
   if (failed) {
     const error = failed.error && typeof failed.error === 'object' ? failed.error : null;
-    return { error: {
+    return { costBody, error: {
       status: error?.type === 'invalid_request_error' ? 400 : 502,
       code: text(error?.code) || 'image_generation_failed',
       message: text(error?.message) || 'upstream image generation failed',
       ...(text(error?.param) ? { param: error.param } : {})
     } };
   }
-  const data = uniqueItems.flatMap((item) => text(item.result) ? [{ b64_json: item.result, ...(text(item.revised_prompt) ? { revised_prompt: item.revised_prompt } : {}) }] : []);
-  if (!data.length) return { error: { status: 502, code: 'image_generation_failed', message: 'Upstream image response contained no image data' } };
+  const terminal = events.findLast((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type));
+  if (terminal?.type !== 'response.completed' || !uniqueItems.length || !uniqueItems.every((item) => isEncodedImage(item.result))) {
+    return { costBody, error: { status: 502, code: 'image_generation_failed', message: 'Upstream image response contained invalid image data' } };
+  }
+  const data = uniqueItems.map((item) => ({ b64_json: item.result, ...(text(item.revised_prompt) ? { revised_prompt: item.revised_prompt } : {}) }));
   const normalizedUsage = normalizeUsage(usage);
   return { body: { created: Math.floor(Date.now() / 1000), data, ...(normalizedUsage ? { usage: normalizedUsage } : {}) }, costBody };
 }
@@ -568,7 +579,7 @@ function extractCost(body) {
   return upstreamCostMicros(body?.usage) ?? upstreamCostMicros(body?.message?.usage) ?? upstreamCostMicros(body?.response?.usage) ?? upstreamCostMicros(body);
 }
 
-function settleCost(store, upstream, body, req) {
+function settleCost(store, upstream, body, req, errorCode = null) {
   const settledCostMicros = extractCost(body);
   const attemptId = req.compatibilityShareAttemptId || randomUUID();
   const startedAt = new Date().toISOString();
@@ -579,10 +590,10 @@ function settleCost(store, upstream, body, req) {
     if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
     if (settledCostMicros !== undefined) {
       store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
-      if (!shared) store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
-      if (shared && req.proxyAuth.shareSessionId) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros);
+      if (!shared && !errorCode) store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
+      if (shared && req.proxyAuth.shareSessionId) req.sharingStore?.settleSession(req.proxyAuth.shareSessionId, attemptId, settledCostMicros, errorCode);
     } else if (shared) {
-      releaseShareRequest(req, attemptId, null);
+      releaseShareRequest(req, attemptId, errorCode);
     }
   } catch {
     // Accounting must not replace a successful provider response.
