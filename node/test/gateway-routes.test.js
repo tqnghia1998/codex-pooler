@@ -1023,8 +1023,8 @@ test('translates public image generations and edits through Responses SSE', asyn
     assert.equal(path, '/backend-api/codex/responses');
     responseBodies.push(JSON.parse(options.body));
     return new Response([
-      'data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"B64_IMAGE","revised_prompt":"better"}}',
-      'data: {"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"B64_IMAGE","revised_prompt":"better"}],"tool_usage":{"image_gen":{"input_tokens":7,"output_tokens":13}}}}',
+      'data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC","revised_prompt":"better"}}',
+      'data: {"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC","revised_prompt":"better"}],"tool_usage":{"image_gen":{"input_tokens":7,"output_tokens":13}}}}',
       'data: [DONE]', ''
     ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
   };
@@ -1036,7 +1036,7 @@ test('translates public image generations and edits through Responses SSE', asyn
     });
     const generated = await generation.json();
     assert.equal(generation.status, 200);
-    assert.deepEqual(generated.data, [{ b64_json: 'B64_IMAGE', revised_prompt: 'better' }]);
+    assert.deepEqual(generated.data, [{ b64_json: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC', revised_prompt: 'better' }]);
     assert.deepEqual(generated.usage, { input_tokens: 7, output_tokens: 13, total_tokens: 20 });
     assert.equal(responseBodies[0].model, 'gpt-5.6-sol');
     assert.deepEqual(responseBodies[0].input, [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'a cat' }] }]);
@@ -1093,7 +1093,7 @@ test('rejects an image when its terminal event exhausts quota after image output
   const fetchImpl = async (url) => new URL(url).pathname === '/backend-api/codex/models'
     ? new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol', input_modalities: ['image'] }] }), { status: 200 })
     : new Response([
-      'data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"B64_IMAGE"}}',
+      'data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"}}',
       'data: {"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"credit_balance_exhausted"},"error":{"message":"private account details"}}}',
       'data: [DONE]', ''
     ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
@@ -2966,4 +2966,82 @@ test('preserves verified native JSON tool-result rounds under the duplicate fenc
     assert.equal((await post(next)).status, 409);
     assert.equal(calls, 2);
   } finally { await close(server); store.sqlite.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('rejects malformed final images atomically and retains measured failed usage for generation and edits', async (t) => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC';
+  for (const edit of [false, true]) {
+    for (const result of [undefined, null, 42, '', 'not-base64', Buffer.from('not an image').toString('base64'), 'https://example.test/private.png']) {
+      await t.test(`${edit ? 'edit' : 'generate'} ${JSON.stringify(result)}`, async () => {
+        const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 7) });
+        const upstream = store.create(codex());
+        store.setCap(upstream.id, { capDollars: 100 });
+        let calls = 0;
+        const { server, base } = await start(store, async (url) => {
+          if (new URL(url).pathname === '/backend-api/codex/models') return Response.json({ models: [{ slug: 'gpt-5.6-sol', input_modalities: ['image'] }] });
+          calls += 1;
+          assert.equal(new URL(url).pathname, '/backend-api/codex/responses');
+          const events = [
+            { type: 'response.output_item.done', item: { id: 'img_bad', type: 'image_generation_call', result: png } },
+            { type: 'response.completed', response: { output: [
+              { id: 'img_good', type: 'image_generation_call', result: png },
+              { id: 'img_bad', type: 'image_generation_call', result }
+            ], usage: { input_tokens: 1, output_tokens: 1, price_cost_usd: 0.1 } } }
+          ];
+          return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+        });
+        try {
+          let body;
+          if (edit) {
+            body = new FormData();
+            body.append('model', 'gpt-image-1'); body.append('prompt', 'edit');
+            body.append('image', new Blob([Buffer.from(png, 'base64')], { type: 'image/png' }), 'image.png');
+          } else body = JSON.stringify({ model: 'gpt-image-1', prompt: 'generate' });
+          const response = await gatewayFetch(base, `/v1/images/${edit ? 'edits' : 'generations'}`, {
+            method: 'POST', headers: { ...(edit ? {} : { 'content-type': 'application/json' }), 'x-codex-session-id': 'malformed-image' }, body
+          });
+          assert.equal(response.status, 502);
+          const failure = await response.json();
+          assert.equal(failure.error.code, 'image_generation_failed');
+          assert.equal('data' in failure, false);
+          assert.equal(calls, 1);
+          assert.equal(store.get(upstream.id).spending.spentCredits, 2.5);
+          assert.equal(store.get(upstream.id).lastSuccessfulAt, undefined);
+          assert.equal(store.sessionUpstream('malformed-image', undefined, store.listApiKeys()[0].id), null);
+        } finally { await close(server); store.sqlite.close(); }
+      });
+    }
+  }
+});
+
+test('image terminal replacements preserve final ordering and require a completed turn', async (t) => {
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC';
+  const jpeg = Buffer.from([255, 216, 255, 224, 0, 1, 2, 3, 4, 5, 255, 217]).toString('base64');
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 7) });
+  const upstream = store.create(codex());
+  store.setCap(upstream.id, { capDollars: 100 });
+  let completed = true;
+  const { server, base } = await start(store, async (url) => {
+    if (new URL(url).pathname === '/backend-api/codex/models') return Response.json({ models: [{ slug: 'gpt-5.6-sol', input_modalities: ['image'] }] });
+    const events = [
+      { type: 'response.output_item.done', item: { id: 'img_a', type: 'image_generation_call', result: completed ? 'invalid' : png } },
+      { type: 'response.output_item.done', item: { id: 'img_b', type: 'image_generation_call', result: jpeg } },
+      ...(completed ? [{ type: 'response.completed', response: { output: [
+        { id: 'img_a', type: 'image_generation_call', result: png },
+        { id: 'img_b', type: 'image_generation_call', result: jpeg }
+      ] } }] : [])
+    ];
+    return new Response(events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''), { headers: { 'content-type': 'text/event-stream' } });
+  });
+  t.after(async () => { await close(server); store.sqlite.close(); });
+  const post = () => gatewayFetch(base, '/v1/images/generations', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-image-1', prompt: 'generate' })
+  });
+  const success = await post();
+  assert.equal(success.status, 200);
+  assert.deepEqual((await success.json()).data, [{ b64_json: png }, { b64_json: jpeg }]);
+  completed = false;
+  const failure = await post();
+  assert.equal(failure.status, 502);
+  assert.equal((await failure.json()).error.code, 'image_generation_failed');
 });
