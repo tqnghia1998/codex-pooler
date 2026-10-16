@@ -94,12 +94,12 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.162.1']);
-  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1']) {
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.163.0']);
+  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.162.2'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.163.1'), 'instructions_template');
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);
@@ -121,7 +121,7 @@ test('native catalog projections filter undecodable rows and bind ETags to the s
   assert.equal('base_instructions' in checked.nativeModels[0], false);
   assert.notEqual(checked.etag, catalog.etag);
   assert.equal(projectCodexCatalog(catalog, 'codex_cli_rs/0.162.0-alpha.1').etag, checked.etag);
-  assert.equal(projectCodexCatalog(catalog, 'codex_cli_rs/0.163.0').nativeModels.length, 2);
+  assert.equal(projectCodexCatalog(catalog, 'codex_cli_rs/0.163.0').nativeModels.length, 1);
   assert.equal(projectCodexCatalog(catalog, 'codex_cli_rs/0.147.0'), catalog);
   assert.equal(catalog.nativeModels[0].base_instructions, 'legacy');
 });
