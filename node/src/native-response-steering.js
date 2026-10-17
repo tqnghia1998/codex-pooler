@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { HttpError } from './http-ingress.js';
 import { beginNativeTurn, finishNativeTurn, nativeEventWritten, nativeTurnIdentity, nativeWriteStarted } from './native-turn-recovery.js';
 import { isShareCredential, releaseShareRequest, reserveShareRequest } from './share-authorization.js';
@@ -7,6 +8,8 @@ import { classifySseEvent } from './upstream-outcomes.js';
 
 const RESPONSE_ID = /^resp_[A-Za-z0-9_-]{1,1020}$/;
 const TERMINALS = new Set(['response.completed', 'response.incomplete', 'response.failed', 'error']);
+const DELIVERY_SETTLEMENT_MS = 5_000;
+const TRANSIENT_DURABILITY_CODES = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EAI_AGAIN']);
 
 // One lane per producing socket. Provider control frames never become billable turns.
 export class NativeResponseSteering {
@@ -17,6 +20,7 @@ export class NativeResponseSteering {
     this.pending = new Map();
     this.acceptedIds = new Set();
     this.leases = new Set();
+    this.deliveries = new Set();
     this.accepted = false;
     this.closed = false;
   }
@@ -148,16 +152,57 @@ export class NativeResponseSteering {
   }
 
   async deliver(turn, event, write) {
-    if (turn?.lease) nativeWriteStarted(turn.lease);
+    if (this.closed) throw new HttpError(409, 'native_lane_closed', 'The native connection is no longer available');
+    const delivery = { lease: turn?.lease };
+    this.deliveries.add(delivery);
+    let active = true;
+    let timer;
+    const timeout = Object.assign(new Error('Native delivery settlement timed out'), { code: 'native_delivery_timeout' });
+    const check = () => { if (!active) throw timeout; };
+    const flush = async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        check();
+        try {
+          await this.store.flushDurability();
+          check();
+          return;
+        } catch (error) {
+          check();
+          if (attempt >= 2 || !TRANSIENT_DURABILITY_CODES.has(error?.code)) throw error;
+          await delay(25 * (attempt + 1));
+        }
+      }
+    };
     try {
-      await this.store.flushDurability();
-      await write();
-      if (turn?.lease) nativeEventWritten(turn.lease, event);
-      await this.store.flushDurability();
+      // One absolute budget covers both barriers and the write. Only barriers
+      // retry: never repeat accounting or a downstream write after an error.
+      const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => { active = false; reject(timeout); }, DELIVERY_SETTLEMENT_MS);
+      });
+      await Promise.race([deadline, (async () => {
+        if (turn?.lease) nativeWriteStarted(turn.lease);
+        await flush();
+        check();
+        await write();
+        check();
+        if (turn?.lease) nativeEventWritten(turn.lease, event);
+        if (this.closed) finishNativeTurn(turn?.lease);
+        await flush();
+        // Disconnect can also arrive while the post-write barrier is pending.
+        // Persist that interrupted status before releasing receipt ownership.
+        if (this.closed && turn?.lease && !turn.lease.finished) {
+          finishNativeTurn(turn.lease);
+          await flush();
+        }
+      })()]);
     } catch (error) {
       finishNativeTurn(turn?.lease);
       throw error;
     } finally {
+      active = false;
+      clearTimeout(timer);
+      this.deliveries.delete(delivery);
+      if (this.closed) finishNativeTurn(turn?.lease);
       if (turn?.lease?.finished) this.leases.delete(turn.lease);
     }
   }
@@ -169,15 +214,26 @@ export class NativeResponseSteering {
     if (turn) {
       try { this.store.settleUpstreamAttempt(turn.upstream.id, turn.admission, outcome); } catch {}
       this.fail(turn, code);
-      finishNativeTurn(turn.lease);
+      if (!this.delivering(turn.lease)) finishNativeTurn(turn.lease);
     }
-    for (const lease of this.leases) finishNativeTurn(lease);
-    this.leases.clear();
+    // A write already in flight owns its receipt until its callback and final
+    // durability barrier complete (or the original delivery deadline expires).
+    for (const lease of this.leases) {
+      if (!this.delivering(lease)) {
+        finishNativeTurn(lease);
+        this.leases.delete(lease);
+      }
+    }
     this.current = null;
     this.predecessor = null;
     this.accepted = false;
     this.acceptedIds.clear();
     this.pending.clear();
+  }
+
+  delivering(lease) {
+    for (const delivery of this.deliveries) if (lease && delivery.lease === lease) return true;
+    return false;
   }
 
   fail(turn, code) {
