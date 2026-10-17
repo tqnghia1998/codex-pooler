@@ -552,6 +552,16 @@ test('serves unauthenticated health checks but protects usage with the single AP
     const ready = await fetch(base + '/readyz');
     assert.equal(ready.status, 200);
     assert.equal((await ready.json()).status, 'ready');
+    for (const path of ['/healthz', '/readyz']) {
+      const head = await fetch(base + path, { method: 'HEAD' });
+      assert.equal(head.status, 200);
+      assert.match(head.headers.get('content-type'), /application\/json/);
+      assert.equal(head.headers.get('location'), null);
+      assert.equal(await head.text(), '');
+    }
+    for (const path of ['/readyz-extra', '/readyz/extra']) {
+      assert.equal((await fetch(base + path, { method: 'HEAD' })).status, 404);
+    }
     assert.equal((await fetch(base + '/readyz', { method: 'POST' })).status, 404);
     assert.equal(await statusWithHost(server.address().port, 'attacker.example'), 403);
     const badOrigin = await fetch(base + '/api/upstreams', {
@@ -590,6 +600,10 @@ test('serves sanitized pending and degraded readiness states', async () => {
     assert.equal(response.status, 503);
     assert.equal(response.headers.get('retry-after'), '1');
     assert.equal((await response.json()).status, 'pending');
+    const head = await fetch(base + '/readyz', { method: 'HEAD' });
+    assert.equal(head.status, 503);
+    assert.equal(head.headers.get('retry-after'), '1');
+    assert.equal(await head.text(), '');
     readiness.set('tokenRecovery', 'degraded');
     readiness.set('quotaRefresh', 'degraded');
     readiness.set('modelCatalog', 'degraded');
