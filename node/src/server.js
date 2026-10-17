@@ -72,7 +72,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
         sendJson(res, 200, { status: 'ok' });
         return;
       }
-      if (req.method === 'GET' && url.pathname === '/readyz') {
+      if (['GET', 'HEAD'].includes(req.method) && url.pathname === '/readyz') {
         const state = readiness.status();
         sendJson(res, state.status === 'ready' ? 200 : 503, state, state.status === 'ready' ? {} : { 'retry-after': '1' });
         return;
