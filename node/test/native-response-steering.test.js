@@ -221,6 +221,150 @@ test('failed terminal delivery interrupts its receipt even after the successor i
   assert.equal(Object.values(store.load().nativeTurnReceipts).every(({ status }) => status === 'interrupted'), true);
 });
 
+function successor(lane, upstream) {
+  lane.dispatch(opener, upstream);
+  lane.event(created('resp_original'), upstream);
+  lane.dispatch(steer, upstream);
+  lane.event(accepted, upstream);
+  lane.event(terminal('resp_original'), upstream);
+  return lane.event(created('resp_successor'), upstream);
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('disconnect preserves an in-flight write receipt through transient durability failures', async (t) => {
+  const { lane, upstream, store, calls } = fixture(t);
+  const turn = successor(lane, upstream);
+  let finishWrite;
+  const writing = deferred();
+  let flushes = 0;
+  store.setDurabilityBarrier(async () => {
+    flushes += 1;
+    if (flushes === 1 || flushes === 3) throw Object.assign(new Error('temporary'), { code: 'SQLITE_BUSY' });
+  });
+  const item = { type: 'message', id: 'msg_1', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'private output' }] };
+  let writes = 0;
+  const delivery = lane.deliver(turn, { type: 'response.output_item.done', item }, () => {
+    writes += 1;
+    writing.resolve();
+    return new Promise((resolve) => { finishWrite = resolve; });
+  });
+  await writing.promise;
+  lane.close();
+  assert.equal(turn.lease.finished, false);
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).pendingWrite, true);
+  finishWrite();
+  await delivery;
+  const receipt = store.nativeTurnReceipt(turn.identity.key);
+  assert.equal(receipt.status, 'interrupted');
+  assert.equal(receipt.pendingWrite, false);
+  assert.equal(receipt.items.length, 1);
+  assert.equal(writes, 1);
+  assert.equal(flushes, 4);
+  assert.equal(calls.settlements.length, 1);
+  assert.equal(lane.leases.size, 0);
+});
+
+test('disconnect during terminal settlement retains success without repeating charges or delivery', async (t) => {
+  const { lane, upstream, store, calls } = fixture(t);
+  const turn = successor(lane, upstream);
+  const done = terminal('resp_successor');
+  lane.event(done, upstream);
+  let flushes = 0;
+  let writes = 0;
+  store.setDurabilityBarrier(async () => {
+    flushes += 1;
+    if (flushes === 2) {
+      lane.close();
+      throw Object.assign(new Error('temporary'), { code: 'ECONNRESET' });
+    }
+  });
+  await lane.deliver(turn, done, async () => { writes += 1; });
+  assert.equal(calls.settlements.length, 2);
+  assert.equal(writes, 1);
+  assert.equal(flushes, 3);
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).status, 'succeeded');
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).pendingWrite, false);
+});
+
+test('disconnect during the post-write barrier durably interrupts the completed item receipt', async (t) => {
+  const { lane, upstream, store } = fixture(t);
+  const turn = successor(lane, upstream);
+  const flushing = deferred();
+  const release = deferred();
+  const snapshots = [];
+  store.setDurabilityBarrier(async () => {
+    snapshots.push({ ...store.nativeTurnReceipt(turn.identity.key) });
+    if (snapshots.length === 2) {
+      flushing.resolve();
+      await release.promise;
+    }
+  });
+  const delivery = lane.deliver(turn, { type: 'response.output_item.done', item: {
+    type: 'reasoning', id: 'rs_1', summary: [], encrypted_content: 'private output'
+  } }, async () => {});
+  await flushing.promise;
+  lane.close();
+  release.resolve();
+  await delivery;
+  assert.equal(snapshots.length, 3);
+  assert.equal(snapshots[2].status, 'interrupted');
+  assert.equal(snapshots[2].pendingWrite, false);
+  assert.equal(snapshots[2].items.length, 1);
+});
+
+for (const code of ['SQLITE_BUSY', 'persistence_conflict']) {
+  test(`delivery fails closed after ${code} without replaying output`, async (t) => {
+    const { lane, upstream, store } = fixture(t);
+    const turn = successor(lane, upstream);
+    let flushes = 0;
+    store.setDurabilityBarrier(async () => {
+      flushes += 1;
+      throw Object.assign(new Error('unavailable'), { code });
+    });
+    await assert.rejects(lane.deliver(turn, created('resp_successor'), async () => assert.fail('must not write')), { code });
+    assert.equal(flushes, code === 'SQLITE_BUSY' ? 3 : 1);
+    assert.equal(store.nativeTurnReceipt(turn.identity.key).status, 'interrupted');
+    assert.equal(store.nativeTurnReceipt(turn.identity.key).pendingWrite, true);
+  });
+}
+
+test('a stalled delivery has a fixed cutoff and a late callback cannot restore its receipt', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const { lane, upstream, store } = fixture(t);
+  const turn = successor(lane, upstream);
+  const writing = deferred();
+  let finishWrite;
+  const delivery = lane.deliver(turn, terminal('resp_successor'), () => {
+    writing.resolve();
+    return new Promise((resolve) => { finishWrite = resolve; });
+  });
+  const rejected = assert.rejects(delivery, { code: 'native_delivery_timeout' });
+  await writing.promise;
+  lane.close();
+  t.mock.timers.tick(5_000);
+  await rejected;
+  finishWrite();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).status, 'interrupted');
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).pendingWrite, true);
+  assert.equal(lane.deliveries.size, 0);
+  assert.equal(lane.leases.size, 0);
+});
+
+test('cancellation before delivery cannot claim receipt protection or write output', async (t) => {
+  const { lane, upstream, store } = fixture(t);
+  const turn = successor(lane, upstream);
+  lane.close();
+  await assert.rejects(lane.deliver(turn, terminal('resp_successor'), async () => assert.fail('must not write')), { code: 'native_lane_closed' });
+  assert.equal(store.nativeTurnReceipt(turn.identity.key).status, 'interrupted');
+  assert.equal(lane.deliveries.size, 0);
+});
+
 test('native WebSocket steering stays on its producing socket and settles both turns', { timeout: 5000 }, async (t) => {
   const { store, upstream } = fixture(t);
   let connections = 0;

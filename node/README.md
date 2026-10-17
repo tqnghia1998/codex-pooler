@@ -132,7 +132,12 @@ including provider-accepted late steering. Extra control fields stay on the
 wire. Accepted successors receive separate attempts, usage settlement, share
 reservations, and keyed delivery receipts; admission repeats authorization,
 credential-generation, model, capacity, and spending checks on the original
-account. Receipt writes are flushed before output and after delivery.
+account. Receipt writes are flushed before output and after delivery. An
+in-flight delivery retains its receipt across disconnects for at most five
+seconds, including both durability barriers and the write callback. Each
+barrier makes at most three attempts for transient SQLite contention or
+network errors, within that same deadline. Writes and charges are never
+replayed; persistence conflicts and permanent failures fail closed.
 The steering lane retains only model, reasoning, output limit, service tier,
 and account identity for admission and billing; prompt history, tools, client
 metadata, and account catalogs are not retained in its turn context.
@@ -278,7 +283,7 @@ preserving any `db.sqlite-wal` and `db.sqlite-shm` files with `db.sqlite`; copyi
 only a live main database file can omit committed writes. The standalone
 QuotaHub documents its own Redis/KMS storage and snapshot backup.
 
-`GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only sanitized fixed states.
+`GET /healthz` is immediate process liveness. Exact `GET /readyz` returns `200` only after local storage and API-key setup plus the initial token-recovery, quota-refresh, and model-discovery passes have settled. Both probes also accept `HEAD`, with the same status and headers and no body. Provider/network failures degrade those startup checks without blocking readiness because requests can still recover credentials on demand, quota refresh continues in the background, and model discovery has the documented static fallback. Pending or failed readiness returns `503`, `Retry-After: 1`, and only sanitized fixed states.
 
 Spending caps use 25 credits per dollar, rounded to whole credits, and a positive cap is never rounded down to zero (which would read as no cap). A cap update starts a new cap period and resets spend. Proxy requests require a positive cap: accounts remain eligible until they reach 100%, and a `previous_response_id` continuation stays pinned to its original account below 125%. Valid provider-reported `usage.price_cost_usd` is authoritative, accepted only as a plain non-negative decimal; otherwise supported Codex and Anthropic token usage is priced from the local snapshot, which applies OpenAI's long-context rates above 272,000 input tokens. A known model with no snapshot for an ordinary requested service tier or context bucket bills at its standard default rates rather than going unpriced. The distinct `ultrafast` tier remains unpriced without an exact snapshot. A provider `total_tokens` that disagrees with input plus output is reported as received without discarding the priced tokens. The usage endpoint remains available for other integrations.
 
