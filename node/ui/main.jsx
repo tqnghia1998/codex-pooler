@@ -1064,7 +1064,7 @@ function Dashboard({ themeMode, setThemeMode }) {
             setFormDialog((s) => ({ ...s, isOpen: false }));
           }} width={640} purpose="form">
             <Layout
-              header={<DialogHeader title={formDialog.mode === 'edit' ? 'Edit upstream' : 'Add upstream'} hasDivider />}
+              header={<DialogHeader title={formDialog.mode === 'edit' ? 'Edit upstream' : 'Add upstream'} subtitle={formDialog.mode === 'edit' && formDialog.upstream ? `For ${formDialog.upstream.name}` : undefined} hasDivider />}
               content={(
                 <LayoutContent>
                   <form id="upstream-form" onSubmit={async (e) => {
