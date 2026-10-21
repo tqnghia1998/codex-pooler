@@ -23,6 +23,13 @@ test('aborts a stalled body read at an injected idle deadline', async () => {
   assert.equal(cancelled, true);
 });
 
+test('reports a stalled real stream read as a timeout rather than a clean end', async () => {
+  let cancelled = false;
+  const reader = new Response(new ReadableStream({ cancel() { cancelled = true; } })).body.getReader();
+  await assert.rejects(readWithIdleDeadline(reader, { bodyIdleMs: 5 }), (error) => error?.name === 'TimeoutError');
+  assert.equal(cancelled, true);
+});
+
 test('uses defaults for invalid injectable deadline values', async () => {
   const reader = { read: async () => ({ done: true }) };
   assert.deepEqual(await readWithIdleDeadline(reader, { bodyIdleMs: 0 }), { done: true });
