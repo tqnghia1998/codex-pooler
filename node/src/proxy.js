@@ -17,7 +17,7 @@ import { HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, completeUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
-import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { chatUsage, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
@@ -2063,8 +2063,6 @@ function responsesToChat(response, chatPayload = {}) {
         function: { name: typeof item.name === 'string' ? item.name : 'tool', arguments: typeof item.arguments === 'string' ? item.arguments : '' }
       });
   const usage = response.usage;
-  const promptTokens = usage?.prompt_tokens ?? usage?.input_tokens;
-  const completionTokens = usage?.completion_tokens ?? usage?.output_tokens;
   const incomplete = response.status === 'incomplete' || response[TERMINAL_EVENT_TYPE] === 'response.incomplete';
   const finishReason = incomplete
     ? ['content_filter', 'content-filter'].includes(response.incomplete_details?.reason) ? 'content_filter' : 'length'
@@ -2075,12 +2073,7 @@ function responsesToChat(response, chatPayload = {}) {
     created: Number.isInteger(response.created) ? response.created : Number.isInteger(response.created_at) ? response.created_at : Math.floor(Date.now() / 1000),
     model: typeof response.model === 'string' ? response.model : typeof chatPayload.model === 'string' ? chatPayload.model : 'unknown',
     choices: [{ index: 0, message: { role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}) }, finish_reason: finishReason }],
-    ...(usage ? { usage: Object.fromEntries(Object.entries({
-      prompt_tokens: promptTokens,
-      prompt_tokens_details: usage.prompt_tokens_details,
-      completion_tokens: completionTokens,
-      total_tokens: usage.total_tokens ?? (Number.isInteger(promptTokens) && Number.isInteger(completionTokens) ? promptTokens + completionTokens : undefined)
-    }).filter(([, value]) => value !== undefined)) } : {}),
+    ...(usage ? { usage: chatUsage(usage) || {} } : {}),
     ...(typeof response.service_tier === 'string' ? { service_tier: response.service_tier } : {})
   };
 }
@@ -2125,10 +2118,13 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (transformChat) res.end(chatStreamFailure());
     else if (sanitizePublicResponses) res.end(publicStreamFailure());
     else res.end();
-    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_stream_failed', responseStatusCode });
+    finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_stream_failed', responseStatusCode, termination: 'http_protocol_error' });
     return;
   }
   let downstreamClosed = false;
+  // The first observed cause wins; a clean body end yields to a later failure.
+  let termination = null;
+  const observeTermination = (cause) => { if (!termination || termination === 'http_body_done') termination = cause; };
   let visible = false;
   let terminal = false;
   let completed = false;
@@ -2169,7 +2165,10 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     for (const part of held) await writeNative(part.wire, eventData(part.block));
   };
   res.once('close', () => {
-    if (!res.writableEnded) downstreamClosed = true;
+    if (!res.writableEnded) {
+      downstreamClosed = true;
+      observeTermination('downstream_closed');
+    }
     void reader.cancel('Downstream closed').catch(() => {});
   });
   const relayEvent = async (event, wire = `${event}\n\n`) => {
@@ -2306,7 +2305,11 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
   try {
     while (!downstreamClosed && !terminal) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
-      if (done) break;
+      if (done) {
+        // Cancelling the reader after a client close also ends the read.
+        if (!downstreamClosed) observeTermination('http_body_done');
+        break;
+      }
       const text = decoder.decode(value, { stream: true });
       if (nativeSse) {
         await relayNativeParts(consumeNativeSse(nativeParser, text));
@@ -2314,13 +2317,13 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       }
       const result = consumeSseChunk(parserState, text);
       parserState = result.state;
-      if (result.overflow) throw new Error('SSE event exceeded buffer limit');
+      if (result.overflow) throw Object.assign(new Error('SSE event exceeded buffer limit'), { sseOverflow: true });
       for (const event of result.blocks) await relayEvent(event);
     }
     if (nativeSse) await relayNativeParts(consumeNativeSse(nativeParser, decoder.decode(), { eof: true }));
     const final = consumeSseChunk(parserState, nativeSse ? '' : decoder.decode());
     parserState = final.state;
-    if (final.overflow) throw new Error('SSE event exceeded buffer limit');
+    if (final.overflow) throw Object.assign(new Error('SSE event exceeded buffer limit'), { sseOverflow: true });
     for (const event of final.blocks) await relayEvent(event);
     const pending = pendingSseBlock(parserState);
     if (pending.trim() && !terminal) await relayEvent(pending);
@@ -2332,6 +2335,8 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     if (transformChat && completed && !chatState.terminal && !downstreamClosed) await writeChunk(res, 'data: [DONE]\n\n');
   } catch (error) {
     logProxyFailure(logger, 'stream', upstream.id, error);
+    const cause = downstreamClosed ? 'downstream_closed' : streamTerminationCause(error);
+    if (cause) observeTermination(cause);
     healthOutcome ||= error.nativePreambleLimit
       ? { class: 'neutral', retryable: false, errorCode: 'native_preamble_limit_exceeded' }
       : classifyTransportError(error, { clientCancelled: downstreamClosed });
@@ -2349,18 +2354,18 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     else {
       if (chatState?.reconciliationFailed && usage) {
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
-          errorCode: 'upstream_tool_snapshot_inconsistent'
+          errorCode: 'upstream_tool_snapshot_inconsistent', termination
         });
       } else if (completeUsage(usage)) {
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
-          errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
+          errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', termination
         });
       } else {
         accounting.sharingStore?.releaseReservation(
           attemptId,
           downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed'
         );
-        if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode });
+        if (lifecycle) finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', responseStatusCode, termination });
         else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease && !publicState?.completionFailure) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
       }
     }
@@ -2372,6 +2377,15 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
     }
   }
+}
+
+// Unrecognized exceptions may be gateway-side, so they record no cause.
+function streamTerminationCause(error) {
+  if (error?.nativePreambleLimit) return 'pooler_stream_cancel';
+  if (error?.sseOverflow) return 'http_protocol_error';
+  const { transport } = classifyTransportError(error);
+  if (transport === 'timeout' || transport === 'UND_ERR_BODY_TIMEOUT') return 'http_receive_timeout';
+  return ['transport', 'cancelled'].includes(transport) ? null : 'http_transport_error';
 }
 
 function publicStreamFailure(sequenceNumber = 0) {
@@ -2419,7 +2433,7 @@ function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, 
     ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier)
     : { settledCostMicros: usage.upstreamCostMicros, costSource: 'upstream_reported' };
   try {
-    if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: failure ? 'failed' : 'succeeded', errorCode: failure?.errorCode, responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
+    if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: failure ? 'failed' : 'succeeded', errorCode: failure?.errorCode, termination: failure?.termination, responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });
     else {
       if (!accounting.shareSessionId) store.recordGatewayUsage({ ...accounting, attemptId, startedAt, usage, settledCostMicros: settlement?.settledCostMicros ?? null });
       if (settlement) store.addUsage(upstream.id, { attemptId, startedAt, ...settlement });
