@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, MAX_SSE_EVENT_BYTES, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
+import { chatCompletionTokenDetails, chatPromptTokenDetails, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, MAX_SSE_EVENT_BYTES, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from '../src/openai-streaming.js';
 
 const decode = (chunk) => JSON.parse(chunk.match(/^data: (.+)$/m)[1]);
 
@@ -281,4 +281,30 @@ test('ignores unidentified tool deltas instead of inventing a call at index zero
   assert.deepEqual(normalizeChatEvent({ type: 'response.function_call_arguments.delta', delta: 'private' }, state), []);
   assert.deepEqual(normalizeChatEvent({ type: 'response.custom_tool_call_input.delta', output_index: 9, delta: 'private' }, state), []);
   assert.equal(state.toolArguments.size, 0);
+});
+
+test('projects documented Chat token details from Responses usage without inventing counters', () => {
+  const responsesUsage = {
+    input_tokens: 10, output_tokens: 4,
+    input_tokens_details: { cached_tokens: 6, cache_write_tokens: 0, unknown_tokens: 9 },
+    output_tokens_details: { reasoning_tokens: 3, text_tokens: -1, audio_tokens: 1.5, accepted_prediction_tokens: '1', rejected_prediction_tokens: true }
+  };
+  assert.deepEqual(chatPromptTokenDetails(responsesUsage), { cache_write_tokens: 0, cached_tokens: 6 });
+  assert.deepEqual(chatCompletionTokenDetails(responsesUsage), { reasoning_tokens: 3 });
+  assert.deepEqual(chatPromptTokenDetails({ prompt_tokens_details: {}, input_tokens_details: { cached_tokens: 6 } }), {});
+  assert.deepEqual(chatCompletionTokenDetails({ completion_tokens_details: { reasoning_tokens: 0 }, output_tokens_details: { reasoning_tokens: 3 } }), { reasoning_tokens: 0 });
+  for (const malformed of [null, false, 1, 'x', []]) {
+    assert.deepEqual(chatPromptTokenDetails({ prompt_tokens_details: malformed, input_tokens_details: { cached_tokens: 2 } }), { cached_tokens: 2 });
+    assert.equal(chatCompletionTokenDetails({ completion_tokens_details: malformed, output_tokens_details: malformed }), undefined);
+  }
+  assert.equal(chatPromptTokenDetails(undefined), undefined);
+
+  const state = createChatStreamState({ model: 'gpt', stream_options: { include_usage: true } });
+  const terminal = normalizeChatEvent({ type: 'response.completed', response: { id: 'resp_details', status: 'completed', output: [], usage: { ...responsesUsage, total_tokens: 14 } } }, state);
+  assert.deepEqual(terminal.at(-2).usage, {
+    prompt_tokens: 10, prompt_tokens_details: { cache_write_tokens: 0, cached_tokens: 6 },
+    completion_tokens: 4, completion_tokens_details: { reasoning_tokens: 3 }, total_tokens: 14
+  });
+  const plainTerminal = normalizeChatEvent({ type: 'response.completed', response: { id: 'resp_plain', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1 } } }, createChatStreamState({ model: 'gpt', stream_options: { include_usage: true } }));
+  assert.deepEqual(plainTerminal.at(-2).usage, { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 });
 });
