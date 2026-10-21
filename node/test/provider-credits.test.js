@@ -36,6 +36,30 @@ test('routes opt-in credits after included capacity while preserving hard policy
   assert.equal(store.candidatePlan({ requestedId: paid.id }).length, 0);
 });
 
+test('ranks windowless capacity after ordinary windows and before provider credits', (t) => {
+  const { store, create, exhausted } = setup(t);
+  const paid = create('paid'), spendOnly = create('spend-only'), modelOnly = create('model-only'), ordinary = create('ordinary');
+  store.update(paid.id, { allowProviderCredits: true });
+  store.setQuota(paid.id, exhausted());
+  store.setQuota(spendOnly.id, parseCodexQuota({ rate_limit: { allowed: true }, spend_control: { reached: false, individual_limit: { used_percent: 10, limit_window_seconds: 2592000 } } }));
+  store.setQuota(modelOnly.id, parseCodexQuota({ rate_limit: { allowed: true }, additional_rate_limits: [{ model: 'gpt-6-sol', rate_limit: { primary_window: { used_percent: 10, limit_window_seconds: 18000 } } }] }));
+  store.setQuota(ordinary.id, parseCodexQuota({ rate_limit: { allowed: true, primary_window: { used_percent: 90, limit_window_seconds: 18000 } } }));
+  assert.equal(codexCapacityDecision(store.get(spendOnly.id)).basis, 'windowless');
+  assert.equal(codexCapacityDecision(store.get(modelOnly.id), 'gpt-6-sol').basis, 'windowless');
+  assert.equal(codexCapacityDecision(store.get(ordinary.id)).basis, 'included');
+  store.setPriorityList([paid.id, spendOnly.id, modelOnly.id, ordinary.id]);
+  const order = (options = {}) => store.candidatePlan({ model: 'gpt-6-sol', ...options }).map((row) => row.id);
+  const plan = order();
+  assert.equal(plan[0], ordinary.id);
+  assert.deepEqual(new Set(plan.slice(1, 3)), new Set([spendOnly.id, modelOnly.id]));
+  assert.equal(plan[3], paid.id);
+  assert.equal(order({ affinityId: spendOnly.id })[0], ordinary.id);
+  assert.ok(order({ affinityId: paid.id }).indexOf(paid.id) > order({ affinityId: paid.id }).indexOf(modelOnly.id));
+  assert.equal(order({ requestedId: spendOnly.id })[0], spendOnly.id);
+  store.setQuota(ordinary.id, parseCodexQuota({ rate_limit: { allowed: true, primary_window: { used_percent: 100, reset_after_seconds: 3600, limit_window_seconds: 18000 } } }));
+  assert.deepEqual(new Set(order().slice(0, 2)), new Set([spendOnly.id, modelOnly.id]));
+});
+
 test('requires fresh current-credential credit proof and rechecks at physical admission', (t) => {
   const { store, create, exhausted } = setup(t);
   const account = create('paid');
