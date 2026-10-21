@@ -32,8 +32,9 @@ export async function readWithIdleDeadline(reader, deadlines = {}) {
       reader.read(),
       new Promise((_, reject) => {
         timer = setTimeout(() => {
-          void Promise.resolve(reader.cancel?.('Upstream response body timed out')).catch(() => {});
+          // Reject first: cancelling a real stream resolves the pending read as done.
           reject(new DOMException('Upstream response body timed out', 'TimeoutError'));
+          void Promise.resolve(reader.cancel?.('Upstream response body timed out')).catch(() => {});
         }, bodyIdleMs);
       })
     ]);
