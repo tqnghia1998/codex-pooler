@@ -15,7 +15,9 @@ export function codexCapacityDecision(upstream, model = '', now = Date.now()) {
   const spend = evidence.spendControl;
   if (spend?.remainingPercent === 0 && (Date.parse(spend.resetAt) > now || !spend.resetAt && fresh)) return { eligible: false, basis: 'none', fresh };
   const exhausted = windows.some((window) => window.remainingPercent === 0 && (Date.parse(window.resetAt) > now || !window.resetAt && fresh));
-  if (!exhausted && !(fresh && evidence.allowed === false)) return { eligible: true, basis: 'included', fresh };
+  // Spend-control or model-only evidence proves no account window capacity, so
+  // it routes after ordinary windowed accounts but before paid credits.
+  if (!exhausted && !(fresh && evidence.allowed === false)) return { eligible: true, basis: evidence.windows?.length ? 'included' : 'windowless', fresh };
   const credits = evidence.credits;
   const usable = fresh && upstream.allowProviderCredits === true && credits?.hasCredits === true
     && (credits.unlimited === true || typeof credits.balance === 'number' && credits.balance > 0);

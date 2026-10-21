@@ -261,6 +261,47 @@ test('fails a divergent streamed Chat tool snapshot without successful accountin
   }
 });
 
+test('preserves Responses token details in Chat JSON and included streamed usage', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  let status = 'completed';
+  const usage = {
+    input_tokens: 12, output_tokens: 5, total_tokens: 17,
+    input_tokens_details: { cached_tokens: 8, cache_write_tokens: 0, private_tokens: 1 },
+    output_tokens_details: { reasoning_tokens: 2, text_tokens: -1 }
+  };
+  const expected = {
+    prompt_tokens: 12, prompt_tokens_details: { cache_write_tokens: 0, cached_tokens: 8 },
+    completion_tokens: 5, completion_tokens_details: { reasoning_tokens: 2 }, total_tokens: 17
+  };
+  const fetchImpl = async () => {
+    const response = { id: `resp_${status}`, status, output: [{ type: 'message', content: [{ type: 'output_text', text: 'hi' }] }], usage, ...(status === 'incomplete' ? { incomplete_details: { reason: 'max_output_tokens' } } : {}) };
+    return new Response(`data: ${JSON.stringify({ type: `response.${status}`, response })}\n\n`, { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const { server, base } = await runningServer(store, fetchImpl);
+  const chat = (body) => fetch(base + '/v1/chat/completions', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hello' }], ...body })
+  });
+  const streamedUsage = async (body) => {
+    const text = await (await chat({ stream: true, ...body })).text();
+    return text.split('\n').filter((line) => line.startsWith('data: {')).map((line) => JSON.parse(line.slice(6))).filter((chunk) => chunk.usage).map((chunk) => chunk.usage);
+  };
+  try {
+    for (status of ['completed', 'incomplete']) {
+      const json = await (await chat({})).json();
+      assert.deepEqual(json.usage, expected);
+      assert.deepEqual(await streamedUsage({ stream_options: { include_usage: true } }), [expected]);
+      assert.deepEqual(await streamedUsage({}), []);
+    }
+    assert.ok(store.load().gatewayRequests.every((entry) => entry.usageStatus === 'usage_known'));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
+  }
+});
+
 test('validates public OpenAI adapters before dispatch and supports Chat input fallback', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-adapter-boundary-'));
   const bodies = [];
@@ -1188,9 +1229,71 @@ test('finalizes Codex streaming accounting when the upstream returns no body', a
     assert.equal(requests.length, 1);
     assert.equal(requests[0].status, 'failed');
     assert.equal(requests[0].lastErrorCode, 'upstream_stream_failed');
+    assert.equal(store.gatewayDiagnostics().failures[0].attempts[0].termination, 'http_protocol_error');
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('records the observed HTTP stream termination cause without changing public failures', async () => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const upstream = store.create(codexInput());
+  store.setCap(upstream.id, { capDollars: 100 });
+  const delta = new TextEncoder().encode('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"partial"}\n\n');
+  // Four transient cases exceed one account's failure circuit.
+  store.setCap(store.create(codexInput({ email: 'termination-spare@example.com', accountId: 'acct-termination-spare' })).id, { capDollars: 100 });
+  store.configureApiKey('local-client-key');
+  let mode = 'eof';
+  const fetchImpl = async () => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(delta);
+      if (mode === 'eof') controller.close();
+      if (mode === 'reset') setTimeout(() => controller.error(Object.assign(new Error('socket reset'), { code: 'ECONNRESET' })), 20);
+      if (mode === 'internal') setTimeout(() => controller.error(new Error('unexpected relay fault')), 20);
+    }
+  }), { headers: { 'content-type': 'text/event-stream' } });
+  const { server, base } = await runningServerWithOptions(store, { apiKey: 'local-client-key', fetchImpl, upstreamDeadlines: { bodyIdleMs: 150 } });
+  const failure = async (index) => {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const failures = store.gatewayDiagnostics().failures;
+      if (failures.length > index) return failures[0];
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`${mode} stream failure was not finalized`);
+  };
+  try {
+    const cases = [
+      ['client-close', '/v1/responses', 'downstream_closed', 'downstream_closed'],
+      ['eof', '/v1/responses', 'upstream_stream_failed', 'http_body_done'],
+      ['timeout', '/v1/responses', 'upstream_stream_failed', 'http_receive_timeout'],
+      ['reset', '/v1/chat/completions', 'upstream_stream_failed', 'http_transport_error'],
+      ['internal', '/v1/responses', 'upstream_stream_failed', null]
+    ];
+    for (const [index, [name, path, errorCode, termination]] of cases.entries()) {
+      mode = name;
+      const controller = new AbortController();
+      const response = await fetch(base + path, {
+        method: 'POST', headers: { authorization: 'Bearer local-client-key', 'content-type': 'application/json' }, signal: controller.signal,
+        body: JSON.stringify({ model: 'gpt-5.6-sol', stream: true, ...(path === '/v1/responses' ? { input: 'hello' } : { messages: [{ role: 'user', content: 'hello' }] }) })
+      });
+      assert.equal(response.status, 200, name);
+      if (name === 'client-close') {
+        const reader = response.body.getReader();
+        await reader.read();
+        controller.abort();
+        await reader.closed.catch(() => {});
+      } else {
+        await response.text();
+      }
+      const recorded = await failure(index);
+      assert.equal(recorded.errorCode, errorCode, name);
+      assert.equal(recorded.attempts.at(-1).termination, termination, name);
+    }
+    assert.equal(/socket reset|relay fault/.test(JSON.stringify(store.load().gatewayAttempts)), false);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    store.sqlite.close();
   }
 });
 
