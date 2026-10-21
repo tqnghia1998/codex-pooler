@@ -680,7 +680,7 @@ export class Store {
     return { ...attempt };
   }
 
-  finalizeGatewayRequest({ requestId, attemptId = null, status, responseStatusCode = null, errorCode = null, exclusionReasons = [], timings = null, usage = null, settledCostMicros = null, costSource = null, completedAt = new Date().toISOString() } = {}) {
+  finalizeGatewayRequest({ requestId, attemptId = null, status, responseStatusCode = null, errorCode = null, termination = null, exclusionReasons = [], timings = null, usage = null, settledCostMicros = null, costSource = null, completedAt = new Date().toISOString() } = {}) {
     if (!['succeeded', 'failed'].includes(status)) throw new Error('request status must be succeeded or failed');
     const db = this.load();
     const request = findGatewayRequest(db, requestId);
@@ -701,6 +701,8 @@ export class Store {
         timings: sanitizeAttemptTimings(timings || measured),
         completedAt
       });
+      const observed = safeStreamTermination(termination);
+      if (observed) attempt.termination = observed;
       if (status === 'failed') delete attempt.upstreamId;
     }
     const attemptReasons = db.gatewayAttempts
@@ -773,6 +775,7 @@ export class Store {
             status: ['retryable_failed', 'failed'].includes(attempt.status) ? attempt.status : 'failed',
             responseStatusCode: safeStatusCode(attempt.responseStatusCode),
             errorCode: safeDiagnosticCode(attempt.errorCode),
+            termination: safeStreamTermination(attempt.termination),
             timings: diagnosticAttemptTimings(attempt)
           }))
         };
@@ -1376,6 +1379,7 @@ function normalizeDatabase(parsed) {
   for (const attempt of parsed.gatewayAttempts) {
     attempt.responseStatusCode = safeStatusCode(attempt.responseStatusCode);
     attempt.errorCode = safeDiagnosticCode(attempt.errorCode);
+    if (attempt.termination !== undefined) attempt.termination = safeStreamTermination(attempt.termination);
     attempt.timings = sanitizeAttemptTimings(attempt.timings);
     if (['failed', 'retryable_failed'].includes(attempt.status)) delete attempt.upstreamId;
   }
@@ -1543,6 +1547,12 @@ function findGatewayAttempt(db, requestId, attemptId) {
 function safeStatusCode(value) {
   const status = Number(value);
   return Number.isInteger(status) && status >= 100 && status <= 599 ? status : null;
+}
+
+const STREAM_TERMINATIONS = new Set(['http_body_done', 'http_transport_error', 'http_protocol_error', 'http_receive_timeout', 'downstream_closed', 'pooler_stream_cancel']);
+
+function safeStreamTermination(value) {
+  return STREAM_TERMINATIONS.has(value) ? value : null;
 }
 
 function safeDiagnosticCode(value) {
@@ -1765,8 +1775,13 @@ function candidateEligible(upstream, model, requirements, { ignoreModelRestricti
   return !requirements.serviceTier || !routing.serviceTiers.length || routing.serviceTiers.includes(requirements.serviceTier);
 }
 
+const CAPACITY_TIERS = { windowless: 1, provider_credits: 2 };
+
+// Capacity group is outermost: ordinary, windowless, then provider credits.
+// Accounts without Codex capacity evidence stay ordinary so tiers never demote
+// unprobed Codex accounts behind other provider types.
 function capacityTier(upstream, now, model = '') {
-  return codexCapacityDecision(upstream, model, now)?.basis === 'provider_credits' ? 1 : 0;
+  return CAPACITY_TIERS[codexCapacityDecision(upstream, model, now)?.basis] ?? 0;
 }
 
 function quotaBlocksRouting(upstream, now, model = '') {

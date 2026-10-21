@@ -2165,7 +2165,7 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
                           )}
                           {failure.attempts?.map((attempt) => (
                             <Text key={attempt.attemptNumber} type="supporting" color="secondary" maxLines={1}>
-                              Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status} · {formatTimings(attempt.timings)}
+                              Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status}{attempt.termination ? ` (${attempt.termination})` : ''} · {formatTimings(attempt.timings)}
                             </Text>
                           ))}
                           {failure.omittedAttemptCount > 0 && (
