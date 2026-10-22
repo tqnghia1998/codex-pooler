@@ -515,11 +515,13 @@ function normalizeResponseContentPart(part, role) {
   if (typeof part === 'string') return { type: role === 'assistant' ? 'output_text' : 'input_text', text: part };
   if (!plainObject(part)) invalid('message content part is not translatable', 'input');
   if (role === 'assistant') {
-    if (part.type === 'output_text' && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations'].includes(key))) {
+    // Codex and other clients replay output_text with the response's logprobs list; it is client metadata, so drop it.
+    if (part.logprobs !== undefined && !Array.isArray(part.logprobs)) invalid('message content part is not translatable', 'input');
+    if (part.type === 'output_text' && typeof part.text === 'string' && Object.keys(part).every((key) => ['type', 'text', 'annotations', 'logprobs'].includes(key))) {
       if (part.annotations !== undefined) validateUrlCitations(part.annotations);
       return { type: 'output_text', text: part.text, ...(part.annotations !== undefined ? { annotations: part.annotations } : {}) };
     }
-    if (part.type === 'text' && typeof part.text === 'string' && part.annotations === undefined && Object.keys(part).every((key) => ['type', 'text'].includes(key))) return { type: 'output_text', text: part.text };
+    if (part.type === 'text' && typeof part.text === 'string' && part.annotations === undefined && Object.keys(part).every((key) => ['type', 'text', 'logprobs'].includes(key))) return { type: 'output_text', text: part.text };
     if (part.type === 'thinking' && typeof part.thinking === 'string') return null;
     invalid('message content part is not translatable', 'input');
   }
