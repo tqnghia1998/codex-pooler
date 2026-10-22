@@ -2220,6 +2220,6 @@ function decrypt(value, key) {
     decipher.setAuthTag(Buffer.from(tagText, 'base64url'));
     return Buffer.concat([decipher.update(Buffer.from(dataText, 'base64url')), decipher.final()]).toString('utf8');
   } catch {
-    throw new Error('Could not decrypt stored credentials; restore the original .data/.key pair');
+    throw Object.assign(new Error('Could not decrypt stored credentials; restore the original .data/.key pair'), { code: 'upstream_credential_unavailable' });
   }
 }
