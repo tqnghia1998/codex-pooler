@@ -210,6 +210,25 @@ test('accepts pi replay shapes when switching models mid-session', () => {
   assert.deepEqual(adapted.input[1].content[0], { type: 'input_image', image_url: 'https://example.com/a.png', detail: 'auto' });
 });
 
+test('accepts and strips empty logprobs on replayed assistant output text', () => {
+  const adapted = adaptResponsesRequest({
+    model: 'gpt-5.6-luna',
+    input: [
+      { type: 'message', role: 'assistant', id: 'msg_1', status: 'completed', phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'prior answer', annotations: [], logprobs: [] }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'bare', logprobs: [] }] },
+      { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'chat style', logprobs: [] }] },
+      { role: 'user', content: 'next' }
+    ]
+  });
+  assert.deepEqual(adapted.input[0].content, [{ type: 'output_text', text: 'prior answer', annotations: [] }]);
+  assert.deepEqual(adapted.input[1].content, [{ type: 'output_text', text: 'bare' }]);
+  assert.deepEqual(adapted.input[2].content, [{ type: 'output_text', text: 'chat style' }]);
+  for (const logprobs of [null, {}, 'x']) {
+    assertAdapterError(() => adaptResponsesRequest({ model: 'gpt', input: [{ role: 'assistant', content: [{ type: 'output_text', text: 'x', logprobs }] }] }), { param: 'input' });
+  }
+});
+
 test('translates official Chat custom tools and named choices', () => {
   const adapted = adaptChatRequest({
     model: 'gpt-5.6-sol',
