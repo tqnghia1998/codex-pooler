@@ -1708,6 +1708,44 @@ test('forwards a Claude OAuth upstream directly to Anthropic Messages', async ()
   }
 });
 
+test('drops Claude header quota observed with credentials replaced in flight', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-quota-epoch-'));
+  const store = new Store(dir);
+  const upstream = store.create({
+    type: 'claude',
+    accessToken: 'sk-ant-oat-old-access-token',
+    refreshToken: 'claude-refresh-token',
+    email: 'claude@example.com',
+    accountId: 'account-uuid'
+  });
+  store.setCap(upstream.id, { capDollars: 100 });
+  const epoch = store.get(upstream.id).credentialEpoch;
+  const { server, base } = await start(store, async () => {
+    store.persistCredentials(upstream.id, { ...store.credentials(upstream.id), accessToken: 'sk-ant-oat-new-access-token' });
+    return new Response(JSON.stringify({
+      id: 'msg_epoch', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
+      content: [{ type: 'text', text: 'hello' }], usage: { input_tokens: 7, output_tokens: 3 }
+    }), { status: 200, headers: {
+      'content-type': 'application/json',
+      'anthropic-ratelimit-unified-5h-utilization': '0.99',
+      'anthropic-ratelimit-unified-5h-reset': '1800000000'
+    } });
+  });
+  try {
+    const response = await request(base, '/v1/messages', {
+      method: 'POST',
+      headers: { 'x-upstream-type': 'claude', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(store.get(upstream.id).credentialEpoch, epoch + 1);
+    assert.notEqual(store.get(upstream.id).quota?.source, 'claude_oauth_headers');
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('retries a Claude credential in an additional local round when configured', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-retry-'));
   const store = new Store(dir);

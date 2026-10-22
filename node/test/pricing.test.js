@@ -101,6 +101,9 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   });
   assert.equal(priceUsage(['claude-sonnet-5-5-20260928'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }, '2026-09-29T00:00:00Z').settledCostMicros, 3_000);
   assert.equal(priceUsage(['claude-3-sonnet'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 1, outputTokens: 100 }), null);
+  // A missing cached-input rate leaves cost unavailable only when cached input is billable.
+  assert.equal(priceUsage(['claude-3-sonnet'], { inputTokens: 100, cachedInputTokens: 10, cacheWriteTokens: 0, outputTokens: 100 }), null);
+  assert.equal(priceUsage(['claude-3-sonnet'], { inputTokens: 100, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 1_800);
   // A model priced only at standard rates still bills on a priority request instead of escaping the spending cap.
   assert.equal(priceUsage(['claude-sonnet-4-6'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'priority' }).settledCostMicros, 4_500);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 0, serviceTier: 'priority' }).settledCostMicros, 8_000);

@@ -878,6 +878,44 @@ test('implements the complete public file create, upload, finalize, list, and re
   }
 });
 
+test('answers requests with unreadable stored credentials as a service error and releases the slot', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-file-credentials-'));
+  const { store, codexUpstream } = configuredStore(dir);
+  const db = store.load();
+  const record = db.upstreams.find((upstream) => upstream.id === codexUpstream.id);
+  record.credentials = Object.fromEntries(Object.keys(record.credentials).map((name) => [name, 'v1:corrupt:tag:data']));
+  store.save(db);
+  const settlements = [];
+  const settle = store.settleUpstreamAttempt.bind(store);
+  store.settleUpstreamAttempt = (...args) => { settlements.push(args[2]); return settle(...args); };
+  let calls = 0;
+  const { server, base } = await start(store, async () => { calls += 1; return new Response('{}', { status: 200 }); });
+  try {
+    const expected = { type: 'server_error', code: 'upstream_credential_unavailable', message: 'upstream credentials are unavailable', param: null };
+    const form = new FormData();
+    form.append('purpose', 'user_data');
+    form.append('file', new Blob(['x'], { type: 'text/plain' }), 'x.txt');
+    const created = await gatewayFetch(base, '/v1/files', { method: 'POST', body: form });
+    assert.equal(created.status, 503);
+    assert.deepEqual((await created.json()).error, expected);
+
+    for (const path of ['/backend-api/files', '/backend-api/files/file-1/uploaded']) {
+      const raw = await gatewayFetch(base, path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ file_name: 'x.txt', file_size: 1, use_case: 'codex' }) });
+      assert.equal(raw.status, 503);
+      assert.deepEqual((await raw.json()).error, expected);
+    }
+    const proxied = await gatewayFetch(base, '/v1/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hello' }) });
+    assert.equal(proxied.status, 503);
+    assert.deepEqual((await proxied.json()).error, expected);
+    assert.deepEqual(settlements, Array(3).fill({ class: 'neutral', retryable: false }));
+    assert.equal(calls, 0);
+    assert.equal(store.listFiles().length, 0);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('does not persist files when upload finalization is incomplete', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-file-finalize-error-'));
   const { store } = configuredStore(dir);
@@ -1005,6 +1043,49 @@ test('renders validated transcription text without changing settlement or JSON e
     assert.match(rejected.headers.get('content-type'), /^application\/json/);
     assert.equal((await rejected.json()).error.param, 'response_format');
     assert.equal(calls, 2);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('refuses image edit uploads over 50 MiB in total before selecting an upstream', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-image-limit-'));
+  const { store } = configuredStore(dir);
+  const paths = [];
+  const fetchImpl = async (url) => {
+    const path = new URL(url).pathname;
+    paths.push(path);
+    if (path === '/backend-api/codex/models') {
+      return new Response(JSON.stringify({ models: [{ slug: 'gpt-5.6-sol', input_modalities: ['text', 'image'] }] }), { status: 200 });
+    }
+    return new Response([
+      'data: {"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYGAAAAAEAAH2FzhVAAAAAElFTkSuQmCC"}]}}',
+      'data: [DONE]', ''
+    ].join('\n\n'), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const limit = 50 * 1024 * 1024;
+  const edit = (imageBytes, maskBytes) => {
+    const form = new FormData();
+    form.append('model', 'gpt-image-1');
+    form.append('prompt', 'make blue');
+    form.append('image[]', new Blob([Buffer.alloc(imageBytes)], { type: 'image/png' }), 'a.png');
+    form.append('mask', new Blob([Buffer.alloc(maskBytes)], { type: 'image/png' }), 'mask.png');
+    return form;
+  };
+  const { server, base } = await start(store, fetchImpl);
+  try {
+    const rejected = await gatewayFetch(base, '/v1/images/edits', { method: 'POST', body: edit(limit - 1024, 1025) });
+    assert.equal(rejected.status, 413);
+    assert.deepEqual((await rejected.json()).error, {
+      type: 'invalid_request_error', code: 'request_too_large',
+      message: 'image and mask uploads must total at most 50 MiB', param: 'image'
+    });
+    assert.deepEqual(paths, []);
+
+    const accepted = await gatewayFetch(base, '/v1/images/edits', { method: 'POST', body: edit(limit - 1024, 1024) });
+    assert.equal(accepted.status, 200);
+    assert.ok(paths.includes('/backend-api/codex/responses'));
   } finally {
     await close(server);
     rmSync(dir, { recursive: true, force: true });

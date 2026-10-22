@@ -89,7 +89,7 @@ export function retryableFirstSseEvent(event) {
   return RETRY_CODES.has(string(error.code) || string(error.type) || incompleteReason(event));
 }
 
-export function createPublicResponsesState(customToolNamespaces = {}, { websocket = false, maxOutputBytes = MAX_SSE_EVENT_BYTES } = {}) { return { sequence: -1, terminal: false, created: false, text: false, visible: false, responseId: '', customToolNamespaces, websocket, integrity: createResponsesIntegrityState(maxOutputBytes), completionFailure: null }; }
+export function createPublicResponsesState(customToolNamespaces = {}, { websocket = false, maxOutputBytes = MAX_SSE_EVENT_BYTES } = {}) { return { sequence: -1, terminal: false, created: false, text: false, itemsRelayed: false, visible: false, responseId: '', customToolNamespaces, websocket, integrity: createResponsesIntegrityState(maxOutputBytes), completionFailure: null }; }
 
 export function normalizePublicResponsesEvent(source, state) {
   if (state.terminal || !plain(source)) return [];
@@ -101,17 +101,13 @@ export function normalizePublicResponsesEvent(source, state) {
     event = failed(event, state.completionFailure);
     terminal = 'failed';
   } else if (terminal === 'completed' || terminal === 'incomplete') event = fillResponsesOutput(event, state.integrity);
-  const result = [];
-  if ((terminal === 'completed' || terminal === 'incomplete') && state.visible) {
-    if (!state.created) result.push(encode({ type: 'response.created', response: lifecycle(event.response) }, synthetic(state)));
-    if (!state.text && terminalText(event.response)) result.push(encode({ type: 'response.output_text.delta', delta: terminalText(event.response) }, synthetic(state)));
-  }
+  const projected = terminal === 'failed' ? (state.websocket ? publicWebSocketError(event) : null) || failed(event) : project(event, terminal, state.customToolNamespaces);
+  const result = !state.websocket && (terminal === 'completed' || terminal === 'incomplete') ? terminalPrefix(projected, state) : [];
   const sequence = nextSequence(event.sequence_number, state, Boolean(terminal));
   if (sequence === 'overflow') {
     state.terminal = true;
     return [...result, encode(failed({}, 'response_sequence_exhausted'), MAX_SEQUENCE)];
   }
-  const projected = terminal === 'failed' ? (state.websocket ? publicWebSocketError(event) : null) || failed(event) : project(event, terminal, state.customToolNamespaces);
   repairItem(projected, state.customToolNamespaces);
   recordResponsesOutput(projected, state.integrity);
   state.sequence = sequence;
@@ -119,6 +115,7 @@ export function normalizePublicResponsesEvent(source, state) {
   if (projected.type === 'response.created') state.created = true;
   if (projected.type.startsWith('response.shell_call_')) state.created = true;
   if (projected.type === 'response.output_text.delta' && projected.delta) state.text = true;
+  if (projected.type === 'response.output_item.added' || projected.type === 'response.output_item.done') state.itemsRelayed = true;
   if (!terminal && projected.type !== 'response.created') state.visible = true;
   state.responseId ||= responseId(projected);
   if (terminal) state.terminal = true;
@@ -359,8 +356,48 @@ export function restoreCustomToolCallNamespaces(response, namespaces = {}) {
   }
   return response;
 }
-function lifecycle(response) { return { id: responseId({ response }) || 'resp_failed', object: 'response', created_at: 0, status: 'in_progress' }; }
-function terminalText(response) { for (const item of response?.output || []) for (const part of item?.content || []) if (typeof part?.text === 'string' && part.text) return part.text; return ''; }
+// A terminal that closes a response the upstream never opened is preceded by
+// the grammar SDK stream helpers require: a response.created snapshot, then
+// every terminal output item announced in order with its content parts and
+// text. Items or text the upstream already relayed are never repeated.
+function terminalPrefix(event, state) {
+  const response = plain(event.response) ? event.response : event;
+  const result = [];
+  if (!state.created) {
+    const snapshot = { object: 'response', status: 'in_progress', output: [] };
+    if (string(response.id)) snapshot.id = response.id;
+    if (Number.isSafeInteger(response.created_at) && response.created_at >= 0) snapshot.created_at = response.created_at;
+    if (string(response.model)) snapshot.model = response.model;
+    result.push(encode({ type: 'response.created', response: snapshot }, synthetic(state)));
+    state.created = true;
+  }
+  if (state.text || state.itemsRelayed) return result;
+  const output = Array.isArray(response.output) ? response.output.filter(plain) : [];
+  output.forEach((item, outputIndex) => {
+    for (const synthesized of outputItemEvents(item, outputIndex)) result.push(encode(synthesized, synthetic(state)));
+    state.itemsRelayed = true;
+    state.visible = true;
+  });
+  return result;
+}
+function outputItemEvents(item, outputIndex) {
+  const done = { type: 'response.output_item.done', output_index: outputIndex, item };
+  if (item.type !== 'message') return [{ type: 'response.output_item.added', output_index: outputIndex, item }, done];
+  const parts = (Array.isArray(item.content) ? item.content : []).filter(plain).flatMap((part, contentIndex) => {
+    const position = { item_id: item.id, output_index: outputIndex, content_index: contentIndex };
+    if (part.type !== 'output_text' || typeof part.text !== 'string') {
+      return [{ type: 'response.content_part.added', ...position, part }, { type: 'response.content_part.done', ...position, part }];
+    }
+    const opening = { ...part, text: '', ...(part.annotations === undefined ? {} : { annotations: [] }) };
+    return [
+      { type: 'response.content_part.added', ...position, part: opening },
+      ...(part.text ? [{ type: 'response.output_text.delta', ...position, delta: part.text }] : []),
+      { type: 'response.output_text.done', ...position, text: part.text },
+      { type: 'response.content_part.done', ...position, part }
+    ];
+  });
+  return [{ type: 'response.output_item.added', output_index: outputIndex, item: { ...item, status: 'in_progress', content: [] } }, ...parts, done];
+}
 function encode(event, sequence) { return `event: ${event.type}\ndata: ${JSON.stringify({ ...event, sequence_number: sequence })}\n\n`; }
 function responseId(event) { const value = string(event?.response?.id); return /^resp_[A-Za-z0-9_-]{1,250}$/.test(value) && Buffer.byteLength(value) <= 255 ? value : ''; }
 function syncChat(event, state) { const response = plain(event.response) ? event.response : event; if (string(response.id)) state.id = response.id; if (Number.isInteger(response.created)) state.created = response.created; else if (Number.isInteger(response.created_at)) state.created = response.created_at; if (string(response.model)) state.model = response.model; state.serviceTier = string(event.service_tier) || string(response.service_tier) || state.serviceTier; }
