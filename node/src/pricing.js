@@ -87,8 +87,9 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens);
   const cacheWrite = usage.cacheWriteTokens || 0;
   if (cacheWrite > 0 && snapshot.cacheWrite === null) return null;
+  if (cached > 0 && snapshot.cachedInput == null) return null;
   const standardInput = Math.max(usage.inputTokens - cached - cacheWrite, 0);
-  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput || 0) + cacheWrite * (snapshot.cacheWrite || 0) + usage.outputTokens * snapshot.output;
+  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput ?? 0) + cacheWrite * (snapshot.cacheWrite || 0) + usage.outputTokens * snapshot.output;
   const settledCostMicros = Math.round(cost);
   if (!Number.isSafeInteger(settledCostMicros) || settledCostMicros < 0) return null;
   return { settledCostMicros, costSource: 'pricing_snapshot', model: snapshot.model, priceVersion: snapshot.priceVersion };
