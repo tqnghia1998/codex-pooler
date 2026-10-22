@@ -8,8 +8,15 @@ export function errorEnvelope(error) {
     return { status: 503, body: openaiError('server_error', 'no_eligible_backend', 'No eligible upstream is available') };
   }
   if (error?.codexHostCircuitOpen) return codexHostUnavailable(error.retryAfterSeconds);
+  if (error?.code === 'upstream_credential_unavailable') return upstreamCredentialUnavailable();
   if (error?.statusCode === 404) return { status: 404, body: openaiError('invalid_request_error', 'not_found', 'Not found') };
   return upstreamFailure();
+}
+
+// Stored credentials that cannot be decrypted are a gateway service fault, not
+// an upstream failure.
+export function upstreamCredentialUnavailable() {
+  return { status: 503, body: openaiError('server_error', 'upstream_credential_unavailable', 'upstream credentials are unavailable') };
 }
 
 export function upstreamFailure() {
