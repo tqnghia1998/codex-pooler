@@ -112,7 +112,7 @@ function priceRow(model, tier, bucket, values, contextRule) {
     tier,
     bucket,
     input: priceNumber(values.input, `${model} ${tier} ${bucket} input`),
-    cachedInput: priceNumber(values.cached_input, `${model} ${tier} ${bucket} cached_input`),
+    cachedInput: values.cached_input == null ? null : priceNumber(values.cached_input, `${model} ${tier} ${bucket} cached_input`),
     cacheWrite: priceNumber(values.cache_write, `${model} ${tier} ${bucket} cache_write`),
     output: priceNumber(values.output, `${model} ${tier} ${bucket} output`),
     contextRule
