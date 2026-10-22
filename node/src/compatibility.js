@@ -23,6 +23,7 @@ import {
 
 const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
 const IMAGE_25_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
+const IMAGE_EDIT_UPLOAD_LIMIT = 50 * 1024 * 1024;
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
 const IMAGE_ENUMS = {
@@ -176,6 +177,10 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
     images = [...form.getAll('image'), ...form.getAll('image[]')].filter((value) => value instanceof Blob);
     mask = form.get('mask');
     if (!images.length) return invalid(res, 'image is required', 'image');
+    const uploadBytes = images.reduce((total, input) => total + input.size, mask instanceof Blob ? mask.size : 0);
+    if (uploadBytes > IMAGE_EDIT_UPLOAD_LIMIT) {
+      return sendError(res, 413, 'request_too_large', 'image and mask uploads must total at most 50 MiB', 'image');
+    }
   } else {
     payload = jsonBody(body);
   }

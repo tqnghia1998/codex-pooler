@@ -72,7 +72,7 @@ test('projects spend-limit incomplete terminals as failures while retaining ordi
     assert.equal(normalizeChatEvent(event, createChatStreamState({ model: 'gpt' }))[0].error.code, 'upstream_response_failed');
   }
   const truncated = { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' } } };
-  assert.equal(decode(normalizePublicResponsesEvent(truncated, createPublicResponsesState())[0]).type, 'response.incomplete');
+  assert.deepEqual(normalizePublicResponsesEvent(truncated, createPublicResponsesState()).map((chunk) => decode(chunk).type), ['response.created', 'response.incomplete']);
 });
 
 test('drops backend-only public Responses events before sequencing', () => {
@@ -179,11 +179,49 @@ test('projects policy failures with only the stable public contract', () => {
 test('synthesizes public lifecycle events and normalizes done/typeless success', () => {
   const state = createPublicResponsesState();
   normalizePublicResponsesEvent({ type: 'response.output_item.added', item: { type: 'message', id: 'msg_1' }, output_index: 2 }, state);
-  const events = normalizePublicResponsesEvent({ type: 'response.done', response: { id: 'resp_ok', output: [{ content: [{ text: 'answer' }] }] } }, state).map(decode);
-  assert.deepEqual(events.map((event) => event.type), ['response.created', 'response.output_text.delta', 'response.completed']);
+  const events = normalizePublicResponsesEvent({ type: 'response.done', response: { id: 'resp_ok', output: [{ type: 'message', id: 'msg_1', content: [{ type: 'output_text', text: 'answer' }] }] } }, state).map(decode);
+  assert.deepEqual(events.map((event) => event.type), ['response.created', 'response.completed']);
   assert.equal(events.at(-1).response.status, 'completed');
-  const typeless = decode(normalizePublicResponsesEvent({ id: 'resp_typeless', output: [] }, createPublicResponsesState())[0]);
-  assert.equal(typeless.type, 'response.completed');
+  const typeless = normalizePublicResponsesEvent({ id: 'resp_typeless', output: [] }, createPublicResponsesState()).map(decode);
+  assert.deepEqual(typeless.map((event) => event.type), ['response.created', 'response.completed']);
+});
+
+test('opens a terminal-only public Responses stream with the full item grammar and citations', () => {
+  const citation = { type: 'url_citation', url: 'https://example.com/a', title: 'A', start_index: 0, end_index: 6 };
+  const message = { type: 'message', id: 'msg_1', role: 'assistant', status: 'completed', content: [{ type: 'output_text', text: 'answer', annotations: [citation] }] };
+  const search = { type: 'web_search_call', id: 'ws_1', status: 'completed' };
+  const reasoning = { type: 'reasoning', id: 'rs_1', summary: [], content: [{ type: 'reasoning_text', text: 'private thought' }] };
+  const state = createPublicResponsesState();
+  const events = normalizePublicResponsesEvent({
+    type: 'response.completed',
+    response: { id: 'resp_terminal', created_at: 1700000000, model: 'gpt-5.6-sol', status: 'completed', output: [reasoning, search, message] }
+  }, state).map(decode);
+  assert.deepEqual(events.map((event) => event.type), [
+    'response.created',
+    'response.output_item.added', 'response.output_item.done',
+    'response.output_item.added', 'response.output_item.done',
+    'response.output_item.added', 'response.content_part.added', 'response.output_text.delta', 'response.output_text.done', 'response.content_part.done', 'response.output_item.done',
+    'response.completed'
+  ]);
+  assert.deepEqual(events.map((event) => event.sequence_number), events.map((_, index) => index));
+  assert.deepEqual(events[0].response, { object: 'response', status: 'in_progress', output: [], id: 'resp_terminal', created_at: 1700000000, model: 'gpt-5.6-sol' });
+  assert.deepEqual(events[5].item, { ...message, status: 'in_progress', content: [] });
+  const position = { item_id: 'msg_1', output_index: 2, content_index: 0 };
+  assert.deepEqual(events[6], { type: 'response.content_part.added', ...position, part: { type: 'output_text', text: '', annotations: [] }, sequence_number: 6 });
+  assert.deepEqual(events[7], { type: 'response.output_text.delta', ...position, delta: 'answer', sequence_number: 7 });
+  assert.deepEqual(events[9].part.annotations, [citation]);
+  assert.deepEqual(events[10].item, message);
+  assert.deepEqual(events.at(-1).response.output[2].content[0].annotations, [citation]);
+  assert.deepEqual(events.filter((event) => event.type === 'response.output_text.delta').map((event) => event.delta), ['answer']);
+
+  const relayed = createPublicResponsesState();
+  normalizePublicResponsesEvent({ type: 'response.output_item.done', output_index: 0, item: search }, relayed);
+  const late = normalizePublicResponsesEvent({ type: 'response.completed', response: { id: 'resp_late', output: [search, message] } }, relayed).map(decode);
+  assert.deepEqual(late.map((event) => event.type), ['response.created', 'response.completed']);
+  assert.deepEqual(late.at(-1).response.output[1].content[0].annotations, [citation]);
+
+  const websocket = normalizePublicResponsesEvent({ type: 'response.completed', response: { id: 'resp_ws', output: [message] } }, createPublicResponsesState({}, { websocket: true })).map(decode);
+  assert.deepEqual(websocket.map((event) => event.type), ['response.completed']);
 });
 
 test('restores a missing custom_tool_call namespace from declared tools, live and streamed', () => {
