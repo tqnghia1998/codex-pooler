@@ -885,7 +885,13 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     if (!upstream || !admission && !allowUnavailableCandidate) continue;
     candidatesAttempted += 1;
     const queuePacing = last || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
-    const credentials = store.credentials(upstream.id);
+    let credentials;
+    try {
+      credentials = store.credentials(upstream.id);
+    } catch (error) {
+      store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+      throw error;
+    }
     const startedAt = new Date().toISOString();
     const attempt = lifecycle ? store.beginGatewayAttempt(lifecycle.id, upstream.id, startedAt) : { id: randomUUID(), startedAt };
     const attemptId = attempt.id;
@@ -1591,6 +1597,10 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
     const fetchRequest = request.upstreamType === 'claude' && fetchImpl === globalThis.fetch
       ? fetchWithHostOverride
       : fetchImpl;
+    // Quota headers describe the credentials this request was sent with.
+    const issuedCredentialEpoch = request.upstreamType === 'claude' && pacing?.store && pacing.upstreamId
+      ? pacing.store.get(pacing.upstreamId)?.credentialEpoch ?? null
+      : null;
     let response = await withCodexHostHealth(codexHostHealth, request.url, () => fetchWithHeaderDeadline(fetchRequest, request.url, {
         method: request.method || 'POST',
         headers: wireHeaders,
@@ -1600,7 +1610,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
       }, upstreamDeadlines));
     if (request.upstreamType === 'claude') {
       response = await decodeClaudeResponse(response);
-      persistClaudeResponseQuota(response, pacing);
+      persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch);
       if (request.claudeThinkingReplay) {
         if (response.ok) void captureClaudeThinkingReplayResponse(request.claudeThinkingReplay, response);
         else if ([400, 422].includes(response.status) && request.claudeThinkingReplay.replayApplied) forgetClaudeThinkingReplay(request.claudeThinkingReplay);
@@ -1629,7 +1639,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
   }
 }
 
-function persistClaudeResponseQuota(response, pacing) {
+function persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch = null) {
   if (!CLAUDE_QUOTA_HEADER_NAMES.some((name) => response?.headers?.get?.(name))) return;
   if (!pacing?.store || !pacing.upstreamId) return;
   try {
@@ -1644,7 +1654,7 @@ function persistClaudeResponseQuota(response, pacing) {
       quota.remainingDollars = upstream.quota.remainingDollars;
       quota.limitDollars = upstream.quota.limitDollars;
     }
-    pacing.store.setQuota(pacing.upstreamId, quota, { notify: false });
+    pacing.store.setQuota(pacing.upstreamId, quota, { notify: false, expectedCredentialEpoch: issuedCredentialEpoch });
   } catch {
     // Quota observation is advisory and must never change the proxy outcome.
   }
@@ -2657,7 +2667,13 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   const scope = { model: '', routeClass: 'raw_native', ignoreQuotaCooldown: Boolean(req.ignoreQuotaCooldown) };
   let admission = store.beginUpstreamAttempt(upstream.id, scope);
   if (!admission) return sendRoutingError(res, store, req, 'No eligible Codex upstream is available');
-  const credentials = store.credentials(upstream.id);
+  let credentials;
+  try {
+    credentials = store.credentials(upstream.id);
+  } catch (error) {
+    store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+    throw error;
+  }
   const startedAt = new Date().toISOString();
   const attemptId = randomUUID();
   if (!reserveShareRequest(req, attemptId, { route: path })) {

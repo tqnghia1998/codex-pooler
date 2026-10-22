@@ -61,6 +61,21 @@ test('imports per-tier context rules and allows a same-generation bucket fallbac
   assert.throws(() => buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'] }), /missing gpt-test fast context pricing rule/);
 });
 
+test('keeps an omitted cached-input rate unavailable instead of free', () => {
+  const omitted = prices(2);
+  delete omitted.cached_input;
+  const snapshot = buildOpenAiPricingSnapshot({
+    generated_at: '2026-10-21T00:00:00Z',
+    models: { 'gpt-test': { model: 'gpt-test', pricing_type: 'per_1m_tokens', prices: { standard: { default: omitted, long_context: prices(4) }, flex: { default: prices(1), long_context: prices(2) }, fast: { default: prices(4), long_context: prices(8) } } } }
+  }, { models: ['gpt-test'] });
+  assert.match(snapshot, /"tier":"standard","bucket":"default","input":2,"cachedInput":null,/);
+  assert.match(snapshot, /"tier":"flex","bucket":"default","input":1,"cachedInput":0\.1,/);
+  assert.throws(() => buildOpenAiPricingSnapshot({
+    generated_at: '2026-10-21T00:00:00Z',
+    models: { 'gpt-test': { model: 'gpt-test', pricing_type: 'per_1m_tokens', prices: { standard: { default: { ...prices(2), cached_input: -1 }, long_context: prices(4) }, flex: { default: prices(1), long_context: prices(2) }, fast: { default: prices(4), long_context: prices(8) } } } }
+  }, { models: ['gpt-test'] }), /cached_input must be a non-negative number/);
+});
+
 function prices(input) {
   return { input, cached_input: input / 10, cache_write: input * 1.25, output: input * 6 };
 }
