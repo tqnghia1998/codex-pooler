@@ -28,6 +28,7 @@ import { ensureClaudeCredentialIdentity } from './claude-protocol.js';
 import {
   attachWebSocketProxy,
   authenticateProxyRequest,
+  proxyAcceptsXApiKey,
   testUpstreamConnection,
   validProxyApiKey
 } from './proxy.js';
@@ -83,7 +84,7 @@ export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOL
           sendJson(res, 403, { error: { type: 'invalid_request_error', code: 'access_denied', message: 'client IP is not allowed', param: null } });
           return;
         }
-        const auth = authenticateProxyRequest(req, store, apiKey, { allowXApiKey: req.method === 'POST' && ['/v1/messages', '/v1/messages/count_tokens'].includes(url.pathname) });
+        const auth = authenticateProxyRequest(req, store, apiKey, { allowXApiKey: proxyAcceptsXApiKey(req, url.pathname) });
         if (!auth) {
           sendJson(res, 401, { error: { type: 'authentication_error', message: 'Invalid API key' } }, { 'www-authenticate': 'Bearer' });
           return;

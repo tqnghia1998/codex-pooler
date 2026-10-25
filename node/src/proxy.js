@@ -3018,6 +3018,13 @@ export function authenticateProxyRequest(req, store, expected, { allowXApiKey = 
   return (shareKeysOnly ? null : store.authenticateApiKey(key)) || sharingStore?.authenticateShareKey(key, store) || null;
 }
 
+// Anthropic clients send their key as x-api-key, both for Messages and for
+// listing models; every other route keeps Bearer auth only.
+export function proxyAcceptsXApiKey(req, pathname) {
+  if (req.method === 'POST') return ['/v1/messages', '/v1/messages/count_tokens'].includes(pathname);
+  return req.method === 'GET' && pathname === '/v1/models' && isClaudeModelsRequest(req);
+}
+
 export function validProxyApiKey(req, expected) {
   return Boolean(req.proxyAuth) || validApiKey(req, expected);
 }
