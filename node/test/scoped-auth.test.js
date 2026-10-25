@@ -84,3 +84,22 @@ test('requires Bearer auth except Messages x-api-key and hides scoped files from
   response = await fetch(`${fixture.base}/v1/files`, bearer(SECOND_KEY));
   assert.equal(response.status, 401);
 });
+
+test('accepts x-api-key on Claude model listings only', async (t) => {
+  const fixture = await app();
+  t.after(fixture.close);
+  const anthropic = { 'anthropic-version': '2023-06-01' };
+
+  let response = await fetch(`${fixture.base}/v1/models`, { headers: { ...anthropic, 'x-api-key': SECOND_KEY } });
+  assert.equal(response.status, 200);
+  const listing = await response.json();
+  assert.equal(listing.has_more, false);
+  assert.ok(listing.data.length > 0);
+
+  response = await fetch(`${fixture.base}/v1/models`, { headers: { ...anthropic, 'x-api-key': 'wrong-key' } });
+  assert.equal(response.status, 401);
+  response = await fetch(`${fixture.base}/v1/models`, { headers: { 'x-api-key': SECOND_KEY } });
+  assert.equal(response.status, 401);
+  response = await fetch(`${fixture.base}/backend-api/codex/models`, { headers: { ...anthropic, 'x-api-key': SECOND_KEY } });
+  assert.equal(response.status, 401);
+});
