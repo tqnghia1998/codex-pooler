@@ -195,7 +195,7 @@ npm start
 # open http://localhost:3000
 ```
 
-`npm start` loads `node/.env`. Use `npm run dev` for Node's watch mode. Set one client key in `CODEX_POOLER_API_KEY`; startup fails without it. Proxy routes require `Authorization: Bearer ...`, except `POST /v1/messages`, which also accepts `x-api-key`.
+`npm start` loads `node/.env`. Use `npm run dev` for Node's watch mode. Set one client key in `CODEX_POOLER_API_KEY`; startup fails without it. Proxy routes require `Authorization: Bearer ...`, except `POST /v1/messages`, `POST /v1/messages/count_tokens`, and Claude model listings (`GET /v1/models` with `anthropic-version` or a `claude-cli` user agent), which also accept `x-api-key`.
 
 By default, the server binds `127.0.0.1` and accepts only localhost Host headers. For a reverse proxy deployment, set `CODEX_POOLER_BIND_HOST` and `CODEX_POOLER_ALLOWED_HOSTS` (comma-separated). Optional `CODEX_POOLER_ALLOWED_ORIGINS`, `CODEX_POOLER_TRUSTED_PROXIES`, and `CODEX_POOLER_FIREWALL_ALLOWLIST` configure browser origins, trusted forwarding peers, and runtime CIDR/IP admission. External `/api/*` administration requests require the Bearer key; localhost administration remains dashboard-compatible.
 
