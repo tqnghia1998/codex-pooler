@@ -3,7 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { HttpError } from './http-ingress.js';
 import { beginNativeTurn, finishNativeTurn, nativeEventWritten, nativeTurnIdentity, nativeWriteStarted } from './native-turn-recovery.js';
 import { isShareCredential, releaseShareRequest, reserveShareRequest } from './share-authorization.js';
-import { completeUsage, extractUsage, mergeUsage } from './pricing.js';
+import { hasMeasuredUsage, extractUsage, mergeUsage } from './pricing.js';
 import { classifySseEvent } from './upstream-outcomes.js';
 
 const RESPONSE_ID = /^resp_[A-Za-z0-9_-]{1,1020}$/;
@@ -237,7 +237,7 @@ export class NativeResponseSteering {
   }
 
   fail(turn, code) {
-    if (completeUsage(turn.usage)) {
+    if (hasMeasuredUsage(turn.usage)) {
       this.settle(turn, { errorCode: code });
       return;
     }
