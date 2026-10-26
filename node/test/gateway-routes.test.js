@@ -2538,6 +2538,136 @@ test('returns upstream WebSocket message-too-large as a request error without fa
   }
 });
 
+test('refuses oversized native WebSocket frames before dispatch and sends the window back to HTTP', { timeout: 20_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-native-oversize-'));
+  const { store } = configuredStore(dir);
+  const received = [];
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1', maxPayload: 64 * 1024 * 1024 });
+  target.on('connection', (socket) => socket.on('message', (data) => received.push(JSON.parse(data))));
+  await new Promise((resolve) => target.once('listening', resolve));
+  const fetchImpl = async () => new Response('{}');
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const url = `ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`;
+  const connect = (window) => new WebSocket(url, { headers: { authorization: `Bearer ${API_KEY}`, ...(window ? { 'x-codex-window-id': window } : {}) } });
+  const handshake = (window) => new Promise((resolve) => {
+    const client = connect(window);
+    client.once('open', () => { client.close(); resolve({ status: 101 }); });
+    client.once('unexpected-response', (_request, response) => {
+      let body = '';
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, headers: response.headers, body }));
+    });
+    client.once('error', () => {});
+  });
+  const frame = (text, extra = {}) => JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text }] }], ...extra });
+  const oversized = 'x'.repeat(16_777_216);
+  try {
+    const refused = await new Promise((resolve, reject) => {
+      const client = connect(' window-1 ');
+      const messages = [];
+      client.once('open', () => client.send(frame(oversized)));
+      client.on('message', (data) => messages.push(JSON.parse(data)));
+      client.once('close', (code, reason) => resolve({ code, reason: String(reason), messages }));
+      client.once('error', reject);
+    });
+    assert.equal(refused.code, 1011);
+    assert.equal(refused.reason, 'upstream websocket message limit');
+    assert.deepEqual(refused.messages, [{ type: 'error', status: 502, error: { type: 'server_error', code: 'upstream_request_failed', message: 'request exceeds the upstream websocket message limit' } }]);
+    assert.deepEqual(received, []);
+    assert.equal(store.load().gatewayAttempts.length, 0);
+
+    const fallback = await handshake('window-1');
+    assert.equal(fallback.status, 426);
+    assert.equal(fallback.body, '');
+    assert.equal(fallback.headers.connection, 'close');
+    assert.equal('x-models-etag' in fallback.headers, false);
+    assert.equal('x-codex-turn-state' in fallback.headers, false);
+    assert.equal((await handshake('window-2')).status, 101);
+    assert.equal((await handshake(null)).status, 101);
+    store.createApiKey({ key: 'oversize-other-key' });
+    assert.equal(await new Promise((resolve) => {
+      const client = new WebSocket(url, { headers: { authorization: 'Bearer oversize-other-key', 'x-codex-window-id': 'window-1' } });
+      client.once('open', () => { client.close(); resolve(101); });
+      client.once('unexpected-response', (_request, response) => resolve(response.statusCode));
+      client.once('error', () => {});
+    }), 101);
+    assert.equal(store.nativeWebsocketSizeRecovery(Object.keys(store.load().nativeWebsocketSizeRecoveries)[0], Date.now() + 61_000), false);
+
+    const withoutWindow = await new Promise((resolve, reject) => {
+      const client = connect(null);
+      client.once('open', () => client.send(frame(oversized)));
+      client.on('message', (data) => {
+        const message = JSON.parse(data);
+        if (message.type === 'error') { client.close(); resolve(message); }
+      });
+      client.once('error', reject);
+    });
+    assert.deepEqual(withoutWindow, { type: 'error', status: 413, error: { type: 'invalid_request_error', code: 'websocket_message_too_large', message: 'request exceeds the upstream websocket message limit' } });
+    assert.equal(Object.keys(store.load().nativeWebsocketSizeRecoveries).length, 1);
+    assert.deepEqual(received, []);
+
+    // Discarded metadata does not count: the normalized frame fits.
+    await new Promise((resolve, reject) => {
+      const client = connect('window-3');
+      client.once('open', () => client.send(frame('fits', { metadata: { padding: 'm'.repeat(17 * 1024 * 1024) } })));
+      const started = Date.now();
+      const poll = setInterval(() => {
+        if (received.length) { clearInterval(poll); client.close(); resolve(); }
+        else if (Date.now() - started > 10_000) { clearInterval(poll); reject(new Error('frame was not relayed')); }
+      }, 20);
+      client.once('error', reject);
+    });
+    assert.equal(received[0].input[0].content[0].text, 'fits');
+    assert.equal('metadata' in received[0], false);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('does not grant the native HTTP fallback when the size-recovery marker is not durable', { timeout: 20_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-native-oversize-durability-'));
+  const { store } = configuredStore(dir);
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((resolve) => target.once('listening', resolve));
+  const fetchImpl = async () => new Response('{}');
+  const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
+  await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
+  const url = `ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`;
+  const headers = { authorization: `Bearer ${API_KEY}`, 'x-codex-window-id': 'window-1' };
+  try {
+    store.setDurabilityBarrier(async () => { throw new Error('redis unavailable'); });
+    const error = await new Promise((resolve, reject) => {
+      const client = new WebSocket(url, { headers });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: 'x'.repeat(16_777_216) })));
+      client.on('message', (data) => {
+        const message = JSON.parse(data);
+        if (message.type === 'error') { client.close(); resolve(message); }
+      });
+      client.once('error', reject);
+    });
+    assert.deepEqual(error, { type: 'error', status: 503, error: { type: 'server_error', code: 'service_unavailable', message: 'request admission is unavailable' } });
+    assert.deepEqual(store.load().nativeWebsocketSizeRecoveries, {});
+    store.setDurabilityBarrier(null);
+    assert.equal(await new Promise((resolve) => {
+      const client = new WebSocket(url, { headers });
+      client.once('open', () => { client.close(); resolve(101); });
+      client.once('unexpected-response', (_request, response) => resolve(response.statusCode));
+      client.once('error', () => {});
+    }), 101);
+  } finally {
+    relay.close();
+    await close(gateway);
+    await new Promise((resolve) => target.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('native WebSocket upgrades while cold model discovery is still pending', { timeout: 5_000 }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-ws-cold-catalog-'));
   const { store } = configuredStore(dir);
