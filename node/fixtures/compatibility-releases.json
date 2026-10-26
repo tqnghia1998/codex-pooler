@@ -6,32 +6,32 @@
       "id": "codex",
       "family": "codex",
       "package": "@openai/codex",
-      "version": "0.163.0",
-      "integrity": "sha512-HNd7vR9oTK6M2ikxFnvNDCdYUgAsyo9VVnd5KnEd2ON0GYI++7MiX9XNPUkhtdgGKFPsWS+CEppQ1UU63uVhUw==",
+      "version": "0.164.0",
+      "integrity": "sha512-TWj7UGyPRe3Pj/A3ddNAxs1te3a/W/xAd+J0LHrrFTmsSfahGMOLF/vn88D3QCIgAT3B1rm1y/Z3NYE0rx6cZQ==",
       "profile": "codex-public-sse",
       "platforms": {
         "darwin-arm64": {
           "package": "@openai/codex",
-          "version": "0.163.0-darwin-arm64",
-          "integrity": "sha512-i7Dzk2a5aGmuGM9aNZgaUVTojZ/4bc5lRfosz++Y7X2BGhDkz+cySgbD+NYS1pOxfm0VEbLi9PZ3pAulI4kchw==",
+          "version": "0.164.0-darwin-arm64",
+          "integrity": "sha512-pDizgOUAtq3/k3AbUFHbaU19WpYKCja+oFpNSTLKrDQj4lTUNSDuTPJip4uQVn2/1EipQdpQrGMOQBVuI1znAA==",
           "executable": "vendor/aarch64-apple-darwin/bin/codex"
         },
         "darwin-x64": {
           "package": "@openai/codex",
-          "version": "0.163.0-darwin-x64",
-          "integrity": "sha512-Ioj7h+B1ME9ZU1PH1ATfvFV5DiototEpFFaSSbg3kfDifB9djhl5fcJ++g5mpcL/+uVbcnReei+RiSXEx8o+kw==",
+          "version": "0.164.0-darwin-x64",
+          "integrity": "sha512-lIe+udnguPGzBezkgbkj2Eaz0YqOhNXT7jja136Fj0sXfI+UKNS2icmaK14GcoRAgeVEpDTtC1ftamWBPmD1zg==",
           "executable": "vendor/x86_64-apple-darwin/bin/codex"
         },
         "linux-arm64": {
           "package": "@openai/codex",
-          "version": "0.163.0-linux-arm64",
-          "integrity": "sha512-IH2/R+4OarjGvsAf1ll3fdyLwrPgYLl3uzp6u9CyD9sj2Lw+ViDSe3QBZVHdcHJs0eIiZFg6Wprcuy4CRZaUGw==",
+          "version": "0.164.0-linux-arm64",
+          "integrity": "sha512-LL5iTQjyDL4YRX44EWqhIfEQ5uGnmgxkQBJSxjZSeJ8L1Og83pdlzUJW/PRJ76oaVwOVgh6HXwuPEiBNEHU4lg==",
           "executable": "vendor/aarch64-unknown-linux-musl/bin/codex"
         },
         "linux-x64": {
           "package": "@openai/codex",
-          "version": "0.163.0-linux-x64",
-          "integrity": "sha512-uwRaOsrYogLQhcxAM/GoeWrw0QIWEMRo7c9gM8sKAviVkZQHlu9kRLJ5PkufbV+ABGjyZgIwiFdJ0LCJ0N6e8w==",
+          "version": "0.164.0-linux-x64",
+          "integrity": "sha512-XLAoaWsGOT2khzl+P4FYDPTkzAr9W0VFXFaVkqlFdkM0soa1gH/4S0wSD57Ek3HHwkirAEGz2/Mwehseh+l5Mg==",
           "executable": "vendor/x86_64-unknown-linux-musl/bin/codex"
         }
       }
@@ -40,32 +40,32 @@
       "id": "claude-code",
       "family": "claude-code",
       "package": "@anthropic-ai/claude-code",
-      "version": "2.1.301",
-      "integrity": "sha512-sEqs0D9IIc6GwbdMvss5GHOjLjhaoqbrZWdickLRlG6v4kT946t4pq3zFAmQdUpRgdv1CvtSLyRrrdp+hDS9ww==",
+      "version": "2.1.310",
+      "integrity": "sha512-EySpBwaocdU1nc9r7JH+GOlnMsbXc764d3HX7NL8fr7qqdxz2MiXI9hqf/rzeE/XgU23HHFltIqhb+Fq6G1CVw==",
       "profile": "compass-anthropic-messages",
       "platforms": {
         "darwin-arm64": {
           "package": "@anthropic-ai/claude-code-darwin-arm64",
-          "version": "2.1.301",
-          "integrity": "sha512-A4OcibtminZ9KlXX4ce/yhPVdPKWnJ6nK5vNGBdP1uPMp68KryG++C/J12EUeW9FvEhvwnHKX86eG9TkJkPcpg==",
+          "version": "2.1.310",
+          "integrity": "sha512-1HkmRv3tvMTjTrsW5J17S3NtjFjEDC8nnhduNT0klPStHes8/FRX1YFv7UwnfC6fuwd31kFuzWLyNn2IN07JtQ==",
           "executable": "claude"
         },
         "darwin-x64": {
           "package": "@anthropic-ai/claude-code-darwin-x64",
-          "version": "2.1.301",
-          "integrity": "sha512-rMr/61VZ6nSY2BYaa8BrjmUGq6MyFFW7wzeGIiwEKueUqOYHc8f5CRvau8H9W5pjw7gIEY1kzSMLRV4PIWbg1g==",
+          "version": "2.1.310",
+          "integrity": "sha512-7httDzvIQv+LZF7cSdTu6/hCeOVEbUKmeQ1D1yv0OV1cWH6yjthUucbSFmQKKCUjXmKyI2iomunw+W9Rvbyo5g==",
           "executable": "claude"
         },
         "linux-arm64": {
           "package": "@anthropic-ai/claude-code-linux-arm64",
-          "version": "2.1.301",
-          "integrity": "sha512-vMA8QVkLBqO8fZLaCecONZhatIRtoieIwCZ8npn8b0UvinZz40i5PhBIQ52fvhnZYdX16wFdTzhij3iL1RRL7w==",
+          "version": "2.1.310",
+          "integrity": "sha512-iAukGiGmsInasuW34o4ExD8Gqh3b/CPUp6kjxsWIBT8tFBrVFxtWGfI7wfRy3owWrbuRekBCaHQFMiI2ddWUpA==",
           "executable": "claude"
         },
         "linux-x64": {
           "package": "@anthropic-ai/claude-code-linux-x64",
-          "version": "2.1.301",
-          "integrity": "sha512-JNe0VzIuXdaBrtlh+fY2SX5AQLDf8BDfIKrylOWK528AZ/aAq2bJt4SBkPikZ0CvecUbL0YN22Xe7eltAWCJGg==",
+          "version": "2.1.310",
+          "integrity": "sha512-CuzpJrMBbqaR3+1SiLrBtPV3w/cFvcqBfhe9kNskzZ2Fm6KXa7v0l7tM+Ln6l5QLb79WoU0CcacXnYtsygbe6A==",
           "executable": "claude"
         }
       }

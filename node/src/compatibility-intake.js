@@ -182,7 +182,9 @@ export function closestCompatibilityFixture(draft, entries) {
       fixture,
       similarity: shapeSimilarity(draftShape, summarizeJsonShape(wireJson(fixture.request.body)))
     }))
-    .sort((left, right) => right.similarity - left.similarity || left.fixture.id.localeCompare(right.fixture.id))[0];
+    .sort((left, right) => right.similarity - left.similarity
+      || Number(right.fixture.client.version === draft.client.version) - Number(left.fixture.client.version === draft.client.version)
+      || left.fixture.id.localeCompare(right.fixture.id))[0];
 }
 
 export function renderCompatibilityIntakeReport(result, { format = 'markdown' } = {}) {
