@@ -297,7 +297,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
 
   if (!response.ok) {
     finishNativeTurn(req.nativeTurnLease, 'failed');
-    const errorBytes = await readBoundedResponse(response);
+    const errorBytes = await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
     const policyError = policyErrorForRoute(errorBytes, path, sourcePath);
     const outcome = classifyHttpResponse(response, parseJson(errorBytes), {
       allowMisalignmentPolicy: policyRoute(path, sourcePath),
@@ -324,10 +324,22 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     else sendFailure(res, retryAfterHeader(response));
     return;
   }
+  const collectBody = async (collect) => {
+    try {
+      return await collect();
+    } catch (error) {
+      const cancelled = req.aborted || res.destroyed;
+      if (admission) store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: cancelled }));
+      releaseShareRequest(req, attemptId, cancelled ? 'downstream_closed' : 'upstream_response_failed');
+      finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: cancelled ? 'downstream_closed' : 'upstream_response_failed', responseStatusCode: 502 });
+      void response.body?.cancel(error).catch(() => {});
+      throw error;
+    }
+  };
   if (compactionBridge || v2Compaction && isEventStream(response)) {
-    const compactResult = v2Compaction && isEventStream(response)
-      ? await collectV2CompactionResponse(response, upstreamDeadlines)
-      : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines));
+    const compactResult = await collectBody(async () => v2Compaction && isEventStream(response)
+      ? collectV2CompactionResponse(response, upstreamDeadlines)
+      : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines)));
     if (compactResult?.quotaFailure) {
       if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: false, errorCode: 'insufficient_quota' });
       releaseShareRequest(req, attemptId, 'insufficient_quota');
@@ -386,7 +398,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     return;
   }
 
-  const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
+  const bytes = await collectBody(() => readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines));
   if (upstream.type === 'claude') commitClaudeDiagnostics(dispatchedDiagnosticsState, parseJson(bytes)?.id);
   let output = bytes;
   if (upstream.type === 'claude' && (dispatchedToolAliases?.size || dispatchedModelAlias?.forceMapping)) {
@@ -518,16 +530,23 @@ export async function testUpstreamConnection({
   }
 
   let body;
-  if (upstream.type === 'codex') {
-    body = dispatched.collected;
-    if (!validCodexConnectionTestResponse(body)) {
-      throw new HttpError(502, 'connection_test_failed', 'Connection test returned an invalid Codex response');
+  try {
+    if (upstream.type === 'codex') {
+      body = dispatched.collected;
+      if (!validCodexConnectionTestResponse(body)) {
+        throw new HttpError(502, 'connection_test_failed', 'Connection test returned an invalid Codex response');
+      }
+    } else {
+      body = parseJson(await readResponseBytes(dispatched.response, 2 * 1024 * 1024, upstreamDeadlines));
+      if (!validCompassConnectionTestResponse(body)) {
+        throw new HttpError(502, 'connection_test_failed', `Connection test returned an invalid ${upstream.type === 'claude' ? 'Claude' : 'Compass'} response`);
+      }
     }
-  } else {
-    body = parseJson(await readResponseBytes(dispatched.response, 2 * 1024 * 1024, upstreamDeadlines));
-    if (!validCompassConnectionTestResponse(body)) {
-      throw new HttpError(502, 'connection_test_failed', `Connection test returned an invalid ${upstream.type === 'claude' ? 'Claude' : 'Compass'} response`);
-    }
+    if (dispatched.admission) store.settleUpstreamAttempt(upstream.id, dispatched.admission, { class: 'success', retryable: false });
+  } catch (error) {
+    if (dispatched.admission) store.settleUpstreamAttempt(upstream.id, dispatched.admission, classifyTransportError(error, { clientCancelled: req.aborted || res.destroyed }));
+    releaseShareRequest(probeReq, dispatched.attemptId, 'connection_test_failed');
+    throw error;
   }
   settleUsage(
     store,
@@ -958,10 +977,10 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       persistResponseCookies(response, upstream, credentials, store);
       let authenticationRetried = false;
       const initialPolicyFailure = policyRoute(path, sourcePath) && [400, 403].includes(response.status)
-        ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
+        ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines)))
         : null;
       const initialCodexDenial = response.status === 403 && upstream.type === 'codex'
-        ? classifyHttpResponse(response, parseJson(await readBoundedResponse(response.clone())), { upstreamType: 'codex' })
+        ? classifyHttpResponse(response, parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines)), { upstreamType: 'codex' })
         : null;
       if ((response.status === 401 || response.status === 403) && !initialPolicyFailure
         && (!initialCodexDenial || initialCodexDenial.class === 'credential')
@@ -982,6 +1001,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             compatibility = compatibilityState(upstream, compatibilityService.activeFact(upstream.id, compatibilityScope), sourcePath);
           }
           await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
+          void response.body?.cancel('Retrying with refreshed credentials').catch(() => {});
           request = buildRequest(upstream, sourcePath, payload, req, credentials, path, codexPayload, compatibility, claudeConfig, store, codexOptions);
           response = await requestUpstream(request, fetchImpl, { req, res }, upstreamDeadlines, upstream.type === 'codex' ? codexHostHealth : null, {
             store,
@@ -1013,7 +1033,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         const compatibilityResponse = ['error', 'response.failed'].includes(inspectedSse?.firstEvent?.type)
           ? new Response(JSON.stringify(inspectedSse.firstEvent), { status: 400, headers: { 'content-type': 'application/json' } })
           : response;
-        const learned = await compatibilityFallback(compatibilityResponse, upstream, sourcePath, payload, request, compatibility);
+        const learned = await compatibilityFallback(compatibilityResponse, upstream, sourcePath, payload, request, compatibility, upstreamDeadlines);
         if (!learned) break;
         const feature = compatibilityEvidenceFeature(compatibility, learned);
         compatibility = learned;
@@ -1075,7 +1095,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         }
       }
       if (authenticationRetried && (response.status === 401 || response.status === 403) && sourcePath !== '/v1/responses/compact') {
-        const body = parseJson(await readBoundedResponse(response.clone()));
+        const body = parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines));
         const outcome = {
           ...applyClaudeRequestScopedAction(classifyHttpResponse(response, body, {
             allowMisalignmentPolicy: policyRoute(path, sourcePath),
@@ -1089,7 +1109,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           return { upstream, attemptId, startedAt, response, admission: null };
         }
         if (outcome.class === 'credential') {
-          await readBoundedResponse(response);
+          await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
           store.settleUpstreamAttempt(upstream.id, admission, outcome);
           releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
@@ -1208,8 +1228,10 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         }
         continue;
       }
-      store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
-      releaseShareRequest(req, attemptId, error?.upstreamFailureKind === 'cancelled' ? 'downstream_closed' : 'upstream_transport_failed');
+      const cancelled = req.aborted || res.destroyed || error?.upstreamFailureKind === 'cancelled';
+      store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: cancelled }));
+      releaseShareRequest(req, attemptId, cancelled ? 'downstream_closed' : 'upstream_transport_failed');
+      if (cancelled) throw error;
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_transport_failed' });
       terminalFailure = {
         upstream,
@@ -1222,12 +1244,10 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       continue;
     }
     if (response.ok) {
-      const streaming = isEventStream(response) || upstream.type === 'codex' && payload?.stream === true;
-      const nativeJson = upstream.type === 'codex' && isBackendResponsesRoute(path) && !streaming;
-      if ((!streaming || collected) && !nativeJson) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
-      return { upstream, attemptId, startedAt, response, collected, admission: streaming && !collected || nativeJson ? admission : null, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState, codexMultiAgentOptimized: request.codexMultiAgentOptimized === true };
+      if (collected) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
+      return { upstream, attemptId, startedAt, response, collected, admission: collected ? null : admission, claudeToolAliases: request.claudeToolAliases, claudeModelAlias: request.claudeModelAlias, claudeDiagnosticsState: request.claudeDiagnosticsState, codexMultiAgentOptimized: request.codexMultiAgentOptimized === true };
     }
-    const body = parseJson(await readBoundedResponse(response.clone()));
+    const body = parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines));
     const outcome = {
       ...applyClaudeRequestScopedAction(classifyHttpResponse(response, body, {
         allowMisalignmentPolicy: policyRoute(path, sourcePath),
@@ -1239,7 +1259,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const retryable = sourcePath !== '/v1/responses/compact' && outcome.retryable;
     if (retryable) {
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
-      await readBoundedResponse(response);
+      await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
       releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
       const failureCode = gatewayOutcomeCode(outcome);
@@ -1378,6 +1398,10 @@ export async function inspectInitialSseEvent(response, upstreamDeadlines = {}, o
       }
       if (done) return finish({ response: streamResponseClone(response, downstream), retryable: true });
     }
+  } catch (error) {
+    void reader.cancel(error).catch(() => {});
+    void downstream.cancel(error).catch(() => {});
+    throw error;
   } finally {
     reader.releaseLock();
   }
@@ -1576,8 +1600,10 @@ export function projectPublicWebSocketFrame(payload, { generate = true, compatib
 
 async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}, codexHostHealth = null, pacing = null) {
   const abort = downstream ? downstreamAbortSignal(downstream.req, downstream.res) : null;
+  let bodyOwnsAbort = false;
   const diagnostics = pacing?.store && pacing.attemptId ? gatewayDiagnosticsForStore(pacing.store) : null;
   try {
+    abort?.signal.throwIfAborted();
     if (pacing?.store && pacing.upstreamId && !pacing.disable && !downstream?.req?.disablePacing) {
       const pacingResult = await upstreamPacerForStore(pacing.store).acquire(pacing.upstreamId, {
         model: pacing.model,
@@ -1609,11 +1635,16 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
         ...(request.dispatcher ? { dispatcher: request.dispatcher } : {}),
         signal: abort?.signal
       }, upstreamDeadlines));
+    abort?.headersReceived();
+    if (abort && response.body) {
+      response = responseWithDownstreamAbort(response, abort);
+      bodyOwnsAbort = true;
+    }
     if (request.upstreamType === 'claude') {
-      response = await decodeClaudeResponse(response);
+      response = await decodeClaudeResponse(response, { upstreamDeadlines });
       persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch);
       if (request.claudeThinkingReplay) {
-        if (response.ok) void captureClaudeThinkingReplayResponse(request.claudeThinkingReplay, response);
+        if (response.ok) void captureClaudeThinkingReplayResponse(request.claudeThinkingReplay, response, upstreamDeadlines);
         else if ([400, 422].includes(response.status) && request.claudeThinkingReplay.replayApplied) forgetClaudeThinkingReplay(request.claudeThinkingReplay);
       }
     }
@@ -1636,8 +1667,49 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
     }
     throw wrapped;
   } finally {
-    abort?.cleanup();
+    if (!bodyOwnsAbort) abort?.cleanup();
   }
+}
+
+function responseWithDownstreamAbort(response, abort) {
+  const reader = response.body.getReader();
+  let finished = false;
+  const cleanup = () => {
+    finished = true;
+    abort.signal.removeEventListener('abort', cancelled);
+    abort.cleanup();
+    reader.releaseLock();
+  };
+  const cancel = (reason) => {
+    // A tee branch may wait for its sibling; never block cleanup on cancel.
+    void reader.cancel(reason).catch(() => {});
+    cleanup();
+  };
+  let controller;
+  const cancelled = () => {
+    if (finished) return;
+    controller.error(abort.signal.reason);
+    cancel(abort.signal.reason);
+  };
+  const body = new ReadableStream({
+    start(value) {
+      controller = value;
+      abort.signal.addEventListener('abort', cancelled, { once: true });
+      if (abort.signal.aborted) cancelled();
+    },
+    async pull(value) {
+      try {
+        const next = await reader.read();
+        if (finished) return;
+        if (next.done) { value.close(); cleanup(); }
+        else value.enqueue(next.value);
+      } catch (error) {
+        if (!finished) { value.error(error); cancel(error); }
+      }
+    },
+    cancel(reason) { if (!finished) cancel(reason); }
+  }, { highWaterMark: 0 });
+  return streamResponseClone(response, body);
 }
 
 function persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch = null) {
@@ -1717,8 +1789,10 @@ function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
   const abort = () => controller.abort(new DOMException('Downstream request closed', 'AbortError'));
   req?.once('aborted', abort);
   res?.once('close', abort);
+  if (req?.aborted || res?.destroyed || res?.readyState !== undefined && res.readyState !== WebSocket.OPEN) abort();
   return {
     signal: controller.signal,
+    headersReceived() { clearTimeout(timeout); },
     cleanup() {
       clearTimeout(timeout);
       req?.removeListener('aborted', abort);
@@ -1727,12 +1801,12 @@ function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
   };
 }
 
-async function compatibilityFallback(response, upstream, sourcePath, payload, request, current) {
+async function compatibilityFallback(response, upstream, sourcePath, payload, request, current, upstreamDeadlines = {}) {
   if (![400, 422].includes(response.status)) return null;
   let text;
   let body;
   try {
-    const bytes = await readBoundedResponse(response.clone());
+    const bytes = await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines);
     text = bytes.toString('utf8');
     body = parseJson(bytes);
   } catch {
@@ -2358,6 +2432,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     }
   } finally {
     finishNativeTurn(nativeTurnLease, completed ? 'succeeded' : 'interrupted');
+    void reader.cancel('Stream response finished').catch(() => {});
     reader.releaseLock();
     if (!res.writableEnded && !res.destroyed) res.end();
     if (upstream.type === 'claude' && completed) commitClaudeDiagnostics(claudeDiagnosticsState, claudeMessageId);
@@ -2497,12 +2572,13 @@ async function readResponseBytes(response, maxBytes = 16 * 1024 * 1024, upstream
       if (done) return Buffer.concat(chunks, size);
       size += value.byteLength;
       if (size > maxBytes) {
-        await reader.cancel('Response body exceeded limit');
+        void reader.cancel('Response body exceeded limit').catch(() => {});
         throw Object.assign(new Error('Upstream response body is too large'), { statusCode: 502 });
       }
       chunks.push(Buffer.from(value));
     }
   } finally {
+    void reader.cancel('Response collection finished').catch(() => {});
     reader.releaseLock();
   }
 }
@@ -2520,9 +2596,13 @@ async function readBoundedResponse(response, maxBytes = 1024 * 1024, upstreamDea
       if (size > maxBytes) break;
       chunks.push(Buffer.from(value));
     }
-    await reader.cancel('Error body exceeded limit');
+    void reader.cancel('Error body exceeded limit').catch(() => {});
+    return Buffer.alloc(0);
+  } catch {
+    // The HTTP status still classifies a failed/truncated error body.
     return Buffer.alloc(0);
   } finally {
+    void reader.cancel('Error response inspection finished').catch(() => {});
     reader.releaseLock();
   }
 }

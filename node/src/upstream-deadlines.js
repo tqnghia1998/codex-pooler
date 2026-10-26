@@ -11,6 +11,7 @@ export function normalizeUpstreamDeadlines(value = {}) {
 }
 
 export async function fetchWithHeaderDeadline(fetchImpl, url, options = {}, deadlines = {}) {
+  options.signal?.throwIfAborted();
   const { headersMs } = normalizeUpstreamDeadlines(deadlines);
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal?.reason || new DOMException('Upstream request aborted', 'AbortError'));
