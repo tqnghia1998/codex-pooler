@@ -261,6 +261,24 @@ test('translates Chat tool arguments, moderation, incomplete usage, and early fa
   assert.equal(completedTool.find((chunk) => chunk.choices?.[0]?.finish_reason)?.choices[0].finish_reason, 'tool_calls');
 });
 
+test('reports Chat stream failures as errors after output has started', () => {
+  const prefixes = {
+    created: [{ type: 'response.created', response: { id: 'resp_1' } }],
+    text: [{ type: 'response.created', response: { id: 'resp_1' } }, { type: 'response.output_text.delta', delta: 'partial' }],
+    tool: [{ type: 'response.output_item.added', output_index: 0, item: { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{' } }]
+  };
+  for (const [name, events] of Object.entries(prefixes)) {
+    for (const failure of [{ type: 'response.failed', response: { error: { message: 'secret detail' } } }, { type: 'error', error: { message: 'secret detail', param: 'input' } }]) {
+      const state = createChatStreamState({ model: 'gpt', stream_options: { include_usage: true } });
+      for (const event of events) normalizeChatEvent(event, state);
+      const chunks = normalizeChatEvent(failure, state);
+      assert.deepEqual(chunks, [{ error: { type: 'server_error', code: 'upstream_response_failed', message: 'Upstream response failed', param: null } }], `${name} ${failure.type}`);
+      assert.equal(JSON.stringify(chunks).includes('secret'), false);
+      assert.deepEqual(normalizeChatEvent({ type: 'response.completed', response: { status: 'completed' } }, state), []);
+    }
+  }
+});
+
 test('completes partial Chat tool arguments from matching final snapshots without duplicates', () => {
   const state = createChatStreamState({ model: 'gpt' });
   normalizeChatEvent({ type: 'response.output_item.added', output_index: 2, item: { type: 'function_call', id: 'item_2', call_id: 'call_2', name: 'lookup', arguments: '{"city":' } }, state);

@@ -187,6 +187,41 @@ test('normalizes Responses instructions, replay, continuation, and cache control
   assert.equal(continuation.input[2].output, null);
 });
 
+test('accepts 30m and 12h prompt cache breakpoint TTLs on Responses and Chat parts', () => {
+  const responses = (breakpoint) => adaptResponsesRequest({ model: 'gpt-5.6-sol', input: [{ role: 'user', content: [{ type: 'input_text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }] });
+  const chat = (breakpoint) => adaptChatRequest({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: [{ type: 'text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }] });
+  for (const adapt of [responses, chat]) {
+    for (const ttl of ['30m', '12h']) {
+      assert.deepEqual(adapt({ mode: 'explicit', ttl }).input[0].content[0].prompt_cache_breakpoint, { mode: 'explicit', ttl });
+    }
+    for (const ttl of [null, '1h', '24h', 12, true, {}, []]) {
+      assertAdapterError(() => adapt({ mode: 'explicit', ttl }), { param: 'input.prompt_cache_breakpoint.ttl' });
+    }
+    assertAdapterError(() => adapt({ mode: 'explicit', zeta: 1, alpha: 1, ttl: '30m' }), { param: 'input.prompt_cache_breakpoint.alpha' });
+  }
+});
+
+test('limits function tool names to 1-128 ASCII letters, digits, underscores and hyphens', () => {
+  const parameters = { type: 'object', properties: {} };
+  const responses = (name, layout = 'flat') => {
+    const fn = { type: 'function', name, parameters, strict: false };
+    const tools = layout === 'flat' ? [fn] : [{ type: 'namespace', name: 'catalog', description: 'Functions', tools: [fn] }];
+    return adaptResponsesRequest({ model: 'gpt-5.6-sol', input: 'hi', tools, ...(layout === 'flat' ? { tool_choice: { type: 'function', name } } : {}) });
+  };
+  const chat = (name) => adaptChatRequest({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: 'hi' }], tools: [{ type: 'function', function: { name, parameters } }], tool_choice: { type: 'function', function: { name } } });
+  for (const name of ['a', 'LOOKUP_01-a', 'a'.repeat(64), 'a'.repeat(65), 'a'.repeat(128)]) {
+    const adapted = responses(name);
+    assert.equal(adapted.tools[0].name, name);
+    assert.deepEqual(adapted.tool_choice, { type: 'function', name });
+    assert.equal(responses(name, 'namespace').tools[0].tools[0].name, name);
+  }
+  assert.equal(chat('a'.repeat(128)).tools[0].name, 'a'.repeat(128));
+  for (const name of ['catalog.lookup', 'lookup item', ' lookup', 'lookup ', 'look\nup', 'lookup_é', 'a'.repeat(129)]) {
+    for (const layout of ['flat', 'namespace']) assertAdapterError(() => responses(name, layout), { param: 'tools' });
+    assertAdapterError(() => chat(name), { param: 'tools' });
+  }
+});
+
 test('preserves standard detail field on Responses input_image parts', () => {
   const adapted = adaptResponsesRequest({
     model: 'gpt-5.6-sol',

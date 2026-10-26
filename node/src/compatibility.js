@@ -49,7 +49,7 @@ export function isUnsupportedV1Route(method, path) {
 export async function handleCompatibilityRequest({ req, res, path, body, store, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store) }) {
   try {
     if (path === '/v1/files') {
-      if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: listFiles(store, req) });
+      if (req.method === 'GET') return sendJson(res, 200, { object: 'list', data: listFiles(store, req), has_more: false });
       return await createFile({ req, res, body, store, fetchImpl, upstreamDeadlines, codexHostHealth });
     }
     const fileMatch = path.match(/^\/v1\/files\/([^/]+)(\/content)?$/);

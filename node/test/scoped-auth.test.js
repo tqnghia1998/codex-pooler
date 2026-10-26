@@ -85,6 +85,18 @@ test('requires Bearer auth except Messages x-api-key and hides scoped files from
   assert.equal(response.status, 401);
 });
 
+test('marks complete file lists as the last page', async (t) => {
+  const fixture = await app();
+  t.after(fixture.close);
+  let response = await fetch(`${fixture.base}/v1/files`, bearer(FIRST_KEY));
+  assert.deepEqual(await response.json(), { object: 'list', data: [], has_more: false });
+  fixture.store.saveFile({ id: 'first-file', object: 'file', bytes: 1, filename: 'first.txt', purpose: 'user_data', status: 'uploaded' });
+  response = await fetch(`${fixture.base}/v1/files`, bearer(FIRST_KEY));
+  const listing = await response.json();
+  assert.deepEqual(listing.data.map((file) => file.id), ['first-file']);
+  assert.equal(listing.has_more, false);
+});
+
 test('accepts x-api-key on Claude model listings only', async (t) => {
   const fixture = await app();
   t.after(fixture.close);
