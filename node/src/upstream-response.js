@@ -1,5 +1,6 @@
 import { brotliDecompressSync, gunzipSync, inflateRawSync, inflateSync } from 'node:zlib';
 import { Decompress as ZstdDecompress } from 'fzstd';
+import { readWithIdleDeadline } from './upstream-deadlines.js';
 
 const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 
@@ -7,10 +8,10 @@ const DEFAULT_MAX_BYTES = 16 * 1024 * 1024;
 // implementations and misbehaving upstreams can still expose compressed bytes.
 // CPA sniffs those bytes before handing JSON/SSE to the Claude executor. Keep
 // the same tolerance while leaving ordinary streaming responses untouched.
-export async function decodeClaudeResponse(response, { maxBytes = DEFAULT_MAX_BYTES } = {}) {
+export async function decodeClaudeResponse(response, { maxBytes = DEFAULT_MAX_BYTES, upstreamDeadlines = {} } = {}) {
   if (!response?.body) return response;
   const encoding = response.headers.get('content-encoding') || '';
-  const { reader, first } = await readFirstChunk(response);
+  const { reader, first } = await readFirstChunk(response, upstreamDeadlines);
   const prefix = first.done || !first.value ? Buffer.alloc(0) : Buffer.from(first.value).subarray(0, 512);
   if (!shouldDecode(prefix, encoding)) {
     if (first.done) {
@@ -19,7 +20,7 @@ export async function decodeClaudeResponse(response, { maxBytes = DEFAULT_MAX_BY
     }
     return rebuildResponse(response, streamFromReader(reader, first));
   }
-  const compressed = Buffer.from(await readResponseBody(reader, first, maxBytes));
+  const compressed = Buffer.from(await readResponseBody(reader, first, maxBytes, upstreamDeadlines));
   const decoded = decodeBytes(compressed, encoding, maxBytes);
   const headers = new Headers(response.headers);
   headers.delete('content-encoding');
@@ -35,29 +36,29 @@ function streamFromReader(reader, first) {
   let pending = first;
   return new ReadableStream({
     async pull(controller) {
-      if (pending) {
-        const chunk = pending;
+      try {
+        const next = pending || await reader.read();
         pending = null;
-        if (!chunk.done && chunk.value) controller.enqueue(chunk.value);
-        if (chunk.done) controller.close();
-        return;
+        if (next.done) { reader.releaseLock(); controller.close(); }
+        else if (next.value) controller.enqueue(next.value);
+      } catch (error) {
+        reader.releaseLock();
+        controller.error(error);
       }
-      const next = await reader.read();
-      if (next.done) controller.close();
-      else if (next.value) controller.enqueue(next.value);
     },
-    async cancel(reason) {
-      await reader.cancel(reason).catch(() => {});
+    cancel(reason) {
+      void reader.cancel(reason).catch(() => {});
       reader.releaseLock();
     }
   });
 }
 
-async function readFirstChunk(response) {
+async function readFirstChunk(response, upstreamDeadlines) {
   const reader = response.body.getReader();
   try {
-    return { reader, first: await reader.read() };
+    return { reader, first: await readWithIdleDeadline(reader, upstreamDeadlines) };
   } catch (error) {
+    void reader.cancel(error).catch(() => {});
     reader.releaseLock();
     throw error;
   }
@@ -84,7 +85,7 @@ function isZstd(bytes) {
   return bytes.length >= 4 && bytes[0] === 0x28 && bytes[1] === 0xb5 && bytes[2] === 0x2f && bytes[3] === 0xfd;
 }
 
-async function readResponseBody(reader, first, maxBytes) {
+async function readResponseBody(reader, first, maxBytes, upstreamDeadlines) {
   const chunks = [];
   let size = 0;
   try {
@@ -94,13 +95,14 @@ async function readResponseBody(reader, first, maxBytes) {
       chunks.push(Buffer.from(first.value));
     }
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (done) return Buffer.concat(chunks, size);
       size += value.byteLength;
       if (size > maxBytes) throw Object.assign(new Error('Compressed upstream response is too large'), { statusCode: 502 });
       chunks.push(Buffer.from(value));
     }
   } finally {
+    void reader.cancel('Claude response collection finished').catch(() => {});
     reader.releaseLock();
   }
 }
@@ -115,7 +117,7 @@ function decodeBytes(input, encoding, maxBytes) {
       decoded = name === 'gzip' ? gunzipSync(decoded, { maxOutputLength: maxBytes })
         : name === 'deflate' ? inflateDeflate(decoded, maxBytes)
           : name === 'br' ? brotliDecompressSync(decoded, { maxOutputLength: maxBytes })
-              : name === 'zstd' ? decompressZstd(decoded)
+              : name === 'zstd' ? decompressZstd(decoded, maxBytes)
                 : name === 'compress' ? decompressUnixCompress(decoded, maxBytes)
                 : name === 'identity' ? decoded
                 : (() => { throw new Error(`unsupported content encoding ${name}`); })();
