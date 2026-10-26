@@ -2260,7 +2260,8 @@ async function collectCodexResponse(response, upstreamDeadlines = {}) {
     observe?.(new Uint8Array(), true);
     const collected = collectEventStreamText(bytes.toString('utf8')) || parseJson(bytes);
     collectedUsage = mergeUsage(observer?.usage, extractUsage(collected));
-    const validJsonResponse = collected && typeof collected === 'object' && !Array.isArray(collected) && typeof collected.id === 'string';
+    const policyFailure = collected?.[TERMINAL_EVENT_TYPE] === 'response.failed' && misalignmentPolicyFailure({ response: collected });
+    const validJsonResponse = policyFailure || collected && typeof collected === 'object' && !Array.isArray(collected) && typeof collected.id === 'string';
     if (!validJsonResponse) throw new Error('Invalid upstream response terminal');
     Object.defineProperty(collected, COLLECTED_USAGE, { value: collectedUsage });
     return collected;
@@ -2976,7 +2977,7 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   if (!response.ok) {
     const structuredBody = parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines));
     store.settleUpstreamAttempt(upstream.id, admission, classifyHttpResponse(response, structuredBody));
-    releaseShareRequest(req, attemptId, `upstream_http_${response.status}`);
+    settleFailedAttempt(req, store, upstream, attemptId, startedAt, structuredBody, {}, `upstream_http_${response.status}`, response.status);
     await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
     sendFailure(res, retryAfterHeader(response));
     return;
@@ -4013,6 +4014,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
       if (!response.ok) {
         const body = parseJson(await readBoundedResponse(response.clone()));
+        publicUsage = mergeUsage(publicUsage, extractUsage(body));
         const outcome = classifyHttpResponse(response, body, { allowMisalignmentPolicy: true });
         settlePublicAdmission(outcome);
         throw Object.assign(new Error('Upstream compact request failed'), {
