@@ -3373,6 +3373,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let pendingBytes = 0;
   let publicSequence = 0;
   let publicTurnActive = false;
+  let publicCompactionActive = false;
   let publicAttempt;
   let publicLifecycle;
   let publicPayload;
@@ -3675,6 +3676,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
   const resetIdle = () => {
     clearIdle();
+    if (publicCompactionActive) return;
     idleTimer = setTimeout(() => {
       if (publicTurnActive) failActiveTurn('upstream_websocket_idle_timeout', 'Upstream websocket timed out', classifyTransportError(Object.assign(new Error('WebSocket idle timeout'), { upstreamFailureKind: 'timeout' })));
       if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(1011, 'Upstream websocket timed out');
@@ -3762,6 +3764,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         gatewayDiagnosticsForStore(store).credentialStarted(attempt.id);
         data = upstreamFrame;
         publicTurnActive = true;
+        publicCompactionActive = Boolean(compactionBridge);
         publicSequence = 0;
         publicOutput = false;
         publicStreamId = streamId;
@@ -3776,7 +3779,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         publicAttempt = attempt;
         upstream = candidate;
         if (compactionBridge) {
-          if (targetSocket) retireUpstreamSocket(targetSocket);
+          clearIdle();
+          if (targetSocket?.readyState === WebSocket.CONNECTING) retireUpstreamSocket(targetSocket);
           void executePublicWebSocketCompaction(compactionBridge.payload, candidate);
           return;
         }
@@ -4192,7 +4196,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       pendingBytes = 0;
     });
     const receiveFrame = async (data, isBinary) => {
-      if (socket !== targetSocket || client.readyState !== WebSocket.OPEN) return;
+      if (socket !== targetSocket || client.readyState !== WebSocket.OPEN || publicCompactionActive) return;
       resetIdle();
       if (publicResponses) {
         let frame;
@@ -4367,6 +4371,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         targetSocket = undefined;
         targetUpstreamId = null;
         targetPromptCacheSessionId = null;
+        if (publicCompactionActive) { clearIdle(); return; }
       }
       const outcome = code === 1009
         ? { class: 'neutral', retryable: false, requestScoped: true, status: 413, errorCode: 'request_too_large' }
@@ -4395,6 +4400,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     });
     socket.on('error', (error) => {
       if (socket !== targetSocket || refreshingConnection) return;
+      if (publicCompactionActive) { retireUpstreamSocket(socket); clearIdle(); return; }
       const hostOutcome = settleHostError(error);
       const outcome = hostOutcome.preconnect
         ? { class: 'neutral', retryable: false }
