@@ -8,6 +8,7 @@ import { Badge } from '@astryxdesign/core/Badge';
 import { Banner } from '@astryxdesign/core/Banner';
 import { Button } from '@astryxdesign/core/Button';
 import { Card } from '@astryxdesign/core/Card';
+import { CheckboxList, CheckboxListItem } from '@astryxdesign/core/CheckboxList';
 import { AlertDialog } from '@astryxdesign/core/AlertDialog';
 import { Collapsible } from '@astryxdesign/core/Collapsible';
 import { Dialog, DialogHeader } from '@astryxdesign/core/Dialog';
@@ -44,6 +45,8 @@ const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 50, capDollars: 5 },
   { minQuotaLeft: 0, capDollars: 0 }
 ];
+const BULK_ACCOUNT_TYPES = [{ value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude' }, { value: 'compass', label: 'Compass' }];
+const DEFAULT_BULK_ACCOUNT_TYPES = BULK_ACCOUNT_TYPES.map(({ value }) => value);
 const FOCUSED_QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 
 const FILTER_OPTIONS = {
@@ -246,6 +249,7 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [systemStatusError, setSystemStatusError] = useState('');
   const [routingPolicy, setRoutingPolicy] = useState({ strategy: 'least-recent-success', quotaFreshnessMs: 300000 });
   const [bulkMode, setBulkMode] = useState('rules');
+  const [bulkAccountTypes, setBulkAccountTypes] = useState(DEFAULT_BULK_ACCOUNT_TYPES);
   const [bulkCapValue, setBulkCapValue] = useState(100);
   const [bulkRules, setBulkRules] = useState(DEFAULT_BULK_RULES);
   const [bulkUnknownValue, setBulkUnknownValue] = useState(5);
@@ -778,6 +782,7 @@ function Dashboard({ themeMode, setThemeMode }) {
 
   const openBulkCaps = () => {
     setBulkMode('rules');
+    setBulkAccountTypes(DEFAULT_BULK_ACCOUNT_TYPES);
     setBulkCapValue(100);
     setBulkRules(DEFAULT_BULK_RULES);
     setBulkUnknownValue(5);
@@ -786,9 +791,13 @@ function Dashboard({ themeMode, setThemeMode }) {
 
   const saveBulkCaps = async (event) => {
     event.preventDefault();
+    if (!bulkAccountTypes.length) {
+      show('Choose at least one account type', true);
+      return;
+    }
     const payload = bulkMode === 'rules'
-      ? { rules: bulkRules.map(({ minQuotaLeft, capDollars }) => ({ minQuotaLeft, capDollars })), unknownQuotaDollars: bulkUnknownValue }
-      : { target: bulkMode, capDollars: bulkCapValue };
+      ? { accountTypes: bulkAccountTypes, rules: bulkRules.map(({ minQuotaLeft, capDollars }) => ({ minQuotaLeft, capDollars })), unknownQuotaDollars: bulkUnknownValue }
+      : { accountTypes: bulkAccountTypes, target: bulkMode, capDollars: bulkCapValue };
     if (bulkMode === 'rules' && (!payload.rules.length || payload.rules.some((rule) => rule.minQuotaLeft == null || rule.capDollars == null))) {
       show('Enter non-negative numbers for every quota and cap', true);
       return;
@@ -966,6 +975,8 @@ function Dashboard({ themeMode, setThemeMode }) {
           <BulkCapDialog
             open={bulkOpen}
             mode={bulkMode}
+            accountTypes={bulkAccountTypes}
+            onAccountTypesChange={setBulkAccountTypes}
             capValue={bulkCapValue}
             rules={bulkRules}
             unknownValue={bulkUnknownValue}
@@ -1558,7 +1569,7 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
   );
 }
 
-function BulkCapDialog({ open, mode, capValue, rules, unknownValue, onModeChange, onCapValueChange, onRulesChange, onUnknownValueChange, onClose, onSubmit }) {
+function BulkCapDialog({ open, mode, accountTypes, onAccountTypesChange, capValue, rules, unknownValue, onModeChange, onCapValueChange, onRulesChange, onUnknownValueChange, onClose, onSubmit }) {
   const updateRule = (index, field, value) => onRulesChange(rules.map((rule, current) => current === index ? { ...rule, [field]: value } : rule));
   return (
     <Dialog isOpen={open} onOpenChange={onClose} purpose="form" width={560}>
@@ -1569,6 +1580,16 @@ function BulkCapDialog({ open, mode, capValue, rules, unknownValue, onModeChange
             <form id="bulk-cap-form" onSubmit={onSubmit}>
               <VStack gap={4}>
                 <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled. AIS upstreams are excluded.</Text>
+                <CheckboxList
+                  label="Account types"
+                  description="Apply caps only to the selected account types."
+                  value={accountTypes}
+                  onChange={onAccountTypesChange}
+                  density="compact"
+                  status={!accountTypes.length ? { type: 'error', message: 'Choose at least one account type' } : undefined}
+                >
+                  {BULK_ACCOUNT_TYPES.map(({ value, label }) => <CheckboxListItem key={value} value={value} label={label} />)}
+                </CheckboxList>
                 <Selector
                   label="Strategy"
                   options={[{ value: 'rules', label: 'Original quota presets' }, { value: 'all', label: 'Set one cap for all upstreams' }, { value: 'cap_reached', label: 'Replace caps already reached' }, { value: 'uncapped', label: 'Set caps on uncapped upstreams' }]}
@@ -1612,7 +1633,7 @@ function BulkCapDialog({ open, mode, capValue, rules, unknownValue, onModeChange
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
               <Button label="Cancel" variant="secondary" onClick={onClose} />
-              <Button label="Save caps" variant="primary" type="submit" form="bulk-cap-form" />
+              <Button label="Save caps" variant="primary" type="submit" form="bulk-cap-form" isDisabled={!accountTypes.length} />
             </HStack>
           </LayoutFooter>
         )}
