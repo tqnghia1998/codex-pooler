@@ -821,3 +821,23 @@ test('sets caps in dollars, records priced usage, and applies bulk quota rules',
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('loads records from newer collections and drops expired size-recovery markers', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-forward-'));
+  const store = new Store(dir);
+  let reopened;
+  try {
+    store.recordNativeWebsocketSizeRecovery('live', { messageBytes: 16_777_217 });
+    store.recordNativeWebsocketSizeRecovery('stale', { messageBytes: 16_777_217 }, Date.now() - 120_000);
+    store.sqlite.prepare('INSERT INTO records (collection, key, value) VALUES (?, ?, ?)').run('futureCollection', 'one', '{}');
+    reopened = new Store(dir);
+    assert.equal(reopened.nativeWebsocketSizeRecovery('live'), true);
+    assert.deepEqual(Object.keys(reopened.load().nativeWebsocketSizeRecoveries), ['live']);
+    const keys = reopened.sqlite.prepare("SELECT key FROM records WHERE collection = 'nativeWebsocketSizeRecoveries'").all().map(({ key }) => key);
+    assert.deepEqual(keys, ['live']);
+  } finally {
+    store.sqlite.close();
+    reopened?.sqlite.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
