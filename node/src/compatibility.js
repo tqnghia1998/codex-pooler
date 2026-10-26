@@ -152,8 +152,10 @@ async function transcribe({ req, res, body, store, fetchImpl, upstreamDeadlines,
   }
   const response = await codexFetch(provider, '/backend-api/transcribe', { method: 'POST', body: upstreamForm }, { pacingModel: 'gpt-4o-transcribe' });
   const responseBody = await responseJson(response, provider.upstreamDeadlines, provider);
-  if (!response.ok) return sendFailure(res, retryAfterHeader(response));
-  if (!responseBody || typeof responseBody.text !== 'string') return sendFailure(res);
+  if (!response.ok || !responseBody || typeof responseBody.text !== 'string') {
+    if (extractCost(responseBody) !== undefined) settleCost(store, provider.upstream, responseBody, req, 'transcription_failed');
+    return sendFailure(res, retryAfterHeader(response));
+  }
   pinCompatibilitySession(provider);
   settleCost(store, provider.upstream, responseBody, req);
   if (format === 'text') {
@@ -222,6 +224,7 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
     let structuredBody = null;
     try { structuredBody = JSON.parse(textBody); } catch {}
     settleCodexFetch(provider, response, classifyHttpResponse(response, structuredBody));
+    if (extractCost(structuredBody) !== undefined) settleCost(store, provider.upstream, structuredBody, req, 'image_generation_failed');
     return sendFailure(res, retryAfterHeader(response));
   }
   const events = parseSse(textBody);
