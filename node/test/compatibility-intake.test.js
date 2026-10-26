@@ -103,6 +103,21 @@ test('reports stable adapter errors without echoing the rejected capture', async
   assert.equal(report.includes('nested-secret'), false);
 });
 
+test('prefers the captured client version when baseline shapes tie, preserving shape precedence', async () => {
+  const capture = await loadCompatibilityCapture(join(CAPTURE_DIRECTORY, 'codex-future-sse.capture.json'));
+  const draft = sanitizeCompatibilityCapture(capture);
+  const older = structuredClone(draft);
+  older.id = 'a-older-release';
+  older.client.version = '0.199.0';
+  const current = structuredClone(draft);
+  current.id = 'z-current-release';
+  for (const candidates of [[older, current], [current, older]]) {
+    assert.equal(closestCompatibilityFixture(draft, candidates).fixture.id, current.id);
+  }
+  current.request.body.fixture_extra = true;
+  assert.equal(closestCompatibilityFixture(draft, [current, older]).fixture.id, older.id);
+});
+
 test('matches the closest same-profile fixture deterministically', async () => {
   const baselines = await loadCompatibilityFixtures(FIXTURE_DIRECTORY);
   const capture = await loadCompatibilityCapture(join(CAPTURE_DIRECTORY, 'codex-future-sse.capture.json'));
