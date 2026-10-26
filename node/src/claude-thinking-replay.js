@@ -1,3 +1,5 @@
+import { readWithIdleDeadline } from './upstream-deadlines.js';
+
 const CACHE_TTL_MS = 60 * 60_000;
 const MAX_ENTRIES = 10_240;
 const MAX_TURNS_PER_SESSION = 64;
@@ -85,11 +87,11 @@ export function restoreClaudeThinkingReplay(body, cachedContents) {
   return { body: restored ? updated : body, restored };
 }
 
-export async function captureClaudeThinkingReplayResponse(scope, response) {
+export async function captureClaudeThinkingReplayResponse(scope, response, upstreamDeadlines = {}) {
   if (!scope || !response) return false;
   try {
     const clone = response.clone();
-    const bytes = await readBounded(clone);
+    const bytes = await readBounded(clone, upstreamDeadlines);
     const content = claudeResponseContent(bytes);
     if (content) return cacheClaudeThinkingReplay(scope, content);
     if (scope.replayApplied) clearClaudeThinkingReplay(scope);
@@ -156,23 +158,24 @@ function stableJson(value) {
   return JSON.stringify(value);
 }
 
-async function readBounded(response) {
+async function readBounded(response, upstreamDeadlines) {
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
   const chunks = [];
   let size = 0;
   try {
     while (true) {
-      const next = await reader.read();
+      const next = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (next.done) break;
       size += next.value.byteLength;
       if (size > MAX_RESPONSE_BYTES) {
-        await reader.cancel('Claude replay response exceeded cache limit');
+        void reader.cancel('Claude replay response exceeded cache limit').catch(() => {});
         throw new Error('response too large');
       }
       chunks.push(next.value);
     }
   } finally {
+    void reader.cancel('Claude replay inspection finished').catch(() => {});
     reader.releaseLock?.();
   }
   const output = new Uint8Array(size);
