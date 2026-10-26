@@ -89,3 +89,4 @@ graphify-out/
 .data/
 .pi-tasks/
 .pi-subagents/
+.tmp/dev-server.json
