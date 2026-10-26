@@ -1489,7 +1489,7 @@ test('fails over a pre-output spend-limit incomplete terminal without billing th
   }
 });
 
-test('fails over a collected spend-limit response and does not pin or bill the exhausted account', async () => {
+test('fails over a collected spend-limit response without pinning and retains measured spend', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-collected-spend-failover-'));
   const store = new Store(dir);
   const first = store.create(codexInput({ email: 'collected-first@example.com' }));
@@ -1511,7 +1511,7 @@ test('fails over a collected spend-limit response and does not pin or bill the e
     assert.equal(result.body.id, 'resp_recovered');
     assert.equal(calls.length, 2);
     assert.equal(store.get(first.id).health.status, 'cooldown');
-    assert.equal(store.get(first.id).spending.spentCostMicros, 0);
+    assert.ok(store.get(first.id).spending.spentCostMicros > 0);
     assert.equal(store.responseUpstream('resp_exhausted', 'default', store.authenticateApiKey('local-client-key').id), null);
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1530,7 +1530,7 @@ test('rejects native JSON spend-limit responses without successful accounting', 
     const result = await request(base, '/backend-api/codex/responses', { model: 'gpt-5.6-sol', input: 'hello', stream: false }, { authorization: 'Bearer local-client-key' });
     assert.equal(result.response.status, 502);
     assert.equal(store.get(upstream.id).health.status, 'cooldown');
-    assert.equal(store.get(upstream.id).spending.spentCostMicros, 0);
+    assert.ok(store.get(upstream.id).spending.spentCostMicros > 0);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     rmSync(dir, { recursive: true, force: true });
