@@ -1285,6 +1285,9 @@ export class Store {
       const db = emptyDatabase();
       for (const { collection, key, value } of this.sqlite.prepare('SELECT collection, key, value FROM records ORDER BY rowid').all()) {
         const target = db[collection];
+        // Rows from a newer gateway's collections (shared persistence during a
+        // rolling deploy) are left untouched instead of failing startup.
+        if (!target) continue;
         if (Array.isArray(target)) target.push(JSON.parse(value));
         else target[key] = JSON.parse(value);
       }
@@ -1398,6 +1401,9 @@ function normalizeDatabase(parsed) {
   parsed.responsePins ||= {};
   parsed.nativeTurnReceipts ||= {};
   parsed.nativeWebsocketSizeRecoveries ||= {};
+  for (const [key, marker] of Object.entries(parsed.nativeWebsocketSizeRecoveries)) {
+    if (!(Date.parse(marker?.expiresAt) > Date.now())) delete parsed.nativeWebsocketSizeRecoveries[key];
+  }
   parsed.routingPolicy = normalizeRoutingPolicy(parsed.routingPolicy);
   if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
   parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
