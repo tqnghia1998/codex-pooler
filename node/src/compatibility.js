@@ -6,6 +6,7 @@ import { ensureProviderCredentials, refreshProviderCredentials } from './provide
 import { upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
 import { extractUsage, upstreamCostMicros } from './pricing.js';
+import { createSseUsageObserver } from './sse-usage-observer.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders } from './protocol-compat.js';
 import { modelCatalogForStore } from './codex-model-catalog.js';
@@ -209,10 +210,12 @@ async function image({ req, res, path, body, store, fetchImpl, upstreamDeadlines
     method: 'POST', headers: { 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify(requestBody)
   }, { deferSettlement: true, pacingModel: hostModel });
   let textBody;
+  const observer = createSseUsageObserver();
   try {
-    textBody = (await responseBytes(response, 32 * 1024 * 1024, provider.upstreamDeadlines)).toString('utf8');
+    textBody = (await responseBytes(response, 32 * 1024 * 1024, provider.upstreamDeadlines, chunk => observer.write(chunk))).toString('utf8');
   } catch (error) {
     settleCodexFetch(provider, response, classifyTransportError(error));
+    if (observer.usage?.upstreamCostMicros !== undefined) settleCost(store, provider.upstream, null, req, 'image_generation_failed', observer.usage);
     throw error;
   }
   if (!response.ok) {
@@ -584,15 +587,15 @@ function extractCost(body) {
   return upstreamCostMicros(body?.usage) ?? upstreamCostMicros(body?.message?.usage) ?? upstreamCostMicros(body?.response?.usage) ?? upstreamCostMicros(body);
 }
 
-function settleCost(store, upstream, body, req, errorCode = null) {
-  const settledCostMicros = extractCost(body);
+function settleCost(store, upstream, body, req, errorCode = null, measuredUsage = null) {
+  const settledCostMicros = measuredUsage?.upstreamCostMicros ?? extractCost(body);
   const attemptId = req.compatibilityShareAttemptId || randomUUID();
   const startedAt = new Date().toISOString();
   try {
     const scopeId = requestScopeId(req);
     const shared = isShareCredential(req.proxyAuth);
     const apiKeyId = shared ? null : req.proxyAuth?.id || null;
-    if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: extractUsage(body), settledCostMicros: settledCostMicros ?? null });
+    if (!shared) store.recordGatewayUsage({ scopeId, apiKeyId, attemptId, startedAt, usage: measuredUsage || extractUsage(body), settledCostMicros: settledCostMicros ?? null });
     if (settledCostMicros !== undefined) {
       store.addUsage(upstream.id, { attemptId, startedAt, settledCostMicros, costSource: 'upstream_reported' });
       if (!shared && !errorCode) store.addSessionUsage(sessionAffinity(req), upstream.id, settledCostMicros, scopeId, apiKeyId);
@@ -629,7 +632,7 @@ async function responseJson(response, upstreamDeadlines = {}, context = null) {
   return body;
 }
 
-async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}) {
+async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}, observe = null) {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
   const chunks = [];
@@ -638,14 +641,16 @@ async function responseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDead
     while (true) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (done) return Buffer.concat(chunks, size);
+      observe?.(value);
       size += value.byteLength;
       if (size > maxBytes) {
-        await reader.cancel('Response body exceeded limit');
+        void reader.cancel('Response body exceeded limit').catch(() => {});
         throw Object.assign(new Error('Upstream response body is too large'), { statusCode: 502 });
       }
       chunks.push(Buffer.from(value));
     }
   } finally {
+    void reader.cancel('Compatibility collection finished').catch(() => {});
     reader.releaseLock();
   }
 }
