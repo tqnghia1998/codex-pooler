@@ -4,15 +4,17 @@ import { fileURLToPath } from 'node:url';
 const DEFAULT_SOURCE_URL = 'https://icoretech.github.io/openai-json-pricing/pricing.json';
 const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
 const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
-const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', flex: 'flex', fast: 'priority' });
-const OPTIONAL_TIER_MAP = Object.freeze({ ultrafast: 'ultrafast' });
+const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', fast: 'priority' });
+const OPTIONAL_TIER_MAP = Object.freeze({ flex: 'flex', ultrafast: 'ultrafast' });
+const CACHE_WRITE_DURATIONS = ['30m', '12h'];
 const BUCKETS = ['default', 'short_context', 'long_context'];
 const TARGET = fileURLToPath(new URL('../src/openai-pricing-snapshot.js', import.meta.url));
 
 export function buildOpenAiPricingSnapshot(payload, {
   sourceUrl = DEFAULT_SOURCE_URL,
   effectiveAt = DEFAULT_EFFECTIVE_AT,
-  models = DEFAULT_MODELS
+  models = DEFAULT_MODELS,
+  previousRows = []
 } = {}) {
   if (!plainObject(payload) || !plainObject(payload.models) || !validDate(payload.generated_at)) {
     throw new Error('Pricing feed must include generated_at and models');
@@ -32,7 +34,13 @@ export function buildOpenAiPricingSnapshot(payload, {
       rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
     for (const [sourceTier, tier] of Object.entries(OPTIONAL_TIER_MAP)) {
-      if (model.prices[sourceTier] === undefined) continue;
+      if (model.prices[sourceTier] === undefined) {
+        // A feed that stops listing a tier must not reprice it at the
+        // standard fallback: keep the last imported rows, as upstream keeps
+        // its immutable snapshots.
+        rows.push(...previousRows.filter((row) => row.model === modelId && row.tier === tier).map((row) => ({ ...row })));
+        continue;
+      }
       rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
   }
@@ -113,10 +121,17 @@ function priceRow(model, tier, bucket, values, contextRule) {
     bucket,
     input: priceNumber(values.input, `${model} ${tier} ${bucket} input`),
     cachedInput: values.cached_input == null ? null : priceNumber(values.cached_input, `${model} ${tier} ${bucket} cached_input`),
-    cacheWrite: priceNumber(values.cache_write, `${model} ${tier} ${bucket} cache_write`),
+    // Duration-specific write rates are kept for reference only: aggregate
+    // usage does not report the TTL, so writes stay unpriced without a
+    // duration-neutral rate.
+    cacheWrite: values.cache_write === undefined ? null : priceNumber(values.cache_write, `${model} ${tier} ${bucket} cache_write`),
     output: priceNumber(values.output, `${model} ${tier} ${bucket} output`),
     contextRule
   };
+  const durationRates = Object.fromEntries(CACHE_WRITE_DURATIONS
+    .filter((duration) => values[`cache_write_${duration}`] !== undefined)
+    .map((duration) => [duration, priceNumber(values[`cache_write_${duration}`], `${model} ${tier} ${bucket} cache_write_${duration}`)]));
+  if (Object.keys(durationRates).length) row.cacheWriteRates = durationRates;
   return row;
 }
 
@@ -165,6 +180,7 @@ async function main() {
   const effectiveAt = args.get('--effective-at') || DEFAULT_EFFECTIVE_AT;
   const modelArg = args.get('--models');
   const models = modelArg ? modelArg.split(',') : DEFAULT_MODELS;
+  const { OPENAI_PRICE_ROWS: previousRows } = await import('../src/openai-pricing-snapshot.js');
   const payload = sourceUrl.startsWith('file:')
     ? JSON.parse(await readFile(fileURLToPath(sourceUrl), 'utf8'))
     : await fetch(sourceUrl).then(async (response) => {
@@ -174,7 +190,8 @@ async function main() {
   await writeFile(TARGET, buildOpenAiPricingSnapshot(payload, {
     sourceUrl: sourceUrl.startsWith('file:') ? DEFAULT_SOURCE_URL : sourceUrl,
     effectiveAt,
-    models
+    models,
+    previousRows
   }));
   process.stdout.write(`Updated ${TARGET}\n`);
 }

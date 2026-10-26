@@ -50,7 +50,7 @@ The Node proxy covers the client-visible local compatibility path:
 | Area | Implemented contract | Regression coverage |
 | --- | --- | --- |
 | Requests and headers | Responses aliases, reasoning/service-tier normalization, configurable and native-client Codex version/beta negotiation, Anthropic header defaults/forwarding, dynamic Codex model discovery, native Codex response-control projection, model ETags, unsupported-route envelopes | `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/codex-model-catalog.test.js`, `test/native-payload.test.js` |
-| OpenAI adapters | Validated Responses access programs and forward-compatible fields/tools, Responses and Chat message/content/tool conversion, Chat reasoning aliases and non-strict function defaults, oversized UTF-8 text and replay call-ID normalization, multimodal input, continuation/replay validation including URL citations and closed hosted-shell history, strict object-root schemas with nested recursion, non-stream Chat output and finish reasons | `test/openai-adapters.test.js`, `test/proxy.test.js` |
+| OpenAI adapters | Validated Responses access programs and forward-compatible fields/tools, Responses and Chat message/content/tool conversion, Chat reasoning aliases and non-strict function defaults, oversized UTF-8 text and replay call-ID normalization, multimodal input, continuation/replay validation including URL citations and closed hosted-shell history, strict object-root schemas with nested recursion, function tool names limited to 1-128 ASCII letters, digits, `_` or `-` without trimming, content `prompt_cache_breakpoint` TTLs of `30m` or `12h`, non-stream Chat output and finish reasons | `test/openai-adapters.test.js`, `test/proxy.test.js` |
 | HTTP ingress and errors | Bounded JSON/compressed bodies (128 MiB compressed, 256 MiB decoded by default), gzip/deflate/zstd, timeouts, OpenAI-shaped errors, provider-detail redaction, bounded native-only misalignment guidance, allowlisted parameter-validation relay, sanitized upstream 429 with `Retry-After`, valid Anthropic 4xx passthrough | `test/http-ingress.test.js`, `test/http-errors.test.js`, `test/gateway-routes.test.js` |
 | Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, coherent per-tier context rules and rates, requested priority pricing when Codex echoes `default`, exact ultrafast-tier pricing without fallback, authoritative `price_cost_usd`, measured usage retained across interrupted turns, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js` |
 | Routing | Ordered spend-cap-eligible candidates, per-account discovered Codex model support and advertised ultrafast capability, an optional operator-managed priority list ahead of least-recent-success balancing, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output failover capped at eight candidate accounts per request, immediate account cooldown for quota responses, reauthentication blocking, health-neutral policy failures, shared Codex-origin reachability protection, and durable model/route circuit recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/codex-model-catalog.test.js`, `test/codex-host-health.test.js`, `test/upstream-outcomes.test.js`, `test/store.test.js` |
@@ -60,7 +60,7 @@ The Node proxy covers the client-visible local compatibility path:
 | Compatibility intake | Bounded local capture sanitization, closest-fixture matching, deterministic drift classification, review suggestions, draft output, and CI failure mode | `test/compatibility-intake.test.js` |
 | Client release gate | Reviewed npm manifest, latest-version discovery, integrity-pinned platform packages, loopback-only synthetic client execution, and sanitized intake reports | `test/compatibility-release-gate.test.js` |
 | Readiness and diagnostics | Immediate liveness, startup-settled readiness with documented degradation, bounded sanitized terminal failure reasons, and phase timing summaries | `test/readiness.test.js`, `test/gateway-diagnostics.test.js`, `test/server.test.js`, `test/accounting-lifecycle.test.js` |
-| SSE | Incremental UTF-8/SSE parsing across LF, CRLF, standalone CR, and transport boundaries; bounded complete and incomplete events; quota-incomplete failure and account cooldown; OpenAI and Anthropic terminal recognition; first-event failover; optional bounded Codex bootstrap buffering before headers; public Responses sequencing; Chat translation with verified final tool-argument recovery and inconsistent-snapshot failure; cancellation and usage settlement | `test/openai-streaming.test.js`, `test/proxy.test.js`, `test/codex-compatibility.test.js` |
+| SSE | Incremental UTF-8/SSE parsing across LF, CRLF, standalone CR, and transport boundaries; bounded complete and incomplete events; quota-incomplete failure and account cooldown; OpenAI and Anthropic terminal recognition; first-event failover; optional bounded Codex bootstrap buffering before headers; public Responses sequencing; Chat translation with verified final tool-argument recovery and inconsistent-snapshot failure, and failures after output started reported as a final error chunk rather than a normal finish; cancellation and usage settlement | `test/openai-streaming.test.js`, `test/proxy.test.js`, `test/codex-compatibility.test.js` |
 | Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, independent frame/queue/backpressure limits, keepalive pings, pre-output reconnect, request-scoped `1009` handling, sanitized terminals and terminal usage settlement; native Codex frames remain opaque on one upstream connection unless guarded compatibility is enabled | `test/gateway-routes.test.js`, `test/codex-compatibility.test.js` |
 
 ### Responses stream and request contracts
@@ -304,8 +304,13 @@ Spending caps use 25 credits per dollar, rounded to whole credits, and a positiv
 
 When Codex reports the `default` service tier for a request that explicitly asked for `priority`, snapshot accounting retains the requested priority rate. An explicitly reported different tier still takes precedence.
 
-The October 8 pricing snapshot includes exact GPT-6.1 Sol `ultrafast` input,
-cached-input, cache-write, and output rates for both ordinary and long contexts.
+The October 23 pricing snapshot includes exact GPT-6.1 Sol `ultrafast` input,
+cached-input, and output rates for both ordinary and long contexts. OpenAI now
+publishes cache-write prices only per TTL (`30m` and `12h`); the snapshot keeps
+both as `cacheWriteRates`, but usage does not report a write's TTL, so OpenAI
+usage with cache-write tokens stays unpriced. A refresh keeps the last imported
+rows for a tier the feed stops listing (currently `flex`) instead of letting it
+fall back to standard rates.
 
 ## API
 
@@ -348,7 +353,7 @@ POST   /v1/messages                 # Compass or Claude; native Anthropic Messag
 POST   /v1/messages/count_tokens    # Claude native/local or Compass local O200k count
 POST   /v1/responses/compact        # deterministic unsupported_endpoint, matching origin
 GET    /v1/models
-GET    /v1/files
+GET    /v1/files                    # complete list: has_more is always false
 POST   /v1/files
 GET    /v1/files/:id
 DELETE /v1/files/:id               # deterministic unsupported_endpoint
@@ -388,7 +393,7 @@ removal invalidate cached account metadata as before.
 
 Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
 Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
-template exists. Builds in the upstream-qualified `0.154.0` through `0.162.1`
+template exists. Builds in the upstream-qualified `0.154.0` through `0.164.0`
 window also omit entries that violate the mirrored decoder contract. Older
 or unknown clients keep the verbatim catalog; newer builds are not checked
 against an unqualified decoder. Static rows without the required native

@@ -134,7 +134,9 @@ export function normalizeChatEvent(event, state) {
     state.terminal = true;
     const policyError = publicMisalignmentError(event);
     if (policyError) return [{ error: policyError }];
-    return state.roleSent ? [chatChunk(state, {}, 'stop')] : [{ error: { ...safeError(event), code: 'upstream_response_failed', message: 'Upstream response failed' } }];
+    // A failure after output started must still reach the client as an error:
+    // a synthetic stop chunk would present a truncated answer as complete.
+    return [{ error: { ...safeError(event), code: 'upstream_response_failed', message: 'Upstream response failed' } }];
   }
   const chunks = [];
   const role = () => { if (!state.roleSent) { state.roleSent = true; chunks.push(chatChunk(state, { role: 'assistant' }, null)); } };
