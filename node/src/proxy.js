@@ -1,4 +1,4 @@
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { writeChunk } from './http-stream.js';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
@@ -13,7 +13,7 @@ import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
 import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages, withoutUserIdentifier } from './openai-adapters.js';
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
-import { HttpError, hasDuplicateHost } from './http-ingress.js';
+import { DEFAULT_INGRESS_LIMITS, HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, completeUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
@@ -114,6 +114,7 @@ const COMPACT_PAYLOAD_FIELDS = new Set([
   'text'
 ]);
 const MAX_SESSION_ID_LENGTH = 200;
+const NATIVE_WEBSOCKET_MESSAGE_LIMIT = 16_777_216;
 const MAX_GATEWAY_CANDIDATE_ATTEMPTS = 8;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
 // Keep Claude Code and CPA-compatible affinity signals ahead of generic
@@ -2633,6 +2634,21 @@ function requestAccounting(req) {
   };
 }
 
+function nativeSizeCheckEligible(frame) {
+  return frame.type === 'response.create' && frame.generate !== false && frame.previous_response_id == null
+    && !(Array.isArray(frame.input) && frame.input.some((item) => plainObject(item) && item.type === 'compaction_trigger'));
+}
+
+// Keyed by scope, credential and the digest of exactly one non-blank
+// x-codex-window-id; a missing or duplicated window gets no HTTP fallback.
+function nativeWebsocketSizeRecoveryKey(req) {
+  const windows = req.headersDistinct?.['x-codex-window-id'] || [];
+  const window = windows.length === 1 ? windows[0].trim() : '';
+  if (!window) return null;
+  const { scopeId, apiKeyId } = providerSessionScope(req);
+  return JSON.stringify([scopeId, apiKeyId || null, createHash('sha256').update(window).digest('hex')]);
+}
+
 function providerSessionScope(req) {
   return {
     scopeId: requestScopeId(req),
@@ -3032,7 +3048,11 @@ export function validProxyApiKey(req, expected) {
 export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, ignoreQuotaCooldown = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null, codexOptions = codexGatewayOptions(ingress) } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
-  const wss = new WebSocketServer({ noServer: true, maxPayload: codexOptions.websocketFrameBytes });
+  // Native frames are measured after normalization, so the socket admits
+  // bodies up to the HTTP ingress limit; relayWebSocket enforces the frame
+  // limit for everything that is not size-checked.
+  const maxPayload = Math.max(codexOptions.websocketFrameBytes, ingress.maxDecompressedBodyBytes ?? DEFAULT_INGRESS_LIMITS.maxDecompressedBodyBytes);
+  const wss = new WebSocketServer({ noServer: true, maxPayload });
   wss.on('headers', (headers, req) => {
     if (req.codexModelsEtag) headers.push(`x-models-etag: ${req.codexModelsEtag}`);
     if (isBackendResponsesRoute(new URL(req.url, 'http://localhost').pathname)) {
@@ -3073,6 +3093,21 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
         return;
       }
       if (isBackendResponsesRoute(path)) {
+        const recoveryKey = nativeWebsocketSizeRecoveryKey(req);
+        let httpRequired = false;
+        try {
+          httpRequired = Boolean(recoveryKey) && store.nativeWebsocketSizeRecovery(recoveryKey);
+        } catch {
+          const body = JSON.stringify({ error: { type: 'server_error', code: 'service_unavailable', message: 'request admission is unavailable', param: null } });
+          socket.end(`HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`, () => socket.destroy());
+          return;
+        }
+        // A recent oversized frame on this window tells the Codex client to
+        // continue over HTTP; the client retries the request itself.
+        if (httpRequired) {
+          socket.end('HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
+          return;
+        }
         const upstreamIds = req.proxyAuth.kind === 'share_session' ? [req.proxyAuth.upstreamId]
           : req.proxyAuth.kind === 'personal_share' ? personalShareSessions(req).map(({ upstreamId }) => upstreamId)
             : null;
@@ -3177,6 +3212,32 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   const pending = [];
   const queuedTurns = [];
   let queuedTurnBytes = 0;
+  let nativeSizeRecoveryStopping = false;
+  // An ordinary native frame larger than the upstream message limit never
+  // reaches an upstream: no attempt, usage or health change. With a window id
+  // the next handshake on that window answers 426 so the client retries over
+  // HTTP; queued frames are dropped rather than dispatched.
+  const refuseOversizedNativeFrame = async (messageBytes) => {
+    const key = nativeWebsocketSizeRecoveryKey(req);
+    const refuse = (status, type, code, message) => client.send(JSON.stringify({ type: 'error', status, error: { type, code, message } }));
+    if (!key) return refuse(413, 'invalid_request_error', 'websocket_message_too_large', 'request exceeds the upstream websocket message limit');
+    nativeSizeRecoveryStopping = true;
+    try {
+      store.recordNativeWebsocketSizeRecovery(key, { messageBytes });
+      await store.flushDurability();
+    } catch {
+      try { store.discardNativeWebsocketSizeRecovery(key); } catch {}
+      nativeSizeRecoveryStopping = false;
+      return refuse(503, 'server_error', 'service_unavailable', 'request admission is unavailable');
+    }
+    pending.length = 0;
+    pendingBytes = 0;
+    queuedTurns.length = 0;
+    queuedTurnBytes = 0;
+    if (client.readyState !== WebSocket.OPEN) return;
+    refuse(502, 'server_error', 'upstream_request_failed', 'request exceeds the upstream websocket message limit');
+    client.close(1011, 'upstream websocket message limit');
+  };
   let idleTimer = null;
   let keepAliveTimer = null;
   const pacingAbort = new AbortController();
@@ -3459,7 +3520,9 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close(code, reason);
   };
   client.on('message', (data, isBinary) => {
-    if (client.readyState !== WebSocket.OPEN) return;
+    if (client.readyState !== WebSocket.OPEN || nativeSizeRecoveryStopping) return;
+    const oversizedFrame = data.byteLength > codexOptions.websocketFrameBytes;
+    if (oversizedFrame && (publicResponses || isBinary)) return client.close(1009, 'WebSocket frame exceeded limit');
     if (isBinary) return client.close(1003, 'Binary WebSocket frames are not supported');
     if (!isShareCredential(req.proxyAuth) && req.proxyAuth?.id && !store.authorizeApiKey(req.proxyAuth.id)) {
       return client.close(1008, 'API key is no longer authorized');
@@ -3571,6 +3634,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       }
     }
     let nativePayloadForRecovery = null;
+    let sizeChecked = false;
     if (!publicResponses && !isBinary) {
       try {
         const nativeFrame = JSON.parse(data.toString());
@@ -3583,6 +3647,13 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           if (nativeFrame.type === 'response.create') delete sanitized.metadata;
           nativeMultiAgentOptimized = prepared.optimized;
           data = Buffer.from(JSON.stringify(sanitized));
+          if (nativeSizeCheckEligible(nativeFrame)) {
+            sizeChecked = true;
+            if (data.byteLength > NATIVE_WEBSOCKET_MESSAGE_LIMIT) {
+              void refuseOversizedNativeFrame(data.byteLength);
+              return;
+            }
+          }
         }
       } catch (error) {
         if (error instanceof AdapterError) {
@@ -3591,6 +3662,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         }
       }
     }
+    if (oversizedFrame && !sizeChecked) return client.close(1009, 'WebSocket frame exceeded limit');
     if (!publicResponses && !nativePayloadForRecovery && !nativeLane.current && !nativeAdmission && upstream) {
       settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
       const admission = store.beginUpstreamAttempt(upstream.id, nativeCircuitScope);
