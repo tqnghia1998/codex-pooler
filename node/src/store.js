@@ -2199,7 +2199,13 @@ function capCreditsFromInput(input = {}) {
 
 function selectBulkTargets(upstreams, input = {}) {
   const target = input.target;
-  const eligible = (upstream) => !isAisUpstream(upstream);
+  const supportedTypes = ['codex', 'claude', 'compass'];
+  const accountTypes = input.accountTypes === undefined ? supportedTypes : input.accountTypes;
+  if (!Array.isArray(accountTypes) || !accountTypes.length || accountTypes.some((type) => !supportedTypes.includes(type))) {
+    throw new Error('accountTypes must be a non-empty array containing only codex, claude, or compass');
+  }
+  const selectedTypes = new Set(accountTypes);
+  const eligible = (upstream) => selectedTypes.has(upstream.type) && !isAisUpstream(upstream);
   if (target) {
     if (!['all', 'cap_reached', 'uncapped'].includes(target)) throw new Error('target must be all, cap_reached, or uncapped');
     return upstreams
@@ -2215,7 +2221,8 @@ function selectBulkTargets(upstreams, input = {}) {
   const unknownCap = input.unknownQuotaDollars == null ? null : number(input.unknownQuotaDollars, 'unknownQuotaDollars');
   return upstreams.flatMap((upstream) => {
     if (!eligible(upstream)) return [];
-    const quotaLeft = Number(upstream.quota?.remainingDollars ?? upstream.quota?.remainingUnits);
+    const remaining = upstream.quota?.remainingDollars ?? upstream.quota?.remainingUnits;
+    const quotaLeft = remaining == null ? NaN : Number(remaining);
     if (!Number.isFinite(quotaLeft)) return unknownCap == null ? [] : [{ upstream, capDollars: unknownCap }];
     const matching = rules.filter((rule) => quotaLeft > rule.minQuotaLeft).sort((a, b) => b.minQuotaLeft - a.minQuotaLeft)[0];
     return matching ? [{ upstream, capDollars: matching.capDollars }] : [];
