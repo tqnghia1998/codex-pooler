@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { writeChunk } from './http-stream.js';
+import { createSseUsageObserver } from './sse-usage-observer.js';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { request as undiciRequest } from 'undici';
@@ -16,7 +17,7 @@ import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './publ
 import { DEFAULT_INGRESS_LIMITS, HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
-import { cheapestPricedModel, completeUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
+import { cheapestPricedModel, hasMeasuredUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
 import { chatUsage, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
@@ -68,6 +69,7 @@ export const PROXY_ENDPOINTS = new Set([
   '/backend-api/codex/v1/chat/completions',
   '/v1/messages/count_tokens'
 ]);
+const COLLECTED_USAGE = Symbol('collected usage');
 const CODEX_RESPONSES_PATH = '/backend-api/codex/responses';
 const CODEX_COMPACT_PATH = '/backend-api/codex/responses/compact';
 const COMPASS_PATHS = {
@@ -354,7 +356,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
       : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines)));
     if (compactResult?.quotaFailure) {
       if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: false, errorCode: 'insufficient_quota' });
-      releaseShareRequest(req, attemptId, 'insufficient_quota');
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, compactResult, dispatchPayload, 'insufficient_quota', 429);
       finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'insufficient_quota', responseStatusCode: 429 });
       sendJson(res, 429, { error: { type: 'insufficient_quota', code: 'insufficient_quota', message: 'Upstream rejected the compact request', param: null } });
       return;
@@ -362,7 +364,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     const compact = compactionBridgeResult(compactResult, path === '/v1/responses');
     if (!compact) {
       if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'transient', retryable: true });
-      releaseShareRequest(req, attemptId, 'invalid_compaction_response');
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, compactResult, dispatchPayload, 'invalid_compaction_response', 502);
       finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'invalid_compaction_response', responseStatusCode: 502 });
       sendJson(res, 502, { error: { type: 'server_error', code: 'invalid_compaction_response', message: 'Upstream compact response did not include encrypted compaction content', param: null } });
       return;
@@ -440,12 +442,12 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     }
   }
   const terminalBody = parseJson(bytes);
-  if (upstream.type === 'codex' && failedIncompleteResponse({
+  if (upstream.type === 'codex' && (terminalBody?.status === 'failed' || terminalBody?.error || failedIncompleteResponse({
     type: terminalBody?.status === 'incomplete' ? 'response.incomplete' : '',
     response: terminalBody
-  })) {
-    if (admission) store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent({ type: 'response.incomplete', response: terminalBody }));
-    releaseShareRequest(req, attemptId, 'upstream_response_failed');
+  }))) {
+    if (admission) store.settleUpstreamAttempt(upstream.id, admission, classifySseEvent({ type: terminalBody?.status === 'failed' || terminalBody?.error ? 'response.failed' : 'response.incomplete', response: terminalBody }));
+    settleFailedAttempt(req, store, upstream, attemptId, startedAt, terminalBody, payload, 'upstream_response_failed', 502);
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
     sendFailure(res);
     return;
@@ -737,6 +739,8 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
   let terminal = null;
   let quotaFailure = false;
   let invalid = false;
+  let usage = null;
+  const failed = () => ({ [COLLECTED_USAGE]: usage });
   const collect = (block) => {
     const { kind, event } = decodeSseBlock(block);
     if (!hasSseData(block)) {
@@ -748,6 +752,7 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
     const rawEvent = parseJson(Buffer.from(data));
     if (!plainObject(rawEvent) || typeof rawEvent.type !== 'string') { invalid = true; return; }
     if (terminal || quotaFailure) { invalid = true; return; }
+    usage = mergeUsage(usage, extractUsage(event));
     const namedEvent = block.split(/\r?\n/).find((line) => line.startsWith('event:'))?.slice(6).trim();
     if (namedEvent && namedEvent !== event.type) { invalid = true; return; }
     if (event.type === 'response.output_item.done' && plainObject(event.item) && ['compaction', 'compaction_summary'].includes(event.item.type) && !item) item = event.item;
@@ -760,21 +765,22 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       const result = consumeSseChunk(parser, done ? decoder.decode() : decoder.decode(value, { stream: true }));
       parser = result.state;
-      if (result.overflow) return null;
+      if (result.overflow) return failed();
       for (const block of result.blocks) collect(block);
       if (done) break;
     }
     const pending = pendingSseBlock(parser);
     if (pending.trim()) collect(pending);
   } catch {
-    return null;
+    return failed();
   } finally {
+    void reader.cancel('Compaction collection finished').catch(() => {});
     reader.releaseLock();
   }
-  if (invalid) return null;
-  if (quotaFailure) return { quotaFailure: true };
-  if (!terminal) return null;
-  return { ...terminal, output: item ? [item] : terminal.output };
+  if (invalid) return failed();
+  if (quotaFailure) return { quotaFailure: true, [COLLECTED_USAGE]: usage };
+  if (!terminal) return failed();
+  return { ...terminal, output: item ? [item] : terminal.output, [COLLECTED_USAGE]: usage };
 }
 
 function compactionBridgeResult(decoded, publicResponses = false) {
@@ -1145,7 +1151,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           };
           const quotaFailure = sseOutcome.class === 'quota';
           store.settleUpstreamAttempt(upstream.id, admission, sseOutcome);
-          releaseShareRequest(req, attemptId, quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed');
+          settleFailedAttempt(req, store, upstream, attemptId, startedAt, inspected.firstEvent, payload, quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed', quotaFailure ? 429 : response.status);
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: quotaFailure ? sseOutcome.errorCode : 'upstream_first_event_failed', responseStatusCode: quotaFailure ? 429 : response.status });
           terminalFailure = {
             upstream,
@@ -1201,7 +1207,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         });
         if (incompleteQuota) {
           store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: true, errorCode: incompleteQuota });
-          releaseShareRequest(req, attemptId, incompleteQuota);
+          settleFailedAttempt(req, store, upstream, attemptId, startedAt, collected, payload, incompleteQuota, 429);
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: incompleteQuota, responseStatusCode: 429 });
           terminalFailure = {
             upstream, attemptId: null, startedAt, response: new Response(null, { status: 429 }),
@@ -1214,7 +1220,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           : null;
         if (policyFailure) {
           store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false, errorCode: policyFailure.code });
-          releaseShareRequest(req, attemptId, policyFailure.code);
+          settleFailedAttempt(req, store, upstream, attemptId, startedAt, collected, payload, policyFailure.code, 403);
           return {
             upstream,
             attemptId,
@@ -1226,13 +1232,13 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             admission: null
           };
         }
-        if (failedIncompleteResponse({
+        if (collected.status === 'failed' || collected.error || collected[TERMINAL_EVENT_TYPE] === 'response.failed' || failedIncompleteResponse({
           type: collected?.[TERMINAL_EVENT_TYPE] || (collected?.status === 'incomplete' ? 'response.incomplete' : ''),
           response: collected
         })) {
-          const outcome = classifySseEvent({ type: 'response.incomplete', response: collected });
+          const outcome = classifySseEvent({ type: collected.status === 'failed' || collected.error ? 'response.failed' : 'response.incomplete', response: collected });
           store.settleUpstreamAttempt(upstream.id, admission, outcome);
-          releaseShareRequest(req, attemptId, 'upstream_response_failed');
+          settleFailedAttempt(req, store, upstream, attemptId, startedAt, collected, payload, 'upstream_response_failed', 502);
           retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_response_failed', responseStatusCode: response.status });
           terminalFailure = {
             upstream, attemptId: null, startedAt,
@@ -1301,7 +1307,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       }
       const cancelled = req.aborted || res.destroyed || error?.upstreamFailureKind === 'cancelled';
       store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: cancelled }));
-      releaseShareRequest(req, attemptId, cancelled ? 'downstream_closed' : 'upstream_transport_failed');
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, error.gatewayMeasuredUsage, payload, cancelled ? 'downstream_closed' : 'upstream_transport_failed');
       if (cancelled) throw error;
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_transport_failed' });
       terminalFailure = {
@@ -1332,7 +1338,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
       await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
-      releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, body, payload, gatewayOutcomeCode(outcome), response.status);
       const failureCode = gatewayOutcomeCode(outcome);
       retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: failureCode, responseStatusCode: response.status });
       terminalFailure = {
@@ -1346,7 +1352,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       continue;
     }
     store.settleUpstreamAttempt(upstream.id, admission, outcome);
-    releaseShareRequest(req, attemptId, gatewayOutcomeCode(outcome));
+    settleFailedAttempt(req, store, upstream, attemptId, startedAt, body, payload, gatewayOutcomeCode(outcome), response.status);
     return { upstream, attemptId, startedAt, response, admission: null };
   }
   return terminalFailure;
@@ -1890,6 +1896,7 @@ async function compatibilityFallback(response, upstream, sourcePath, payload, re
     const bytes = await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines);
     text = bytes.toString('utf8');
     body = parseJson(bytes);
+    if (hasMeasuredUsage(extractUsage(body))) return null;
   } catch {
     return null;
   }
@@ -2245,16 +2252,24 @@ function responsesToChat(response, chatPayload = {}) {
 }
 
 async function collectCodexResponse(response, upstreamDeadlines = {}) {
-  const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
-  const collected = collectEventStreamText(bytes.toString('utf8')) || parseJson(bytes);
-  const policyFailure = collected?.[TERMINAL_EVENT_TYPE] === 'response.failed'
-    && misalignmentPolicyFailure({ response: collected });
-  if (policyFailure) return collected;
-  const validJsonResponse = collected && typeof collected === 'object' && !Array.isArray(collected) && typeof collected.id === 'string' && !collected.error;
-  if (!validJsonResponse || collected.status === 'failed' || collected[TERMINAL_EVENT_TYPE] === 'response.failed') {
-    throw new Error('Invalid upstream response terminal');
+  let collectedUsage = null;
+  const observer = isEventStream(response) ? createSseUsageObserver() : null;
+  const observe = observer ? (chunk, final = false) => observer.write(chunk, final) : null;
+  try {
+    const bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines, observe);
+    observe?.(new Uint8Array(), true);
+    const collected = collectEventStreamText(bytes.toString('utf8')) || parseJson(bytes);
+    collectedUsage = mergeUsage(observer?.usage, extractUsage(collected));
+    const validJsonResponse = collected && typeof collected === 'object' && !Array.isArray(collected) && typeof collected.id === 'string';
+    if (!validJsonResponse) throw new Error('Invalid upstream response terminal');
+    Object.defineProperty(collected, COLLECTED_USAGE, { value: collectedUsage });
+    return collected;
+  } catch (error) {
+    // Retain statistics already parsed from complete events, never incomplete JSON.
+    const usage = collectedUsage || observer?.usage;
+    if (hasMeasuredUsage(usage)) error.gatewayMeasuredUsage = usage;
+    throw error;
   }
-  return collected;
 }
 
 function collectEventStreamText(text) {
@@ -2351,6 +2366,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         else if (!transformChat) await writeNative(wire, null);
         terminal = true;
         completed = true;
+        healthOutcome = { class: 'success', retryable: false };
         void reader.cancel('Upstream terminal event').catch(() => {});
       } else if (sanitizePublicResponses || transformChat) {
         terminal = true;
@@ -2525,7 +2541,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
           errorCode: 'upstream_tool_snapshot_inconsistent', termination
         });
-      } else if (completeUsage(usage)) {
+      } else if (hasMeasuredUsage(usage)) {
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
           errorCode: downstreamClosed ? 'downstream_closed' : healthOutcome?.errorCode || 'upstream_stream_failed', termination
         });
@@ -2538,7 +2554,7 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         else if (response.ok && usage && !failedIncompleteTerminal && !nativeTurnLease && !publicState?.completionFailure) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting);
       }
     }
-    if (!completed && completeUsage(usage)) await store.flushDurability().catch(() => {});
+    if (!completed && hasMeasuredUsage(usage)) await store.flushDurability().catch(() => {});
     if (admission) {
       const outcome = healthOutcome || (downstreamClosed
         ? { class: 'neutral', retryable: false, transport: 'cancelled' }
@@ -2597,7 +2613,7 @@ function logProxyFailure(logger, stage, upstreamId, error) {
 }
 
 function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, accounting = {}, lifecycle = null, responseStatusCode = null, failure = null) {
-  const usage = body?.inputTokens !== undefined || body?.upstreamCostMicros !== undefined ? body : extractUsage(body);
+  const usage = body?.[COLLECTED_USAGE] || (body?.inputTokens !== undefined || body?.upstreamCostMicros !== undefined ? body : extractUsage(body));
   const settlement = usage?.upstreamCostMicros === undefined
     ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier)
     : { settledCostMicros: usage.upstreamCostMicros, costSource: 'upstream_reported' };
@@ -2617,6 +2633,13 @@ function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, 
     if (accounting.shareSessionId) accounting.sharingStore?.releaseReservation(attemptId, 'accounting_failed');
     // Accounting must not replace a successful provider response.
   }
+}
+
+function settleFailedAttempt(req, store, upstream, attemptId, startedAt, body, payload, errorCode, responseStatusCode = 502) {
+  const usage = body?.[COLLECTED_USAGE] || (body?.inputTokens !== undefined || body?.upstreamCostMicros !== undefined ? body : extractUsage(body));
+  if (hasMeasuredUsage(usage)) {
+    settleUsage(store, upstream, attemptId, startedAt, usage, payload, requestAccounting(req), null, responseStatusCode, { errorCode });
+  } else releaseShareRequest(req, attemptId, errorCode);
 }
 
 function retryGatewayAttempt(store, lifecycle, attemptId, details) {
@@ -2644,7 +2667,7 @@ function parseJson(bytes) {
   try { return JSON.parse(bytes.toString('utf8')); } catch { return null; }
 }
 
-async function readResponseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}) {
+async function readResponseBytes(response, maxBytes = 16 * 1024 * 1024, upstreamDeadlines = {}, observe = null) {
   const reader = response.body?.getReader();
   if (!reader) return Buffer.alloc(0);
   const chunks = [];
@@ -2653,6 +2676,7 @@ async function readResponseBytes(response, maxBytes = 16 * 1024 * 1024, upstream
     while (true) {
       const { done, value } = await readWithIdleDeadline(reader, upstreamDeadlines);
       if (done) return Buffer.concat(chunks, size);
+      observe?.(value);
       size += value.byteLength;
       if (size > maxBytes) {
         void reader.cancel('Response body exceeded limit').catch(() => {});
@@ -2978,17 +3002,13 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
       if (['response.completed', 'response.incomplete'].includes(terminalEvent?.type) && !failedIncompleteResponse(terminalEvent)) {
         settleUsage(store, upstream, attemptId, startedAt, streamUsage, {}, requestAccounting(req));
       } else {
-        releaseShareRequest(
-          req,
-          attemptId,
+        settleFailedAttempt(req, store, upstream, attemptId, startedAt, streamUsage, {},
           streamed.cancelled ? 'downstream_closed' : terminalEvent?.type === 'error' || terminalEvent?.type === 'response.failed' || failedIncompleteResponse(terminalEvent)
-            ? 'upstream_response_failed'
-            : 'upstream_stream_incomplete'
-        );
+            ? 'upstream_response_failed' : 'upstream_stream_incomplete');
       }
     } catch (error) {
       store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: error?.upstreamFailureKind === 'cancelled' }));
-      releaseShareRequest(req, attemptId, error?.upstreamFailureKind === 'cancelled' ? 'downstream_closed' : 'upstream_stream_failed');
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, streamUsage, {}, error?.upstreamFailureKind === 'cancelled' ? 'downstream_closed' : 'upstream_stream_failed');
       if (!res.headersSent) sendFailure(res);
       else res.destroy();
     }
@@ -2998,8 +3018,9 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
   try {
     bytes = await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines);
   } catch (error) {
-    store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error));
-    releaseShareRequest(req, attemptId, 'upstream_response_failed');
+    const cancelled = req.aborted || res.destroyed || error?.upstreamFailureKind === 'cancelled';
+    store.settleUpstreamAttempt(upstream.id, admission, classifyTransportError(error, { clientCancelled: cancelled }));
+    releaseShareRequest(req, attemptId, cancelled ? 'downstream_closed' : 'upstream_response_failed');
     throw error;
   }
   store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
@@ -3434,7 +3455,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     releaseShareRequest(req, publicAttempt?.id, errorCode);
   };
   const settlePublicFailure = (errorCode, responseStatusCode = 200) => {
-    if (publicAttempt && upstream && completeUsage(publicUsage)) {
+    if (publicAttempt && upstream && hasMeasuredUsage(publicUsage)) {
       settleUsage(store, upstream, publicAttempt.id, publicAttempt.startedAt,
         publicUsage, publicPayload, accounting, publicLifecycle, responseStatusCode, { errorCode });
       return;
@@ -3592,7 +3613,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
   const retryPublicWebSocketCompatibility = (frame, candidate) => {
     if (!publicTurnActive || publicOutput || publicCompatibilityRetries >= COMPATIBILITY_RETRY_LIMIT) return false;
-    if (!['error', 'response.failed'].includes(frame?.type)) return false;
+    if (!['error', 'response.failed'].includes(frame?.type) || hasMeasuredUsage(extractUsage(frame))) return false;
     const field = rejectedParameter(frame, JSON.stringify(frame));
     if (!CODEX_OPTIONAL_FALLBACK_FIELDS.has(field) || !Object.hasOwn(publicPayload || {}, field)) return false;
     const context = compatibilityFactContext(candidate, '/v1/responses', publicPayload, req, '/v1/responses', { websocket: true });
@@ -3875,6 +3896,10 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     settlePublicAdmission(outcome);
     const acquired = acquirePublicCandidate(turnCandidateIndex + 1, { model: publicPayload.model, routeClass: 'proxy_stream', ignoreQuotaCooldown: Boolean(ignoreQuotaCooldown) });
     if (!acquired) return false;
+    if (publicAttempt && hasMeasuredUsage(publicUsage)) {
+      settleFailedAttempt(req, store, upstream, publicAttempt.id, publicAttempt.startedAt, publicUsage, publicPayload, 'upstream_websocket_retryable_failure');
+    }
+    publicUsage = null;
     retryGatewayAttempt(store, publicLifecycle, publicAttempt?.id, { errorCode: 'upstream_websocket_retryable_failure' });
     retriedTurn = true;
     const fallback = activatePublicCandidate(acquired);
@@ -3996,6 +4021,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         });
       }
       const decoded = parseJson(await readResponseBytes(response));
+      publicUsage = mergeUsage(publicUsage, extractUsage(decoded));
       const compact = compactionBridgeResult(decoded, true);
       if (!compact) throw new Error('Invalid upstream compact response');
       const events = [
@@ -4171,6 +4197,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return;
         frame = restoreCodexMultiAgentResponse(frame, publicMultiAgentOptimized);
         gatewayDiagnosticsForStore(store).firstSseEvent(publicAttempt?.id);
+        publicUsage = mergeUsage(publicUsage, extractUsage(frame));
         if (retryPublicWebSocketCompatibility(frame, connectionUpstream)) return;
         const frameOutcome = classifySseEvent(frame, { allowMisalignmentPolicy: true });
         if (frameOutcome.errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
@@ -4183,7 +4210,6 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         const events = projected.map((block) => decodeSseBlock(block)).filter((decoded) => decoded.kind === 'event').map((decoded) => decoded.event);
         if (!events.length) return;
         publicOutput = true;
-        publicUsage = mergeUsage(publicUsage, extractUsage(frame));
         const terminal = events.find((event) => ['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event.type));
         if (sessionId && req.proxyAuth?.kind !== 'personal_share' && !['response.failed', 'error'].includes(terminal?.type)) {
           store.pinSession(sessionId, connectionUpstream.id, scopeId, requestAccounting(req).apiKeyId);

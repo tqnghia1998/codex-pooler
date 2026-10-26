@@ -65,6 +65,13 @@ The Node proxy covers the client-visible local compatibility path:
 
 ### Responses stream and request contracts
 
+Failed or cancelled turns retain complete measured usage, including an explicit
+provider cost without token counts. This includes collected JSON/SSE, initial
+SSE failures, raw streams, and public/native WebSocket turns. Failed attempts
+are charged before failover without turning them into successful requests;
+missing usage is never estimated. Successful Chat streams ending in `[DONE]`
+clear their health lease, and downstream cancellation remains health-neutral.
+
 Public Responses and Chat Completions accept the legacy `user` field as a
 string or null and discard it before routing or provider dispatch. Other types
 return `400 invalid_request` with `param: user`. The Responses adapter supports
