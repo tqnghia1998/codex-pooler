@@ -5,8 +5,9 @@ import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
 import { upstreamFailure } from './public-errors.js';
 import { HttpError } from './http-ingress.js';
-import { extractUsage, upstreamCostMicros } from './pricing.js';
+import { extractUsage, hasMeasuredUsage, upstreamCostMicros } from './pricing.js';
 import { createSseUsageObserver } from './sse-usage-observer.js';
+import { collectRejectedResponse, downstreamAbortSignal, responseWithDownstreamAbort } from './upstream-response-lifecycle.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders } from './protocol-compat.js';
 import { modelCatalogForStore } from './codex-model-catalog.js';
@@ -93,7 +94,8 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
     redirect: 'error',
     headers: { 'content-type': file.type || 'application/octet-stream', 'x-ms-blob-type': 'BlockBlob' },
     body: Buffer.from(await file.arrayBuffer())
-  }, fetchImpl, upstreamDeadlines);
+  }, fetchImpl, upstreamDeadlines, null, { req, res });
+  void upload.body?.cancel('File upload response finished').catch(() => {});
   if (!upload.ok) return sendFailure(res);
 
   const { response: finalized, body: finalizedBody } = await finalizeFile(provider, fileId);
@@ -448,10 +450,17 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
     if (!context.req.disablePacing) {
       await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
     }
-    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
+    response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth, context);
     persistCookies(response, context);
-    if ((response.status === 401 || response.status === 403) && context.credentials.refreshToken) {
+    let authenticationUsage = null;
+    if ([401, 403].includes(response.status) && context.credentials.refreshToken) {
+      const rejected = await collectRejectedResponse(response, context.upstreamDeadlines);
+      response = rejected.response;
+      try { authenticationUsage = extractUsage(JSON.parse(rejected.bytes.toString('utf8'))); } catch {}
+    }
+    if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && context.credentials.refreshToken) {
       try {
+        void response.body?.cancel('Retrying with refreshed credentials').catch(() => {});
         const refreshed = await refreshProviderCredentials(context.upstream, context.credentials, {
           fetchImpl: context.fetchImpl,
           saveCredentials: (updated, expiresAt) => context.store.persistCredentials(context.upstream.id, updated, expiresAt)
@@ -469,10 +478,11 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
       if (!context.req.disablePacing) {
         await upstreamPacerForStore(context.store).acquire(context.upstream.id, { model: pacingModel, signal: abort.signal });
       }
-      response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth);
+      response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth, context);
       persistCookies(response, context);
     }
   } catch (error) {
+    void response?.body?.cancel('Compatibility dispatch failed').catch(() => {});
     if (!error?.upstreamOutcomeSettled) {
       try {
         context.store.settleUpstreamAttempt(
@@ -521,37 +531,36 @@ function persistCookies(response, context) {
   }
 }
 
-async function timedFetch(url, options, fetchImpl, upstreamDeadlines = {}, codexHostHealth = null) {
+async function timedFetch(url, options, fetchImpl, upstreamDeadlines = {}, codexHostHealth = null, downstream = null) {
+  const abort = downstream ? downstreamAbortSignal(downstream.req, downstream.res) : null;
+  let bodyOwnsAbort = false;
   try {
-    return await withCodexHostHealth(codexHostHealth, url, () => fetchWithHeaderDeadline(fetchImpl, url, options, upstreamDeadlines));
+    abort?.signal.throwIfAborted();
+    let response = await withCodexHostHealth(codexHostHealth, url, () => fetchWithHeaderDeadline(fetchImpl, url, {
+      ...options,
+      ...(abort ? { signal: abort.signal } : {})
+    }, upstreamDeadlines));
+    abort?.headersReceived();
+    if (abort && response.body) {
+      response = responseWithDownstreamAbort(response, abort);
+      bodyOwnsAbort = true;
+    }
+    return response;
   } catch (error) {
     if (error?.codexHostCircuitOpen) throw error;
+    const cancelled = abort?.signal.reason?.upstreamFailureKind === 'cancelled';
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
-    const wrapped = new Error(timedOut ? 'Upstream request timed out' : `Upstream request failed: ${error.message}`, { cause: error });
+    const wrapped = new Error(cancelled ? 'Downstream request closed' : timedOut ? 'Upstream request timed out' : `Upstream request failed: ${error.message}`, { cause: error });
     wrapped.statusCode = 502;
-    wrapped.upstreamFailureKind = timedOut ? 'timeout' : 'transport';
+    wrapped.upstreamFailureKind = cancelled ? 'cancelled' : timedOut ? 'timeout' : 'transport';
     if (error?.codexHostPreconnect) {
       wrapped.codexHostPreconnect = true;
       wrapped.codexHostPreconnectCode = error.codexHostPreconnectCode;
     }
     throw wrapped;
+  } finally {
+    if (!bodyOwnsAbort) abort?.cleanup();
   }
-}
-
-function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new DOMException('Upstream request timed out', 'TimeoutError')), timeoutMs);
-  const abort = () => controller.abort(new DOMException('Downstream request closed', 'AbortError'));
-  req?.once('aborted', abort);
-  res?.once('close', abort);
-  return {
-    signal: controller.signal,
-    cleanup() {
-      clearTimeout(timeout);
-      req?.removeListener('aborted', abort);
-      res?.removeListener('close', abort);
-    }
-  };
 }
 
 async function multipart(req, body) {
