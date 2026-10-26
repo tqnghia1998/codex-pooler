@@ -79,3 +79,21 @@ test('keeps an omitted cached-input rate unavailable instead of free', () => {
 function prices(input) {
   return { input, cached_input: input / 10, cache_write: input * 1.25, output: input * 6 };
 }
+
+test('imports duration-specific cache-write rates without inventing a generic rate', () => {
+  const durationPrices = (input) => ({ input, cached_input: input / 10, cache_write_30m: input * 1.25, cache_write_12h: input * 2.5, output: input * 6 });
+  const payload = {
+    generated_at: '2026-10-23T16:30:24.279646Z',
+    models: { 'gpt-test': { model: 'gpt-test', pricing_type: 'per_1m_tokens', prices: { standard: { default: durationPrices(2), long_context: durationPrices(4) }, fast: { default: durationPrices(4), long_context: durationPrices(8) } } } }
+  };
+  const previousRows = [{ model: 'gpt-test', tier: 'flex', bucket: 'default', input: 1, cachedInput: 0.1, cacheWrite: 1.25, output: 6, contextRule: { status: 'legacy', longContextInputTokensGt: 272000 } }];
+  const snapshot = buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'], previousRows });
+  assert.match(snapshot, /"tier":"standard","bucket":"default","input":2,"cachedInput":0\.2,"cacheWrite":null,"output":12,.*"cacheWriteRates":\{"30m":2\.5,"12h":5\}/);
+  assert.match(snapshot, /"tier":"flex","bucket":"default","input":1,"cachedInput":0\.1,"cacheWrite":1\.25,/);
+  assert.equal(buildOpenAiPricingSnapshot(payload, { models: ['gpt-test'] }).includes('"tier":"flex"'), false);
+  for (const invalid of [null, true, -1, '1']) {
+    const broken = structuredClone(payload);
+    broken.models['gpt-test'].prices.standard.default.cache_write_12h = invalid;
+    assert.throws(() => buildOpenAiPricingSnapshot(broken, { models: ['gpt-test'] }), /standard default cache_write_12h must be a non-negative number/);
+  }
+});
