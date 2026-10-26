@@ -339,6 +339,7 @@ POST   /api/upstreams
 POST   /api/upstreams/refresh-quota         # all upstreams, concurrent batches of 10
 PATCH  /api/upstreams/:id
 DELETE /api/upstreams/:id
+POST   /api/upstreams/remove-reauth-required  # { "ids": [...] }; removes only accounts still requiring reauth
 POST   /api/upstreams/:id/refresh-quota
 POST   /api/upstreams/:id/test-connection  # live minimal generation through this upstream
 POST   /api/upstreams/:id/refresh-token
