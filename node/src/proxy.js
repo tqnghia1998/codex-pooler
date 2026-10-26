@@ -3,7 +3,7 @@ import { writeChunk } from './http-stream.js';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { request as undiciRequest } from 'undici';
-import { defaultBaseUrl, isClaudeOAuthUpstream, normalizeClaudeBaseUrl, parseClaudeQuotaHeaders, STATIC_MODEL_CATALOG } from './domain.js';
+import { defaultBaseUrl, isClaudeOAuthUpstream, normalizeClaudeBaseUrl, parseClaudeQuotaHeaders, spendingEligibility, STATIC_MODEL_CATALOG } from './domain.js';
 import { buildClaudeModelsResponse, isClaudeModelsRequest, resolveClaudeModelListId } from './claude-models.js';
 import { DEFAULT_SCOPE_ID } from './store.js';
 import { MODEL_LISTING_TTL_MS, modelCatalogForStore } from './codex-model-catalog.js';
@@ -285,6 +285,18 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
   if (response.ok && sessionId && req.proxyAuth?.kind !== 'personal_share' && !store.sessionUpstream(sessionId, authScopeId, accounting.apiKeyId)) {
     store.pinSession(sessionId, upstream.id, authScopeId, accounting.apiKeyId);
   }
+  const recoverClaudeSession = sessionId && isAutomaticClaudeRoute(req, sourcePath) && upstream.type === 'claude'
+    ? () => {
+      try {
+        const previousId = store.sessionUpstream(sessionId, authScopeId, accounting.apiKeyId);
+        if (previousId && store.get(previousId, authScopeId)?.type === 'compass') {
+          store.pinSession(sessionId, upstream.id, authScopeId, accounting.apiKeyId);
+        }
+      } catch {
+        // Session affinity must not replace a completed provider response.
+      }
+    }
+    : null;
   const responseOptions = {
     relayTurnState: isBackendMetadataRoute(path),
     nativeResponseControls: isBackendResponsesRoute(path)
@@ -391,6 +403,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
       restoreCodexMultiAgent: codexMultiAgentOptimized,
       claudeToolAliases: dispatchedToolAliases,
       claudeModelAlias: dispatchedModelAlias,
+      onSuccessfulCompletion: recoverClaudeSession,
       onSuccessfulTerminal: path === '/v1/responses' ? (terminalResponse) => learnResponsePin(store, terminalResponse, upstream.id, authScopeId, accounting.apiKeyId, req) : null,
       logger,
       nativeTurnLease: req.nativeTurnLease
@@ -438,6 +451,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     return;
   }
   if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'success', retryable: false });
+  recoverClaudeSession?.();
   settleUsage(store, upstream, attemptId, startedAt, terminalBody, payload, accounting, lifecycle, response.status);
   const nativeLease = req.nativeTurnLease;
   if (nativeLease) {
@@ -821,7 +835,7 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   const model = typeof payload?.model === 'string' ? payload.model.toLowerCase() : '';
   const nativeCodex = originalPath.startsWith('/backend-api/codex/');
   const ultrafast = normalizedServiceTier(payload?.service_tier) === 'ultrafast';
-  const preferredType = path === '/v1/messages' ? (requestedType || 'compass') : path === '/v1/messages/count_tokens' ? 'claude' : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
+  const preferredType = CLAUDE_MESSAGES_PATHS.has(path) ? (requestedType || 'claude') : path === '/v1/responses/compact' || nativeCodex || ultrafast ? 'codex' : model.startsWith('claude-') ? 'compass' : 'codex';
   if (personalKey && (headerRequestedId || requestedType)) {
     return { candidates: [], diagnostics: { exclusions: [{ code: 'personal_key_upstream_conflict' }] } };
   }
@@ -862,6 +876,14 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   if (path === '/v1/messages') plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'codex');
   else if (path === '/v1/messages/count_tokens') plan.candidates = plan.candidates.filter((candidate) => ['claude', 'compass'].includes(candidate.type));
   else plan.candidates = plan.candidates.filter((candidate) => candidate.type !== 'claude');
+  // A Compass soft affinity must not outrank the native Claude phase on
+  // the next request. Account/type selectors and product share pins stay strict.
+  if (isAutomaticClaudeRoute(req, path)) {
+    plan.candidates = [
+      ...plan.candidates.filter((candidate) => candidate.type === 'claude'),
+      ...plan.candidates.filter((candidate) => candidate.type === 'compass')
+    ];
+  }
   if (!personalKey) return plan;
   const position = new Map(personalSessions.map((session, index) => [session.upstreamId, index]));
   plan.candidates = plan.candidates
@@ -870,7 +892,20 @@ function chooseUpstreamPlan(store, req, path, payload, originalPath = path, mode
   return plan;
 }
 
-export function* gatewayCandidateAttempts(candidates, claudeConfig = null) {
+function isAutomaticClaudeRoute(req, sourcePath) {
+  return CLAUDE_MESSAGES_PATHS.has(sourcePath)
+    && !header(req, 'x-upstream-id') && !header(req, 'x-upstream-type')
+    && !isShareCredential(req.proxyAuth);
+}
+
+export function* gatewayCandidateAttempts(candidates, claudeConfig = null, { claudeFirst = false } = {}) {
+  if (claudeFirst) {
+    // Finish configured Claude retry rounds before entering the fallback phase.
+    for (const type of ['claude', 'compass']) {
+      yield* gatewayCandidateAttempts(candidates.filter((candidate) => candidate.type === type), claudeConfig);
+    }
+    return;
+  }
   // Snapshot retry policy, but leave account lookup/admission until each attempt.
   let lastRound = 0;
   let lastIndex = candidates.length - 1;
@@ -895,16 +930,29 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
   const scopeId = requestScopeId(req);
   let terminalFailure = null;
   let codexHostBlocked = false;
-  let candidatesAttempted = 0;
-  for (const { candidate, last } of gatewayCandidateAttempts(candidates, claudeConfig)) {
-    if (candidatesAttempted >= MAX_GATEWAY_CANDIDATE_ATTEMPTS) break;
+  const claudeFirst = isAutomaticClaudeRoute(req, sourcePath);
+  const enforceSpendingCap = CLAUDE_MESSAGES_PATHS.has(sourcePath)
+    && !isShareCredential(req.proxyAuth) && !allowUnavailableCandidate;
+  const attemptsByPhase = new Map();
+  for (const { candidate, last } of gatewayCandidateAttempts(candidates, claudeConfig, { claudeFirst })) {
+    if (req.aborted || res.destroyed) {
+      finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'downstream_closed' });
+      throw Object.assign(new Error('Downstream request closed'), { upstreamFailureKind: 'cancelled', statusCode: 502 });
+    }
+    const phase = claudeFirst ? candidate.type : 'all';
+    const candidatesAttempted = attemptsByPhase.get(phase) || 0;
+    if (candidatesAttempted >= MAX_GATEWAY_CANDIDATE_ATTEMPTS) {
+      if (!claudeFirst) break;
+      continue;
+    }
     if (!selectPersonalShareSession(req, candidate.id, { affinityId: sessionAffinity(req), allowReselect: true })) continue;
     const upstream = store.get(candidate.id, scopeId);
     if (codexHostBlocked && upstream?.type === 'codex') continue;
+    if (enforceSpendingCap && upstream && !spendingEligibility(upstream).eligible) continue;
     let admission = upstream && store.beginUpstreamAttempt(upstream.id, scope);
     if (!upstream || !admission && !allowUnavailableCandidate) continue;
-    candidatesAttempted += 1;
-    const queuePacing = last || candidatesAttempted === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
+    attemptsByPhase.set(phase, candidatesAttempted + 1);
+    const queuePacing = last || candidatesAttempted + 1 === MAX_GATEWAY_CANDIDATE_ATTEMPTS;
     let credentials;
     try {
       credentials = store.credentials(upstream.id);
@@ -956,11 +1004,17 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       logProxyFailure(logger, 'credentials', upstream.id, error);
       releaseShareRequest(req, attemptId, 'upstream_credentials_failed');
       store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+      if (claudeFirst && upstream.type === 'claude') {
+        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_credentials_failed', responseStatusCode: 502 });
+        terminalFailure = { upstream, attemptId: null, startedAt, response: new Response(null, { status: 502 }), admission: null, failureCode: 'upstream_credentials_failed' };
+        continue;
+      }
       return { upstream, attemptId, startedAt, response: new Response(null, { status: 502 }) };
     } finally {
       diagnostics.credentialPrepared(attemptId);
     }
     try {
+      if (localTokenCount && enforceSpendingCap) assertUpstreamSpendingCap(store, upstream.id);
       if (!localTokenCount) await ensureClaudeCredentialIdentity({ upstream, credentials, store, fetchImpl });
       request = localTokenCount && upstream.type === 'compass'
         ? { body: JSON.stringify(prepareClaudeLocalCountTokensBody({ body: payload })) }
@@ -972,6 +1026,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           upstreamId: upstream.id,
           model: payload?.model,
           queue: queuePacing,
+          enforceSpendingCap,
           attemptId
         });
       persistResponseCookies(response, upstream, credentials, store);
@@ -1008,13 +1063,21 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
             upstreamId: upstream.id,
             model: payload?.model,
             queue: queuePacing,
+            enforceSpendingCap,
             attemptId
           });
           persistResponseCookies(response, upstream, credentials, store);
           authenticationRetried = true;
-        } catch {
+        } catch (error) {
+          if (error?.upstreamSpendingChanged) throw error;
           store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
           releaseShareRequest(req, attemptId, 'upstream_authentication_failed');
+          if (claudeFirst && upstream.type === 'claude') {
+            retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: 'upstream_authentication_failed', responseStatusCode: response.status });
+            void response.body?.cancel('Trying another eligible upstream').catch(() => {});
+            terminalFailure = { upstream, attemptId: null, startedAt, response: new Response(null, { status: response.status }), admission: null };
+            continue;
+          }
           return { upstream, attemptId, startedAt, response, admission: null };
         }
       }
@@ -1052,6 +1115,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           upstreamId: upstream.id,
           model: payload?.model,
           queue: queuePacing,
+          enforceSpendingCap,
           attemptId
         });
         persistResponseCookies(response, upstream, credentials, store);
@@ -1180,6 +1244,13 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         }
       }
     } catch (error) {
+      if (error?.upstreamSpendingChanged) {
+        store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
+        releaseShareRequest(req, attemptId, error.code);
+        retryGatewayAttempt(store, lifecycle, attemptId, { errorCode: error.code, responseStatusCode: 503 });
+        terminalFailure = { upstream, attemptId: null, startedAt, response: new Response(null, { status: 503 }), admission: null, failureCode: error.code };
+        continue;
+      }
       if (error?.codexCapacityChanged) {
         store.settleUpstreamAttempt(upstream.id, admission, { class: 'neutral', retryable: false });
         releaseShareRequest(req, attemptId, 'quota_exhausted');
@@ -1598,6 +1669,15 @@ export function projectPublicWebSocketFrame(payload, { generate = true, compatib
   return projected;
 }
 
+function assertUpstreamSpendingCap(store, upstreamId) {
+  const decision = spendingEligibility(store.get(upstreamId) || {});
+  if (!decision.eligible) {
+    throw Object.assign(new Error('Upstream spending eligibility changed before dispatch'), {
+      upstreamSpendingChanged: true, code: decision.reason
+    });
+  }
+}
+
 async function requestUpstream(request, fetchImpl, downstream = null, upstreamDeadlines = {}, codexHostHealth = null, pacing = null) {
   const abort = downstream ? downstreamAbortSignal(downstream.req, downstream.res) : null;
   let bodyOwnsAbort = false;
@@ -1612,6 +1692,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
       });
       diagnostics?.queueWaited(pacing.attemptId, pacingResult.waitedMs);
     }
+    if (pacing?.enforceSpendingCap) assertUpstreamSpendingCap(pacing.store, pacing.upstreamId);
     diagnostics?.connectionStarted(pacing.attemptId);
     if (request.upstreamType === 'codex' && pacing?.store) pacing.store.assertCodexCapacity(pacing.upstreamId, pacing.model);
     const wireHeaders = request.upstreamType === 'claude'
@@ -1651,7 +1732,7 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
     diagnostics?.responseHeaders(pacing.attemptId);
     return response;
   } catch (error) {
-    if (error?.codexCapacityChanged) throw error;
+    if (error?.codexCapacityChanged || error?.upstreamSpendingChanged) throw error;
     if (error instanceof PacingError) throw error;
     if (error?.codexHostCircuitOpen) throw error;
     const timedOut = error.name === 'AbortError' || error.name === 'TimeoutError';
@@ -2195,7 +2276,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, logger = null, nativeTurnLease = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, onSuccessfulCompletion = null, logger = null, nativeTurnLease = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -2436,8 +2517,10 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
     reader.releaseLock();
     if (!res.writableEnded && !res.destroyed) res.end();
     if (upstream.type === 'claude' && completed) commitClaudeDiagnostics(claudeDiagnosticsState, claudeMessageId);
-    if (completed) settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
-    else {
+    if (completed) {
+      onSuccessfulCompletion?.();
+      settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode);
+    } else {
       if (chatState?.reconciliationFailed && usage) {
         settleUsage(store, upstream, attemptId, startedAt, usage, payload, accounting, lifecycle, responseStatusCode, {
           errorCode: 'upstream_tool_snapshot_inconsistent', termination
