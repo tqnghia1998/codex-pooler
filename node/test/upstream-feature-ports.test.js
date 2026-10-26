@@ -75,14 +75,17 @@ test('Decisions routes are unsupported for every method without matching neighbo
   assert.equal(gatewayRequestKind('POST', '/v1/decisions-other'), null);
 });
 
-test('prices Sol ultrafast with cache writes and the exact long-context bucket', () => {
+test('prices Sol ultrafast cached input and the exact long-context bucket, leaving TTL-priced cache writes unpriced', () => {
   assert.equal(priceUsage(['gpt-6.1-sol'], { inputTokens: 1_000, outputTokens: 100, serviceTier: 'ultrafast' }).settledCostMicros, 18_000);
   assert.equal(priceUsage(['gpt-6.1-sol-20260929'], {
-    inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100, serviceTier: 'ultrafast'
-  }).settledCostMicros, 17_160);
+    inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'ultrafast'
+  }).settledCostMicros, 16_860);
   assert.equal(priceUsage(['gpt-6.1-sol'], {
-    inputTokens: 272_001, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100, serviceTier: 'ultrafast'
-  }).settledCostMicros, 6_535_344);
+    inputTokens: 272_001, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'ultrafast'
+  }).settledCostMicros, 6_534_744);
+  assert.equal(priceUsage(['gpt-6.1-sol'], {
+    inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100, serviceTier: 'ultrafast'
+  }), null);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 1_000, outputTokens: 100, serviceTier: 'ultrafast' }), null);
 });
 
@@ -94,15 +97,19 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.163.0']);
-  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0']) {
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.164.0']);
+  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.163.1'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.164.1'), 'instructions_template');
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);
+  // Codex 0.164 adds an optional permission-prefix field that the decoder ignores.
+  for (const approved of [null, 'git', 7, false, {}]) {
+    assert.equal(codexCatalogDecodable({ ...catalogRow, model_messages: { ...catalogRow.model_messages, permissions: { approved_prefixes: approved } } }), true);
+  }
   for (const broken of [
     { ...catalogRow, shell_type: 'future' }, { ...catalogRow, supported_in_api: null },
     { ...catalogRow, input_modalities: ['video'] }, { ...catalogRow, service_tiers: [null] },

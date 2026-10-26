@@ -25,6 +25,7 @@ const FILE_MIMES = new Set(['application/pdf', 'text/plain']);
 const TOOL_RESULT_TYPES = new Set(['function_call_output', 'custom_tool_call_output', 'program_output', 'shell_call_output', 'tool_search_output']);
 const MAX_CHAT_TEXT_BYTES = 10_485_760;
 const CHAT_TEXT_CHUNK_BYTES = 262_144;
+const FUNCTION_TOOL_NAME = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_CHAT_CALL_ID_BYTES = 64;
 
 export class AdapterError extends Error {
@@ -328,8 +329,10 @@ function translateChatTools(tools) {
   if (!Array.isArray(tools)) invalid('tools must be an array', 'tools');
   return tools.map((tool) => {
     if (tool?.type === 'function' && plainObject(tool.function)) {
-      const name = cleanString(tool.function.name);
-      if (!name || !plainObject(tool.function.parameters)) invalid('function tool requires nested function name and parameters', 'tools');
+      // Keep the exact spelling: the provider name rule rejects padded names
+      // later instead of silently aliasing them to a trimmed name.
+      const { name } = tool.function;
+      if (!cleanString(name) || !plainObject(tool.function.parameters)) invalid('function tool requires nested function name and parameters', 'tools');
       return { type: 'function', name, parameters: tool.function.parameters, ...(tool.function.description !== undefined ? { description: tool.function.description } : {}), strict: tool.function.strict ?? false };
     }
     if (tool?.type === 'custom' && plainObject(tool.custom)) {
@@ -681,6 +684,7 @@ function validateTool(tool) {
   if (tool.type === 'function') {
     exactKeys(tool, ['type', 'name', 'description', 'parameters', 'strict', 'defer_loading', 'allowed_callers', 'output_schema', 'async'], 'tools');
     if (!cleanString(tool.name) || tool.strict !== true && !plainObject(tool.parameters)) invalid('function tool requires flat name and parameters', 'tools');
+    if (!FUNCTION_TOOL_NAME.test(tool.name)) invalid('function tool names must contain 1 to 128 ASCII letters, digits, underscores or hyphens', 'tools');
     if (tool.strict === null) {
       delete tool.strict;
     } else {
@@ -1134,8 +1138,9 @@ function validBase64(value) {
 function breakpoint(part) {
   if (part.prompt_cache_breakpoint === undefined) return {};
   if (!plainObject(part.prompt_cache_breakpoint) || part.prompt_cache_breakpoint.mode !== 'explicit') invalid('prompt_cache_breakpoint must be an explicit mode object', 'input.prompt_cache_breakpoint');
-  const extra = Object.keys(part.prompt_cache_breakpoint).find((key) => key !== 'mode');
+  const [extra] = Object.keys(part.prompt_cache_breakpoint).filter((key) => !['mode', 'ttl'].includes(key)).sort();
   if (extra) invalid('prompt_cache_breakpoint field is not supported', `input.prompt_cache_breakpoint.${extra}`);
+  if ('ttl' in part.prompt_cache_breakpoint && !['30m', '12h'].includes(part.prompt_cache_breakpoint.ttl)) invalid('prompt_cache_breakpoint ttl is not supported', 'input.prompt_cache_breakpoint.ttl');
   return { prompt_cache_breakpoint: part.prompt_cache_breakpoint };
 }
 

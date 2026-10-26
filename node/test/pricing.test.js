@@ -78,8 +78,11 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   );
   assert.deepEqual(usage, { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 0, outputTokens: 100, serviceTier: null, upstreamCostMicros: 5_000 });
 
-  assert.deepEqual(priceUsage(['gpt-5.6-sol-20260801'], { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, serviceTier: 'priority' }), {
-    settledCostMicros: 8_760,
+  // The feed prices cache writes only per TTL (30m/12h); aggregate usage does
+  // not say which, so writes stay unpriced while the rest still settles.
+  assert.equal(priceUsage(['gpt-5.6-sol-20260801'], { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, serviceTier: 'priority' }), null);
+  assert.deepEqual(priceUsage(['gpt-5.6-sol-20260801'], { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 0, outputTokens: 50, serviceTier: 'priority' }), {
+    settledCostMicros: 8_560,
     costSource: 'pricing_snapshot',
     model: 'gpt-5.6-sol',
     priceVersion: OPENAI_PRICING_VERSION
@@ -113,8 +116,9 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   assert.equal(priceUsage(['gpt-6.1-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 3_000);
   assert.equal(priceUsage(['gpt-6.1-sol-20260929'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'priority' }).settledCostMicros, 6_000);
   assert.equal(priceUsage(['gpt-6.1-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'ultrafast' }).settledCostMicros, 18_000);
-  assert.equal(priceUsage(['gpt-6-luna'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 144);
-  assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 14_350);
+  assert.equal(priceUsage(['gpt-6-luna'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 141);
+  assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 14_100);
+  assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }), null);
   assert.equal(priceUsage(['claude-fable-5-1'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 14_275);
   assert.equal(priceUsage(['claude-opus-5-5'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 5_720);
   assert.equal(extractUsage({ usage: { input_tokens: 1_000, output_tokens: 100, price_cost_usd: null } }).upstreamCostMicros, undefined);
