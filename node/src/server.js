@@ -341,6 +341,26 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     return;
   }
 
+  if (req.method === 'POST' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'remove-reauth-required') {
+    const payload = await body(req);
+    if (!Array.isArray(payload?.ids) || !payload.ids.length || payload.ids.some((id) => typeof id !== 'string' || !id.trim())) {
+      throw new HttpError(400, 'invalid_request', 'ids must be a non-empty array of upstream IDs');
+    }
+    const removed = [];
+    const skipped = [];
+    for (const id of new Set(payload.ids)) {
+      const upstream = store.get(id);
+      if (upstream?.tokenRefresh?.status !== 'reauth_required' && upstream?.health?.status !== 'reauth_required') {
+        skipped.push(id);
+        continue;
+      }
+      store.remove(id);
+      removed.push(id);
+    }
+    sendJson(res, 200, { removed, skipped });
+    return;
+  }
+
   if (req.method === 'PUT' && parts.length === 3 && parts[1] === 'upstreams' && parts[2] === 'priority') {
     const payload = await body(req);
     sendJson(res, 200, { upstreams: store.setPriorityList(payload.ids) });

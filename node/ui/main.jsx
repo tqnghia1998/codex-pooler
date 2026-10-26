@@ -255,6 +255,8 @@ function Dashboard({ themeMode, setThemeMode }) {
   const [bulkUnknownValue, setBulkUnknownValue] = useState(5);
   const [deleteTarget, setDeleteTarget] = useState(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [reauthDeleteIds, setReauthDeleteIds] = useState(null);
+  const [isDeletingReauth, setIsDeletingReauth] = useState(false);
   const [refreshTarget, setRefreshTarget] = useState(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshTokenTarget, setRefreshTokenTarget] = useState(null);
@@ -422,6 +424,8 @@ function Dashboard({ themeMode, setThemeMode }) {
       if (retryTimer) window.clearTimeout(retryTimer);
     };
   }, [apiKey, load]);
+
+  const reauthUpstreams = useMemo(() => upstreams.filter(isReauthRequired), [upstreams]);
 
   const filteredUpstreams = useMemo(() => {
     let filtered = upstreams.slice();
@@ -710,6 +714,23 @@ function Dashboard({ themeMode, setThemeMode }) {
     }
   };
 
+  const confirmDeleteReauth = async () => {
+    if (!reauthDeleteIds?.length || isDeletingReauth) return;
+    setIsDeletingReauth(true);
+    try {
+      const result = await api('/api/upstreams/remove-reauth-required', {
+        method: 'POST', body: JSON.stringify({ ids: reauthDeleteIds })
+      });
+      setReauthDeleteIds(null);
+      await load();
+      show(`Removed ${result.removed.length} reauth-required accounts${result.skipped.length ? `; skipped ${result.skipped.length} recovered or missing accounts` : ''}`);
+    } catch (error) {
+      show(error.message, true);
+    } finally {
+      setIsDeletingReauth(false);
+    }
+  };
+
   const savePriority = (ids) => run(async () => {
     await api('/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids }) });
     setPriorityOpen(false);
@@ -895,6 +916,14 @@ function Dashboard({ themeMode, setThemeMode }) {
                   onClick={() => void openSystemStatus()}
                 />
                 <Button label="Routing" size="sm" variant="secondary" onClick={() => setRoutingOpen(true)} />
+                <Button label="Set bulk caps" size="sm" variant="secondary" onClick={openBulkCaps} />
+                <Button
+                  label={`Remove all Reauth required (${reauthUpstreams.length})`}
+                  size="sm"
+                  variant="destructive"
+                  isDisabled={!reauthUpstreams.length || isDeletingReauth}
+                  onClick={() => setReauthDeleteIds(reauthUpstreams.map(({ id }) => id))}
+                />
                 <MoreMenu
                   label="Management actions"
                   size="sm"
@@ -904,8 +933,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                     { label: 'Diagnostics', onClick: () => void openDiagnostics() },
                     { type: 'divider' },
                     { label: 'Refresh all quotas', onClick: () => setRefreshTarget({ all: true }) },
-                    { label: 'Set priority', onClick: () => setPriorityOpen(true) },
-                    { label: 'Bulk set caps', onClick: openBulkCaps }
+                    { label: 'Set priority', onClick: () => setPriorityOpen(true) }
                   ]}
                 />
                 <Button label="Add upstream" size="sm" variant="primary" onClick={add} />
@@ -1029,6 +1057,16 @@ function Dashboard({ themeMode, setThemeMode }) {
             actionVariant="destructive"
             isActionLoading={compatibilityActionLoading}
             onAction={resetCompatibility}
+          />
+          <AlertDialog
+            isOpen={Boolean(reauthDeleteIds)}
+            onOpenChange={(isOpen) => { if (!isOpen && !isDeletingReauth) setReauthDeleteIds(null); }}
+            title="Remove all Reauth required accounts?"
+            description={`Remove ${reauthDeleteIds?.length || 0} accounts marked Reauth required across the entire pool, including accounts hidden by filters. Accounts that have recovered before removal will be skipped. This action cannot be undone.`}
+            actionLabel={`Remove ${reauthDeleteIds?.length || 0} accounts`}
+            actionVariant="destructive"
+            isActionLoading={isDeletingReauth}
+            onAction={confirmDeleteReauth}
           />
           <AlertDialog
             isOpen={Boolean(deleteTarget)}
