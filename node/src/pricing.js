@@ -122,6 +122,11 @@ export function completeUsage(usage) {
   return usage && Number.isSafeInteger(usage.inputTokens) && usage.inputTokens >= 0 && Number.isSafeInteger(usage.outputTokens) && usage.outputTokens >= 0 && (usage.cachedInputTokens || 0) + (usage.cacheWriteTokens || 0) <= usage.inputTokens;
 }
 
+// A provider-reported cost is authoritative even when tokens are omitted.
+export function hasMeasuredUsage(usage) {
+  return completeUsage(usage) || Number.isSafeInteger(usage?.upstreamCostMicros) && usage.upstreamCostMicros >= 0;
+}
+
 export function resolvePrice(models, tier, timestamp, inputTokens, prices = PRICES) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
