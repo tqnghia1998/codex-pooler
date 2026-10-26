@@ -3774,14 +3774,15 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         activeFrame = { data: upstreamFrame, isBinary: false };
         publicLifecycle = lifecycle;
         publicAttempt = attempt;
+        upstream = candidate;
         if (compactionBridge) {
+          if (targetSocket) retireUpstreamSocket(targetSocket);
           void executePublicWebSocketCompaction(compactionBridge.payload, candidate);
           return;
         }
         const promptCacheSessionId = publicWebSocketSessionId(payload, req);
         const needsConnection = !compactionBridge
           && (!targetSocket || ![WebSocket.OPEN, WebSocket.CONNECTING].includes(targetSocket.readyState) || targetUpstreamId !== candidate.id || targetPromptCacheSessionId !== promptCacheSessionId);
-        upstream = candidate;
         if (needsConnection) {
           if (targetSocket?.readyState === WebSocket.OPEN || targetSocket?.readyState === WebSocket.CONNECTING) targetSocket.close();
           credentials = store.credentials(upstream.id);
