@@ -37,6 +37,8 @@ const SESSION_TTL_MS = 24 * 60 * 60 * 1_000;
 const SESSION_ROTATION_SPEND_MICROS = 5_000_000;
 const RESPONSE_PIN_LIMIT = 1_000;
 const RESPONSE_PIN_TTL_MS = 24 * 60 * 60 * 1_000;
+const NATIVE_WEBSOCKET_SIZE_RECOVERY_TTL_MS = 60_000;
+const NATIVE_WEBSOCKET_SIZE_RECOVERY_LIMIT = 1_000;
 const CIRCUIT_FAILURE_THRESHOLD = 3;
 const CIRCUIT_COOLDOWN_MS = 60_000;
 const CIRCUIT_LIMIT = 100;
@@ -950,6 +952,38 @@ export class Store {
     this.saveChanges(db, { collections: ['nativeTurnReceipts'] });
   }
 
+  // A read never extends the marker: the HTTP fallback window is fixed at
+  // 60 seconds from the refused frame.
+  nativeWebsocketSizeRecovery(key, now = Date.now()) {
+    const marker = this.load().nativeWebsocketSizeRecoveries[key];
+    return Boolean(marker && Date.parse(marker.expiresAt) > now);
+  }
+
+  recordNativeWebsocketSizeRecovery(key, { messageBytes }, now = Date.now()) {
+    const db = this.load();
+    const markers = db.nativeWebsocketSizeRecoveries;
+    for (const [id, marker] of Object.entries(markers)) if (Date.parse(marker.expiresAt) <= now) delete markers[id];
+    markers[key] = { messageBytes, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + NATIVE_WEBSOCKET_SIZE_RECOVERY_TTL_MS).toISOString() };
+    const overflow = Object.entries(markers).sort(([, left], [, right]) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
+      .slice(0, Math.max(0, Object.keys(markers).length - NATIVE_WEBSOCKET_SIZE_RECOVERY_LIMIT));
+    for (const [id] of overflow) if (id !== key) delete markers[id];
+    try {
+      this.saveChanges(db, { collections: ['nativeWebsocketSizeRecoveries'] });
+    } catch (error) {
+      delete markers[key];
+      throw error;
+    }
+  }
+
+  // A marker whose write was not confirmed durable must not grant the
+  // HTTP fallback.
+  discardNativeWebsocketSizeRecovery(key) {
+    const db = this.load();
+    if (!db.nativeWebsocketSizeRecoveries[key]) return;
+    delete db.nativeWebsocketSizeRecoveries[key];
+    this.saveChanges(db, { collections: ['nativeWebsocketSizeRecoveries'] });
+  }
+
   settleUpstreamAttempt(id, admission, outcome, now = Date.now()) {
     if (!admission || !outcome) return false;
     const db = this.load();
@@ -1349,7 +1383,7 @@ export class Store {
 }
 
 function emptyDatabase() {
-  return { upstreams: [], files: [], sessions: {}, responsePins: {}, nativeTurnReceipts: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [], routingPolicy: { strategy: 'least-recent-success' } };
+  return { upstreams: [], files: [], sessions: {}, responsePins: {}, nativeTurnReceipts: {}, nativeWebsocketSizeRecoveries: {}, scopes: [], apiKeys: [], gatewayUsage: [], gatewayRequests: [], gatewayAttempts: [], routingPolicy: { strategy: 'least-recent-success' } };
 }
 
 function normalizeDatabase(parsed) {
@@ -1363,6 +1397,7 @@ function normalizeDatabase(parsed) {
   parsed.gatewayAttempts ||= [];
   parsed.responsePins ||= {};
   parsed.nativeTurnReceipts ||= {};
+  parsed.nativeWebsocketSizeRecoveries ||= {};
   parsed.routingPolicy = normalizeRoutingPolicy(parsed.routingPolicy);
   if (!Array.isArray(parsed.files) || !Array.isArray(parsed.scopes) || !Array.isArray(parsed.apiKeys) || !Array.isArray(parsed.gatewayUsage) || !Array.isArray(parsed.gatewayRequests) || !Array.isArray(parsed.gatewayAttempts)) throw new Error('invalid scoped database');
   parsed.gatewayUsage = compactGatewayUsage(parsed.gatewayUsage);
@@ -1421,6 +1456,7 @@ function databaseRecords(db) {
   for (const [key, value] of Object.entries(db.sessions)) add('sessions', key, value);
   for (const [key, value] of Object.entries(db.responsePins)) add('responsePins', key, value);
   for (const [key, value] of Object.entries(db.nativeTurnReceipts)) add('nativeTurnReceipts', key, value);
+  for (const [key, value] of Object.entries(db.nativeWebsocketSizeRecoveries)) add('nativeWebsocketSizeRecoveries', key, value);
   for (const [key, value] of Object.entries(normalizeRoutingPolicy(db.routingPolicy))) add('routingPolicy', key, value);
   return records;
 }
