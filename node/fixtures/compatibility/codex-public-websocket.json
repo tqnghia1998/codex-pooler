@@ -29,11 +29,11 @@
     "targetPath": "/backend-api/codex/responses",
     "fingerprint": {
       "version": 1,
-      "hash": "5bdafc2b72ecc7224383a0c8a50305c3",
+      "hash": "ddaf3a6c54f40468955070a9a7d8bf7e",
       "values": {
-        "user-agent": "codex_cli_rs/0.163.0",
+        "user-agent": "codex_cli_rs/0.164.0",
         "originator": "codex_cli_rs",
-        "version": "0.163.0",
+        "version": "0.164.0",
         "openai-beta": "responses_websockets=2026-02-06"
       }
     },
