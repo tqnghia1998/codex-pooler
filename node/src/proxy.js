@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { writeChunk } from './http-stream.js';
 import { createSseUsageObserver } from './sse-usage-observer.js';
+import { collectRejectedResponse, downstreamAbortSignal, responseWithDownstreamAbort } from './upstream-response-lifecycle.js';
 import { Readable } from 'node:stream';
 import WebSocket, { WebSocketServer } from 'ws';
 import { request as undiciRequest } from 'undici';
@@ -1036,6 +1037,12 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
           attemptId
         });
       persistResponseCookies(response, upstream, credentials, store);
+      let authenticationUsage = null;
+      if ([401, 403].includes(response.status) && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
+        const rejected = await collectRejectedResponse(response, upstreamDeadlines);
+        response = rejected.response;
+        authenticationUsage = extractUsage(parseJson(rejected.bytes));
+      }
       let authenticationRetried = false;
       const initialPolicyFailure = policyRoute(path, sourcePath) && [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines)))
@@ -1043,7 +1050,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       const initialCodexDenial = response.status === 403 && upstream.type === 'codex'
         ? classifyHttpResponse(response, parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines)), { upstreamType: 'codex' })
         : null;
-      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure
+      if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure
         && (!initialCodexDenial || initialCodexDenial.class === 'credential')
         && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
         try {
@@ -1758,47 +1765,6 @@ async function requestUpstream(request, fetchImpl, downstream = null, upstreamDe
   }
 }
 
-function responseWithDownstreamAbort(response, abort) {
-  const reader = response.body.getReader();
-  let finished = false;
-  const cleanup = () => {
-    finished = true;
-    abort.signal.removeEventListener('abort', cancelled);
-    abort.cleanup();
-    reader.releaseLock();
-  };
-  const cancel = (reason) => {
-    // A tee branch may wait for its sibling; never block cleanup on cancel.
-    void reader.cancel(reason).catch(() => {});
-    cleanup();
-  };
-  let controller;
-  const cancelled = () => {
-    if (finished) return;
-    controller.error(abort.signal.reason);
-    cancel(abort.signal.reason);
-  };
-  const body = new ReadableStream({
-    start(value) {
-      controller = value;
-      abort.signal.addEventListener('abort', cancelled, { once: true });
-      if (abort.signal.aborted) cancelled();
-    },
-    async pull(value) {
-      try {
-        const next = await reader.read();
-        if (finished) return;
-        if (next.done) { value.close(); cleanup(); }
-        else value.enqueue(next.value);
-      } catch (error) {
-        if (!finished) { value.error(error); cancel(error); }
-      }
-    },
-    cancel(reason) { if (!finished) cancel(reason); }
-  }, { highWaterMark: 0 });
-  return streamResponseClone(response, body);
-}
-
 function persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch = null) {
   if (!CLAUDE_QUOTA_HEADER_NAMES.some((name) => response?.headers?.get?.(name))) return;
   if (!pacing?.store || !pacing.upstreamId) return;
@@ -1868,24 +1834,6 @@ function localPacingResponse(error) {
     status: 429,
     headers: { 'retry-after': String(Math.max(1, Number(error?.retryAfterSeconds) || 1)) }
   });
-}
-
-function downstreamAbortSignal(req, res, timeoutMs = 120_000) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(new DOMException('Upstream request timed out', 'TimeoutError')), timeoutMs);
-  const abort = () => controller.abort(new DOMException('Downstream request closed', 'AbortError'));
-  req?.once('aborted', abort);
-  res?.once('close', abort);
-  if (req?.aborted || res?.destroyed || res?.readyState !== undefined && res.readyState !== WebSocket.OPEN) abort();
-  return {
-    signal: controller.signal,
-    headersReceived() { clearTimeout(timeout); },
-    cleanup() {
-      clearTimeout(timeout);
-      req?.removeListener('aborted', abort);
-      res?.removeListener('close', abort);
-    }
-  };
 }
 
 async function compatibilityFallback(response, upstream, sourcePath, payload, request, current, upstreamDeadlines = {}) {
@@ -2918,8 +2866,15 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
       upstreamId: upstream.id
     });
     persistResponseCookies(response, upstream, credentials, store);
-    if ((response.status === 401 || response.status === 403) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
+    let authenticationUsage = null;
+    if ([401, 403].includes(response.status) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
+      const rejected = await collectRejectedResponse(response, upstreamDeadlines);
+      response = rejected.response;
+      authenticationUsage = extractUsage(parseJson(rejected.bytes));
+    }
+    if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
       try {
+        void response.body?.cancel('Retrying with refreshed credentials').catch(() => {});
         const refreshed = await refreshProviderCredentials(upstream, credentials, {
           fetchImpl,
           saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt)
@@ -3953,6 +3908,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   };
 
   const executePublicWebSocketCompaction = async (compactPayload, candidate) => {
+    let response;
     try {
       const candidateCredentials = store.credentials(candidate.id);
       const refreshed = await ensureProviderCredentials(candidate, candidateCredentials, {
@@ -3964,17 +3920,24 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
       let compatibilityScope = compatibilityFactContext(candidate, '/v1/responses/compact', compactPayload, req, '/v1/responses');
       let compatibility = compatibilityState(candidate, compatibilityLearningForStore(store).activeFact(candidate.id, compatibilityScope));
       let request = buildRequest(candidate, '/v1/responses/compact', compactPayload, req, candidateCredentials, '/v1/responses', compactPayload, compatibility, null, store, codexOptions);
-      let response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
+      response = await requestUpstream(request, fetchImpl, { req: null, res: client }, {}, codexHostHealth, {
         store,
         upstreamId: candidate.id,
         model: compactPayload?.model,
         disable: disablePacing
       });
+      let authenticationUsage = null;
+      if ([401, 403].includes(response.status) && candidateCredentials.refreshToken) {
+        const rejected = await collectRejectedResponse(response);
+        response = rejected.response;
+        authenticationUsage = extractUsage(parseJson(rejected.bytes));
+      }
       const initialPolicyFailure = [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
         : null;
-      if ((response.status === 401 || response.status === 403) && !initialPolicyFailure && candidateCredentials.refreshToken) {
+      if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure && candidateCredentials.refreshToken) {
         try {
+          void response.body?.cancel('Retrying WebSocket compaction with refreshed credentials').catch(() => {});
           const refreshed = await refreshProviderCredentials(candidate, candidateCredentials, {
             fetchImpl,
             saveCredentials: (updated, expiresAt) => store.persistCredentials(candidate.id, updated, expiresAt)
@@ -4090,6 +4053,8 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         'Upstream compact response failed',
         error?.upstreamOutcomeSettled ? { class: 'neutral', retryable: false } : classifyTransportError(error)
       );
+    } finally {
+      void response?.body?.cancel('WebSocket compaction finished').catch(() => {});
     }
   };
 
