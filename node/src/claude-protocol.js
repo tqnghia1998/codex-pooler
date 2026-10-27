@@ -224,6 +224,7 @@ export function prepareClaudeRequestBody({ req, body, credentials, upstream, cou
   let shaped = shapeClaudeOAuthBody(prepared, upstream, oauth || directAnthropic && cliProfile, claudeConfig, false);
   shaped = applyPayloadConfig(shaped);
   enforceClaudeCacheControlLimit(shaped, 4);
+  normalizeClaudeCacheControlTtls(shaped);
   if (oauth || directAnthropic && cliProfile) signClaudeOAuthBody(shaped);
   Object.defineProperty(shaped, CLAUDE_TOOL_ALIASES, { value: aliases, enumerable: false });
   attachClaudeModelAlias(shaped, modelAlias);
@@ -1786,27 +1787,31 @@ function ensureClaudeCacheControls(body, { ttl = '' } = {}) {
   if (lastEligibleIndex >= 0 && finalMessage?.role === 'system' && typeof finalMessage.content === 'string' && finalMessage.content.trim()) {
     finalMessage.content = [{ type: 'text', text: finalMessage.content, cache_control: { type: 'ephemeral' } }];
     if (ttl) finalMessage.content[0].cache_control.ttl = ttl;
-    return;
-  }
-  if (lastEligible) {
+  } else if (lastEligible) {
     const content = lastEligible.content;
     if (typeof content === 'string') lastEligible.content = [{ type: 'text', text: content }];
     const blocks = Array.isArray(lastEligible.content) ? lastEligible.content : [];
     if (!blocks.some((block) => plainObject(block) && block.cache_control)) mark(blocks.at(-1));
   }
+  normalizeClaudeCacheControlTtls(body, ttl);
+}
+
+function normalizeClaudeCacheControlTtls(body, ttl = '') {
   const ordered = [
-    ...(body.tools || []),
-    ...normalizedSystem,
-    ...messages.flatMap((message) => Array.isArray(message?.content) ? message.content : [])
+    ...(Array.isArray(body.tools) ? body.tools : []),
+    ...(Array.isArray(body.system) ? body.system : []),
+    ...(Array.isArray(body.messages) ? body.messages.flatMap((message) => Array.isArray(message?.content) ? message.content : []) : [])
   ];
   let seenShort = false;
   for (const block of ordered) {
     const cache = block?.cache_control;
     if (!plainObject(cache)) continue;
     if (ttl && !cache.ttl) cache.ttl = ttl;
-    if (ttl && cache.ttl !== ttl) {
+    // An omitted TTL means 5m. Shorten later 1h markers rather than extending
+    // earlier short markers, which would increase the caller's cache cost.
+    if (!cache.ttl || cache.ttl === '5m') {
       seenShort = true;
-    } else if (ttl && seenShort) {
+    } else if (cache.ttl === '1h' && seenShort) {
       delete cache.ttl;
     }
   }
