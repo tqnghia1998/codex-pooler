@@ -195,6 +195,12 @@ Claude OAuth compatibility, including Claude Code body shaping and CCH signing,
 runs entirely in Node; Claude requests use the Enterprise OAuth compatibility path
 unless `fingerprint_profile: "claude-code-cli"` is explicitly configured.
 
+Gateway-shaped Claude requests normalize cache markers in Anthropic's processing
+order: tools, system, then messages. An omitted TTL means five minutes; any
+one-hour marker after a five-minute marker is shortened to five minutes, including
+after payload overrides and before OAuth signing. Trailing system messages use
+the same normalization. Native Claude Code request cache markers stay caller-owned.
+
 ```bash
 cd node
 npm install
