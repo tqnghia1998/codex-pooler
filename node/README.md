@@ -337,7 +337,9 @@ publishes cache-write prices only per TTL (`30m` and `12h`); the snapshot keeps
 both as `cacheWriteRates`. Usage does not report a write's TTL, so writes settle
 at the `30m` rate unless the request set a `12h` `prompt_cache_breakpoint`, in
 which case all of its writes settle at the `12h` rate (exact, or an upper bound
-for mixed TTLs). Leaving them unpriced would let the request escape the spending cap. A refresh keeps the last imported
+for mixed TTLs). Leaving them unpriced would let the request escape the spending cap.
+Anthropic usage reports its TTL split in `cache_creation`: 1-hour writes settle
+at twice the input rate and 5-minute writes at the listed cache-write rate. A refresh keeps the last imported
 rows for a tier the feed stops listing (currently `flex`) instead of letting it
 fall back to standard rates.
 

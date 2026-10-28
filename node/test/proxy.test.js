@@ -1837,6 +1837,35 @@ test('asks Compass for streamed Chat usage and hides it from clients that did no
   }
 });
 
+test('settles streamed Claude 1-hour cache writes at the 1h rate', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-1h-write-'));
+  const events = [
+    { type: 'message_start', message: { id: 'msg_1h', model: 'claude-opus-5-5', usage: { input_tokens: 10, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 100_000, cache_creation: { ephemeral_5m_input_tokens: 0, ephemeral_1h_input_tokens: 100_000 } } } },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } },
+    { type: 'message_stop' }
+  ];
+  const fetchImpl = async () => new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(''), {
+    status: 200, headers: { 'content-type': 'text/event-stream' }
+  });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'claude-1h-project', projectKey: 'claude-1h-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/messages', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({ model: 'claude-opus-5-5', max_tokens: 16, messages: [{ role: 'user', content: 'hello' }], stream: true })
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    // 100K 1h writes × $8 + 10 input × $4 + 10 output × $20; the 5m rate would settle $0.50024.
+    assert.equal(Math.round(store.getPublic(created.id).spending.spentDollars * 1_000_000), 800_240);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('treats chunk-split Compass message_stop as a successful priced terminal', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-message-stop-'));
   const chunks = [
