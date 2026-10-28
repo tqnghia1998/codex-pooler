@@ -1017,7 +1017,7 @@ function validatePromptCacheOptions(options) {
   if (!plainObject(options)) invalid('prompt_cache_options must be an object', 'prompt_cache_options');
   for (const key of Object.keys(options)) if (!['mode', 'ttl'].includes(key)) invalid('prompt_cache_options field is not supported', `prompt_cache_options.${key}`);
   if (options.mode !== undefined && !['implicit', 'explicit'].includes(options.mode)) invalid('prompt_cache_options mode is not supported', 'prompt_cache_options.mode');
-  if (options.ttl !== undefined && options.ttl !== '30m') invalid('prompt_cache_options ttl is not supported', 'prompt_cache_options.ttl');
+  if (options.ttl !== undefined && !['30m', '12h'].includes(options.ttl)) invalid('prompt_cache_options ttl is not supported', 'prompt_cache_options.ttl');
 }
 
 function validateReasoning(reasoning) {
