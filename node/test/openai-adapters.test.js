@@ -187,6 +187,31 @@ test('normalizes Responses instructions, replay, continuation, and cache control
   assert.equal(continuation.input[2].output, null);
 });
 
+test('accepts request-level cache TTLs without changing omitted or explicit breakpoint TTLs', () => {
+  const responses = (options, breakpoint) => adaptResponsesRequest({
+    model: 'gpt-5.6-sol', prompt_cache_options: options,
+    input: [{ role: 'user', content: [{ type: 'input_text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }]
+  });
+  const chat = (options, breakpoint) => adaptChatRequest({
+    model: 'gpt-5.6-sol', prompt_cache_options: options,
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }]
+  });
+  for (const adapt of [responses, chat]) {
+    for (const ttl of ['30m', '12h']) {
+      const options = { mode: 'explicit', ttl };
+      for (const breakpoint of [{ mode: 'explicit' }, { mode: 'explicit', ttl: '30m' }, { mode: 'explicit', ttl: '12h' }]) {
+        const payload = adapt(options, breakpoint);
+        assert.deepEqual(payload.prompt_cache_options, options);
+        assert.deepEqual(payload.input[0].content[0].prompt_cache_breakpoint, breakpoint);
+      }
+    }
+    assert.deepEqual(adapt({ mode: 'implicit' }, { mode: 'explicit' }).prompt_cache_options, { mode: 'implicit' });
+    for (const ttl of [null, '1h', '24h', 12, true, {}, []]) {
+      assertAdapterError(() => adapt({ ttl }, { mode: 'explicit' }), { param: 'prompt_cache_options.ttl' });
+    }
+  }
+});
+
 test('accepts 30m and 12h prompt cache breakpoint TTLs on Responses and Chat parts', () => {
   const responses = (breakpoint) => adaptResponsesRequest({ model: 'gpt-5.6-sol', input: [{ role: 'user', content: [{ type: 'input_text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }] });
   const chat = (breakpoint) => adaptChatRequest({ model: 'gpt-5.6-sol', messages: [{ role: 'user', content: [{ type: 'text', text: 'cached', prompt_cache_breakpoint: breakpoint }] }] });
