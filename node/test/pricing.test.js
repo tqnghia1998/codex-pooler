@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cheapestPricedModel, extractUsage, mergeUsage, priceUsage, resolvePrice, upstreamCostMicros } from '../src/pricing.js';
+import { cheapestPricedModel, extractUsage, isPricedModel, mergeUsage, priceUsage, requestCacheWriteTtl, resolvePrice, upstreamCostMicros } from '../src/pricing.js';
 import { OPENAI_PRICING_VERSION } from '../src/openai-pricing-snapshot.js';
 
 test('selects the cheapest priced model and preserves provider order as fallback', () => {
@@ -78,9 +78,17 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   );
   assert.deepEqual(usage, { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 0, outputTokens: 100, serviceTier: null, upstreamCostMicros: 5_000 });
 
-  // The feed prices cache writes only per TTL (30m/12h); aggregate usage does
-  // not say which, so writes stay unpriced while the rest still settles.
-  assert.equal(priceUsage(['gpt-5.6-sol-20260801'], { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, serviceTier: 'priority' }), null);
+  // The feed prices cache writes only per TTL (30m/12h). Writes use the TTL the
+  // request asked for (30m unless a breakpoint asked for 12h), never going free.
+  const writes = { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 100, outputTokens: 50, serviceTier: 'priority' };
+  assert.deepEqual(priceUsage(['gpt-5.6-sol-20260801'], writes), {
+    settledCostMicros: 8_760,
+    costSource: 'pricing_snapshot',
+    model: 'gpt-5.6-sol',
+    priceVersion: OPENAI_PRICING_VERSION
+  });
+  assert.equal(priceUsage(['gpt-5.6-sol'], writes, undefined, null, { cacheWriteTtl: '12h' }).settledCostMicros, 9_760);
+  assert.equal(priceUsage(['gpt-5.6-sol'], writes, undefined, null, { cacheWriteTtl: '1w' }), null);
   assert.deepEqual(priceUsage(['gpt-5.6-sol-20260801'], { inputTokens: 1_000, cachedInputTokens: 200, cacheWriteTokens: 0, outputTokens: 50, serviceTier: 'priority' }), {
     settledCostMicros: 8_560,
     costSource: 'pricing_snapshot',
@@ -118,10 +126,35 @@ test('merges partial stream usage and resolves dated model pricing by suffix', (
   assert.equal(priceUsage(['gpt-6.1-sol'], { inputTokens: 1_000, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'ultrafast' }).settledCostMicros, 18_000);
   assert.equal(priceUsage(['gpt-6-luna'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 141);
   assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100 }).settledCostMicros, 14_100);
-  assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }), null);
+  // 800 input × $10 + 100 cached × $1 + 100 writes × $12.50 (30m) + 100 output × $50, per million.
+  assert.equal(priceUsage(['gpt-6-astra'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 14_350);
   assert.equal(priceUsage(['claude-fable-5-1'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 14_275);
   assert.equal(priceUsage(['claude-opus-5-5'], { inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100 }).settledCostMicros, 5_720);
   assert.equal(extractUsage({ usage: { input_tokens: 1_000, output_tokens: 100, price_cost_usd: null } }).upstreamCostMicros, undefined);
   assert.equal(extractUsage({ usage: { input_tokens: 100, cached_input_tokens: 100, cache_write_tokens: 100, output_tokens: 1 } }), null);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 100, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 1 }), null);
+});
+
+test('reads the cache-write TTL a request asked for', () => {
+  assert.equal(requestCacheWriteTtl({ input: 'hi' }), '30m');
+  assert.equal(requestCacheWriteTtl(null), '30m');
+  assert.equal(requestCacheWriteTtl({ prompt_cache_options: { mode: 'explicit', ttl: '30m' }, input: [{ role: 'user', content: [{ type: 'input_text', text: 'a', prompt_cache_breakpoint: { mode: 'explicit', ttl: '30m' } }] }] }), '30m');
+  // Mixed TTLs settle at the longer rate: usage is aggregate, so this is an upper bound.
+  assert.equal(requestCacheWriteTtl({ input: [
+    { role: 'user', content: [{ type: 'input_text', text: 'a', prompt_cache_breakpoint: { mode: 'explicit', ttl: '30m' } }] },
+    { role: 'user', content: [{ type: 'input_text', text: 'b', prompt_cache_breakpoint: { mode: 'explicit', ttl: '12h' } }] }
+  ] }), '12h');
+  assert.equal(requestCacheWriteTtl({ messages: [{ role: 'user', content: [{ type: 'text', text: 'a', prompt_cache_breakpoint: { mode: 'explicit', ttl: '12h' } }] }] }), '12h');
+});
+
+test('prices Claude Haiku 5.5 with its 100K long-context bucket', () => {
+  // ≤100K: $0.10 input, $0.01 cache read, $0.125 5m write, $0.50 output per million.
+  assert.equal(priceUsage(['claude-haiku-5-5'], { inputTokens: 10_000, cachedInputTokens: 1_000, cacheWriteTokens: 1_000, outputTokens: 1_000 }).settledCostMicros, 1_435);
+  // >100K: $0.50 input, $0.05 cache read, $0.625 5m write, $2.50 output per million.
+  assert.equal(priceUsage(['claude-haiku-5-5'], { inputTokens: 100_001, cachedInputTokens: 0, cacheWriteTokens: 0, outputTokens: 1_000 }).settledCostMicros, 52_501);
+});
+
+test('reports whether a model has any snapshot price', () => {
+  for (const model of ['gpt-6-astra', 'GPT-6.1-Sol-20260929', 'claude-opus-5-5[1m]', 'claude-haiku-5-5', 'claude-sonnet-5-5-20260928']) assert.equal(isPricedModel(model), true, model);
+  for (const model of ['kimi-k3', 'glm-5.3-flash', 'gpt-5.5', 'azure/gpt-6-astra', '', null]) assert.equal(isPricedModel(model), false, String(model));
 });
