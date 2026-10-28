@@ -24,7 +24,8 @@ const ANTHROPIC_PRICES = [
   ['claude-3-7-sonnet', 3, 15, 3.75, 0.3], ['claude-3-5-sonnet', 3, 15, 3.75, 0.3], ['claude-3-opus', 15, 75, 18.75, 1.5], ['claude-3-sonnet', 3, 15, null, null]
 ].map(([model, input, output, cacheWrite, cachedInput]) => price(model, [input, cachedInput, cacheWrite, output], 'anthropic-list-2026-05-27'));
 
-const PRICES = [
+// Anthropic bills 5-minute cache writes at the listed rate and 1-hour writes at twice the input rate.
+const PRICES = withClaudeCacheWriteRates([
   ...OPENAI_PRICES,
   ...ANTHROPIC_PRICES,
   price('claude-sonnet-5-5', [2, 0.2, 2.5, 10], 'anthropic-list-2026-09-28', 'standard', '2026-09-28T00:00:00Z'),
@@ -33,7 +34,13 @@ const PRICES = [
   // Haiku 5.5 bills prompts over 100K input tokens at its long-context rates.
   price('claude-haiku-5-5', [0.1, 0.01, 0.125, 0.5], 'anthropic-list-2026-10-06', 'standard', '2026-01-01T00:00:00Z', 'default', HAIKU_5_5_CONTEXT_RULE),
   price('claude-haiku-5-5', [0.5, 0.05, 0.625, 2.5], 'anthropic-list-2026-10-06', 'standard', '2026-01-01T00:00:00Z', 'long_context', HAIKU_5_5_CONTEXT_RULE)
-];
+]);
+
+function withClaudeCacheWriteRates(rows) {
+  return rows.map((row) => row.model.startsWith('claude-') && row.cacheWrite !== null
+    ? { ...row, cacheWriteRates: { '5m': row.cacheWrite, '1h': row.input * 2 } }
+    : row);
+}
 
 function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default', contextRule = { status: 'uniform' }, capturedAt = effectiveAt) {
   return { model, input, cachedInput, cacheWrite, output, priceVersion, tier, effectiveAt, capturedAt, bucket, contextRule };
@@ -46,6 +53,7 @@ export function extractUsage(body) {
   const output = integer(first(usage, ['output_tokens'], ['completion_tokens']));
   const cached = integer(first(usage, ['cached_input_tokens'], ['cache_read_input_tokens'], ['input_tokens_details', 'cached_tokens'], ['prompt_tokens_details', 'cached_tokens']));
   const cacheWrite = integer(first(usage, ['cache_write_tokens'], ['cache_creation_input_tokens'], ['input_tokens_details', 'cache_write_tokens'], ['prompt_tokens_details', 'cache_write_tokens']));
+  const cacheWrite1h = integer(usage.cache_creation?.ephemeral_1h_input_tokens);
   const reasoning = integer(first(usage, ['output_tokens_details', 'reasoning_tokens'], ['reasoning_tokens']));
   const total = integer(usage.total_tokens);
   // Compass may report the price beside usage rather than inside it.
@@ -63,6 +71,8 @@ export function extractUsage(body) {
     ...(output === undefined ? {} : { outputTokens: output }),
     ...(cached === undefined ? {} : { cachedInputTokens: cached }),
     ...(cacheWrite === undefined ? {} : { cacheWriteTokens: cacheWrite }),
+    // The TTL split is optional detail; a malformed one still prices every write at the 5m rate.
+    ...(cacheWrite1h === undefined || cacheWrite1h === false ? {} : { cacheWrite1hTokens: cacheWrite1h }),
     ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
     ...(total === undefined ? {} : { totalTokens: total }),
     serviceTier: string(body?.service_tier ?? body?.response?.service_tier ?? usage.service_tier),
@@ -97,9 +107,11 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   // OpenAI prices writes only per TTL; an unpriced write would let the request escape the spending cap.
   const cacheWriteRate = snapshot.cacheWrite ?? snapshot.cacheWriteRates?.[cacheWriteTtl] ?? null;
   if (cacheWrite > 0 && cacheWriteRate === null) return null;
+  const cacheWrite1h = Math.min(usage.cacheWrite1hTokens || 0, cacheWrite);
+  const cacheWrite1hRate = snapshot.cacheWriteRates?.['1h'] ?? cacheWriteRate;
   if (cached > 0 && snapshot.cachedInput == null) return null;
   const standardInput = Math.max(usage.inputTokens - cached - cacheWrite, 0);
-  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput ?? 0) + cacheWrite * (cacheWriteRate || 0) + usage.outputTokens * snapshot.output;
+  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput ?? 0) + (cacheWrite - cacheWrite1h) * (cacheWriteRate || 0) + cacheWrite1h * (cacheWrite1hRate || 0) + usage.outputTokens * snapshot.output;
   const settledCostMicros = Math.round(cost);
   if (!Number.isSafeInteger(settledCostMicros) || settledCostMicros < 0) return null;
   return { settledCostMicros, costSource: 'pricing_snapshot', model: snapshot.model, priceVersion: snapshot.priceVersion };
