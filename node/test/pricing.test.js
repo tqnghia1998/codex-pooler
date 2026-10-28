@@ -177,3 +177,23 @@ test('reports whether a model has any snapshot price', () => {
   for (const model of ['gpt-6-astra', 'GPT-6.1-Sol-20260929', 'claude-opus-5-5[1m]', 'claude-haiku-5-5', 'claude-sonnet-5-5-20260928']) assert.equal(isPricedModel(model), true, model);
   for (const model of ['kimi-k3', 'glm-5.3-flash', 'gpt-5.5', 'azure/gpt-6-astra', '', null]) assert.equal(isPricedModel(model), false, String(model));
 });
+
+test('prices Claude 1-hour cache writes at twice the input rate', () => {
+  const usage = extractUsage({ usage: {
+    input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 100_000,
+    cache_creation: { ephemeral_5m_input_tokens: 60_000, ephemeral_1h_input_tokens: 40_000 }
+  } });
+  assert.equal(usage.cacheWriteTokens, 100_000);
+  assert.equal(usage.cacheWrite1hTokens, 40_000);
+  // Opus 5.5: 10 input × $4 + 60K 5m writes × $5 + 40K 1h writes × $8 + 10 output × $20, per million.
+  assert.equal(priceUsage(['claude-opus-5-5'], usage).settledCostMicros, 620_240);
+  assert.equal(priceUsage(['claude-opus-5-5'], { ...usage, cacheWrite1hTokens: 100_000 }).settledCostMicros, 800_240);
+  assert.equal(priceUsage(['claude-opus-5-5'], { ...usage, cacheWrite1hTokens: 0 }).settledCostMicros, 500_240);
+  // A 1h count above the total write count is clamped to it.
+  assert.equal(priceUsage(['claude-opus-5-5'], { ...usage, cacheWrite1hTokens: 999_999 }).settledCostMicros, 800_240);
+  assert.equal(priceUsage(['claude-haiku-5-5'], { inputTokens: 100_010, cachedInputTokens: 0, cacheWriteTokens: 100_000, cacheWrite1hTokens: 100_000, outputTokens: 0 }).settledCostMicros, 100_005);
+  // A malformed split is ignored rather than discarding the priced usage.
+  const malformed = extractUsage({ usage: { input_tokens: 10, output_tokens: 10, cache_creation_input_tokens: 100, cache_creation: { ephemeral_1h_input_tokens: -1 } } });
+  assert.equal(malformed.cacheWrite1hTokens, undefined);
+  assert.equal(priceUsage(['claude-opus-5-5'], malformed).settledCostMicros, 740);
+});
