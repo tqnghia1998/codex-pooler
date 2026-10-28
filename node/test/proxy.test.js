@@ -1745,6 +1745,73 @@ test('settles the latest reported Compass streaming cost', async () => {
   }
 });
 
+test('settles Compass Responses usage that includes cache writes without a reported cost', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-cache-write-'));
+  const completed = { type: 'response.completed', response: { id: 'resp_astra', status: 'completed', model: 'gpt-6-astra', output: [], usage: {
+    input_tokens: 1_000, output_tokens: 100, input_tokens_details: { cached_tokens: 100, cache_write_tokens: 100 }
+  } } };
+  const fetchImpl = async () => new Response(`data: ${JSON.stringify(completed)}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'cache-write-project', projectKey: 'cache-write-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6-astra', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    // Unpriced cache writes used to settle nothing, letting AIS shares run past their cap.
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 0.01435);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('asks Compass for streamed Chat usage and hides it from clients that did not ask', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-chat-usage-'));
+  const bodies = [];
+  const chunk = (value) => `data: ${JSON.stringify(value)}\n\n`;
+  const fetchImpl = async (_url, options) => {
+    const body = JSON.parse(options.body);
+    bodies.push(body);
+    return new Response([
+      chunk({ id: 'c', object: 'chat.completion.chunk', model: 'gpt-6-astra', choices: [{ index: 0, delta: { content: 'hi' }, finish_reason: 'stop' }] }),
+      ...(body.stream_options?.include_usage ? [chunk({ id: 'c', object: 'chat.completion.chunk', model: 'gpt-6-astra', choices: [], usage: { prompt_tokens: 1_000, completion_tokens: 100 } })] : []),
+      'data: [DONE]\n\n'
+    ].join(''), { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  };
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'chat-usage-project', projectKey: 'chat-usage-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  const chat = async (extra = {}) => {
+    const response = await fetch(base + '/v1/chat/completions', {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-upstream-id': created.id },
+      body: JSON.stringify({ model: 'gpt-6-astra', messages: [{ role: 'user', content: 'hello' }], stream: true, ...extra })
+    });
+    assert.equal(response.status, 200);
+    return response.text();
+  };
+  try {
+    // Most chat clients omit include_usage; without it the stream has no usage and settles nothing.
+    const plain = await chat();
+    assert.equal(bodies[0].stream_options?.include_usage, true);
+    assert.doesNotMatch(plain, /"usage"/);
+    assert.match(plain, /"content":"hi"/);
+    assert.match(plain, /data: \[DONE\]/);
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 0.015);
+    const requested = await chat({ stream_options: { include_usage: true } });
+    assert.match(requested, /"prompt_tokens":1000/);
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 0.03);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('treats chunk-split Compass message_stop as a successful priced terminal', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-message-stop-'));
   const chunks = [

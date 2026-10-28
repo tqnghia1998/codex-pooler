@@ -8,9 +8,12 @@ import {
 // OpenAI bills a separate long-context bucket once input exceeds this many tokens.
 const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
 
-const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket, contextRule }) => (
-  price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket, contextRule, OPENAI_PRICING_GENERATED_AT)
-));
+const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket, contextRule, cacheWriteRates }) => ({
+  ...price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket, contextRule, OPENAI_PRICING_GENERATED_AT),
+  ...(cacheWriteRates ? { cacheWriteRates } : {})
+}));
+
+const HAIKU_5_5_CONTEXT_RULE = { status: 'known', longContextInputTokensGt: 100_000 };
 
 const ANTHROPIC_PRICES = [
   ['claude-fable-5-1', 10, 50, 12.5, 0.25],
@@ -26,7 +29,10 @@ const PRICES = [
   ...ANTHROPIC_PRICES,
   price('claude-sonnet-5-5', [2, 0.2, 2.5, 10], 'anthropic-list-2026-09-28', 'standard', '2026-09-28T00:00:00Z'),
   price('claude-sonnet-5', [2, 0.2, 2.5, 10], 'anthropic-list-2026-05-27-intro', 'standard', '2026-01-01T00:00:00Z'),
-  price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z')
+  price('claude-sonnet-5', [3, 0.3, 3.75, 15], 'anthropic-list-2026-05-27-standard', 'standard', '2026-09-01T00:00:00Z'),
+  // Haiku 5.5 bills prompts over 100K input tokens at its long-context rates.
+  price('claude-haiku-5-5', [0.1, 0.01, 0.125, 0.5], 'anthropic-list-2026-10-06', 'standard', '2026-01-01T00:00:00Z', 'default', HAIKU_5_5_CONTEXT_RULE),
+  price('claude-haiku-5-5', [0.5, 0.05, 0.625, 2.5], 'anthropic-list-2026-10-06', 'standard', '2026-01-01T00:00:00Z', 'long_context', HAIKU_5_5_CONTEXT_RULE)
 ];
 
 function price(model, [input, cachedInput, cacheWrite, output], priceVersion, tier = 'standard', effectiveAt = '2026-01-01T00:00:00Z', bucket = 'default', contextRule = { status: 'uniform' }, capturedAt = effectiveAt) {
@@ -74,7 +80,7 @@ export function mergeUsage(previous, next) {
   };
 }
 
-export function priceUsage(models, usage, startedAt = new Date().toISOString(), requestedTier = null) {
+export function priceUsage(models, usage, startedAt = new Date().toISOString(), requestedTier = null, { cacheWriteTtl = '30m' } = {}) {
   if (!completeUsage(usage)) return null;
   const timestamp = Date.parse(startedAt);
   if (!Number.isFinite(timestamp)) return null;
@@ -86,13 +92,36 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   if (!snapshot) return null;
   const cached = Math.min(usage.cachedInputTokens || 0, usage.inputTokens);
   const cacheWrite = usage.cacheWriteTokens || 0;
-  if (cacheWrite > 0 && snapshot.cacheWrite === null) return null;
+  // OpenAI prices writes only per TTL; an unpriced write would let the request escape the spending cap.
+  const cacheWriteRate = snapshot.cacheWrite ?? snapshot.cacheWriteRates?.[cacheWriteTtl] ?? null;
+  if (cacheWrite > 0 && cacheWriteRate === null) return null;
   if (cached > 0 && snapshot.cachedInput == null) return null;
   const standardInput = Math.max(usage.inputTokens - cached - cacheWrite, 0);
-  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput ?? 0) + cacheWrite * (snapshot.cacheWrite || 0) + usage.outputTokens * snapshot.output;
+  const cost = standardInput * snapshot.input + cached * (snapshot.cachedInput ?? 0) + cacheWrite * (cacheWriteRate || 0) + usage.outputTokens * snapshot.output;
   const settledCostMicros = Math.round(cost);
   if (!Number.isSafeInteger(settledCostMicros) || settledCostMicros < 0) return null;
   return { settledCostMicros, costSource: 'pricing_snapshot', model: snapshot.model, priceVersion: snapshot.priceVersion };
+}
+
+// Usage reports cache writes in aggregate, so a request that asked for any 12h
+// breakpoint settles every write at the 12h rate: exact or an upper bound.
+export function requestCacheWriteTtl(payload) {
+  const pending = [payload?.input, payload?.messages];
+  for (let visited = 0; pending.length && visited < 10_000; visited += 1) {
+    const value = pending.pop();
+    if (Array.isArray(value)) pending.push(...value);
+    else if (value && typeof value === 'object') {
+      if (value.prompt_cache_breakpoint?.ttl === '12h') return '12h';
+      if (Array.isArray(value.content)) pending.push(value.content);
+    }
+  }
+  return '30m';
+}
+
+// Whether any tier of this model has a snapshot price; usage of other models settles nothing.
+export function isPricedModel(model, at = Date.now()) {
+  const name = string(model)?.toLowerCase();
+  return Boolean(name && resolvePrice(name, 'standard', at, 0));
 }
 
 export function cheapestPricedModel(models, startedAt = new Date().toISOString()) {

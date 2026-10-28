@@ -75,7 +75,7 @@ test('Decisions routes are unsupported for every method without matching neighbo
   assert.equal(gatewayRequestKind('POST', '/v1/decisions-other'), null);
 });
 
-test('prices Sol ultrafast cached input and the exact long-context bucket, leaving TTL-priced cache writes unpriced', () => {
+test('prices Sol ultrafast cached input and the exact long-context bucket, pricing cache writes at the requested TTL rate', () => {
   assert.equal(priceUsage(['gpt-6.1-sol'], { inputTokens: 1_000, outputTokens: 100, serviceTier: 'ultrafast' }).settledCostMicros, 18_000);
   assert.equal(priceUsage(['gpt-6.1-sol-20260929'], {
     inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 0, outputTokens: 100, serviceTier: 'ultrafast'
@@ -85,7 +85,7 @@ test('prices Sol ultrafast cached input and the exact long-context bucket, leavi
   }).settledCostMicros, 6_534_744);
   assert.equal(priceUsage(['gpt-6.1-sol'], {
     inputTokens: 1_000, cachedInputTokens: 100, cacheWriteTokens: 100, outputTokens: 100, serviceTier: 'ultrafast'
-  }), null);
+  }).settledCostMicros, 17_160);
   assert.equal(priceUsage(['gpt-5.6-sol'], { inputTokens: 1_000, outputTokens: 100, serviceTier: 'ultrafast' }), null);
 });
 
