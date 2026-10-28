@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const CODEX_CATALOG_VERIFIED_RANGE = Object.freeze(['0.154.0', '0.164.0']);
+export const CODEX_CATALOG_VERIFIED_RANGE = Object.freeze(['0.154.0', '0.165.0']);
 const string = (value) => typeof value === 'string';
 const bool = (value) => typeof value === 'boolean';
 const effort = (value) => string(value) && value.length > 0;
@@ -58,7 +58,7 @@ export function codexCatalogRepresentation(userAgent) {
     : /^[^\x00-\x1f\x7f]{1,512}?\/(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:[-+][0-9A-Za-z.+-]{0,64})?\s\([^();]+;[^();]+\)/.exec(userAgent)?.slice(1, 4);
   if (!match) return 'verbatim';
   const version = match.map(Number);
-  if (compare(version, [0, 154, 0]) >= 0 && compare(version, [0, 164, 0]) <= 0) return 'decode_checked';
+  if (compare(version, [0, 154, 0]) >= 0 && compare(version, [0, 165, 0]) <= 0) return 'decode_checked';
   return compare(version, [0, 148, 0]) >= 0 ? 'instructions_template' : 'verbatim';
 }
 

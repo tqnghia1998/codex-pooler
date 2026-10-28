@@ -97,12 +97,12 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.164.0']);
-  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0']) {
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.165.0']);
+  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0', '0.165.0']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.164.1'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.165.1'), 'instructions_template');
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);
@@ -110,6 +110,13 @@ test('mirrors the qualified Codex decoder window and tolerated blind spots', () 
   for (const approved of [null, 'git', 7, false, {}]) {
     assert.equal(codexCatalogDecodable({ ...catalogRow, model_messages: { ...catalogRow.model_messages, permissions: { approved_prefixes: approved } } }), true);
   }
+  // 0.165 adds optional permission templates and Memento tool messages inside
+  // nested fields that this bounded compatibility projection leaves unjudged.
+  assert.equal(codexCatalogDecodable({ ...catalogRow, model_messages: {
+    ...catalogRow.model_messages,
+    permissions: { writable_root: 'Root: {{ roots }}.', writable_roots: null },
+    tools: { history: {}, notes: {}, context_management: {} }
+  } }), true);
   for (const broken of [
     { ...catalogRow, shell_type: 'future' }, { ...catalogRow, supported_in_api: null },
     { ...catalogRow, input_modalities: ['video'] }, { ...catalogRow, service_tiers: [null] },

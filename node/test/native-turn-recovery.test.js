@@ -157,3 +157,22 @@ test('an unfinished tool after completed reasoning cannot authorize a grown or m
   assert.throws(() => f.start(f.append(reasoning)), { code: 'duplicate_turn' });
   assert.throws(() => f.start(f.append(reasoning, mail)), { code: 'duplicate_turn' });
 });
+
+test('long mailbox histories retain the complete witness and fence live and duplicate successors', (t) => {
+  const f = fixture(t);
+  f.payload.input.push(...Array.from({ length: 40 }, (_, index) => [
+    { ...mail, content: [{ type: 'input_text', text: `historical mail ${index}` }] },
+    { type: 'message', role: 'user', content: `boundary ${index}` }
+  ]).flat());
+  const lease = f.start();
+  f.delivered(lease, reasoning);
+  const next = f.append(reasoning, mail);
+  assert.throws(() => f.start(next), { code: 'duplicate_turn' });
+  finishNativeTurn(lease);
+  const changed = structuredClone(next);
+  changed.input[1].content[0].text = 'changed historical mail';
+  assert.throws(() => f.start(changed), { code: 'duplicate_turn' });
+  const successor = f.start(next);
+  assert.throws(() => f.start(next), { code: 'duplicate_turn' });
+  finishNativeTurn(successor);
+});
