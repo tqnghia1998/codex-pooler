@@ -48,8 +48,10 @@ export function extractUsage(body) {
   const cacheWrite = integer(first(usage, ['cache_write_tokens'], ['cache_creation_input_tokens'], ['input_tokens_details', 'cache_write_tokens'], ['prompt_tokens_details', 'cache_write_tokens']));
   const reasoning = integer(first(usage, ['output_tokens_details', 'reasoning_tokens'], ['reasoning_tokens']));
   const total = integer(usage.total_tokens);
+  // Compass may report the price beside usage rather than inside it.
+  const cost = upstreamCostMicros(usage) ?? upstreamCostMicros(body?.response) ?? upstreamCostMicros(body?.message) ?? upstreamCostMicros(body);
   if ([input, output, cached, cacheWrite, reasoning, total].some((value) => value === false)) return null;
-  if ([input, output, cached, cacheWrite].every((value) => value === undefined) && upstreamCostMicros(usage) === undefined) return null;
+  if ([input, output, cached, cacheWrite].every((value) => value === undefined) && cost === undefined) return null;
   const anthropic = Object.hasOwn(usage, 'cache_read_input_tokens') || Object.hasOwn(usage, 'cache_creation_input_tokens');
   const inputTokens = input === undefined ? undefined : input + (anthropic ? (cached || 0) + (cacheWrite || 0) : 0);
   if (inputTokens !== undefined && (cached || 0) + (cacheWrite || 0) > inputTokens) return null;
@@ -64,7 +66,7 @@ export function extractUsage(body) {
     ...(reasoning === undefined ? {} : { reasoningTokens: reasoning }),
     ...(total === undefined ? {} : { totalTokens: total }),
     serviceTier: string(body?.service_tier ?? body?.response?.service_tier ?? usage.service_tier),
-    ...(upstreamCostMicros(usage) === undefined ? {} : { upstreamCostMicros: upstreamCostMicros(usage) })
+    ...(cost === undefined ? {} : { upstreamCostMicros: cost })
   };
 }
 
@@ -207,8 +209,15 @@ function modelCandidates(models) {
 }
 
 // Provider-reported cost is upstream-controlled input: accept only plain non-negative decimal numbers.
+// Compass names it per protocol: price_cost_usd (Anthropic), price_cost (OpenAI), priceCostUsd (Gemini).
 export function upstreamCostMicros(usage) {
-  const value = usage?.price_cost_usd;
+  for (const field of ['price_cost_usd', 'price_cost', 'priceCostUsd']) {
+    if (usage?.[field] != null) return costMicros(usage[field]);
+  }
+  return undefined;
+}
+
+function costMicros(value) {
   if (typeof value === 'string' && /^\s*\d+(?:\.\d+)?\s*$/.test(value)) {
     const micros = Math.round(Number(value) * 1_000_000);
     return Number.isSafeInteger(micros) ? micros : undefined;
