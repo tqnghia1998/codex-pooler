@@ -53,6 +53,25 @@ test('accepts only plain decimal provider-reported cost', () => {
   }
 });
 
+test('reads every Compass price field: price_cost (OpenAI), price_cost_usd (Anthropic), priceCostUsd (Gemini)', () => {
+  assert.equal(upstreamCostMicros({ price_cost: 0.000043 }), 43);
+  assert.equal(upstreamCostMicros({ price_cost: '0.25' }), 250_000);
+  assert.equal(upstreamCostMicros({ priceCostUsd: '0.0000406' }), 41);
+  assert.equal(upstreamCostMicros({ price_cost_usd: '0.5', price_cost: 9 }), 500_000);
+  for (const value of ['', '1e5', 'abc', [], true, -1, null]) {
+    assert.equal(upstreamCostMicros({ price_cost: value }), undefined, `rejects price_cost ${JSON.stringify(value)}`);
+    assert.equal(upstreamCostMicros({ priceCostUsd: value }), undefined, `rejects priceCostUsd ${JSON.stringify(value)}`);
+  }
+  // Compass Responses and Chat report price_cost; it may sit in usage or beside it.
+  const tokens = { input_tokens: 1_000, output_tokens: 100, input_tokens_details: { cached_tokens: 100, cache_write_tokens: 100 } };
+  assert.equal(extractUsage({ usage: { ...tokens, price_cost: 0.42 } }).upstreamCostMicros, 420_000);
+  assert.equal(extractUsage({ usage: tokens, price_cost: 0.42 }).upstreamCostMicros, 420_000);
+  assert.equal(extractUsage({ type: 'response.completed', response: { usage: tokens, price_cost: 0.42 } }).upstreamCostMicros, 420_000);
+  assert.equal(extractUsage({ choices: [], usage: { prompt_tokens: 1, completion_tokens: 1 }, price_cost: '0.01' }).upstreamCostMicros, 10_000);
+  assert.equal(extractUsage({ usage: { price_cost: 0.42 } }).upstreamCostMicros, 420_000);
+  assert.equal(extractUsage({ usage: tokens }).upstreamCostMicros, undefined);
+});
+
 test('selects context prices from one generation and leaves unknown rules unpriced', () => {
   const row = (bucket, priceVersion, effectiveAt, contextRule) => ({
     model: 'gpt-test', tier: 'standard', bucket, input: 1, output: 1,
