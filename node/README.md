@@ -89,6 +89,20 @@ Chat-shaped details object wins, even when empty; otherwise the Responses
 fields with non-negative integer values are kept, so explicit zeros survive and
 nothing is invented. Accounting is unchanged.
 
+Streamed Compass Chat requests always ask the provider for
+`stream_options.include_usage`, because the stream otherwise carries no usage
+and the turn would settle nothing. When the client did not ask for it, the
+usage-only chunk is dropped and any usage on a content chunk is removed before
+relaying.
+
+Product share credentials may use token-priced routes (`/v1/responses`,
+`/v1/responses/compact`, `/v1/chat/completions`, `/v1/messages`, and native
+Codex responses) only with a model the pricing snapshot can price. Other
+models return `400 model_not_priced` before an upstream is selected, and share
+admission also fails closed on WebSocket and native paths; unpriced usage would
+otherwise be free and uncapped. Token counting and image, audio, and file
+routes, which settle provider-reported costs, are not affected.
+
 Native Codex HTTP SSE observes ordinary events up to 8 MiB and potential
 terminals up to 64 MiB. Larger events pass through unchanged without observation
 or settlement inferred from their suffixes. Created/in-progress/metadata
@@ -320,8 +334,10 @@ When Codex reports the `default` service tier for a request that explicitly aske
 The October 23 pricing snapshot includes exact GPT-6.1 Sol `ultrafast` input,
 cached-input, and output rates for both ordinary and long contexts. OpenAI now
 publishes cache-write prices only per TTL (`30m` and `12h`); the snapshot keeps
-both as `cacheWriteRates`, but usage does not report a write's TTL, so OpenAI
-usage with cache-write tokens stays unpriced. A refresh keeps the last imported
+both as `cacheWriteRates`. Usage does not report a write's TTL, so writes settle
+at the `30m` rate unless the request set a `12h` `prompt_cache_breakpoint`, in
+which case all of its writes settle at the `12h` rate (exact, or an upper bound
+for mixed TTLs). Leaving them unpriced would let the request escape the spending cap. A refresh keeps the last imported
 rows for a tier the feed stops listing (currently `flex`) instead of letting it
 fall back to standard rates.
 

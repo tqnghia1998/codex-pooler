@@ -18,7 +18,7 @@ import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './publ
 import { DEFAULT_INGRESS_LIMITS, HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
-import { cheapestPricedModel, hasMeasuredUsage, extractUsage, mergeUsage, priceUsage } from './pricing.js';
+import { cheapestPricedModel, hasMeasuredUsage, extractUsage, mergeUsage, priceUsage, requestCacheWriteTtl } from './pricing.js';
 import { chatUsage, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
@@ -35,6 +35,7 @@ import {
   releaseShareRequest,
   reserveShareRequest,
   selectPersonalShareSession,
+  shareModelUnpriced,
   shareSessionDenial
 } from './share-authorization.js';
 import {
@@ -212,6 +213,10 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
   const model = typeof dispatchPayload?.model === 'string' ? dispatchPayload.model.toLowerCase() : '';
   if (model && !store.modelAllowed(authScopeId, model)) {
     sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'invalid_model', message: `Model ${payload.model} is not available`, param: 'model' } });
+    return;
+  }
+  if (isShareCredential(req.proxyAuth) && shareModelUnpriced(model, path)) {
+    sendJson(res, 400, { error: { type: 'invalid_request_error', code: 'model_not_priced', message: `Model ${dispatchPayload?.model || '(none)'} has no price, so it cannot use a shared quota`, param: 'model' } });
     return;
   }
   const routingPlan = chooseUpstreamPlan(store, req, sourcePath, dispatchPayload, path, modelCatalog);
@@ -394,6 +399,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     await streamResponse({
       response, res, sourcePath,
       transformChat: upstream.type === 'codex' && sourcePath === '/v1/chat/completions',
+      hideChatUsage: upstream.type === 'compass' && sourcePath === '/v1/chat/completions' && payload?.stream_options?.include_usage !== true,
       sanitizePublicResponses: upstream.type === 'codex' && path === '/v1/responses',
       publicResponsesNamespaces: path === '/v1/responses' ? customToolNamespaces(codexPayload.tools) : undefined,
       store, upstream, attemptId, startedAt, payload, accounting, lifecycle,
@@ -1919,6 +1925,10 @@ function omitCompatibilityFields(payload, fields, allowed) {
 }
 
 function directUpstreamPayload(payload, sourcePath) {
+  // Streamed Chat reports usage only on request; without it the turn settles nothing.
+  if (sourcePath === '/v1/chat/completions' && payload?.stream === true && payload.stream_options?.include_usage !== true) {
+    return { ...payload, stream_options: { ...(plainObject(payload.stream_options) ? payload.stream_options : {}), include_usage: true } };
+  }
   if (sourcePath !== '/v1/messages' || payload?.thinking?.type !== 'enabled') return payload;
   const thinking = { ...payload.thinking, type: 'adaptive' };
   delete thinking.budget_tokens;
@@ -2240,7 +2250,7 @@ function collectEventStreamText(text) {
   return response;
 }
 
-async function streamResponse({ response, res, sourcePath, transformChat, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, onSuccessfulCompletion = null, logger = null, nativeTurnLease = null }) {
+async function streamResponse({ response, res, sourcePath, transformChat, hideChatUsage = false, sanitizePublicResponses, publicResponsesNamespaces, nativeMisalignmentDetails = false, restoreCodexMultiAgent = false, claudeToolAliases = new Map(), claudeModelAlias = null, claudeDiagnosticsState = null, store, upstream, admission = null, attemptId, startedAt, payload, accounting, lifecycle = null, responseStatusCode = null, responseOptions = {}, upstreamDeadlines = {}, onSuccessfulTerminal = null, onSuccessfulCompletion = null, logger = null, nativeTurnLease = null }) {
   const headers = responseHeaders(response, transformChat || sanitizePublicResponses ? 'text/event-stream' : null, responseOptions);
   res.writeHead(response.status, headers);
   const reader = response.body?.getReader();
@@ -2390,6 +2400,15 @@ async function streamResponse({ response, res, sourcePath, transformChat, saniti
         await writeNative(claudeToolAliases.size || claudeModelAlias?.forceMapping || nativeEvent !== parsed ? encodeSseEvent(nativeEvent) : wire, nativeEvent);
       }
       void reader.cancel('Upstream terminal event').catch(() => {});
+      return;
+    }
+    if (hideChatUsage && parsed.usage !== undefined) {
+      // The gateway asked for this usage itself; the client did not.
+      const { usage: _usage, ...rest } = parsed;
+      if (Array.isArray(rest.choices) && rest.choices.length) {
+        await writeNative(`data: ${JSON.stringify(rest)}\n\n`, rest);
+        visible = true;
+      }
       return;
     }
     const nativeEvent = nativeMisalignmentDetails ? projectNativeMisalignmentEvent(parsed) : parsed;
@@ -2564,7 +2583,7 @@ function logProxyFailure(logger, stage, upstreamId, error) {
 function settleUsage(store, upstream, attemptId, startedAt, body, payload = {}, accounting = {}, lifecycle = null, responseStatusCode = null, failure = null) {
   const usage = body?.[COLLECTED_USAGE] || (body?.inputTokens !== undefined || body?.upstreamCostMicros !== undefined ? body : extractUsage(body));
   const settlement = usage?.upstreamCostMicros === undefined
-    ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier)
+    ? priceUsage([body?.model, body?.response?.model, payload?.model], usage, startedAt, payload?.service_tier, { cacheWriteTtl: requestCacheWriteTtl(payload) })
     : { settledCostMicros: usage.upstreamCostMicros, costSource: 'upstream_reported' };
   try {
     if (lifecycle) store.finalizeGatewayRequest({ requestId: lifecycle.id, attemptId, status: failure ? 'failed' : 'succeeded', errorCode: failure?.errorCode, termination: failure?.termination, responseStatusCode, usage, settledCostMicros: settlement?.settledCostMicros ?? null, costSource: settlement?.costSource ?? null });

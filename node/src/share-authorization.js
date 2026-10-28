@@ -1,3 +1,7 @@
+import { isPricedModel } from './pricing.js';
+
+const TOKEN_PRICED_ROUTES = new Set(['/v1/responses', '/v1/responses/compact', '/v1/chat/completions', '/v1/messages']);
+
 export function shareSessionDenial(auth) {
   if (auth?.kind === 'personal_share') {
     if (auth.activeSessionCount > 0 && auth.remainingMicros > 0) return null;
@@ -52,10 +56,18 @@ export function selectPersonalShareSession(req, upstreamId, { affinityId = '', a
   return true;
 }
 
+// Token usage of a model without a price settles nothing, so on a share it
+// would be free and uncapped. Other routes settle provider-reported costs.
+export function shareModelUnpriced(model, route) {
+  const tokenRoute = TOKEN_PRICED_ROUTES.has(route) || route.startsWith('/backend-api/codex/responses');
+  return tokenRoute && !isPricedModel(model);
+}
+
 export function reserveShareRequest(req, attemptId, { model = '', route = '' } = {}) {
   if (!isShareCredential(req.proxyAuth)) return true;
   const sessionId = req.proxyAuth.shareSessionId;
   if (!sessionId) return false;
+  if (shareModelUnpriced(model, route)) return false;
   return Boolean(req.sharingStore?.reserveSession(sessionId, attemptId, {
     keyId: req.proxyAuth.kind === 'personal_share' ? req.proxyAuth.personalKeyId : null,
     model,
