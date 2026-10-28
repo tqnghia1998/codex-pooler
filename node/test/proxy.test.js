@@ -1770,6 +1770,31 @@ test('settles Compass Responses usage that includes cache writes without a repor
   }
 });
 
+test('settles the price Compass reports as price_cost on Responses streams', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-price-cost-'));
+  const completed = { type: 'response.completed', response: { id: 'resp_astra', status: 'completed', model: 'gpt-6-astra', output: [], usage: {
+    input_tokens: 100_000, output_tokens: 2_000, input_tokens_details: { cached_tokens: 80_000, cache_write_tokens: 10_000 }, price_cost: 0.1234
+  } } };
+  const fetchImpl = async () => new Response(`data: ${JSON.stringify(completed)}\n\n`, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  const store = new Store(dir);
+  const created = store.create({ type: 'compass', projectId: 'price-cost-project', projectKey: 'price-cost-secret' });
+  store.setCap(created.id, { capDollars: 100 });
+  const { server, base } = await runningServer(store, fetchImpl);
+  try {
+    const response = await fetch(base + '/v1/responses', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-6-astra', input: 'hello', stream: true })
+    });
+    assert.equal(response.status, 200);
+    await response.text();
+    // Compass bills this, not our list-price estimate (which would be about $0.41 here).
+    assert.equal(store.getPublic(created.id).spending.spentDollars, 0.1234);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('asks Compass for streamed Chat usage and hides it from clients that did not ask', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compass-chat-usage-'));
   const bodies = [];
