@@ -468,6 +468,15 @@ export class Store {
       Object.assign(credentials, previousCredentials);
       return true;
     }
+    // Codex rotates its session cookies on ordinary responses. Saving them is
+    // not a credential change: bumping the epoch would invalidate in-flight
+    // admissions and quota writes keyed on it, and churn the stored record.
+    if (upstream.type === 'codex' && accessTokenExpiresAt === upstream.accessTokenExpiresAt
+      && sameExceptCookies(previousCredentials, credentials)) {
+      upstream.credentials = encryptCredentials(credentials, this.key);
+      this.save(db);
+      return true;
+    }
     const accessTokenChanged = ['codex', 'claude'].includes(upstream.type)
       && String(previousCredentials.accessToken || '') !== String(credentials?.accessToken || '');
     const authenticationChanged = ['codex', 'claude'].includes(upstream.type)
@@ -2169,6 +2178,12 @@ function compatibilityFactId(upstreamId, key) {
 function sameCompatibilityGeneration(upstream, generation) {
   return Math.max(1, Number(upstream.compatibilityEpoch) || 1) === generation.compatibilityEpoch
     && Math.max(1, Number(upstream.modelCatalogEpoch) || 1) === generation.modelCatalogEpoch;
+}
+
+function sameExceptCookies(left, right) {
+  const fields = new Set([...Object.keys(left || {}), ...Object.keys(right || {})]);
+  fields.delete('codexCookies');
+  return [...fields].every((field) => JSON.stringify(left?.[field]) === JSON.stringify(right?.[field]));
 }
 
 function sameAuthentication(type, left, right) {
