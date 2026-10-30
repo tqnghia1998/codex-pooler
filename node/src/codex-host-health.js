@@ -1,3 +1,13 @@
+// The embedding app refused to send the request (for example its own storage
+// was unavailable). Nothing reached the upstream, so it says nothing about the
+// upstream's or the host's health.
+export function dispatchBlocked(error, maxDepth = 5) {
+  for (let current = error, depth = 0; current && depth <= maxDepth; current = current.cause, depth++) {
+    if (current.dispatchBlocked) return true;
+  }
+  return false;
+}
+
 const PRECONNECT_CODES = new Set([
   'ECONNREFUSED',
   'ENOTFOUND',
@@ -73,7 +83,7 @@ export class CodexHostHealth {
 
   settleError(lease, error, now = this.now()) {
     if (!lease) return { preconnect: false, open: false, retryAfterSeconds: null };
-    const code = provenPreconnectCode(error, this.maxCauseDepth);
+    const code = dispatchBlocked(error) ? null : provenPreconnectCode(error, this.maxCauseDepth);
     if (!code) {
       this.release(lease, now);
       return { preconnect: false, open: false, retryAfterSeconds: null };
