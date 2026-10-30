@@ -2,6 +2,7 @@ import { misalignmentPolicyFailure } from './policy-failures.js';
 import { responseValidationError } from './response-validation.js';
 import { isClaudeOAuthUpstream } from './domain.js';
 import { failedIncompleteResponse, quotaIncompleteReason } from './openai-streaming.js';
+import { dispatchBlocked } from './codex-host-health.js';
 
 const DEFAULT_QUOTA_COOLDOWN_MS = 60_000;
 const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000;
@@ -237,6 +238,8 @@ export function classifyTransportError(error, { clientCancelled = false } = {}) 
   if (clientCancelled || error?.upstreamFailureKind === 'cancelled') {
     return { class: 'neutral', retryable: false, transport: 'cancelled' };
   }
+  // Blocked before it was sent: never count it against the upstream.
+  if (dispatchBlocked(error)) return { class: 'neutral', retryable: false, transport: 'dispatch_blocked' };
   if (error?.upstreamFailureKind === 'timeout' || error?.name === 'TimeoutError') {
     return { class: 'transient', retryable: true, transport: 'timeout' };
   }
