@@ -2608,6 +2608,29 @@ test('refuses oversized native WebSocket frames before dispatch and sends the wi
     assert.equal(Object.keys(store.load().nativeWebsocketSizeRecoveries).length, 1);
     assert.deepEqual(received, []);
 
+    // A startup replaying completed encrypted tool calls gets the same
+    // recovery; the replay stays intact for the client's HTTP request.
+    const replayed = await new Promise((resolve, reject) => {
+      const client = connect('window-replay');
+      client.once('open', () => client.send(JSON.stringify({
+        type: 'response.create',
+        model: 'gpt-5.6-sol',
+        input: [
+          { type: 'message', role: 'user', content: [{ type: 'input_text', text: oversized }] },
+          { type: 'function_call', status: 'completed', name: 'shell', call_id: 'call_1', arguments: '{}', encrypted_content: 'cipher-1' },
+          { type: 'function_call_output', call_id: 'call_1', output: 'ok' },
+          { type: 'custom_tool_call', status: 'completed', name: 'apply_patch', call_id: 'call_2', input: 'patch', encrypted_content: 'cipher-2' },
+          { type: 'web_search_call', status: 'completed', action: { type: 'search', query: 'docs' }, encrypted_content: 'cipher-3' }
+        ]
+      })));
+      client.once('close', (code) => resolve(code));
+      client.once('error', reject);
+    });
+    assert.equal(replayed, 1011);
+    assert.equal((await handshake('window-replay')).status, 426);
+    assert.deepEqual(received, []);
+    assert.equal(store.load().gatewayAttempts.length, 0);
+
     // Discarded metadata does not count: the normalized frame fits.
     await new Promise((resolve, reject) => {
       const client = connect('window-3');
