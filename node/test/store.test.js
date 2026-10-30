@@ -220,6 +220,31 @@ test('routes legacy Claude OAuth records without auth metadata', () => {
   }
 });
 
+test('saving rotated Codex cookies does not change the credential epoch', () => {
+  const { dir, store } = tempStore();
+  try {
+    const upstream = store.create({
+      type: 'codex',
+      authJson: JSON.stringify({ tokens: { access_token: 'access-one', refresh_token: 'refresh-one' } })
+    });
+    const epoch = store.get(upstream.id).credentialEpoch || 0;
+    const expiresAt = store.getPublic(upstream.id).accessTokenExpiresAt;
+    const credentials = store.credentials(upstream.id);
+    credentials.codexCookies = '__cf_bm=rotated-1';
+    assert.equal(store.persistCredentials(upstream.id, credentials, expiresAt), true);
+    assert.equal(store.credentials(upstream.id).codexCookies, '__cf_bm=rotated-1');
+    assert.equal(store.get(upstream.id).credentialEpoch || 0, epoch);
+    // A real credential change still advances the epoch.
+    store.persistCredentials(upstream.id, { ...store.credentials(upstream.id), accessToken: 'access-two' }, expiresAt);
+    assert.equal(store.get(upstream.id).credentialEpoch, epoch + 1);
+    // So does a new expiry, which token refresh relies on.
+    store.persistCredentials(upstream.id, store.credentials(upstream.id), new Date(Date.now() + 60_000).toISOString());
+    assert.equal(store.get(upstream.id).credentialEpoch, epoch + 2);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('keeps an unexpired credential eligible after a scheduled refresh failure', () => {
   const { dir, store } = tempStore();
   try {
