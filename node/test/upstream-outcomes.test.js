@@ -113,6 +113,13 @@ test('classifies bounded transport failures and cancellation', () => {
   assert.equal(classifyTransportError(nested).transport, 'ECONNRESET');
 });
 
+test('a request blocked before dispatch is neutral, even behind wrappers', () => {
+  const blocked = Object.assign(new Error('storage unavailable'), { name: 'TimeoutError', dispatchBlocked: true });
+  assert.deepEqual(classifyTransportError(blocked), { class: 'neutral', retryable: false, transport: 'dispatch_blocked' });
+  const wrapped = new Error('Upstream request failed', { cause: blocked });
+  assert.equal(classifyTransportError(wrapped).class, 'neutral');
+});
+
 test('parses and clamps Retry-After values', () => {
   assert.equal(parseRetryAfterMs('1.25', NOW), 1_250);
   assert.equal(parseRetryAfterMs('0', NOW), 0);

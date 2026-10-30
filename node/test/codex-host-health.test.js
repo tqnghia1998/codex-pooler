@@ -21,6 +21,15 @@ test('normalizes HTTP and WebSocket Codex origins', () => {
   assert.equal(normalizeCodexOrigin('not a url'), null);
 });
 
+test('a request blocked before dispatch never counts against the Codex host', async () => {
+  const health = new CodexHostHealth({ failureThreshold: 1 });
+  for (let i = 0; i < 3; i++) {
+    const blocked = Object.assign(new Error('storage refused'), { dispatchBlocked: true, cause: codedError('ECONNREFUSED') });
+    await assert.rejects(withCodexHostHealth(health, ORIGIN, async () => { throw blocked; }), (error) => error === blocked);
+  }
+  assert.equal(health.begin(ORIGIN).admitted, true);
+});
+
 test('recognizes only bounded proven pre-connect cause codes', () => {
   for (const code of ['ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN', 'ENETUNREACH', 'ENETDOWN', 'EHOSTUNREACH']) {
     assert.equal(provenPreconnectCode(codedError(code)), code);

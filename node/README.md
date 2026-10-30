@@ -71,6 +71,10 @@ SSE failures, raw streams, and public/native WebSocket turns. Failed attempts
 are charged before failover without turning them into successful requests;
 missing usage is never estimated. Successful Chat streams ending in `[DONE]`
 clear their health lease, and downstream cancellation remains health-neutral.
+An error thrown by an injected fetch before the request is sent and marked
+`dispatchBlocked` (anywhere in its `cause` chain), such as an embedding app's
+own storage being unavailable, is also health-neutral for the account and never
+counts as Codex host pre-connect evidence.
 
 Request-level `prompt_cache_options.ttl` accepts `30m` and `12h` on public
 Responses and translated Chat. Omitted breakpoint TTLs remain omitted, and
