@@ -79,7 +79,7 @@ test('caches live Codex models across listing routes while preserving the static
     assert.equal(response.status, 200);
     const listed = (await response.json()).data;
     assert.deepEqual(listed.map((model) => model.id), [
-      'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
+      'gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra-law', 'gpt-6-rosalind', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna',
       'claude-opus-5-5', 'claude-fable-5-1', 'claude-sonnet-5-5', 'claude-opus-5', 'claude-sonnet-5', 'glm-5.3-flash', 'kimi-k3',
       'gpt-new-live'
     ]);
