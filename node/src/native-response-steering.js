@@ -4,7 +4,7 @@ import { HttpError } from './http-ingress.js';
 import { beginNativeTurn, finishNativeTurn, nativeEventWritten, nativeTurnIdentity, nativeWriteStarted } from './native-turn-recovery.js';
 import { isShareCredential, releaseShareRequest, reserveShareRequest } from './share-authorization.js';
 import { hasMeasuredUsage, extractUsage, mergeUsage } from './pricing.js';
-import { classifySseEvent } from './upstream-outcomes.js';
+import { classifyNativeWebSocketEvent } from './native-websocket-policy.js';
 
 const RESPONSE_ID = /^resp_[A-Za-z0-9_-]{1,1020}$/;
 const TERMINALS = new Set(['response.completed', 'response.incomplete', 'response.failed', 'error']);
@@ -135,7 +135,7 @@ export class NativeResponseSteering {
     }
     turn.usage = mergeUsage(turn.usage, extractUsage(event));
     if (TERMINALS.has(event?.type)) {
-      const outcome = classifySseEvent(event);
+      const outcome = classifyNativeWebSocketEvent(event);
       turn.success = ['response.completed', 'response.incomplete'].includes(event.type) && outcome.class === 'success';
       this.store.settleUpstreamAttempt(upstream.id, turn.admission, outcome);
       if (turn.success) {

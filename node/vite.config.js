@@ -4,6 +4,9 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   root: 'ui',
   plugins: [react()],
+  // Emit multiline strings with escaped newlines so generated bundles also
+  // satisfy the repository's trailing-whitespace check.
+  esbuild: { supported: { 'template-literal': false } },
   build: {
     outDir: '../public',
     emptyOutDir: true,
