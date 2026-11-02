@@ -3,7 +3,9 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_SOURCE_URL = 'https://icoretech.github.io/openai-json-pricing/pricing.json';
 const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
-const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra-law', 'gpt-6-rosalind', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+// These reviewed specialist models publish only standard-tier prices.
+const STANDARD_ONLY_MODELS = new Set(['gpt-6-astra-law', 'gpt-6-rosalind']);
 const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', fast: 'priority' });
 const OPTIONAL_TIER_MAP = Object.freeze({ flex: 'flex', ultrafast: 'ultrafast' });
 const CACHE_WRITE_DURATIONS = ['30m', '12h'];
@@ -31,6 +33,7 @@ export function buildOpenAiPricingSnapshot(payload, {
       throw new Error(`Pricing feed is missing a compatible ${modelId} entry`);
     }
     for (const [sourceTier, tier] of Object.entries(REQUIRED_TIER_MAP)) {
+      if (sourceTier === 'fast' && STANDARD_ONLY_MODELS.has(modelId) && model.prices.fast === undefined) continue;
       rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
     for (const [sourceTier, tier] of Object.entries(OPTIONAL_TIER_MAP)) {
