@@ -823,7 +823,7 @@ test('serves the CRUD, priced usage, cap, and eligibility API', async () => {
       accountCount: 0,
       attemptedAccountCount: 0,
       freshAccountCount: 0,
-      modelCount: 14,
+      modelCount: 17,
       lastSuccessAt: null,
       lastFailureAt: null,
       lastFailureClass: null

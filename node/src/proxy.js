@@ -27,6 +27,7 @@ import { MISALIGNMENT_POLICY_CODE, misalignmentPolicyFailure, nativeMisalignment
 import { PacingError, upstreamPacerForStore } from './upstream-pacer.js';
 import { beginNativeTurn, bindNativeTurnUpstream, finishNativeTurn, nativeTurnIdentity, nativeRecoveryUpstream, nativeWriteStarted, nativeEventWritten } from './native-turn-recovery.js';
 import { NativeResponseSteering } from './native-response-steering.js';
+import { classifyNativeWebSocketEvent, nativeWebSocketRetryAfter, portableNativeHistory } from './native-websocket-policy.js';
 import { gatewayDiagnosticsForStore } from './gateway-diagnostics.js';
 import { consumeNativeSse, createNativeSseState, nativeSsePreamble, NATIVE_SSE_EVENT_BYTES } from './native-sse.js';
 import {
@@ -3360,6 +3361,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   let nativeResponseControls = {};
   let nativeMetadataSent = false;
   let nativeMultiAgentOptimized = false;
+  let nativeQuotaUpstreamId = null;
   let retriedTurn = false;
   let publicCompatibilityRetries = 0;
   let activeFrame;
@@ -3496,6 +3498,18 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
   const sendFrame = (socket, frame, candidate) => {
     const attemptId = publicResponses ? publicAttempt?.id : null;
     const task = async () => {
+      if (!publicResponses && socket !== targetSocket && frame.nativePayload && client.readyState === WebSocket.OPEN) {
+        // Frames queued on the former socket must still receive admission or
+        // an explicit refusal after relocation; never silently drop them.
+        if (targetSocket?.readyState !== WebSocket.OPEN) {
+          pending.push(frame);
+          pendingBytes += frame.data.byteLength;
+          if (pendingBytes > codexOptions.websocketPendingBytes) closeBoth(1009, 'Pending websocket data exceeded limit');
+          return;
+        }
+        socket = targetSocket;
+        candidate = upstream;
+      }
       if (socket !== targetSocket || socket.readyState !== WebSocket.OPEN || client.readyState !== WebSocket.OPEN) return;
       const model = framePacingModel(frame);
       if (!publicResponses && frame.nativePayload) {
@@ -3516,6 +3530,31 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           pendingBytes += frame.data.byteLength;
           await connect(false, upstream, credentials);
           return;
+        }
+        // The live socket is only a preference for a new portable history.
+        // Active steering and durable recovery ownership remain hard fences.
+        if (!recoveryId && !nativeLane.current && !nativeLane.accepted && !nativeLane.pending.size
+          && portableNativeHistory(frame.nativePayload)) {
+          const eligible = chooseUpstreams(store, req, '/backend-api/codex/responses', frame.nativePayload, '/backend-api/codex/responses', modelCatalog);
+          if (nativeQuotaUpstreamId === candidate.id || !eligible.some(({ id }) => id === candidate.id)) {
+            const fallback = eligible.find((entry) => entry.id !== candidate.id
+              && selectPersonalShareSession(req, entry.id, { affinityId: sessionId, allowReselect: true }));
+            if (fallback) {
+              settleNativeAdmission({ class: 'neutral', retryable: false });
+              settleNativeConnectionAdmission({ class: 'neutral', retryable: false });
+              retireUpstreamSocket(socket);
+              upstream = store.get(fallback.id, scopeId);
+              credentials = store.credentials(upstream.id);
+              await ensureProviderCredentials(upstream, credentials, { fetchImpl,
+                saveCredentials: (updated, expiresAt) => store.persistCredentials(upstream.id, updated, expiresAt) });
+              pending.push(frame);
+              pendingBytes += frame.data.byteLength;
+              nativeResponseControls = {};
+              nativeMetadataSent = false;
+              await connect(false, upstream, credentials);
+              return;
+            }
+          }
         }
       }
       if (model && !disablePacing) {
@@ -4238,7 +4277,12 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         try { nativeFrame = JSON.parse(data.toString()); } catch {}
       }
       const nativeTurn = nativeLane.event(nativeFrame, connectionUpstream);
-      if (nativeFrame && ['error', 'response.failed', 'response.completed', 'response.incomplete'].includes(nativeFrame.type)) settleNativeAdmission(classifySseEvent(nativeFrame));
+      if (nativeFrame && ['error', 'response.failed', 'response.completed', 'response.incomplete'].includes(nativeFrame.type)) {
+        const outcome = classifyNativeWebSocketEvent(nativeFrame);
+        if (outcome.class === 'quota') nativeQuotaUpstreamId = connectionUpstream.id;
+        else if (outcome.class === 'success') nativeQuotaUpstreamId = null;
+        settleNativeAdmission(outcome);
+      }
       if (classifySseEvent(nativeFrame).errorCode === 'websocket_connection_limit_reached') retireUpstreamSocket(socket);
       if (!nativeMetadataSent) {
         nativeMetadataSent = true;
@@ -4449,6 +4493,7 @@ function sanitizeNativeResponseControlFrame(data, isBinary) {
   let event;
   try { event = JSON.parse(data.toString()); } catch { return data; }
   if (!event || typeof event !== 'object' || Array.isArray(event)) return data;
+  const retryAfter = nativeWebSocketRetryAfter(event);
   let changed = false;
   if (Object.hasOwn(event, 'headers')) {
     event.headers = event.headers && typeof event.headers === 'object' && !Array.isArray(event.headers)
@@ -4465,7 +4510,19 @@ function sanitizeNativeResponseControlFrame(data, isBinary) {
     if (event.response.headers === undefined) delete event.response.headers;
     changed = true;
   }
-  changed ||= redactNativeMisalignmentDetails(event);
+  for (const container of [event, event.response, event.status_details, event.response?.status_details]) {
+    if (!plainObject(container?.error) || !Object.hasOwn(container.error, 'headers')) continue;
+    delete container.error.headers;
+    changed = true;
+  }
+  if (retryAfter !== null) {
+    event.headers = { ...event.headers, 'retry-after': retryAfter };
+    for (const container of [event, event.response]) {
+      if (plainObject(container?.error)) container.error.headers = { 'retry-after': retryAfter };
+    }
+    changed = true;
+  }
+  changed = redactNativeMisalignmentDetails(event) || changed;
   return changed ? Buffer.from(JSON.stringify(event)) : data;
 }
 
