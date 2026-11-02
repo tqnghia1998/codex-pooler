@@ -11,6 +11,13 @@ Relaydeck is a deliberately small local dashboard for:
 
 This is the primary implementation for new development. It is a small single-process proxy with scoped API keys and the core HTTP/WebSocket compatibility layer. The Elixir application is retained unchanged from upstream as a reference, not as a second maintained implementation. Codex and Claude Enterprise OAuth access tokens are refreshed lazily before proxy requests, and proactively once per hour when they expire within 12 hours.
 
+The dashboard supports English and Simplified Chinese. Its **Language** selector
+persists the choice in browser local storage and synchronizes it across tabs;
+the initial choice follows the browser language. Switching preserves open
+forms and filters. Dashboard copy, dates, numbers, and Astryx accessibility
+labels follow the selected language; account names, model IDs, protocol codes,
+credentials, and unrecognized provider error messages retain their source text.
+
 QuotaHub is maintained only in the standalone `codex-share` repository. Its
 Redis/KMS persistence, DW relay, product server, and UI stay there. Its
 `vendor/gateway` submodule pins a minimal runtime snapshot on the standalone
@@ -61,7 +68,7 @@ The Node proxy covers the client-visible local compatibility path:
 | Client release gate | Reviewed npm manifest, latest-version discovery, integrity-pinned platform packages, loopback-only synthetic client execution, and sanitized intake reports | `test/compatibility-release-gate.test.js` |
 | Readiness and diagnostics | Immediate liveness, startup-settled readiness with documented degradation, bounded sanitized terminal failure reasons, and phase timing summaries | `test/readiness.test.js`, `test/gateway-diagnostics.test.js`, `test/server.test.js`, `test/accounting-lifecycle.test.js` |
 | SSE | Incremental UTF-8/SSE parsing across LF, CRLF, standalone CR, and transport boundaries; bounded complete and incomplete events; quota-incomplete failure and account cooldown; OpenAI and Anthropic terminal recognition; first-event failover; optional bounded Codex bootstrap buffering before headers; public Responses sequencing; Chat translation with verified final tool-argument recovery and inconsistent-snapshot failure, and failures after output started reported as a final error chunk rather than a normal finish; cancellation and usage settlement | `test/openai-streaming.test.js`, `test/proxy.test.js`, `test/codex-compatibility.test.js` |
-| Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, independent frame/queue/backpressure limits, keepalive pings, pre-output reconnect, request-scoped `1009` handling, oversized native frame refusal with a `426` HTTP fallback per window, sanitized terminals and terminal usage settlement; native Codex frames remain opaque on one upstream connection unless guarded compatibility is enabled | `test/gateway-routes.test.js`, `test/codex-compatibility.test.js` |
+| Responses WebSocket | Public `response.create` normalization, `generate: false` warmups, validated per-turn `stream_id` echo, public compaction bridging, per-turn routing/session pinning, sequential multi-turn reuse, independent frame/queue/backpressure limits, keepalive pings, pre-output reconnect, request-scoped `1009` handling, oversized native frame refusal with a `426` HTTP fallback per window, sanitized terminals and terminal usage settlement; native portable full-history turns can reconnect between turns when the prior account is unavailable or reports quota exhaustion | `test/gateway-routes.test.js`, `test/codex-compatibility.test.js`, `test/native-websocket-ports.test.js` |
 
 ### Responses stream and request contracts
 
@@ -456,6 +463,26 @@ Account health is settled consistently for public JSON/SSE, Chat adapters, nativ
 
 A `response.incomplete` naming insufficient quota, exhausted credit, or organization/project spend limits fails the turn and cools that account; a collected non-streaming response may fail over before output. Other incomplete reasons such as `max_output_tokens` remain ordinary incomplete results. A final upstream HTTP `429` stays a sanitized `rate_limit_error` with `Retry-After`, and public WebSocket 429 failures use that error type without exposing provider details. Bounded `400` validation rejections relay only allowlisted codes and field paths; Chat input paths are mapped to `messages`, while provider messages are not exposed.
 
+Native WebSocket 429 terminal errors preserve validated `Retry-After` advice
+in the outer and client-parsed error headers. Integer seconds must fit an
+unsigned 64-bit value, and dates must use canonical HTTP-date syntax; control
+characters and values larger than 128 bytes are rejected. Valid nested advice
+takes precedence, with fallback to outer advice. Other nested provider headers
+are removed. Account cooldowns consume the same admitted hint under their
+existing maximum delay. HTTP SSE and public WebSocket header policies are
+unchanged.
+
+A new native `response.create` with full history can move off an exhausted or
+otherwise ineligible account. Completed `collaboration.spawn_agent`,
+`send_message`, and `followup_task` calls retain their outer ciphertext and
+client-authored results. Response/conversation anchors, nested file or item
+references, other encrypted payloads, active steering, and durable recovery
+ownership prevent a move. Each replacement account is reauthorized and admitted
+normally; fixed share-session keys stay pinned, while personal keys can select
+another authorized grant. Already received output is never automatically
+replayed. Frames queued during a reconnect still receive normal admission or
+an explicit refusal.
+
 Codex file, audio, and image requests retain downstream cancellation through provider body consumption. Disconnects release their share reservations without penalizing provider health; already reported usage still settles. Authentication retries collect at most 1 MiB for at most one second and dispose of the rejected response before credential refresh, including raw HTTP and WebSocket compaction. A rejection with measured usage is settled without replay.
 
 Codex HTTP, compatibility, model-discovery, compaction, and WebSocket handshakes also share bounded in-memory origin reachability state. Proven DNS or pre-connect failures settle the selected account neutrally, preventing one local-network or ChatGPT-origin outage from opening every account circuit. Generation-fenced leases prevent an old half-open request from clearing a newer outage, while a real HTTP response of any status immediately restores normal host admission. The state is process-local and stores no credentials, request bodies, response bodies, or hostnames in diagnostics.
@@ -530,6 +557,12 @@ Codex `response.incomplete` terminals reporting exhausted credit or organization
 Public file creation performs the Codex create → upload → finalize protocol and stores only file metadata locally; file content and signed URLs are not persisted. Stored upstream credentials that cannot be decrypted return `503 upstream_credential_unavailable` rather than an upstream failure. Audio requests normalize OpenAI multipart fields for Codex transcription; `response_format=text` returns `text/plain`, while JSON remains the default and subtitle/verbose formats are unsupported. Public image edits refuse image and mask uploads totalling more than 50 MiB with `413 request_too_large` before any upstream is selected. Image results must contain structurally valid base64 PNG, JPEG, or WebP data. Missing or malformed final results fail atomically with `502 image_generation_failed`; result URLs are never downloaded. Measured upstream usage is retained on failure without session affinity or successful share accounting. Public image requests translate through the Responses image-generation tool and automatically select an image-capable Codex host model. The proxy binds to `127.0.0.1`. The API key is a single shared key, not a Pool or per-user key system.
 
 Backend Responses requests with `stream: true` may end their input with a `compaction_trigger`. The Node gateway validates that trigger, projects the compact-compatible request fields, dispatches to `/backend-api/codex/responses/compact` on the selected Codex account, and returns the encrypted compaction item as Responses SSE. Codex V2 compaction requests (`responses_compaction_v2` turn metadata) collect streamed compact results, including an unframed final event, and reject malformed or post-terminal material. A complete `insufficient_quota` failure returns a sanitized HTTP 429 and cools the selected account; poisoned streams remain `502 invalid_compaction_response`. Public `/v1/responses` HTTP and WebSocket turns also accept exactly one terminal trigger after visible input; they dispatch the compact projection through the ordinary backend Responses endpoint and adapt the result to public JSON, SSE, or WebSocket events. The direct public `POST /v1/responses/compact` route remains intentionally unsupported.
+
+The reviewed catalog includes `gpt-6.1-terra`, `gpt-6-astra-law`, and
+`gpt-6-rosalind`. Specialist models publish standard-tier prices only; context
+and cache rates come from that model's reviewed feed entry. No maximum context
+window is inferred from a pricing threshold. Live account discovery remains
+authoritative for model availability and limits.
 
 OpenAI billing rows and the advertised Codex model IDs come from `src/openai-pricing-snapshot.js`. Refresh that reviewable generated file from the configured upstream pricing feed with:
 

@@ -1,4 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { t, getLocale, setLocale, subscribeLocale, localeTag, statusText, ASTRYX_MESSAGES } from './i18n.js';
+import { InternationalizationProvider } from '@astryxdesign/core/i18n';
+import React, { useSyncExternalStore, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@astryxdesign/core/reset.css';
 import '@astryxdesign/core/astryx.css';
@@ -49,33 +51,33 @@ const BULK_ACCOUNT_TYPES = [{ value: 'codex', label: 'Codex' }, { value: 'claude
 const DEFAULT_BULK_ACCOUNT_TYPES = BULK_ACCOUNT_TYPES.map(({ value }) => value);
 const FOCUSED_QUOTA_REFRESH_INTERVAL_MS = 5 * 60 * 1_000;
 
-const FILTER_OPTIONS = {
+const filterOptions = () => ({
   status: [
-    { value: '', label: 'Any status' },
-    { value: 'reauth_required', label: 'Reauth required' },
-    { value: 'refresh_failed', label: 'Refresh failed' },
-    { value: 'cooling_down', label: 'Cooling down' },
-    { value: 'exhausted', label: 'Exhausted' },
-    { value: 'uncapped', label: 'Uncapped' }
+    { value: '', label: t("Any status") },
+    { value: 'reauth_required', label: t("Reauth required") },
+    { value: 'refresh_failed', label: t("Refresh failed") },
+    { value: 'cooling_down', label: t("Cooling down") },
+    { value: 'exhausted', label: t("Exhausted") },
+    { value: 'uncapped', label: t("Uncapped") }
   ],
   quota: [
-    { value: '', label: 'Any quota' },
-    { value: 'plenty', label: 'Plenty (≥70%)' },
-    { value: 'moderate', label: 'Moderate (30–69%)' },
-    { value: 'low', label: 'Low (<30%)' },
-    { value: 'exhausted', label: 'Exhausted (0%)' },
-    { value: 'unknown', label: 'Unknown' }
+    { value: '', label: t("Any quota") },
+    { value: 'plenty', label: t("Plenty (≥70%)") },
+    { value: 'moderate', label: t("Moderate (30–69%)") },
+    { value: 'low', label: t("Low (<30%)") },
+    { value: 'exhausted', label: t("Exhausted (0%)") },
+    { value: 'unknown', label: t("Unknown") }
   ],
   sort: [
-    { value: 'recent_active', label: 'Recent active' },
-    { value: 'quota_asc', label: 'Least quota remaining (Urgent)' },
-    { value: 'quota', label: 'Most quota remaining' },
-    { value: 'expiry_asc', label: 'Earliest quota reset / expiry' },
-    { value: 'expiry_desc', label: 'Latest quota reset / expiry' },
-    { value: 'cap_left', label: 'Most spending cap left' },
-    { value: 'cap_left_asc', label: 'Least spending cap left' }
+    { value: 'recent_active', label: t("Recent active") },
+    { value: 'quota_asc', label: t("Least quota remaining (Urgent)") },
+    { value: 'quota', label: t("Most quota remaining") },
+    { value: 'expiry_asc', label: t("Earliest quota reset / expiry") },
+    { value: 'expiry_desc', label: t("Latest quota reset / expiry") },
+    { value: 'cap_left', label: t("Most spending cap left") },
+    { value: 'cap_left_asc', label: t("Least spending cap left") }
   ]
-};
+});
 
 const DEFAULT_PACING = {
   enabled: false,
@@ -108,7 +110,7 @@ function useApi() {
     });
     let response = await request(apiKey);
     if (response.status === 401) {
-      const nextKey = window.prompt('Enter the Relaydeck API key')?.trim() || '';
+      const nextKey = window.prompt(t("Enter the Relaydeck API key"))?.trim() || '';
       if (nextKey) {
         sessionStorage.setItem('codex-pooler-api-key', nextKey);
         setApiKey(nextKey);
@@ -116,7 +118,7 @@ function useApi() {
       }
     }
     const data = response.status === 204 ? {} : await response.json();
-    if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || 'Request failed');
+    if (!response.ok) throw new Error(typeof data.error === 'string' ? data.error : data.error?.message || t("Request failed"));
     return data;
   }, [apiKey]);
   return { api, apiKey };
@@ -212,7 +214,7 @@ function VirtualGrid({ items, renderItem, onVisibleItemsChange }) {
   );
 }
 
-function Dashboard({ themeMode, setThemeMode }) {
+function Dashboard({ themeMode, setThemeMode, locale, onLocaleChange }) {
   const { api, apiKey } = useApi();
   const toast = useToast();
   const [upstreams, setUpstreams] = useState([]);
@@ -399,7 +401,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         const response = await fetch('/api/upstreams/events', {
           headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {}
         });
-        if (!response.ok || !response.body) throw new Error('Upstream updates unavailable');
+        if (!response.ok || !response.body) throw new Error(t("Upstream updates unavailable"));
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffered = '';
@@ -539,7 +541,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         method: mode === 'edit' ? 'PATCH' : 'POST',
         body: JSON.stringify(data)
       });
-      show('Saved');
+      show(t("Saved"));
       await load();
       return true;
     } catch (error) {
@@ -598,7 +600,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       });
       setCredentialTarget(null);
       setCredentialValue('');
-      show('Credentials replaced');
+      show(t("Credentials replaced"));
       await load();
     } catch (error) {
       setCredentialError(error.message);
@@ -617,7 +619,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       await api(refreshTarget.all ? '/api/upstreams/refresh-quota' : `/api/upstreams/${refreshTarget.id}/refresh-quota`, { method: 'POST' });
       await load();
-      show(refreshTarget.all ? 'All quotas refreshed' : 'Quota refreshed');
+      show(refreshTarget.all ? t("All quotas refreshed") : t("Quota refreshed"));
       setRefreshTarget(null);
     } catch (error) {
       setRefreshTarget(null);
@@ -638,7 +640,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     setIsRefreshingToken(true);
     try {
       await api(`/api/upstreams/${id}/refresh-token`, { method: 'POST' });
-      show('Token refreshed');
+      show(t("Token refreshed"));
     } catch (error) {
       show(error.message, true);
     } finally {
@@ -671,7 +673,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       await api(`/api/upstreams/${cooldownTarget.id}/clear-cooldown`, { method: 'POST' });
       setCooldownTarget(null);
-      show('Cooldown cleared');
+      show(t("Cooldown cleared"));
       await load();
     } catch (error) {
       show(error.message, true);
@@ -692,7 +694,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       await api(`/api/upstreams/${capUpstream.id}/cap`, { method: 'PUT', body: JSON.stringify({ capDollars: capValue ?? 0 }) });
       setCapUpstream(null);
       await load();
-    }, 'Cap updated', show);
+    }, t("Cap updated"), show);
   };
 
   const remove = (upstream) => {
@@ -705,7 +707,7 @@ function Dashboard({ themeMode, setThemeMode }) {
     try {
       await api(`/api/upstreams/${deleteTarget.id}`, { method: 'DELETE' });
       await load();
-      show('Deleted');
+      show(t("Deleted"));
       setDeleteTarget(null);
     } catch (error) {
       show(error.message, true);
@@ -723,7 +725,7 @@ function Dashboard({ themeMode, setThemeMode }) {
       });
       setReauthDeleteIds(null);
       await load();
-      show(`Removed ${result.removed.length} reauth-required accounts${result.skipped.length ? `; skipped ${result.skipped.length} recovered or missing accounts` : ''}`);
+      show(t("Removed {value0} reauth-required accounts{value1}", { value0: result.removed.length, value1: result.skipped.length ? t("; skipped {value0} recovered or missing accounts", { value0: result.skipped.length }) : '' }));
     } catch (error) {
       show(error.message, true);
     } finally {
@@ -735,13 +737,13 @@ function Dashboard({ themeMode, setThemeMode }) {
     await api('/api/upstreams/priority', { method: 'PUT', body: JSON.stringify({ ids }) });
     setPriorityOpen(false);
     await load();
-  }, 'Priority list updated', show);
+  }, t("Priority list updated"), show);
 
   const saveRouting = (strategy) => run(async () => {
     const data = await api('/api/routing', { method: 'PUT', body: JSON.stringify({ strategy }) });
     setRoutingPolicy(data.policy);
     setRoutingOpen(false);
-  }, 'Routing strategy updated', show);
+  }, t("Routing strategy updated"), show);
 
   const openDiagnostics = async () => {
     setDiagnosticsOpen(true);
@@ -778,7 +780,7 @@ function Dashboard({ themeMode, setThemeMode }) {
         ? '/api/compatibility/facts'
         : `/api/compatibility/facts/${compatibilityResetTarget.id}`;
       await api(path, { method: 'DELETE' });
-      show(compatibilityResetTarget.all ? 'Compatibility facts reset' : 'Compatibility fact reset');
+      show(compatibilityResetTarget.all ? t("Compatibility facts reset") : t("Compatibility fact reset"));
       setCompatibilityResetTarget(null);
       await openCompatibility();
     } catch (error) {
@@ -813,25 +815,25 @@ function Dashboard({ themeMode, setThemeMode }) {
   const saveBulkCaps = async (event) => {
     event.preventDefault();
     if (!bulkAccountTypes.length) {
-      show('Choose at least one account type', true);
+      show(t("Choose at least one account type"), true);
       return;
     }
     const payload = bulkMode === 'rules'
       ? { accountTypes: bulkAccountTypes, rules: bulkRules.map(({ minQuotaLeft, capDollars }) => ({ minQuotaLeft, capDollars })), unknownQuotaDollars: bulkUnknownValue }
       : { accountTypes: bulkAccountTypes, target: bulkMode, capDollars: bulkCapValue };
     if (bulkMode === 'rules' && (!payload.rules.length || payload.rules.some((rule) => rule.minQuotaLeft == null || rule.capDollars == null))) {
-      show('Enter non-negative numbers for every quota and cap', true);
+      show(t("Enter non-negative numbers for every quota and cap"), true);
       return;
     }
     if (bulkMode !== 'rules' && bulkCapValue == null) {
-      show('Enter a cap amount', true);
+      show(t("Enter a cap amount"), true);
       return;
     }
     await run(async () => {
       await api('/api/spending-caps/bulk', { method: 'POST', body: JSON.stringify(payload) });
       setBulkOpen(false);
       await load();
-    }, 'Bulk caps updated', show);
+    }, t("Bulk caps updated"), show);
   };
 
   const pacingByUpstream = useMemo(
@@ -846,104 +848,106 @@ function Dashboard({ themeMode, setThemeMode }) {
           <HStack justify="between" vAlign="start" gap={2} wrap="wrap">
             <VStack gap={1}>
               <Heading level={1}>Relaydeck</Heading>
-              <Text type="supporting" color="secondary">Small local upstream and quota dashboard. Credentials never leave this server.</Text>
+              <Text type="supporting" color="secondary">{t("Small local upstream and quota dashboard. Credentials never leave this server.")}</Text>
             </VStack>
             <HStack gap={2} vAlign="center" wrap="wrap">
+              <Selector label={t("Language")} value={locale} onChange={onLocaleChange} width={180}
+                options={[{ value: "en", label: "English" }, { value: "zh-CN", label: "简体中文" }]} />
               <Button
-                label={themeMode === 'dark' ? 'Light mode' : 'Dark mode'}
+                label={themeMode === 'dark' ? t("Light mode") : t("Dark mode")}
                 variant="secondary"
                 onClick={() => setThemeMode(themeMode === 'dark' ? 'light' : 'dark')}
               />
-              <Button label="Reload" variant="secondary" isLoading={isManualReloading} onClick={() => void load(true, true)} />
+              <Button label={t("Reload")} variant="secondary" isLoading={isManualReloading} onClick={() => void load(true, true)} />
             </HStack>
           </HStack>
 
           <VStack gap={1}>
-            <Heading level={2} id="filters-title">Search & filter upstreams</Heading>
+            <Heading level={2} id="filters-title">{t("Search & filter upstreams")}</Heading>
             <HStack gap={1} wrap="wrap" vAlign="start">
               <StackItem size="static">
-                <SegmentedControl label="Type" value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
-                  <SegmentedControlItem value="all" label="All" />
+                <SegmentedControl label={t("Type")} value={filterType || 'all'} onChange={(value) => setFilterType(value === 'all' ? '' : value)}>
+                  <SegmentedControlItem value="all" label={t("All")} />
                   <SegmentedControlItem value="codex" label="Codex" />
                   <SegmentedControlItem value="compass" label="Compass" />
                   <SegmentedControlItem value="claude" label="Claude" />
                 </SegmentedControl>
               </StackItem>
               <StackItem size="fill">
-                <TextInput label="Search" isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder="Search by name, id, or email..." hasClear />
+                <TextInput label={t("Search")} isLabelHidden value={filterQuery} onChange={setFilterQuery} placeholder={t("Search by name, id, or email...")} hasClear />
               </StackItem>
               <StackItem size="fill">
-                <Selector label="Status" isLabelHidden options={FILTER_OPTIONS.status} value={filterStatus} onChange={setFilterStatus} />
+                <Selector label={t("Status")} isLabelHidden options={filterOptions().status} value={filterStatus} onChange={setFilterStatus} />
               </StackItem>
               <StackItem size="fill">
-                <Selector label="Quota" isLabelHidden options={FILTER_OPTIONS.quota} value={filterQuota} onChange={setFilterQuota} />
+                <Selector label={t("Quota")} isLabelHidden options={filterOptions().quota} value={filterQuota} onChange={setFilterQuota} />
               </StackItem>
               <StackItem size="fill">
-                <Selector label="Sort" isLabelHidden options={FILTER_OPTIONS.sort} value={filterSort} onChange={setFilterSort} />
+                <Selector label={t("Sort")} isLabelHidden options={filterOptions().sort} value={filterSort} onChange={setFilterSort} />
               </StackItem>
             </HStack>
           </VStack>
 
           <VStack gap={1}>
-            <Heading level={2} id="metrics-title">Pool overview & metrics</Heading>
+            <Heading level={2} id="metrics-title">{t("Pool overview & metrics")}</Heading>
             {!hasLoaded ? (
               <MetricSkeletons />
             ) : (
               <Grid columns={METRIC_GRID_COLUMNS} gap={2}>
-                {filterType !== 'compass' && filterType !== 'claude' && <Metric label="Codex active / total" value={`${stats.activeCodex}/${stats.totalCodex}`} />}
-                {filterType !== 'codex' && filterType !== 'claude' && <Metric label="Compass active / total" value={`${stats.activeCompass}/${stats.totalCompass}`} />}
-                {filterType !== 'codex' && filterType !== 'compass' && <Metric label="Claude active / total" value={`${stats.activeClaude}/${stats.totalClaude}`} />}
-                <Metric label="Cooling down" value={stats.coolingDown} />
-                <Metric label="Reauth required" value={stats.reauth} />
-                <Metric label="Low quota (<30%)" value={stats.lowQuota} />
-                <Metric label="Uncapped" value={stats.uncapped} />
-                <Metric label="Exhausted" value={stats.exhausted} />
-                <Metric label="Spending cap left" value={`$${formatNumber(stats.capLeft)}`} />
-                <Metric label="Spending cap spent" value={`$${formatNumber(stats.capSpent)}`} />
+                {filterType !== 'compass' && filterType !== 'claude' && <Metric label={t("Codex active / total")} value={`${stats.activeCodex}/${stats.totalCodex}`} />}
+                {filterType !== 'codex' && filterType !== 'claude' && <Metric label={t("Compass active / total")} value={`${stats.activeCompass}/${stats.totalCompass}`} />}
+                {filterType !== 'codex' && filterType !== 'compass' && <Metric label={t("Claude active / total")} value={`${stats.activeClaude}/${stats.totalClaude}`} />}
+                <Metric label={t("Cooling down")} value={stats.coolingDown} />
+                <Metric label={t("Reauth required")} value={stats.reauth} />
+                <Metric label={t("Low quota (<30%)")} value={stats.lowQuota} />
+                <Metric label={t("Uncapped")} value={stats.uncapped} />
+                <Metric label={t("Exhausted")} value={stats.exhausted} />
+                <Metric label={t("Spending cap left")} value={`$${formatNumber(stats.capLeft)}`} />
+                <Metric label={t("Spending cap spent")} value={`$${formatNumber(stats.capSpent)}`} />
               </Grid>
             )}
           </VStack>
 
           <VStack gap={1}>
             <HStack align="center" justify="between" gap={1} wrap="wrap">
-              <Heading level={2} id="upstreams-title">Configured upstreams</Heading>
+              <Heading level={2} id="upstreams-title">{t("Configured upstreams")}</Heading>
               <HStack gap={1} wrap="wrap">
                 <Button
-                  label="System status"
+                  label={t("System status")}
                   size="sm"
                   variant="secondary"
                   endContent={systemSummary.warningCount > 0 ? <Badge label={String(systemSummary.warningCount)} variant="warning" /> : undefined}
                   onClick={() => void openSystemStatus()}
                 />
-                <Button label="Routing" size="sm" variant="secondary" onClick={() => setRoutingOpen(true)} />
-                <Button label="Set bulk caps" size="sm" variant="secondary" onClick={openBulkCaps} />
+                <Button label={t("Routing")} size="sm" variant="secondary" onClick={() => setRoutingOpen(true)} />
+                <Button label={t("Set bulk caps")} size="sm" variant="secondary" onClick={openBulkCaps} />
                 <Button
-                  label={`Remove all Reauth required (${reauthUpstreams.length})`}
+                  label={t("Remove all Reauth required ({value0})", { value0: reauthUpstreams.length })}
                   size="sm"
                   variant="destructive"
                   isDisabled={!reauthUpstreams.length || isDeletingReauth}
                   onClick={() => setReauthDeleteIds(reauthUpstreams.map(({ id }) => id))}
                 />
                 <MoreMenu
-                  label="Management actions"
+                  label={t("Management actions")}
                   size="sm"
                   variant="secondary"
                   items={[
-                    { label: 'Compatibility', onClick: () => void openCompatibility() },
-                    { label: 'Diagnostics', onClick: () => void openDiagnostics() },
+                    { label: t("Compatibility"), onClick: () => void openCompatibility() },
+                    { label: t("Diagnostics"), onClick: () => void openDiagnostics() },
                     { type: 'divider' },
-                    { label: 'Refresh all quotas', onClick: () => setRefreshTarget({ all: true }) },
-                    { label: 'Set priority', onClick: () => setPriorityOpen(true) }
+                    { label: t("Refresh all quotas"), onClick: () => setRefreshTarget({ all: true }) },
+                    { label: t("Set priority"), onClick: () => setPriorityOpen(true) }
                   ]}
                 />
-                <Button label="Add upstream" size="sm" variant="primary" onClick={add} />
+                <Button label={t("Add upstream")} size="sm" variant="primary" onClick={add} />
               </HStack>
             </HStack>
-            {loadError && hasLoaded && <Banner title="Could not load upstreams" description={loadError} status="error" />}
+            {loadError && hasLoaded && <Banner title={t("Could not load upstreams")} description={loadError} status="error" />}
             {!hasLoaded ? (
               <UpstreamSkeletons />
             ) : loadError && upstreams.length === 0 ? (
-              <EmptyState title="Upstreams unavailable" description="Reload the dashboard after the management API is available." />
+              <EmptyState title={t("Upstreams unavailable")} description={t("Reload the dashboard after the management API is available.")} />
             ) : filteredUpstreams.length ? (
               <VirtualGrid
                 items={filteredUpstreams}
@@ -968,7 +972,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                 )}
               />
             ) : (
-              <EmptyState title={upstreams.length ? 'No matching upstreams' : 'No upstreams yet'} description={upstreams.length ? 'Try changing the current filters.' : 'Add a Codex, Compass, or Claude upstream to start routing requests.'} />
+              <EmptyState title={upstreams.length ? t("No matching upstreams") : t("No upstreams yet")} description={upstreams.length ? t("Try changing the current filters.") : t("Add a Codex, Compass, or Claude upstream to start routing requests.")} />
             )}
           </VStack>
 
@@ -1049,11 +1053,11 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(compatibilityResetTarget)}
             onOpenChange={(isOpen) => { if (!isOpen && !compatibilityActionLoading) setCompatibilityResetTarget(null); }}
-            title={compatibilityResetTarget?.all ? 'Reset all compatibility facts?' : 'Reset compatibility fact?'}
+            title={compatibilityResetTarget?.all ? t("Reset all compatibility facts?") : t("Reset compatibility fact?")}
             description={compatibilityResetTarget?.all
-              ? 'Remove every learned compatibility fact. Requests will relearn allowlisted behavior from new evidence.'
-              : `Remove the learned ${compatibilityResetTarget?.features?.join(', ') || 'compatibility'} behavior for future requests?`}
-            actionLabel="Reset"
+              ? t("Remove every learned compatibility fact. Requests will relearn allowlisted behavior from new evidence.")
+              : t("Remove the learned {value0} behavior for future requests?", { value0: compatibilityResetTarget?.features?.join(', ') || 'compatibility' })}
+            actionLabel={t("Reset")}
             actionVariant="destructive"
             isActionLoading={compatibilityActionLoading}
             onAction={resetCompatibility}
@@ -1061,9 +1065,9 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(reauthDeleteIds)}
             onOpenChange={(isOpen) => { if (!isOpen && !isDeletingReauth) setReauthDeleteIds(null); }}
-            title="Remove all Reauth required accounts?"
-            description={`Remove ${reauthDeleteIds?.length || 0} accounts marked Reauth required across the entire pool, including accounts hidden by filters. Accounts that have recovered before removal will be skipped. This action cannot be undone.`}
-            actionLabel={`Remove ${reauthDeleteIds?.length || 0} accounts`}
+            title={t("Remove all Reauth required accounts?")}
+            description={t("Remove {value0} accounts marked Reauth required across the entire pool, including accounts hidden by filters. Accounts that have recovered before removal will be skipped. This action cannot be undone.", { value0: reauthDeleteIds?.length || 0 })}
+            actionLabel={t("Remove {value0} accounts", { value0: reauthDeleteIds?.length || 0 })}
             actionVariant="destructive"
             isActionLoading={isDeletingReauth}
             onAction={confirmDeleteReauth}
@@ -1071,9 +1075,9 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(deleteTarget)}
             onOpenChange={(isOpen) => { if (!isOpen) setDeleteTarget(null); }}
-            title="Delete upstream?"
-            description={deleteTarget ? `Are you sure you want to delete "${deleteTarget.type === 'codex' && deleteTarget.email ? deleteTarget.email : deleteTarget.name}" (${deleteTarget.id})? This action cannot be undone.` : ''}
-            actionLabel="Delete"
+            title={t("Delete upstream?")}
+            description={deleteTarget ? t("Are you sure you want to delete \"{value0}\" ({value1})? This action cannot be undone.", { value0: deleteTarget.type === 'codex' && deleteTarget.email ? deleteTarget.email : deleteTarget.name, value1: deleteTarget.id }) : ''}
+            actionLabel={t("Delete")}
             actionVariant="destructive"
             isActionLoading={isDeleting}
             onAction={confirmDelete}
@@ -1081,9 +1085,9 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(refreshTarget)}
             onOpenChange={(isOpen) => { if (!isOpen) setRefreshTarget(null); }}
-            title={refreshTarget?.all ? 'Refresh all upstream quotas?' : refreshTarget?.type === 'claude' ? 'Refresh Claude quota and profile?' : 'Refresh upstream quota?'}
-            description={refreshTarget?.all ? 'Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.' : refreshTarget ? `Fetch live quota information from provider for "${refreshTarget.name}"?` : ''}
-            actionLabel="Refresh"
+            title={refreshTarget?.all ? t("Refresh all upstream quotas?") : refreshTarget?.type === 'claude' ? t("Refresh Claude quota and profile?") : t("Refresh upstream quota?")}
+            description={refreshTarget?.all ? t("Fetch live quota information from every provider in batches of 10. Each batch completes before the next starts.") : refreshTarget ? t("Fetch live quota information from provider for \"{value0}\"?", { value0: refreshTarget.name }) : ''}
+            actionLabel={t("Refresh")}
             actionVariant="primary"
             isActionLoading={isRefreshing}
             onAction={confirmRefresh}
@@ -1091,9 +1095,9 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(refreshTokenTarget)}
             onOpenChange={(isOpen) => { if (!isOpen && !isRefreshingToken) setRefreshTokenTarget(null); }}
-            title="Refresh OAuth token?"
-            description={refreshTokenTarget ? `Obtain new access token for "${refreshTokenTarget.name}" using refresh token?${refreshTokenTarget.email ? `\nEmail: ${refreshTokenTarget.email}` : ''}${refreshTokenTarget.accessTokenExpiresAt ? `\nExpires: ${formatTokenExpiry(refreshTokenTarget.accessTokenExpiresAt)}` : ''}` : ''}
-            actionLabel="Refresh Token"
+            title={t("Refresh OAuth token?")}
+            description={refreshTokenTarget ? t("Obtain new access token for \"{value0}\" using refresh token?{value1}{value2}", { value0: refreshTokenTarget.name, value1: refreshTokenTarget.email ? t("\nEmail: {value0}", { value0: refreshTokenTarget.email }) : '', value2: refreshTokenTarget.accessTokenExpiresAt ? t("\nExpires: {value0}", { value0: formatTokenExpiry(refreshTokenTarget.accessTokenExpiresAt) }) : '' }) : ''}
+            actionLabel={t("Refresh Token")}
             actionVariant="primary"
             isActionLoading={isRefreshingToken}
             onAction={confirmRefreshToken}
@@ -1101,9 +1105,9 @@ function Dashboard({ themeMode, setThemeMode }) {
           <AlertDialog
             isOpen={Boolean(cooldownTarget)}
             onOpenChange={(isOpen) => { if (!isOpen && !isClearingCooldown) setCooldownTarget(null); }}
-            title="Clear upstream cooldown?"
-            description={cooldownTarget ? `Allow "${cooldownTarget.name}" to receive traffic before its current cooldown ends?` : ''}
-            actionLabel="Clear cooldown"
+            title={t("Clear upstream cooldown?")}
+            description={cooldownTarget ? t("Allow \"{value0}\" to receive traffic before its current cooldown ends?", { value0: cooldownTarget.name }) : ''}
+            actionLabel={t("Clear cooldown")}
             actionVariant="primary"
             isActionLoading={isClearingCooldown}
             onAction={confirmClearCooldown}
@@ -1113,7 +1117,7 @@ function Dashboard({ themeMode, setThemeMode }) {
             setFormDialog((s) => ({ ...s, isOpen: false }));
           }} width={640} purpose="form">
             <Layout
-              header={<DialogHeader title={formDialog.mode === 'edit' ? 'Edit upstream' : 'Add upstream'} subtitle={formDialog.mode === 'edit' && formDialog.upstream ? `For ${formDialog.upstream.name}` : undefined} hasDivider />}
+              header={<DialogHeader title={formDialog.mode === 'edit' ? t("Edit upstream") : t("Add upstream")} subtitle={formDialog.mode === 'edit' && formDialog.upstream ? t("For {value0}", { value0: formDialog.upstream.name }) : undefined} hasDivider />}
               content={(
                 <LayoutContent>
                   <form id="upstream-form" onSubmit={async (e) => {
@@ -1123,14 +1127,14 @@ function Dashboard({ themeMode, setThemeMode }) {
                   }}>
                     <VStack gap={3}>
                       <TextInput
-                        label="Name"
+                        label={t("Name")}
                         value={formValues.name || ''}
                         onChange={(value) => updateForm('name', value)}
-                        placeholder="Optional custom name"
+                        placeholder={t("Optional custom name")}
                       />
                       <Selector
-                        label="Type"
-                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: 'Claude Enterprise OAuth' }]}
+                        label={t("Type")}
+                        options={[{ value: 'codex', label: 'Codex' }, { value: 'compass', label: 'Compass' }, { value: 'claude', label: t("Claude Enterprise OAuth") }]}
                         value={formValues.type}
                         onChange={(value) => updateForm('type', value)}
                         isDisabled={formDialog.mode === 'edit'}
@@ -1139,10 +1143,10 @@ function Dashboard({ themeMode, setThemeMode }) {
                       {formDialog.mode === 'add' && formValues.type === 'codex' ? (
                         <TextArea
                           label="Codex auth.json"
-                          description="The account name is derived from the JWT email."
+                          description={t("The account name is derived from the JWT email.")}
                           value={formValues.authJson || ''}
                           onChange={(value) => updateForm('authJson', value)}
-                          placeholder="Paste auth.json here (tokens.access_token, refresh_token, id_token)"
+                          placeholder={t("Paste auth.json here (tokens.access_token, refresh_token, id_token)")}
                           rows={6}
                           htmlName="authJson"
                         />
@@ -1150,29 +1154,29 @@ function Dashboard({ themeMode, setThemeMode }) {
                         <VStack gap={2}>
                           {formDialog.mode === 'add' ? (
                             <TextInput
-                              label="Claude OAuth Token"
-                              description="Enter OAuth token (e.g. sk-ant-oat...)"
+                              label={t("Claude OAuth Token")}
+                              description={t("Enter OAuth token (e.g. sk-ant-oat...)")}
                               value={formValues.accessToken || ''}
                               onChange={(value) => updateForm('accessToken', value)}
                               placeholder="sk-ant-oat..."
                               htmlName="accessToken"
                             />
                           ) : null}
-                          <Text type="supporting" color="secondary">Claude Enterprise OAuth uses Claude Code-compatible shaping, profile lookup, and quota refresh.</Text>
+                          <Text type="supporting" color="secondary">{t("Claude Enterprise OAuth uses Claude Code-compatible shaping, profile lookup, and quota refresh.")}</Text>
                         </VStack>
                       ) : formValues.type === 'compass' ? (
                         <Grid columns={{ minWidth: 280, max: 2, repeat: 'fit' }} gap={3}>
-                          <TextInput label="Project ID" value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
-                          {formDialog.mode === 'add' && <TextInput label="Project key" value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />}
-                          <Selector label="Quota source" options={[{ value: 'compass', label: 'Compass' }, { value: 'ais', label: 'AIS' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
+                          <TextInput label={t("Project ID")} value={formValues.projectId || ''} onChange={(value) => updateForm('projectId', value)} placeholder="e.g. prj_12345" />
+                          {formDialog.mode === 'add' && <TextInput label={t("Project key")} value={formValues.projectKey || ''} onChange={(value) => updateForm('projectKey', value)} placeholder="e.g. key_67890" />}
+                          <Selector label={t("Quota source")} options={[{ value: 'compass', label: 'Compass' }, { value: 'ais', label: 'AIS' }]} value={formValues.quotaSource || 'compass'} onChange={(value) => updateForm('quotaSource', value)} />
                           <GridSpan columns="full">
-                            <Text type="supporting" color="secondary">The account name is derived from the project ID. AIS quota is managed outside this gateway.</Text>
+                            <Text type="supporting" color="secondary">{t("The account name is derived from the project ID. AIS quota is managed outside this gateway.")}</Text>
                           </GridSpan>
                         </Grid>
                       ) : null}
                       <Switch
-                        label="Request pacing"
-                        description="Space outbound starts for this account."
+                        label={t("Request pacing")}
+                        description={t("Space outbound starts for this account.")}
                         value={Boolean(formValues.pacing?.enabled)}
                         onChange={(value) => updatePacing('enabled', value)}
                       />
@@ -1180,8 +1184,8 @@ function Dashboard({ themeMode, setThemeMode }) {
                         <VStack gap={3}>
                           <Grid columns={{ minWidth: 180, max: 3, repeat: 'fit' }} gap={3}>
                             <NumberInput
-                              label="Account interval"
-                              description="Minimum milliseconds between starts."
+                              label={t("Account interval")}
+                              description={t("Minimum milliseconds between starts.")}
                               value={formValues.pacing?.minStartIntervalMs ?? 0}
                               onChange={(value) => updatePacing('minStartIntervalMs', value ?? 0)}
                               min={0}
@@ -1190,8 +1194,8 @@ function Dashboard({ themeMode, setThemeMode }) {
                               isIntegerOnly
                             />
                             <NumberInput
-                              label="Queue depth"
-                              description="Maximum waiting requests."
+                              label={t("Queue depth")}
+                              description={t("Maximum waiting requests.")}
                               value={formValues.pacing?.maxQueueDepth ?? 20}
                               onChange={(value) => updatePacing('maxQueueDepth', value ?? 20)}
                               min={1}
@@ -1200,8 +1204,8 @@ function Dashboard({ themeMode, setThemeMode }) {
                               isIntegerOnly
                             />
                             <NumberInput
-                              label="Queue age"
-                              description="Maximum wait in milliseconds."
+                              label={t("Queue age")}
+                              description={t("Maximum wait in milliseconds.")}
                               value={formValues.pacing?.maxQueueAgeMs ?? 30000}
                               onChange={(value) => updatePacing('maxQueueAgeMs', value ?? 30000)}
                               min={100}
@@ -1212,9 +1216,9 @@ function Dashboard({ themeMode, setThemeMode }) {
                           </Grid>
                           <VStack gap={2}>
                             <HStack justify="between" vAlign="center">
-                              <Text type="label" weight="bold">Model intervals</Text>
+                              <Text type="label" weight="bold">{t("Model intervals")}</Text>
                               <Button
-                                label="Add model interval"
+                                label={t("Add model interval")}
                                 variant="secondary"
                                 size="sm"
                                 onClick={() => updatePacing('modelIntervals', [
@@ -1227,7 +1231,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                               {(formValues.pacing?.modelIntervals || []).map((entry, index) => (
                                 <Grid key={index} columns={{ minWidth: 220, max: 2, repeat: 'fit' }} gap={3} align="end">
                                   <TextInput
-                                    label="Model"
+                                    label={t("Model")}
                                     value={entry.model || ''}
                                     onChange={(value) => updateModelInterval(index, 'model', value)}
                                     placeholder="gpt-5.6-sol"
@@ -1235,7 +1239,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                                   <HStack gap={2} align="end">
                                     <NumberInput
                                       width="100%"
-                                      label="Minimum interval"
+                                      label={t("Minimum interval")}
                                       value={entry.minStartIntervalMs ?? 0}
                                       onChange={(value) => updateModelInterval(index, 'minStartIntervalMs', value ?? 0)}
                                       min={0}
@@ -1243,10 +1247,10 @@ function Dashboard({ themeMode, setThemeMode }) {
                                       step={100}
                                       isIntegerOnly
                                     />
-                                    <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
+                                    <Field label={<VisuallyHidden>{t("Remove")}</VisuallyHidden>}>
                                       <Button
-                                        label="Remove model interval"
-                                        tooltip="Remove model interval"
+                                        label={t("Remove model interval")}
+                                        tooltip={t("Remove model interval")}
                                         variant="ghost"
                                         isIconOnly
                                         icon="×"
@@ -1263,9 +1267,9 @@ function Dashboard({ themeMode, setThemeMode }) {
                       {formDialog.mode === 'edit' && (
                         <VStack gap={2}>
                           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                            <Text type="label" weight="bold">Current credentials</Text>
+                            <Text type="label" weight="bold">{t("Current credentials")}</Text>
                             <Button
-                              label={currentCredentials ? 'Refresh credentials' : 'View credentials'}
+                              label={currentCredentials ? t("Refresh credentials") : t("View credentials")}
                               size="sm"
                               variant="secondary"
                               isLoading={currentCredentialsLoading}
@@ -1274,7 +1278,7 @@ function Dashboard({ themeMode, setThemeMode }) {
                           </HStack>
                           {currentCredentials && (
                             <TextArea
-                              label="Current credential data"
+                              label={t("Current credential data")}
                               value={currentCredentials}
                               rows={16}
                               isReadOnly
@@ -1290,11 +1294,11 @@ function Dashboard({ themeMode, setThemeMode }) {
               footer={(
                 <LayoutFooter hasDivider>
                   <HStack justify="end" gap={2}>
-                    <Button label="Cancel" variant="secondary" onClick={() => {
+                    <Button label={t("Cancel")} variant="secondary" onClick={() => {
                       setCurrentCredentials(null);
                       setFormDialog((s) => ({ ...s, isOpen: false }));
                     }} />
-                    <Button label="Save" variant="primary" type="submit" form="upstream-form" />
+                    <Button label={t("Save")} variant="primary" type="submit" form="upstream-form" />
                   </HStack>
                 </LayoutFooter>
               )}
@@ -1374,13 +1378,13 @@ function UpstreamCard({
   const compassWorkspaceId = upstream.type === 'compass' ? (upstream.metadata?.workspace_id ?? upstream.metadata?.workspaceId) : null;
   const compassUrl = compassWorkspaceId ? `https://smart.shopee.io/workspace-management?tab=quota&workspace_id=${compassWorkspaceId}` : null;
   const tokenExpiry = upstream.type === 'compass'
-    ? (compassUrl ? <a href={compassUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-text-link, inherit)', textDecoration: 'underline' }}>More Info</a> : 'No expiry')
-    : upstream.accessTokenExpiresAt ? formatTokenExpiry(upstream.accessTokenExpiresAt) : 'Expiry unknown';
+    ? (compassUrl ? <a href={compassUrl} target="_blank" rel="noopener noreferrer" style={{ color: 'var(--color-text-link, inherit)', textDecoration: 'underline' }}>{t("More Info")}</a> : t("No expiry"))
+    : upstream.accessTokenExpiresAt ? formatTokenExpiry(upstream.accessTokenExpiresAt) : t("Expiry unknown");
   const expiresSoon = ['codex', 'claude'].includes(upstream.type) && upstream.accessTokenExpiresAt && new Date(upstream.accessTokenExpiresAt).getTime() - Date.now() < 12 * 60 * 60 * 1000;
-  const capHeading = spending.capCredits > 0 ? `${formatPercent(spendingRemaining)} left` : 'No spending cap';
+  const capHeading = spending.capCredits > 0 ? t("{value0} left", { value0: formatPercent(spendingRemaining) }) : t("No spending cap");
   const capUsage = spending.capCredits > 0
-    ? `$${formatNumber(Math.max(0, (spending.capDollars || 0) - (spending.spentDollars || 0)))} left of $${formatNumber(spending.capDollars)} · ${spending.status}`
-    : 'Set a cap to make this upstream routable';
+    ? t("${value0} left of ${value1} · {value2}", { value0: formatNumber(Math.max(0, (spending.capDollars || 0) - (spending.spentDollars || 0))), value1: formatNumber(spending.capDollars), value2: statusText(spending.status) })
+    : t("Set a cap to make this upstream routable");
   const recentActiveText = formatTimeAgo(getRecentActiveTs(upstream));
   const tokenRefresh = upstream.tokenRefresh;
   const coolingDown = hasActiveCooldown(upstream);
@@ -1402,22 +1406,22 @@ function UpstreamCard({
               <Heading level={3} maxLines={1}>{upstream.name}</Heading>
               <HStack gap={1} vAlign="center" minHeight={28} wrap="wrap">
                 {expiresSoon ? <Badge label={tokenExpiry} variant="warning" /> : <Text type="supporting" color="secondary" maxLines={1}>{tokenExpiry}</Text>}
-                {coolingDown && <Badge label={`Cooling down until ${formatShortTime(upstream.health.nextEligibleAt)}`} variant="warning" />}
-                {pacingEnabled && <Badge label={queuedRequests ? `${queuedRequests} queued` : 'Pacing enabled'} variant={queuedRequests ? 'warning' : 'neutral'} />}
-                {tokenRefresh?.status === 'failed' && <Badge label="Token refresh failed" variant="error" />}
-                {isReauthRequired(upstream) && <Badge label="Reauth required" variant="error" />}
+                {coolingDown && <Badge label={t("Cooling down until {value0}", { value0: formatShortTime(upstream.health.nextEligibleAt) })} variant="warning" />}
+                {pacingEnabled && <Badge label={queuedRequests ? t("{value0} queued", { value0: queuedRequests }) : t("Pacing enabled")} variant={queuedRequests ? 'warning' : 'neutral'} />}
+                {tokenRefresh?.status === 'failed' && <Badge label={t("Token refresh failed")} variant="error" />}
+                {isReauthRequired(upstream) && <Badge label={t("Reauth required")} variant="error" />}
               </HStack>
             </VStack>
           </StackItem>
           <HStack gap={1} vAlign="center">
-            {Number.isInteger(upstream.priority) && <Badge label={`${ordinal(upstream.priority + 1)} priority`} variant="blue" />}
+            {Number.isInteger(upstream.priority) && <Badge label={t("{value0} priority", { value0: ordinal(upstream.priority + 1) })} variant="blue" />}
             <Badge label={upstream.quotaSource === 'ais' ? 'ais' : upstream.type} variant={upstream.type === 'compass' ? 'teal' : upstream.type === 'claude' ? 'orange' : 'purple'} />
           </HStack>
         </HStack>
         <VStack gap={1} height={56}>
-          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? `${formatPercent(quota.remainingPercent)} left` : upstream.quotaSource === 'ais' ? 'ais' : upstream.type === 'claude' ? 'Quota unavailable' : 'Not refreshed'}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? `reset ${formatDate(quota.resetAt)}` : upstream.quotaSource === 'ais' ? 'Quota managed by AIS' : upstream.type === 'claude' ? 'Click refresh to read Claude usage' : 'Click refresh to read provider quota'}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? t("{value0} left", { value0: formatPercent(quota.remainingPercent) }) : upstream.quotaSource === 'ais' ? 'ais' : upstream.type === 'claude' ? t("Quota unavailable") : t("Not refreshed")}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? t("reset {value0}", { value0: formatDate(quota.resetAt) }) : upstream.quotaSource === 'ais' ? t("Quota managed by AIS") : upstream.type === 'claude' ? t("Click refresh to read Claude usage") : t("Click refresh to read provider quota")}</Text></HStack>
           <ProgressBar
-            label="Quota remaining"
+            label={t("Quota remaining")}
             value={!quota ? 0 : quotaRemaining}
             max={100}
             isLabelHidden
@@ -1429,7 +1433,7 @@ function UpstreamCard({
         <VStack gap={1}>
           <Text type="label" weight="bold" maxLines={1}>{capHeading}</Text>
           <ProgressBar
-            label="Spending cap remaining"
+            label={t("Spending cap remaining")}
             value={spending.capCredits <= 0 ? 0 : spendingRemaining}
             max={100}
             isLabelHidden
@@ -1444,8 +1448,8 @@ function UpstreamCard({
         <HStack gap={1} vAlign="center" wrap="wrap">
           {(upstream.type !== 'claude' || upstream.metadata?.auth_kind !== 'claude_api_key') && (
             <Button
-              label="Refresh quota"
-              tooltip="Refresh quota"
+              label={t("Refresh quota")}
+              tooltip={t("Refresh quota")}
               icon={<Icon icon="clock" size="sm" />}
               isIconOnly
               size="sm"
@@ -1454,8 +1458,8 @@ function UpstreamCard({
             />
           )}
           <Button
-            label="Test connection"
-            tooltip="Test connection"
+            label={t("Test connection")}
+            tooltip={t("Test connection")}
             icon={<PlugZap size={16} />}
             isIconOnly
             size="sm"
@@ -1466,8 +1470,8 @@ function UpstreamCard({
           />
           {['codex', 'claude'].includes(upstream.type) && (
             <Button
-              label="Refresh token"
-              tooltip="Refresh token"
+              label={t("Refresh token")}
+              tooltip={t("Refresh token")}
               icon={<Icon icon="arrowsUpDown" size="sm" />}
               isIconOnly
               size="sm"
@@ -1479,7 +1483,7 @@ function UpstreamCard({
           )}
           {coolingDown && (
             <Button
-              label="Clear cooldown"
+              label={t("Clear cooldown")}
               size="sm"
               variant="secondary"
               icon={<Icon icon="warning" size="sm" />}
@@ -1487,25 +1491,25 @@ function UpstreamCard({
             />
           )}
           <MoreMenu
-            label={`Actions for ${upstream.name}`}
+            label={t("Actions for {value0}", { value0: upstream.name })}
             size="sm"
             variant="secondary"
             items={[
               {
                 type: 'section',
-                title: 'Manage',
+                title: t("Manage"),
                 items: [
-                  { label: 'Edit upstream', onClick: () => onEdit(upstream) },
-                  { label: 'Replace credentials', onClick: () => onReplaceCredentials(upstream) },
-                  { label: 'Set spending cap', onClick: () => onCap(upstream) },
-                  { label: 'Set priority', onClick: onPriority }
+                  { label: t("Edit upstream"), onClick: () => onEdit(upstream) },
+                  { label: t("Replace credentials"), onClick: () => onReplaceCredentials(upstream) },
+                  { label: t("Set spending cap"), onClick: () => onCap(upstream) },
+                  { label: t("Set priority"), onClick: onPriority }
                 ]
               },
               { type: 'divider' },
               {
                 type: 'section',
-                title: 'Danger zone',
-                items: [{ label: 'Delete upstream', onClick: () => onDelete(upstream) }]
+                title: t("Danger zone"),
+                items: [{ label: t("Delete upstream"), onClick: () => onDelete(upstream) }]
               }
             ]}
           />
@@ -1519,13 +1523,13 @@ function CapDialog({ upstream, value, onValueChange, onClose, onSubmit }) {
   return (
     <Dialog isOpen={Boolean(upstream)} onOpenChange={onClose} purpose="form" width={400}>
       <Layout
-        header={<DialogHeader title="Set spending cap" subtitle={upstream ? `For ${upstream.name}` : undefined} onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Set spending cap")} subtitle={upstream ? t("For {value0}", { value0: upstream.name }) : undefined} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <form id="single-cap-form" onSubmit={onSubmit}>
               <VStack gap={3}>
-                <Text type="supporting" color="secondary">Enter 0 to clear this upstream's spending cap.</Text>
-                <NumberInput label="Cap (USD)" value={value} onChange={onValueChange} min={0} step={0.01} hasClear />
+                <Text type="supporting" color="secondary">{t("Enter 0 to clear this upstream's spending cap.")}</Text>
+                <NumberInput label={t("Cap (USD)")} value={value} onChange={onValueChange} min={0} step={0.01} hasClear />
               </VStack>
             </form>
           </LayoutContent>
@@ -1533,8 +1537,8 @@ function CapDialog({ upstream, value, onValueChange, onClose, onSubmit }) {
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
-              <Button label="Cancel" variant="secondary" onClick={onClose} />
-              <Button label="Save cap" variant="primary" type="submit" form="single-cap-form" />
+              <Button label={t("Cancel")} variant="secondary" onClick={onClose} />
+              <Button label={t("Save cap")} variant="primary" type="submit" form="single-cap-form" />
             </HStack>
           </LayoutFooter>
         )}
@@ -1547,40 +1551,40 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
   return (
     <Dialog isOpen={Boolean(upstream)} onOpenChange={onClose} purpose="form" width={640}>
       <Layout
-        header={<DialogHeader title="Replace credentials" subtitle={upstream ? `For ${upstream.name}` : undefined} onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Replace credentials")} subtitle={upstream ? t("For {value0}", { value0: upstream.name }) : undefined} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <form id="credential-form" onSubmit={onSubmit}>
               <VStack gap={3}>
                 <Banner
-                  title="Credential replacement"
-                  description="Saving replaces the stored authentication material for this upstream."
+                  title={t("Credential replacement")}
+                  description={t("Saving replaces the stored authentication material for this upstream.")}
                   status="warning"
                 />
-                {error && <Banner title="Could not replace credentials" description={error} status="error" />}
+                {error && <Banner title={t("Could not replace credentials")} description={error} status="error" />}
                 {upstream?.type === 'codex' ? (
                   <TextArea
                     label="Codex auth.json"
                     value={value}
                     onChange={onValueChange}
-                    placeholder="Paste auth.json here"
+                    placeholder={t("Paste auth.json here")}
                     rows={6}
                     htmlName="authJson"
                   />
                 ) : upstream?.type === 'claude' ? (
                   <TextInput
-                    label="Claude OAuth Token"
+                    label={t("Claude OAuth Token")}
                     value={value}
                     onChange={onValueChange}
-                    placeholder="Enter replacement OAuth token (sk-ant-oat...)"
+                    placeholder={t("Enter replacement OAuth token (sk-ant-oat...)")}
                     htmlName="accessToken"
                   />
                 ) : (
                   <TextInput
-                    label="Project key"
+                    label={t("Project key")}
                     value={value}
                     onChange={onValueChange}
-                    placeholder="Enter the replacement project key"
+                    placeholder={t("Enter the replacement project key")}
                   />
                 )}
               </VStack>
@@ -1590,9 +1594,9 @@ function CredentialDialog({ upstream, value, isSaving, error, onValueChange, onC
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
-              <Button label="Cancel" variant="secondary" isDisabled={isSaving} onClick={onClose} />
+              <Button label={t("Cancel")} variant="secondary" isDisabled={isSaving} onClick={onClose} />
               <Button
-                label="Replace credentials"
+                label={t("Replace credentials")}
                 variant="primary"
                 type="submit"
                 form="credential-form"
@@ -1612,25 +1616,25 @@ function BulkCapDialog({ open, mode, accountTypes, onAccountTypesChange, capValu
   return (
     <Dialog isOpen={open} onOpenChange={onClose} purpose="form" width={560}>
       <Layout
-        header={<DialogHeader title="Set spending caps" subtitle="Apply a cap strategy to multiple upstreams." onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Set spending caps")} subtitle={t("Apply a cap strategy to multiple upstreams.")} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <form id="bulk-cap-form" onSubmit={onSubmit}>
               <VStack gap={4}>
-                <Text type="supporting" color="secondary">Quota rules use monthly quota left in USD. The original server preset is pre-filled. AIS upstreams are excluded.</Text>
+                <Text type="supporting" color="secondary">{t("Quota rules use monthly quota left in USD. The original server preset is pre-filled. AIS upstreams are excluded.")}</Text>
                 <CheckboxList
-                  label="Account types"
-                  description="Apply caps only to the selected account types."
+                  label={t("Account types")}
+                  description={t("Apply caps only to the selected account types.")}
                   value={accountTypes}
                   onChange={onAccountTypesChange}
                   density="compact"
-                  status={!accountTypes.length ? { type: 'error', message: 'Choose at least one account type' } : undefined}
+                  status={!accountTypes.length ? { type: 'error', message: t("Choose at least one account type") } : undefined}
                 >
                   {BULK_ACCOUNT_TYPES.map(({ value, label }) => <CheckboxListItem key={value} value={value} label={label} />)}
                 </CheckboxList>
                 <Selector
-                  label="Strategy"
-                  options={[{ value: 'rules', label: 'Original quota presets' }, { value: 'all', label: 'Set one cap for all upstreams' }, { value: 'cap_reached', label: 'Replace caps already reached' }, { value: 'uncapped', label: 'Set caps on uncapped upstreams' }]}
+                  label={t("Strategy")}
+                  options={[{ value: 'rules', label: t("Original quota presets") }, { value: 'all', label: t("Set one cap for all upstreams") }, { value: 'cap_reached', label: t("Replace caps already reached") }, { value: 'uncapped', label: t("Set caps on uncapped upstreams") }]}
                   value={mode}
                   onChange={onModeChange}
                 />
@@ -1639,20 +1643,20 @@ function BulkCapDialog({ open, mode, accountTypes, onAccountTypesChange, capValu
                     <ScrollList count={rules.length}>
                       {rules.map((rule, index) => (
                         <Grid key={index} gap={4} columns={{ minWidth: 180, max: 2, repeat: 'fit' }} align="end">
-                          <NumberInput label="Monthly quota left" value={rule.minQuotaLeft} onChange={(value) => updateRule(index, 'minQuotaLeft', value)} min={0} step={0.01} hasClear />
+                          <NumberInput label={t("Monthly quota left")} value={rule.minQuotaLeft} onChange={(value) => updateRule(index, 'minQuotaLeft', value)} min={0} step={0.01} hasClear />
                           <HStack align="end" gap={4}>
-                            <NumberInput width="100%" label="Spend cap" value={rule.capDollars} onChange={(value) => updateRule(index, 'capDollars', value)} min={0} step={0.01} hasClear />
-                            <Field label={<VisuallyHidden>Remove</VisuallyHidden>}>
-                              <Button label="Remove rule" tooltip="Remove rule" size="md" variant="ghost" isIconOnly icon="×" onClick={() => onRulesChange(rules.filter((_, current) => current !== index))} />
+                            <NumberInput width="100%" label={t("Spend cap")} value={rule.capDollars} onChange={(value) => updateRule(index, 'capDollars', value)} min={0} step={0.01} hasClear />
+                            <Field label={<VisuallyHidden>{t("Remove")}</VisuallyHidden>}>
+                              <Button label={t("Remove rule")} tooltip={t("Remove rule")} size="md" variant="ghost" isIconOnly icon="×" onClick={() => onRulesChange(rules.filter((_, current) => current !== index))} />
                             </Field>
                           </HStack>
                         </Grid>
                       ))}
                     </ScrollList>
-                    <Button label="Add rule" variant="secondary" onClick={() => onRulesChange([...rules, { minQuotaLeft: null, capDollars: null }])} />
+                    <Button label={t("Add rule")} variant="secondary" onClick={() => onRulesChange([...rules, { minQuotaLeft: null, capDollars: null }])} />
                     <NumberInput
-                      label="Unknown quota cap (USD)"
-                      description="Applied to upstreams whose remaining quota is unknown, such as Claude accounts without extra-usage data. Leave empty to skip them."
+                      label={t("Unknown quota cap (USD)")}
+                      description={t("Applied to upstreams whose remaining quota is unknown, such as Claude accounts without extra-usage data. Leave empty to skip them.")}
                       value={unknownValue}
                       onChange={onUnknownValueChange}
                       min={0}
@@ -1661,7 +1665,7 @@ function BulkCapDialog({ open, mode, accountTypes, onAccountTypesChange, capValu
                     />
                   </VStack>
                 ) : (
-                  <NumberInput label="Cap (USD)" value={capValue} onChange={onCapValueChange} min={0} step={0.01} hasClear />
+                  <NumberInput label={t("Cap (USD)")} value={capValue} onChange={onCapValueChange} min={0} step={0.01} hasClear />
                 )}
               </VStack>
             </form>
@@ -1670,8 +1674,8 @@ function BulkCapDialog({ open, mode, accountTypes, onAccountTypesChange, capValu
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
-              <Button label="Cancel" variant="secondary" onClick={onClose} />
-              <Button label="Save caps" variant="primary" type="submit" form="bulk-cap-form" isDisabled={!accountTypes.length} />
+              <Button label={t("Cancel")} variant="secondary" onClick={onClose} />
+              <Button label={t("Save caps")} variant="primary" type="submit" form="bulk-cap-form" isDisabled={!accountTypes.length} />
             </HStack>
           </LayoutFooter>
         )}
@@ -1767,53 +1771,64 @@ function capValue(upstream, missing) {
 }
 
 function nameSort(a, b) { return (a.name || '').localeCompare(b.name || ''); }
-function formatNumber(value) { return Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 }); }
+function formatNumber(value) { return Number(value || 0).toLocaleString(localeTag(), { maximumFractionDigits: 2 }); }
 function capSummary(spending) {
   const cap = Number(spending?.capDollars) || 0;
-  return cap > 0 && `$${formatNumber(Math.max(0, cap - (Number(spending?.spentDollars) || 0)))} left of $${formatNumber(cap)} cap`;
+  return cap > 0 && t("${value0} left of ${value1} cap", { value0: formatNumber(Math.max(0, cap - (Number(spending?.spentDollars) || 0))), value1: formatNumber(cap) });
 }
 function ordinal(value) {
   const n = Math.trunc(Number(value) || 0);
+  if (getLocale() === 'zh-CN') return t("Position {value0}", { value0: n });
   return `${n}${n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
 }
 function formatPercent(value) { return `${Math.round(Number(value) || 0)}%`; }
 function connectionSuccessMessage(connection) {
-  const answer = typeof connection?.answer === 'string' && connection.answer.trim() ? ` with answer '${connection.answer.trim()}'` : '';
-  return `Connected through ${connection.endpoint} with ${connection.model} in ${connection.latencyMs} ms${answer}`;
+  const answer = typeof connection?.answer === 'string' && connection.answer.trim() ? t(" with answer '{value0}'", { value0: connection.answer.trim() }) : '';
+  return t("Connected through {value0} with {value1} in {value2} ms{value3}", { value0: connection.endpoint, value1: connection.model, value2: connection.latencyMs, value3: answer });
 }
 function quotaCount(quota, upstreamType = '') {
   const windows = Array.isArray(quota?.windows) && quota.windows.length
     ? quota.windows
       .slice(0, 4)
-      .map((window) => `${window.key === 'session' ? '5h' : window.key === '7d' ? '7d' : window.key.replace(/^7d_/, '')} ${formatPercent(window.remainingPercent)} left`)
+      .map((window) => t("{value0} {value1} left", { value0: window.key === 'session' ? '5h' : window.key === '7d' ? '7d' : window.key.replace(/^7d_/, ''), value1: formatPercent(window.remainingPercent) }))
       .join(' · ')
     : '';
   const dollars = quota && Number.isFinite(quota.remainingDollars) && Number.isFinite(quota.limitDollars)
-    ? `$${formatNumber(Math.max(0, quota.remainingDollars))} left of $${formatNumber(quota.limitDollars)}`
+    ? t("${value0} left of ${value1}", { value0: formatNumber(Math.max(0, quota.remainingDollars)), value1: formatNumber(quota.limitDollars) })
     : '';
-  const dollarStatus = upstreamType === 'claude' && !dollars ? 'USD unavailable from provider' : '';
+  const dollarStatus = upstreamType === 'claude' && !dollars ? t("USD unavailable from provider") : '';
   return [dollars, windows, dollarStatus].filter(Boolean).join(' · ');
 }
-function formatDate(value) { return value ? new Date(value).toLocaleString() : 'unknown'; }
+function formatDate(value) { return value ? new Date(value).toLocaleString(localeTag()) : t("Unknown"); }
 function formatShortTime(value) {
   const timestamp = new Date(value);
-  return Number.isNaN(timestamp.getTime()) ? 'later' : timestamp.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return Number.isNaN(timestamp.getTime()) ? t("later") : timestamp.toLocaleTimeString(localeTag(), { hour: 'numeric', minute: '2-digit' });
 }
 function formatTokenExpiry(value) {
-  const hours = Math.floor((new Date(value).getTime() - Date.now()) / (60 * 60 * 1000));
-  if (hours < 0) return `Expired ${Math.ceil(-hours / 24)} day${Math.ceil(-hours / 24) === 1 ? '' : 's'} ago`;
-  return `Expires in ${Math.floor(hours / 24)} day${Math.floor(hours / 24) === 1 ? '' : 's'} ${hours % 24} hour${hours % 24 === 1 ? '' : 's'}`;
+  const time = new Date(value).getTime();
+  if (!Number.isFinite(time)) return t("Expiry unknown");
+  const hours = Math.floor((time - Date.now()) / (60 * 60 * 1000));
+  if (hours < 0) {
+    const days = Math.ceil(-hours / 24);
+    return t(days === 1 ? "Expired {value0} day ago" : "Expired {value0} days ago", { value0: days });
+  }
+  const days = Math.floor(hours / 24);
+  const remainder = hours % 24;
+  return t("Expires in {value0} {value1}", {
+    value0: t(days === 1 ? "{value0} day" : "{value0} days", { value0: days }),
+    value1: t(remainder === 1 ? "{value0} hour" : "{value0} hours", { value0: remainder })
+  });
 }
 function formatTimeAgo(ts) {
-  if (!ts || ts <= 0) return 'no activity';
+  if (!ts || ts <= 0) return t("no activity");
   const seconds = Math.floor((Date.now() - ts) / 1000);
-  if (seconds < 60) return 'active just now';
+  if (seconds < 60) return t("active just now");
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `active ${minutes}m ago`;
+  if (minutes < 60) return t("active {value0}m ago", { value0: minutes });
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `active ${hours}h ago`;
+  if (hours < 24) return t("active {value0}h ago", { value0: hours });
   const days = Math.floor(hours / 24);
-  return `active ${days}d ago`;
+  return t("active {value0}d ago", { value0: days });
 }
 
 function SortableRow({ upstream, index, onRemove }) {
@@ -1827,10 +1842,10 @@ function SortableRow({ upstream, index, onRemove }) {
             <Badge label={ordinal(index + 1)} variant="purple" />
             <VStack>
               <Text type="label" weight="bold" maxLines={1}>{upstream.name}</Text>
-              <Text type="supporting" color="secondary" maxLines={1}>{upstream.type} · {capSummary(upstream.spending) || 'no cap'}</Text>
+              <Text type="supporting" color="secondary" maxLines={1}>{upstream.type} · {capSummary(upstream.spending) || t("no cap")}</Text>
             </VStack>
           </HStack>
-          <Button label="Remove" size="sm" variant="ghost" onClick={() => onRemove(upstream.id)} />
+          <Button label={t("Remove")} size="sm" variant="ghost" onClick={() => onRemove(upstream.id)} />
         </HStack>
       </Card>
     </div>
@@ -1864,14 +1879,14 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} purpose="form" width={560}>
       <Layout
-        header={<DialogHeader title="Upstream priority list" subtitle="Listed upstreams are used first, in order. Others are used only once every listed upstream reaches its spending cap." onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Upstream priority list")} subtitle={t("Listed upstreams are used first, in order. Others are used only once every listed upstream reaches its spending cap.")} onOpenChange={onClose} hasDivider />}
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="between" gap={2} wrap="wrap">
-              <Button label="Clear list" variant="secondary" isDisabled={!ids.length} onClick={() => setIds([])} />
+              <Button label={t("Clear list")} variant="secondary" isDisabled={!ids.length} onClick={() => setIds([])} />
               <HStack gap={2}>
-                <Button label="Cancel" variant="secondary" onClick={onClose} />
-                <Button label="Save priority" variant="primary" type="submit" form="priority-form" />
+                <Button label={t("Cancel")} variant="secondary" onClick={onClose} />
+                <Button label={t("Save priority")} variant="primary" type="submit" form="priority-form" />
               </HStack>
             </HStack>
           </LayoutFooter>
@@ -1883,16 +1898,16 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
               <HStack gap={2} vAlign="end" wrap="wrap" width="100%">
                 <StackItem size="fill">
                   <Selector
-                    label="Add upstream to the priority list"
+                    label={t("Add upstream to the priority list")}
                     width="100%"
                     hasSearch
-                    searchPlaceholder="Search name or email..."
+                    searchPlaceholder={t("Search name or email...")}
                     value={pending}
-                    options={[{ value: '', label: available.length ? 'Select an upstream' : 'All upstreams are listed' }, ...available.map((upstream) => ({ value: upstream.id, label: `${upstream.name} (${upstream.email || upstream.type})` }))]}
+                    options={[{ value: '', label: available.length ? t("Select an upstream") : t("All upstreams are listed") }, ...available.map((upstream) => ({ value: upstream.id, label: `${upstream.name} (${upstream.email || upstream.type})` }))]}
                     onChange={setPending}
                   />
                 </StackItem>
-                <Button label="Add" variant="secondary" isDisabled={!pending} onClick={() => { setIds((current) => [...current, pending]); setPending(''); }} />
+                <Button label={t("Add")} variant="secondary" isDisabled={!pending} onClick={() => { setIds((current) => [...current, pending]); setPending(''); }} />
               </HStack>
               {listed.length ? (
                 <DndContext sensors={sensors} collisionDetection={closestCenter} modifiers={[restrictToVerticalAxis, restrictToParentElement]} onDragEnd={onDragEnd}>
@@ -1905,7 +1920,7 @@ function PriorityDialog({ isOpen, upstreams, onClose, onSave }) {
                   </SortableContext>
                 </DndContext>
               ) : (
-                <EmptyState title="Priority list is empty" description="Every upstream is balanced by least recent success. Add an upstream above to make it preferred." />
+                <EmptyState title={t("Priority list is empty")} description={t("Every upstream is balanced by least recent success. Add an upstream above to make it preferred.")} />
               )}
             </VStack>
           </form>
@@ -1956,12 +1971,12 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} purpose="form" width={640}>
       <Layout
-        header={<DialogHeader title="Routing strategy" subtitle="Policy and dry-run diagnostics" onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Routing strategy")} subtitle={t("Policy and dry-run diagnostics")} onOpenChange={onClose} hasDivider />}
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
-              <Button label="Cancel" variant="secondary" onClick={onClose} />
-              <Button label="Save routing" variant="primary" type="submit" form="routing-form" />
+              <Button label={t("Cancel")} variant="secondary" onClick={onClose} />
+              <Button label={t("Save routing")} variant="primary" type="submit" form="routing-form" />
             </HStack>
           </LayoutFooter>
         )}
@@ -1969,42 +1984,42 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
         <LayoutContent>
           <form id="routing-form" onSubmit={submit}>
             <VStack gap={4}>
-              <Selector label="Strategy" value={strategy} onChange={setStrategy} options={[
-                { value: 'least-recent-success', label: 'Least recent success' },
-                { value: 'most-remaining-quota', label: 'Most remaining quota' },
-                { value: 'cache-locality', label: 'Cache locality' },
-                { value: 'deterministic-rotation', label: 'Deterministic rotation' }
+              <Selector label={t("Strategy")} value={strategy} onChange={setStrategy} options={[
+                { value: 'least-recent-success', label: t("Least recent success") },
+                { value: 'most-remaining-quota', label: t("Most remaining quota") },
+                { value: 'cache-locality', label: t("Cache locality") },
+                { value: 'deterministic-rotation', label: t("Deterministic rotation") }
               ]} />
               {['cache-locality', 'deterministic-rotation'].includes(strategy) && (
                 <HStack gap={2} wrap="wrap">
-                  <StackItem size="fill"><TextInput label="Request seed" value={requestSeed} onChange={setRequestSeed} /></StackItem>
-                  {strategy === 'cache-locality' && <StackItem size="fill"><TextInput label="Prompt cache key" value={promptCacheKey} onChange={setPromptCacheKey} /></StackItem>}
+                  <StackItem size="fill"><TextInput label={t("Request seed")} value={requestSeed} onChange={setRequestSeed} /></StackItem>
+                  {strategy === 'cache-locality' && <StackItem size="fill"><TextInput label={t("Prompt cache key")} value={promptCacheKey} onChange={setPromptCacheKey} /></StackItem>}
                 </HStack>
               )}
               <HStack gap={2} vAlign="end" wrap="wrap">
                 <StackItem size="fill">
                   <Selector
-                    label="Preferred provider"
+                    label={t("Preferred provider")}
                     value={preferredType}
                     options={[
                       { value: 'codex', label: 'Codex' },
                       { value: 'compass', label: 'Compass' },
-                      { value: 'claude', label: 'Claude Enterprise OAuth' }
+                      { value: 'claude', label: t("Claude Enterprise OAuth") }
                     ]}
                     onChange={setPreferredType}
                   />
                 </StackItem>
                 <StackItem size="fill">
-                  <TextInput label="Model" value={model} onChange={setModel} placeholder="Optional model ID" />
+                  <TextInput label={t("Model")} value={model} onChange={setModel} placeholder={t("Optional model ID")} />
                 </StackItem>
-                <Button label="Dry run" variant="secondary" isLoading={isRunning} onClick={dryRun} />
+                <Button label={t("Dry run")} variant="secondary" isLoading={isRunning} onClick={dryRun} />
               </HStack>
-              {error && <Banner title="Dry run failed" description={error} status="error" />}
+              {error && <Banner title={t("Dry run failed")} description={error} status="error" />}
               {diagnostics && (
                 <VStack gap={3}>
                   <HStack justify="between" vAlign="center">
-                    <Heading level={3}>Candidate order</Heading>
-                    <Badge label={`${diagnostics.candidateCount} eligible`} variant="blue" />
+                    <Heading level={3}>{t("Candidate order")}</Heading>
+                    <Badge label={t("{value0} eligible", { value0: diagnostics.candidateCount })} variant="blue" />
                   </HStack>
                   {diagnostics.candidates.length ? (
                     <ScrollList count={diagnostics.candidates.length}>
@@ -2013,20 +2028,20 @@ function RoutingDialog({ isOpen, policy, api, onClose, onSave }) {
                           <HStack justify="between" gap={2} vAlign="center">
                             <VStack gap={1}>
                               <Text type="label" weight="bold" maxLines={1}>{candidate.order}. {candidate.name}</Text>
-                              <Text type="supporting" color="secondary" maxLines={1}>{candidate.type} · {candidate.priorityTier === 'unlisted' ? 'unlisted' : `priority ${candidate.priorityTier + 1}`}</Text>
+                              <Text type="supporting" color="secondary" maxLines={1}>{candidate.type} · {candidate.priorityTier === 'unlisted' ? t("Unlisted") : t("priority {value0}", { value0: candidate.priorityTier + 1 })}</Text>
                             </VStack>
                             <Badge
-                              label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : candidate.quota.status}
+                              label={candidate.quota.status === 'known' ? `${formatNumber(candidate.quota.remainingPercent)}%` : statusText(candidate.quota.status)}
                               variant={candidate.quota.status === 'known' ? 'green' : 'neutral'}
                             />
                           </HStack>
                         </Card>
                       ))}
                     </ScrollList>
-                  ) : <EmptyState title="No eligible upstreams" description="The current routing context excludes every upstream." />}
+                  ) : <EmptyState title={t("No eligible upstreams")} description={t("The current routing context excludes every upstream.")} />}
                   {diagnostics.exclusions.length > 0 && (
                     <VStack gap={2}>
-                      <Heading level={3}>Excluded</Heading>
+                      <Heading level={3}>{t("Excluded")}</Heading>
                       <ScrollList count={diagnostics.exclusions.length} height={240}>
                         {diagnostics.exclusions.map((candidate) => (
                           <HStack key={candidate.id} justify="between" gap={2}>
@@ -2070,11 +2085,11 @@ function SystemStatusDialog({
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} width={820}>
       <Layout
-        header={<DialogHeader title="System status" subtitle="Gateway readiness, compatibility, discovery, and local pacing" onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("System status")} subtitle={t("Gateway readiness, compatibility, discovery, and local pacing")} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <VStack gap={4}>
-              {error && <Banner title="System status unavailable" description={error} status="error" />}
+              {error && <Banner title={t("System status unavailable")} description={error} status="error" />}
               {isLoading && !status ? (
                 <VStack gap={3}>
                   <Skeleton height={72} />
@@ -2087,19 +2102,19 @@ function SystemStatusDialog({
               ) : (
                 <>
                   <Banner
-                    title={summary.warningCount ? `${summary.warningCount} item${summary.warningCount === 1 ? ' needs' : 's need'} attention` : 'All monitored systems are ready'}
+                    title={summary.warningCount ? t(summary.warningCount === 1 ? "{value0} item needs attention" : "{value0} items need attention", { value0: summary.warningCount }) : t("All monitored systems are ready")}
                     description={summary.message}
                     status={summary.warningCount ? 'warning' : 'success'}
                   />
                   <Grid columns={{ minWidth: 160, max: 3, repeat: 'fill' }} gap={2}>
-                    <StatusMetric label="Readiness" value={readinessStatusLabel(readinessState)} variant={diagnosticVariant(readinessState)} />
-                    <StatusMetric label="Model catalog" value={catalog ? `${catalog.modelCount} models` : 'unknown'} variant={catalogVariant(catalog)} />
-                    <StatusMetric label="Codex host circuit" value={hostHealth?.openOriginCount ? `${hostHealth.openOriginCount} open` : 'closed'} variant={hostHealth?.openOriginCount ? 'warning' : 'success'} />
-                    <StatusMetric label="Pacing queue" value={queueDepth ? `${queueDepth} queued` : 'clear'} variant={queueDepth ? 'warning' : 'success'} />
+                    <StatusMetric label={t("Readiness")} value={readinessStatusLabel(readinessState)} variant={diagnosticVariant(readinessState)} />
+                    <StatusMetric label={t("Model catalog")} value={catalog ? t("{value0} models", { value0: catalog.modelCount }) : t("Unknown")} variant={catalogVariant(catalog)} />
+                    <StatusMetric label={t("Codex host circuit")} value={hostHealth?.openOriginCount ? t("{value0} open", { value0: hostHealth.openOriginCount }) : t("Closed")} variant={hostHealth?.openOriginCount ? 'warning' : 'success'} />
+                    <StatusMetric label={t("Pacing queue")} value={queueDepth ? t("{value0} queued", { value0: queueDepth }) : t("Clear")} variant={queueDepth ? 'warning' : 'success'} />
                   </Grid>
 
                   <Card variant="muted">
-                    <Collapsible trigger="Readiness checks" defaultIsOpen>
+                    <Collapsible trigger={t("Readiness checks")} defaultIsOpen>
                       <Grid columns={{ minWidth: 170, max: 3, repeat: 'fit' }} gap={2}>
                         {checks.map(([name, checkStatus]) => (
                           <ReadinessCheck key={name} name={name} status={checkStatus} />
@@ -2109,22 +2124,22 @@ function SystemStatusDialog({
                   </Card>
 
                   <Card variant="muted">
-                    <Collapsible trigger="Operational details" defaultIsOpen={false}>
+                    <Collapsible trigger={t("Operational details")} defaultIsOpen={false}>
                       <Grid columns={{ minWidth: 190, max: 3, repeat: 'fit' }} gap={3}>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold" maxLines={1}>Gateway</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{gateway?.runtime?.activeAttemptCount ?? 0} active attempts</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{gateway?.retainedFailureCount ?? 0} retained failures</Text>
+                          <Text type="label" weight="bold" maxLines={1}>{t("Gateway")}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} active attempts", { value0: gateway?.runtime?.activeAttemptCount ?? 0 })}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} retained failures", { value0: gateway?.retainedFailureCount ?? 0 })}</Text>
                         </VStack>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold" maxLines={1}>Model discovery</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{catalog?.source || 'unknown'} source, {catalog?.freshness || 'unknown'} freshness</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{catalog?.freshAccountCount ?? 0}/{catalog?.accountCount ?? 0} account catalogs fresh</Text>
+                          <Text type="label" weight="bold" maxLines={1}>{t("Model discovery")}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} source, {value1} freshness", { value0: statusText(catalog?.source), value1: statusText(catalog?.freshness) })}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0}/{value1} account catalogs fresh", { value0: catalog?.freshAccountCount ?? 0, value1: catalog?.accountCount ?? 0 })}</Text>
                         </VStack>
                         <VStack gap={1}>
-                          <Text type="label" weight="bold" maxLines={1}>Compatibility</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{compatibility?.counts?.active ?? 0} learned rules</Text>
-                          <Text type="supporting" color="secondary" maxLines={1}>{compatibility?.counts?.observations ?? 0} pending evidence records</Text>
+                          <Text type="label" weight="bold" maxLines={1}>{t("Compatibility")}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} learned rules", { value0: compatibility?.counts?.active ?? 0 })}</Text>
+                          <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} pending evidence records", { value0: compatibility?.counts?.observations ?? 0 })}</Text>
                         </VStack>
                       </Grid>
                     </Collapsible>
@@ -2138,12 +2153,12 @@ function SystemStatusDialog({
           <LayoutFooter hasDivider>
             <HStack justify="between" gap={2} wrap="wrap">
               <HStack gap={2} wrap="wrap">
-                <Button label="Diagnostics" variant="secondary" onClick={onOpenDiagnostics} />
-                <Button label="Compatibility" variant="secondary" onClick={onOpenCompatibility} />
+                <Button label={t("Diagnostics")} variant="secondary" onClick={onOpenDiagnostics} />
+                <Button label={t("Compatibility")} variant="secondary" onClick={onOpenCompatibility} />
               </HStack>
               <HStack gap={2}>
-                <Button label="Close" variant="secondary" onClick={onClose} />
-                <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+                <Button label={t("Close")} variant="secondary" onClick={onClose} />
+                <Button label={t("Refresh")} variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
               </HStack>
             </HStack>
           </LayoutFooter>
@@ -2160,7 +2175,7 @@ function StatusMetric({ label, value, variant }) {
         <Text type="supporting" color="secondary" maxLines={1}>{label}</Text>
         <HStack justify="between" vAlign="center" gap={2}>
           <Text type="label" weight="bold" maxLines={1}>{value}</Text>
-          <Badge label={variant === 'success' ? 'OK' : variant === 'warning' ? 'Check' : 'Unknown'} variant={variant} />
+          <Badge label={variant === 'success' ? t("OK") : variant === 'warning' ? t("Check") : t("Unknown")} variant={variant} />
         </HStack>
       </VStack>
     </Card>
@@ -2174,14 +2189,14 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} width={760}>
       <Layout
-        header={<DialogHeader title="Diagnostics" subtitle="Sanitized readiness and gateway failure history" onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Diagnostics")} subtitle={t("Sanitized readiness and gateway failure history")} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <VStack gap={4}>
-              {error && <Banner title="Diagnostics unavailable" description={error} status="error" />}
+              {error && <Banner title={t("Diagnostics unavailable")} description={error} status="error" />}
               <VStack gap={2}>
                 <HStack justify="between" vAlign="center">
-                  <Heading level={3}>Readiness</Heading>
+                  <Heading level={3}>{t("Readiness")}</Heading>
                   <Badge label={readinessStatusLabel(readiness?.status || 'pending')} variant={diagnosticVariant(readiness?.status)} />
                 </HStack>
                 <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
@@ -2194,50 +2209,46 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
               </VStack>
 
               <VStack gap={2}>
-                <Heading level={3}>Gateway</Heading>
+                <Heading level={3}>{t("Gateway")}</Heading>
                 <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
-                  <Metric label="Active attempts" value={gateway?.runtime?.activeAttemptCount ?? 0} />
-                  <Metric label="Retained failures" value={`${gateway?.retainedFailureCount ?? 0}/${gateway?.retentionLimit ?? 100}`} />
-                  <Metric label="Recent successes" value={gateway?.runtime?.recentSuccesses?.length ?? 0} />
+                  <Metric label={t("Active attempts")} value={gateway?.runtime?.activeAttemptCount ?? 0} />
+                  <Metric label={t("Retained failures")} value={`${gateway?.retainedFailureCount ?? 0}/${gateway?.retentionLimit ?? 100}`} />
+                  <Metric label={t("Recent successes")} value={gateway?.runtime?.recentSuccesses?.length ?? 0} />
                 </Grid>
               </VStack>
 
               <VStack gap={2}>
-                <Heading level={3}>Terminal failures</Heading>
+                <Heading level={3}>{t("Terminal failures")}</Heading>
                 {gateway?.failures?.length ? (
                   <ScrollList count={gateway.failures.length}>
                     {gateway.failures.map((failure, index) => (
                       <Card key={`${failure.completedAt}-${index}`} padding={3}>
                         <VStack gap={2}>
                           <HStack justify="between" vAlign="center" gap={2} wrap="wrap">
-                            <Text weight="bold" maxLines={1}>{failure.endpoint || 'Gateway request'}</Text>
+                            <Text weight="bold" maxLines={1}>{failure.endpoint || t("Gateway request")}</Text>
                             <HStack gap={1} vAlign="center">
-                              {failure.responseStatusCode && <Badge label={`Upstream ${failure.responseStatusCode}`} variant="error" />}
+                              {failure.responseStatusCode && <Badge label={t("Upstream {value0}", { value0: failure.responseStatusCode })} variant="error" />}
                               <Badge label={failure.errorCode || 'failed'} variant="error" />
                             </HStack>
                           </HStack>
                           <Text type="supporting" color="secondary" maxLines={1}>
-                            {failure.transport || 'unknown transport'} · {formatDiagnosticTime(failure.completedAt)} · {formatFailovers(failure)}
+                            {failure.transport || t("unknown transport")} · {formatDiagnosticTime(failure.completedAt)} · {formatFailovers(failure)}
                           </Text>
                           {failure.exclusionReasons?.length > 0 && (
-                            <Text type="supporting" maxLines={1}>Reasons: {failure.exclusionReasons.join(', ')}</Text>
+                            <Text type="supporting" maxLines={1}>{t("Reasons: {value0}", { value0: failure.exclusionReasons.join(', ') })}</Text>
                           )}
                           {failure.attempts?.map((attempt) => (
-                            <Text key={attempt.attemptNumber} type="supporting" color="secondary" maxLines={1}>
-                              Attempt {attempt.attemptNumber}: {attempt.errorCode || attempt.status}{attempt.termination ? ` (${attempt.termination})` : ''} · {formatTimings(attempt.timings)}
-                            </Text>
+                            <Text key={attempt.attemptNumber} type="supporting" color="secondary" maxLines={1}>{t("Attempt {value0}: {value1}{value2} · {value3}", { value0: attempt.attemptNumber, value1: attempt.errorCode || attempt.status, value2: attempt.termination ? ` (${attempt.termination})` : '', value3: formatTimings(attempt.timings) })}</Text>
                           ))}
                           {failure.omittedAttemptCount > 0 && (
-                            <Text type="supporting" color="secondary" maxLines={1}>
-                              Showing the latest {failure.attempts.length} of {failure.attemptCount} attempts
-                            </Text>
+                            <Text type="supporting" color="secondary" maxLines={1}>{t("Showing the latest {value0} of {value1} attempts", { value0: failure.attempts.length, value1: failure.attemptCount })}</Text>
                           )}
                         </VStack>
                       </Card>
                     ))}
                   </ScrollList>
                 ) : (
-                  <EmptyState title="No terminal failures" description="The retained diagnostic window is clear." />
+                  <EmptyState title={t("No terminal failures")} description={t("The retained diagnostic window is clear.")} />
                 )}
               </VStack>
             </VStack>
@@ -2246,8 +2257,8 @@ function DiagnosticsDialog({ isOpen, diagnostics, isLoading, error, onRefresh, o
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="end" gap={2}>
-              <Button label="Close" variant="secondary" onClick={onClose} />
-              <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+              <Button label={t("Close")} variant="secondary" onClick={onClose} />
+              <Button label={t("Refresh")} variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
             </HStack>
           </LayoutFooter>
         )}
@@ -2261,29 +2272,29 @@ function CompatibilityDialog({ isOpen, compatibility, isLoading, error, onResetF
   return (
     <Dialog isOpen={isOpen} onOpenChange={onClose} width={820}>
       <Layout
-        header={<DialogHeader title="Compatibility" subtitle="Protocol fingerprints and bounded learned behavior" onOpenChange={onClose} hasDivider />}
+        header={<DialogHeader title={t("Compatibility")} subtitle={t("Protocol fingerprints and bounded learned behavior")} onOpenChange={onClose} hasDivider />}
         content={(
           <LayoutContent>
             <VStack gap={4}>
-              {error && <Banner title="Compatibility status unavailable" description={error} status="error" />}
+              {error && <Banner title={t("Compatibility status unavailable")} description={error} status="error" />}
               <Grid columns={{ minWidth: 180, max: 3, repeat: 'fill' }} gap={2}>
-                <Metric label="Learned compatibility rules" value={compatibility?.counts?.active ?? 0} />
-                <Metric label="Stale" value={compatibility?.counts?.stale ?? 0} />
-                <Metric label="Pending evidence" value={compatibility?.counts?.observations ?? 0} />
+                <Metric label={t("Learned compatibility rules")} value={compatibility?.counts?.active ?? 0} />
+                <Metric label={t("Stale")} value={compatibility?.counts?.stale ?? 0} />
+                <Metric label={t("Pending evidence")} value={compatibility?.counts?.observations ?? 0} />
               </Grid>
 
               <VStack gap={2}>
                 <HStack justify="between" vAlign="center">
-                  <Heading level={3}>Passive learning</Heading>
+                  <Heading level={3}>{t("Passive learning")}</Heading>
                   <Badge
-                    label={compatibility?.passiveEnabled ? 'enabled' : 'disabled'}
+                    label={statusText(compatibility?.passiveEnabled ? 'enabled' : 'disabled')}
                     variant={compatibility?.passiveEnabled ? 'success' : 'neutral'}
                   />
                 </HStack>
               </VStack>
 
               <Card variant="muted">
-                <Collapsible trigger="Protocol fingerprint details" defaultIsOpen={false}>
+                <Collapsible trigger={t("Protocol fingerprint details")} defaultIsOpen={false}>
                   <Grid columns={{ minWidth: 260, max: 2, repeat: 'fit' }} gap={2}>
                     {Object.entries(compatibility?.fingerprints || {}).map(([provider, fingerprint]) => (
                       <VStack key={provider} gap={1}>
@@ -2298,17 +2309,17 @@ function CompatibilityDialog({ isOpen, compatibility, isLoading, error, onResetF
                 </Collapsible>
               </Card>
 
-              <CompatibilityFactList title="Learned compatibility rules" facts={facts} onResetFact={onResetFact} />
+              <CompatibilityFactList title={t("Learned compatibility rules")} facts={facts} onResetFact={onResetFact} />
             </VStack>
           </LayoutContent>
         )}
         footer={(
           <LayoutFooter hasDivider>
             <HStack justify="between" gap={2} wrap="wrap">
-              <Button label="Reset all" variant="destructive" isDisabled={!facts.length} onClick={onResetAll} />
+              <Button label={t("Reset all")} variant="destructive" isDisabled={!facts.length} onClick={onResetAll} />
               <HStack justify="end" gap={2}>
-                <Button label="Close" variant="secondary" onClick={onClose} />
-                <Button label="Refresh" variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
+                <Button label={t("Close")} variant="secondary" onClick={onClose} />
+                <Button label={t("Refresh")} variant="primary" isLoading={isLoading} onClick={() => void onRefresh()} />
               </HStack>
             </HStack>
           </LayoutFooter>
@@ -2336,16 +2347,14 @@ function CompatibilityFactList({ title, facts, onResetFact }) {
                     <Badge label={fact.provider} variant={fact.provider === 'codex' ? 'purple' : 'teal'} />
                     <Badge label={fact.route} variant="neutral" />
                   </HStack>
-                  <Text type="supporting" color="secondary" maxLines={1}>
-                    {fact.evidenceCount} observations · expires {formatDiagnosticTime(fact.expiresAt)}
-                  </Text>
+                  <Text type="supporting" color="secondary" maxLines={1}>{t("{value0} observations · expires {value1}", { value0: fact.evidenceCount, value1: formatDiagnosticTime(fact.expiresAt) })}</Text>
                 </VStack>
-                <Button label="Reset fact" variant="destructive" size="sm" onClick={() => onResetFact(fact)} />
+                <Button label={t("Reset fact")} variant="destructive" size="sm" onClick={() => onResetFact(fact)} />
               </HStack>
             </Card>
           ))}
         </ScrollList>
-      ) : <EmptyState title={`No ${title.toLowerCase()}`} description="No learned records are present in this category." />}
+      ) : <EmptyState title={t("No {value0}", { value0: title.toLowerCase() })} description={t("No learned records are present in this category.")} />}
     </VStack>
   );
 }
@@ -2396,86 +2405,93 @@ function readinessDisplayState(readiness) {
 function summarizeSystemStatus(status, upstreams, error = '') {
   if (!status) {
     return error
-      ? { warningCount: 1, message: 'System status could not be loaded.' }
-      : { warningCount: 0, message: 'Open system status for current gateway health.' };
+      ? { warningCount: 1, message: t("System status could not be loaded.") }
+      : { warningCount: 0, message: t("Open system status for current gateway health.") };
   }
   const warnings = [];
-  if (error) warnings.push('status refresh');
-  if (readinessDisplayState(status.diagnostics?.readiness) !== 'ready') warnings.push('gateway readiness');
-  if (status.hostHealth?.openOriginCount > 0) warnings.push('Codex host circuit');
-  if (status.catalog?.freshness === 'stale') warnings.push('model catalog');
-  if ((status.pacing || []).some((entry) => entry.queueDepth > 0)) warnings.push('pacing queue');
-  if (upstreams.some(hasActiveCooldown)) warnings.push('upstream cooldowns');
+  if (error) warnings.push(t("status refresh"));
+  if (readinessDisplayState(status.diagnostics?.readiness) !== 'ready') warnings.push(t("gateway readiness"));
+  if (status.hostHealth?.openOriginCount > 0) warnings.push(t("Codex host circuit"));
+  if (status.catalog?.freshness === 'stale') warnings.push(t("model catalog"));
+  if ((status.pacing || []).some((entry) => entry.queueDepth > 0)) warnings.push(t("pacing queue"));
+  if (upstreams.some(hasActiveCooldown)) warnings.push(t("upstream cooldowns"));
   const retainedFailures = status.diagnostics?.gateway?.retainedFailureCount || 0;
-  if (retainedFailures > 0) warnings.push('recent gateway failures');
+  if (retainedFailures > 0) warnings.push(t("recent gateway failures"));
   return {
     warningCount: warnings.length,
-    message: warnings.length ? `Review ${warnings.join(', ')}.` : 'Readiness, discovery, host health, compatibility, and pacing are clear.'
+    message: warnings.length ? t("Review {value0}.", { value0: warnings.join(', ') }) : t("Readiness, discovery, host health, compatibility, and pacing are clear.")
   };
 }
 
 function readinessLabel(name) {
   return {
-    storage: 'Storage',
-    apiKey: 'API key',
-    tokenRecovery: 'Token recovery',
-    quotaRefresh: 'Quota refresh',
-    modelCatalog: 'Model catalog'
+    storage: t("Storage"),
+    apiKey: t("API key"),
+    tokenRecovery: t("Token recovery"),
+    quotaRefresh: t("Quota refresh"),
+    modelCatalog: t("Model catalog")
   }[name] || name;
 }
 
 function readinessStatusLabel(status) {
   return {
-    ready: 'Ready',
-    degraded: 'Fallback active',
-    pending: 'Starting',
-    failed: 'Failed'
-  }[status] || 'Unknown';
+    ready: t("Ready"),
+    degraded: t("Fallback active"),
+    pending: t("Starting"),
+    failed: t("Failed")
+  }[status] || t("Unknown");
 }
 
 function readinessDescription(name, status) {
   if (status !== 'degraded') return '';
   return {
-    tokenRecovery: 'Some credentials could not be refreshed. Other upstreams remain available.',
-    quotaRefresh: 'One or more quota reads failed. Scheduled refreshes will keep retrying.',
-    modelCatalog: 'Live discovery is unavailable or incomplete. Static or last-known models remain available.'
-  }[name] || 'The gateway is available with reduced supporting data.';
+    tokenRecovery: t("Some credentials could not be refreshed. Other upstreams remain available."),
+    quotaRefresh: t("One or more quota reads failed. Scheduled refreshes will keep retrying."),
+    modelCatalog: t("Live discovery is unavailable or incomplete. Static or last-known models remain available.")
+  }[name] || t("The gateway is available with reduced supporting data.");
 }
 
 function formatDiagnosticTime(value) {
-  if (!value) return 'unknown time';
+  if (!value) return t("unknown time");
   const timestamp = new Date(value);
-  return Number.isNaN(timestamp.getTime()) ? 'unknown time' : timestamp.toLocaleString();
+  return Number.isNaN(timestamp.getTime()) ? t("unknown time") : timestamp.toLocaleString(localeTag());
 }
 
 function formatTimings(timings = {}) {
   const labels = {
-    queueWaitMs: 'queue',
-    credentialPreparationMs: 'credentials',
-    connectionMs: 'connect',
-    firstResponseHeaderMs: 'headers',
-    firstSseEventMs: 'first event',
-    terminalCompletionMs: 'terminal'
+    queueWaitMs: t('queue'),
+    credentialPreparationMs: t('credentials'),
+    connectionMs: t('connect'),
+    firstResponseHeaderMs: t('headers'),
+    firstSseEventMs: t("first event"),
+    terminalCompletionMs: t('terminal')
   };
   const values = Object.entries(labels).flatMap(([name, label]) => (
-    Number.isFinite(timings[name]) ? [`${label} ${timings[name]}ms`] : []
+    Number.isFinite(timings[name]) ? [t("{value0} {value1}ms", { value0: label, value1: timings[name] })] : []
   ));
-  return values.length ? values.join(', ') : 'timing unavailable';
+  return values.length ? values.join(', ') : t("timing unavailable");
 }
 
 function formatFailovers(failure = {}) {
   const count = Number(failure.retryCount) || 0;
-  return `${count} candidate failover${count === 1 ? '' : 's'}`;
+  return t(count === 1 ? "{value0} candidate failover" : "{value0} candidate failovers", { value0: count });
 }
 
 function App() {
+  const locale = useSyncExternalStore(subscribeLocale, getLocale, () => 'en');
   const [themeMode, setThemeMode] = useStoredValue('codex_theme_mode', 'dark');
+  useEffect(() => {
+    document.documentElement.lang = locale;
+    document.title = t('Relaydeck — Upstream dashboard');
+  }, [locale]);
   return (
-    <Theme theme={relayTheme} mode={themeMode}>
-      <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
-        <Dashboard themeMode={themeMode} setThemeMode={setThemeMode} />
-      </ToastViewport>
-    </Theme>
+    <InternationalizationProvider locale={locale} overrides={ASTRYX_MESSAGES}>
+      <Theme theme={relayTheme} mode={themeMode}>
+        <ToastViewport position="bottomEnd" maxVisible={3} isTopLayer>
+          <Dashboard themeMode={themeMode} setThemeMode={setThemeMode} locale={locale} onLocaleChange={setLocale} />
+        </ToastViewport>
+      </Theme>
+    </InternationalizationProvider>
   );
 }
 
