@@ -517,11 +517,11 @@
     "targetPath": "/backend-api/codex/responses",
     "fingerprint": {
       "version": 1,
-      "hash": "acf609ad62be114ec3790ae809a2e76c",
+      "hash": "971ff790235d4cf1e5e4c52bd59453d1",
       "values": {
-        "user-agent": "codex_cli_rs/0.165.0",
+        "user-agent": "codex_cli_rs/0.166.0",
         "originator": "codex_cli_rs",
-        "version": "0.165.0"
+        "version": "0.166.0"
       }
     },
     "projection": {
