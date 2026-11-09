@@ -1,3 +1,5 @@
+import { terminalRuntimeAuthDenial } from './runtime-auth.js';
+import { collectRejectedResponse } from './upstream-response-lifecycle.js';
 import { createHash } from 'node:crypto';
 import {
   DEFAULT_CODEX_BASE_URL,
@@ -274,7 +276,13 @@ export class CodexModelCatalog {
       generation = catalogGeneration(upstream);
 
       let response = await requestModels(this.store, upstream, credentials, { fetchImpl, upstreamDeadlines, codexHostHealth });
-      if ((response.status === 401 || response.status === 403) && credentials.refreshToken) {
+      let authenticationBody = null;
+      if ([401, 403].includes(response.status) && credentials.refreshToken) {
+        const rejected = await collectRejectedResponse(response, upstreamDeadlines);
+        response = rejected.response;
+        authenticationBody = rejected.bytes;
+      }
+      if ((response.status === 401 || response.status === 403) && !terminalRuntimeAuthDenial(response, authenticationBody) && credentials.refreshToken) {
         await response.body?.cancel('Retrying model discovery after credential refresh').catch(() => {});
         await refreshProviderCredentials(upstream, credentials, {
           fetchImpl,
