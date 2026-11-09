@@ -250,9 +250,9 @@ gateway must call `hasDuplicateHost` from `http-ingress.js` before admission;
 `attachWebSocketProxy` applies the same check to upgrade requests.
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
-The fallback Codex wire identity is `0.166.0`; the separately reviewed,
-integrity-pinned release manifest now reviews Codex `0.166.0` and Claude Code
-`2.1.316`. The dashboard's bundled Codex login executable is also pinned to `0.166.0`.
+The fallback Codex wire identity is `0.167.0`; the separately reviewed,
+integrity-pinned release manifest now reviews Codex `0.167.0` and Claude Code
+`2.1.316`. The dashboard's bundled Codex login executable is also pinned to `0.167.0`.
 
 Codex Responses WebSockets send a ping every `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS` (30 seconds by default) and close an idle upstream after `CODEX_POOLER_CODEX_WEBSOCKET_IDLE_MS`. The upstream frame limit is independently configurable (16 MiB by default); the pending-turn queue remains 2 MiB and outbound backpressure remains 16 MiB. An upstream close with code `1009` is request-scoped and is returned as a 413-style `request_too_large` error without rotating credentials. An ordinary native `response.create` (generating, unanchored, not a compaction trigger) is measured after normalization against the 16,777,216-byte upstream message limit before any attempt starts. A larger frame never reaches an upstream and changes no usage or health. With exactly one non-blank `x-codex-window-id`, the client gets a `502 upstream_request_failed` error event and Close `1011`; for the next 60 seconds a native Responses WebSocket handshake for the same scope, credential and window answers `426` with an empty body, so the Codex client retries over HTTP. The marker is persisted, and a failed write answers `503 service_unavailable` without granting the fallback. Without a usable window id, the frame gets a local `413 websocket_message_too_large` error and the socket stays open. Other frames above the frame limit still close with `1009`. A `websocket_connection_limit_reached` terminal retires its upstream socket before the next turn. Set `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS=0` to disable pings.
 
@@ -442,7 +442,7 @@ removal invalidate cached account metadata as before.
 
 Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
 Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
-template exists. Builds in the upstream-qualified `0.154.0` through `0.166.0`
+template exists. Builds in the upstream-qualified `0.154.0` through `0.167.0`
 window also omit entries that violate the mirrored decoder contract. Older
 or unknown clients keep the verbatim catalog; newer builds are not checked
 against an unqualified decoder. Static rows without the required native
@@ -554,7 +554,7 @@ The priority list is empty by default; upstreams added to it (dashboard **Set pr
 
 Codex `response.incomplete` terminals reporting exhausted credit or organization/project spend limits are failures, not successful truncations. The affected account enters quota cooldown; a pre-output HTTP turn can fail over, while already visible output is not replayed. Failed or interrupted turns retain complete measured usage received before failure without becoming successful requests. Missing measured usage is not inferred from an estimate.
 
-Public file creation performs the Codex create → upload → finalize protocol and stores only file metadata locally; file content and signed URLs are not persisted. Stored upstream credentials that cannot be decrypted return `503 upstream_credential_unavailable` rather than an upstream failure. Audio requests normalize OpenAI multipart fields for Codex transcription; `response_format=text` returns `text/plain`, while JSON remains the default and subtitle/verbose formats are unsupported. Public image edits refuse image and mask uploads totalling more than 50 MiB with `413 request_too_large` before any upstream is selected. Image results must contain structurally valid base64 PNG, JPEG, or WebP data. Missing or malformed final results fail atomically with `502 image_generation_failed`; result URLs are never downloaded. Measured upstream usage is retained on failure without session affinity or successful share accounting. Public image requests translate through the Responses image-generation tool and automatically select an image-capable Codex host model. The proxy binds to `127.0.0.1`. The API key is a single shared key, not a Pool or per-user key system.
+Public file creation validates and forwards provider `upload_headers` to storage, allowing provider content/storage headers to override defaults while rejecting identity, hop-by-hop, framing and case-duplicate headers. It performs the Codex create → upload → finalize protocol and stores only file metadata locally; file content and signed URLs are not persisted. Stored upstream credentials that cannot be decrypted return `503 upstream_credential_unavailable` rather than an upstream failure. Audio requests normalize OpenAI multipart fields for Codex transcription; `response_format=text` returns `text/plain`, while JSON remains the default and subtitle/verbose formats are unsupported. Public image edits refuse image and mask uploads totalling more than 50 MiB with `413 request_too_large` before any upstream is selected. Image results must contain structurally valid base64 PNG, JPEG, or WebP data. Missing or malformed final results fail atomically with `502 image_generation_failed`; result URLs are never downloaded. Measured upstream usage is retained on failure without session affinity or successful share accounting. Public image requests translate through the Responses image-generation tool and automatically select an image-capable Codex host model. The proxy binds to `127.0.0.1`. The API key is a single shared key, not a Pool or per-user key system.
 
 Backend Responses requests with `stream: true` may end their input with a `compaction_trigger`. The Node gateway validates that trigger, projects the compact-compatible request fields, dispatches to `/backend-api/codex/responses/compact` on the selected Codex account, and returns the encrypted compaction item as Responses SSE. Codex V2 compaction requests (`responses_compaction_v2` turn metadata) collect streamed compact results, including an unframed final event, and reject malformed or post-terminal material. A complete `insufficient_quota` failure returns a sanitized HTTP 429 and cools the selected account; poisoned streams remain `502 invalid_compaction_response`. Public `/v1/responses` HTTP and WebSocket turns also accept exactly one terminal trigger after visible input; they dispatch the compact projection through the ordinary backend Responses endpoint and adapt the result to public JSON, SSE, or WebSocket events. The direct public `POST /v1/responses/compact` route remains intentionally unsupported.
 
@@ -586,3 +586,36 @@ npm run compatibility:check
 npm run compatibility:release-check
 npm test
 ```
+
+
+### Recent compatibility updates
+
+Request body reads have a separate 60-second total budget (`bodyReadTimeoutMs`),
+including plain JSON and multipart uploads. Compressed bodies receive a fresh
+10-second decompression budget (`decompressionTimeoutMs`) after the read.
+Both are configurable through the host's `ingress` options. Read expiry returns
+`408 request_body_read_timeout`; decoding expiry remains
+`408 request_decompression_timeout`. Byte and ratio limits are unchanged.
+
+Runtime instance authentication denials are health-neutral and skip token
+refresh on HTTP, compatibility, discovery, WebSocket handshakes and WebSocket
+compaction. The classifier accepts the four terminal runtime codes in a bounded
+JSON body or canonical base64 `x-error-json`; ordinary credential failures keep
+their existing refresh behavior.
+
+GPT Image `gpt-image-2.6-flare` and `gpt-image-2.6-sunburst` support generations
+and edits with the extended quality and dimension validation. Existing 2.5
+aliases remain accepted. `src/image-pricing.js` records the reviewed text/image
+and cached-input rates, separately from host-model token prices. Image routes
+continue settling the provider-reported total cost; rates never turn missing
+usage into an inferred charge.
+
+Native Responses HTTP requests and direct compaction requests reject an
+identical overlapping request with `409 duplicate_turn`, including after visible
+output. The process-local fence is isolated by store, scope, principal, native
+continuity identity (thread, then session, alias or window) and endpoint class; it retains only keyed digests, holds through
+response delivery and settlement, and releases on success, failure or cancellation.
+Changed full-history resamples and other principals remain independent. A bounded
+4096-request capacity fails closed without evicting live requests. This active
+HTTP fence is separate from durable metadata-based native turn recovery; it does
+not provide cross-process deduplication or cache completed responses.

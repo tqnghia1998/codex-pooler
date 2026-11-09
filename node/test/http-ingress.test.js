@@ -196,7 +196,7 @@ test('accepts the decompressed boundary and rejects the next byte', async () => 
 
 test('times out a slow compressed-body read', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-compression-read-timeout-'));
-  const { server, base } = await runningServer(configuredStore(dir), async () => { throw new Error('must not dispatch'); }, { decompressionTimeoutMs: 20 });
+  const { server, base } = await runningServer(configuredStore(dir), async () => { throw new Error('must not dispatch'); }, { bodyReadTimeoutMs: 20, decompressionTimeoutMs: 1_000 });
   try {
     const url = new URL(base);
     const compressed = gzipSync(JSON.stringify({ model: 'gpt-5.6-sol', input: 'slow' }));
@@ -212,7 +212,7 @@ test('times out a slow compressed-body read', async () => {
       setTimeout(() => req.end(compressed.subarray(1)), 80);
     });
     assert.equal(result.status, 408);
-    assert.deepEqual(result.body.error, { type: 'invalid_request_error', code: 'request_decompression_timeout', message: 'request body decompression timed out', param: null });
+    assert.deepEqual(result.body.error, { type: 'invalid_request_error', code: 'request_body_read_timeout', message: 'request body read timed out', param: null });
   } finally {
     await close(server, dir);
   }
