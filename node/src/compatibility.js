@@ -1,3 +1,5 @@
+import { IMAGE_PRICING } from './image-pricing.js';
+import { terminalRuntimeAuthDenial } from './runtime-auth.js';
 import { randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import { defaultBaseUrl } from './domain.js';
@@ -23,8 +25,8 @@ import {
   selectPersonalShareSession
 } from './share-authorization.js';
 
-const IMAGE_MODELS = new Set(['gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
-const IMAGE_25_MODELS = new Set(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
+const IMAGE_MODELS = new Set([...Object.keys(IMAGE_PRICING), 'gpt-image-1', 'gpt-image-1.5', 'gpt-image-1-mini', 'gpt-image-2', 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
+const EXTENDED_IMAGE_MODELS = new Set([...Object.keys(IMAGE_PRICING), 'gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2.5-flare-2026-09-08', 'gpt-image-2.5-sunburst-2026-09-08']);
 const IMAGE_EDIT_UPLOAD_LIMIT = 50 * 1024 * 1024;
 const FILE_PURPOSES = new Set(['user_data', 'assistants', 'vision', 'batch', 'fine-tune']);
 const UPLOAD_HOST_SUFFIXES = ['.oaiusercontent.com', '.blob.core.windows.net'];
@@ -88,11 +90,12 @@ async function createFile({ req, res, body, store, fetchImpl, upstreamDeadlines,
   const uploadUrl = text(createdBody?.upload_url);
   if (!fileId || !uploadUrl) return sendFailure(res);
 
-  if (!safeUploadUrl(uploadUrl)) return sendFailure(res);
+  const uploadHeaders = validatedUploadHeaders(createdBody?.upload_headers);
+  if (!uploadHeaders || !safeUploadUrl(uploadUrl)) return sendFailure(res);
   const upload = await timedFetch(uploadUrl, {
     method: 'PUT',
     redirect: 'error',
-    headers: { 'content-type': file.type || 'application/octet-stream', 'x-ms-blob-type': 'BlockBlob' },
+    headers: { 'content-type': file.type || 'application/octet-stream', 'x-ms-blob-type': 'BlockBlob', ...uploadHeaders },
     body: Buffer.from(await file.arrayBuffer())
   }, fetchImpl, upstreamDeadlines, null, { req, res });
   void upload.body?.cancel('File upload response finished').catch(() => {});
@@ -259,8 +262,8 @@ function validateImage(payload, edit) {
   for (const [field, allowed] of Object.entries(IMAGE_ENUMS)) {
     const value = text(payload[field]);
     if (payload[field] === undefined) continue;
-    if (field === 'quality' && IMAGE_25_MODELS.has(payload.model) && ['xhigh', 'max'].includes(value)) continue;
-    if (field === 'size' && IMAGE_25_MODELS.has(payload.model) && validImage25Size(value)) continue;
+    if (field === 'quality' && EXTENDED_IMAGE_MODELS.has(payload.model) && ['xhigh', 'max'].includes(value)) continue;
+    if (field === 'size' && EXTENDED_IMAGE_MODELS.has(payload.model) && validImage25Size(value)) continue;
     if (!allowed.has(value)) return { message: `${field} is not supported`, param: field };
   }
   if (payload.n !== undefined && Number(payload.n) !== 1) return { message: 'n must be 1', param: 'n' };
@@ -453,12 +456,14 @@ async function codexFetch(context, path, options, { deferSettlement = false, pac
     response = await timedFetch(`${defaultBaseUrl('codex')}${path}`, withCodexHeaders(context, { ...options, signal: abort.signal }), context.fetchImpl, context.upstreamDeadlines, context.codexHostHealth, context);
     persistCookies(response, context);
     let authenticationUsage = null;
+    let authenticationBody = null;
     if ([401, 403].includes(response.status) && context.credentials.refreshToken) {
       const rejected = await collectRejectedResponse(response, context.upstreamDeadlines);
       response = rejected.response;
+      authenticationBody = rejected.bytes;
       try { authenticationUsage = extractUsage(JSON.parse(rejected.bytes.toString('utf8'))); } catch {}
     }
-    if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && context.credentials.refreshToken) {
+    if ((response.status === 401 || response.status === 403) && !terminalRuntimeAuthDenial(response, authenticationBody) && !hasMeasuredUsage(authenticationUsage) && context.credentials.refreshToken) {
       try {
         void response.body?.cancel('Retrying with refreshed credentials').catch(() => {});
         const refreshed = await refreshProviderCredentials(context.upstream, context.credentials, {
@@ -765,4 +770,19 @@ function safeUploadUrl(value) {
   } catch {
     return false;
   }
+}
+
+// Provider-supplied storage headers may override defaults, never transport or identity.
+export function validatedUploadHeaders(value) {
+  if (value == null) return {};
+  if (typeof value !== 'object' || Array.isArray(value)) return null;
+  const forbidden = new Set(['authorization', 'proxy-authorization', 'chatgpt-account-id', 'cookie', 'cookie2', 'host', 'content-length', 'transfer-encoding', 'connection', 'keep-alive', 'proxy-connection', 'te', 'trailer', 'upgrade', 'expect', 'x-openai-api-key', 'openai-organization', 'openai-project', 'x-api-key']);
+  const headers = Object.create(null);
+  for (const [name, entry] of Object.entries(value)) {
+    const key = name.toLowerCase();
+    if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof entry !== 'string' || !/^[\x20-\x7e\t]*$/.test(entry)
+      || forbidden.has(key) || Object.hasOwn(headers, key)) return null;
+    headers[key] = entry;
+  }
+  return headers;
 }

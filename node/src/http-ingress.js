@@ -5,6 +5,7 @@ export const DEFAULT_INGRESS_LIMITS = Object.freeze({
   maxCompressedBodyBytes: 128 * 1024 * 1024,
   maxDecompressedBodyBytes: 256 * 1024 * 1024,
   maxDecompressionRatio: 200,
+  bodyReadTimeoutMs: 60_000,
   decompressionTimeoutMs: 10_000
 });
 
@@ -32,22 +33,20 @@ export async function readRequestBody(req, options = {}) {
   const encoding = contentEncoding(req);
   if (encoding && !['gzip', 'deflate', 'zstd'].includes(encoding)) rejectRequest(req, new HttpError(415, 'unsupported_content_encoding', 'content encoding is not supported'));
   if (encoding) validateCompressedContentType(req);
-  if (limits.decompressionTimeoutMs <= 0) rejectRequest(req, timeoutError());
 
-  const deadline = Date.now() + limits.decompressionTimeoutMs;
+  if (!Number.isFinite(limits.bodyReadTimeoutMs) || limits.bodyReadTimeoutMs <= 0) rejectRequest(req, bodyReadTimeoutError());
   const maxInputBytes = encoding ? limits.maxCompressedBodyBytes : limits.maxDecompressedBodyBytes;
   const bytes = await readBounded(
     req,
     maxInputBytes,
     encoding ? 'compressed_request_too_large' : 'decompressed_request_too_large',
     encoding ? 'compressed request body is too large' : 'request body is too large',
-    limits.decompressionTimeoutMs
+    limits.bodyReadTimeoutMs
   );
   if (!encoding) return bytes;
+  if (!Number.isFinite(limits.decompressionTimeoutMs) || limits.decompressionTimeoutMs <= 0) throw timeoutError();
 
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) throw timeoutError();
-  const decodeLimits = { ...limits, decompressionTimeoutMs: remainingMs };
+  const decodeLimits = limits;
   return encoding === 'zstd' ? decompressZstd(bytes, decodeLimits) : decompressZlib(bytes, encoding, decodeLimits);
 }
 
@@ -95,7 +94,7 @@ function readBounded(req, maxBytes, code, message, timeoutMs) {
     const chunks = [];
     let size = 0;
     let settled = false;
-    const timer = timeoutMs === null ? null : setTimeout(() => fail(timeoutError()), timeoutMs);
+    const timer = timeoutMs === null ? null : setTimeout(() => fail(bodyReadTimeoutError()), timeoutMs);
     const cleanup = () => {
       if (timer) clearTimeout(timer);
       req.off('data', onData);
@@ -250,4 +249,8 @@ function timeoutError() {
 
 function invalidCompressedBodyError() {
   return new HttpError(400, 'invalid_request', 'compressed request body is invalid');
+}
+
+function bodyReadTimeoutError() {
+  return new HttpError(408, 'request_body_read_timeout', 'request body read timed out');
 }

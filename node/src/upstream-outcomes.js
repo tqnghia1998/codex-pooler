@@ -1,3 +1,4 @@
+import { terminalRuntimeAuthDenial } from './runtime-auth.js';
 import { misalignmentPolicyFailure } from './policy-failures.js';
 import { responseValidationError } from './response-validation.js';
 import { isClaudeOAuthUpstream } from './domain.js';
@@ -29,6 +30,7 @@ const requestScopedRegexCache = new Map();
 
 export function classifyHttpResponse(response, structuredBody = null, { allowMisalignmentPolicy = false, upstreamType = '', quotaSource = '' } = {}) {
   const status = Number(response?.status ?? response?.statusCode);
+  if (terminalRuntimeAuthDenial(response, structuredBody)) return { class: 'neutral', retryable: false, status, errorCode: 'runtime_identity_denied' };
   const structured = structuredError(structuredBody);
   if (status === 403 && upstreamType === 'compass' && ['ais', 'aiswitch'].includes(quotaSource)
     && !['invalid_api_key', 'invalid_token', 'token_expired', 'authentication_error'].includes(structured.code)
