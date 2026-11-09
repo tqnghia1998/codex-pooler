@@ -235,3 +235,45 @@ for (const route of ['raw', 'compatibility', 'core']) {
     assertReleased(f);
   });
 }
+
+for (const mode of ['compaction', 'native-handshake', 'public-handshake']) {
+  test(`runtime instance denial does not refresh on WebSocket ${mode}`, { timeout: 5000 }, async t => {
+    const f = fixture(t, true);
+    let refreshes = 0;
+    const target = createServer();
+    target.on('upgrade', (_req, socket) => {
+      const body = JSON.stringify({ error: { code: 'runtime_instance_revoked' } });
+      socket.end(`HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
+    });
+    target.listen(0, '127.0.0.1'); await once(target, 'listening');
+    const server = createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const gateway = attachWebSocketProxy(server, { store: f.store, apiKey: 'test', disablePacing: true,
+      websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+      fetchImpl: async url => {
+        if (new URL(url).pathname === '/oauth/token') { refreshes++; throw new Error('must not refresh'); }
+        return Response.json({ error: { code: 'runtime_instance_revoked' } }, { status: 401 });
+      }
+    });
+    let client;
+    try {
+      const path = mode === 'native-handshake' ? '/backend-api/codex/responses' : '/v1/responses';
+      client = new WebSocket(`ws://127.0.0.1:${server.address().port}${path}`, { headers: { authorization: 'Bearer test' } });
+      const ended = new Promise((resolve, reject) => {
+        client.on('message', data => { if (['error', 'response.failed'].includes(JSON.parse(data.toString()).type)) resolve(); });
+        client.on('close', resolve); client.on('error', reject);
+      });
+      await once(client, 'open');
+      client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: [
+        { role: 'user', content: 'synthetic' }, ...(mode === 'compaction' ? [{ type: 'compaction_trigger' }] : [])
+      ] }));
+      await ended;
+      assert.equal(refreshes, 0);
+      assert.notEqual(f.store.get(f.upstream.id).tokenRefresh?.status, 'reauth_required');
+    } finally {
+      client?.terminate(); for (const socket of gateway.clients) socket.terminate();
+      await new Promise(resolve => gateway.close(resolve));
+      await new Promise(resolve => server.close(resolve));
+      await new Promise(resolve => target.close(resolve));
+    }
+  });
+}

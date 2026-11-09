@@ -1,3 +1,5 @@
+import { beginNativeHttpRequest } from './native-http-fence.js';
+import { terminalRuntimeAuthDenial } from './runtime-auth.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { writeChunk } from './http-stream.js';
 import { createSseUsageObserver } from './sse-usage-observer.js';
@@ -144,10 +146,11 @@ const POLICY_ROUTES = new Set([
 ]);
 
 export async function proxyRequest({ req, res, path, payload, store, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, upstreamDeadlines = {}, logger = null, codexHostHealth = codexHostHealthForStore(store), claudeConfig = null, codexOptions = codexGatewayOptions() }) {
+  const releaseFence = validApiKey(req, apiKey) ? beginNativeHttpRequest(store, req, path, payload) : null;
   try {
     return await proxyRequestWithRecovery({ req, res, path, payload, store, apiKey, fetchImpl, upstreamDeadlines, logger, codexHostHealth, claudeConfig, codexOptions });
   } finally {
-    finishNativeTurn(req.nativeTurnLease);
+    try { finishNativeTurn(req.nativeTurnLease); } finally { releaseFence?.(); }
     delete req.nativeTurnLease;
   }
 }
@@ -1045,9 +1048,11 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         });
       persistResponseCookies(response, upstream, credentials, store);
       let authenticationUsage = null;
+      let authenticationBody = null;
       if ([401, 403].includes(response.status) && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
         const rejected = await collectRejectedResponse(response, upstreamDeadlines);
         response = rejected.response;
+        authenticationBody = rejected.bytes;
         authenticationUsage = extractUsage(parseJson(rejected.bytes));
       }
       let authenticationRetried = false;
@@ -1057,7 +1062,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
       const initialCodexDenial = response.status === 403 && upstream.type === 'codex'
         ? classifyHttpResponse(response, parseJson(await readBoundedResponse(response.clone(), 1024 * 1024, upstreamDeadlines)), { upstreamType: 'codex' })
         : null;
-      if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure
+      if ((response.status === 401 || response.status === 403) && !terminalRuntimeAuthDenial(response, authenticationBody) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure
         && (!initialCodexDenial || initialCodexDenial.class === 'credential')
         && ['codex', 'claude'].includes(upstream.type) && credentials.refreshToken) {
         try {
@@ -2887,12 +2892,14 @@ export async function proxyRawRequest({ req, res, path, body, store, apiKey = pr
     });
     persistResponseCookies(response, upstream, credentials, store);
     let authenticationUsage = null;
+    let authenticationBody = null;
     if ([401, 403].includes(response.status) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
       const rejected = await collectRejectedResponse(response, upstreamDeadlines);
       response = rejected.response;
+      authenticationBody = rejected.bytes;
       authenticationUsage = extractUsage(parseJson(rejected.bytes));
     }
-    if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
+    if ((response.status === 401 || response.status === 403) && !terminalRuntimeAuthDenial(response, authenticationBody) && !hasMeasuredUsage(authenticationUsage) && credentials.refreshToken && rawMethodIsSafe(req.method)) {
       try {
         void response.body?.cancel('Retrying with refreshed credentials').catch(() => {});
         const refreshed = await refreshProviderCredentials(upstream, credentials, {
@@ -3985,15 +3992,17 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         disable: disablePacing
       });
       let authenticationUsage = null;
+      let authenticationBody = null;
       if ([401, 403].includes(response.status) && candidateCredentials.refreshToken) {
         const rejected = await collectRejectedResponse(response);
         response = rejected.response;
+        authenticationBody = rejected.bytes;
         authenticationUsage = extractUsage(parseJson(rejected.bytes));
       }
       const initialPolicyFailure = [400, 403].includes(response.status)
         ? misalignmentPolicyFailure(parseJson(await readBoundedResponse(response.clone())))
         : null;
-      if ((response.status === 401 || response.status === 403) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure && candidateCredentials.refreshToken) {
+      if ((response.status === 401 || response.status === 403) && !terminalRuntimeAuthDenial(response, authenticationBody) && !hasMeasuredUsage(authenticationUsage) && !initialPolicyFailure && candidateCredentials.refreshToken) {
         try {
           void response.body?.cancel('Retrying WebSocket compaction with refreshed credentials').catch(() => {});
           const refreshed = await refreshProviderCredentials(candidate, candidateCredentials, {
@@ -4340,7 +4349,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         : null;
       if (policyFailure && publicTurnActive) {
         failActiveTurn(policyFailure.code, policyFailure.message, { class: 'neutral', retryable: false, errorCode: policyFailure.code });
-      } else if (!authenticationRetried && connectionCredentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
+      } else if (!terminalRuntimeAuthDenial(response, body) && !authenticationRetried && connectionCredentials.refreshToken && (response.statusCode === 401 || response.statusCode === 403)) {
         refreshingConnection = true;
         try {
           const refreshed = await refreshProviderCredentials(connectionUpstream, connectionCredentials, {
