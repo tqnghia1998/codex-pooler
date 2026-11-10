@@ -72,6 +72,13 @@ The Node proxy covers the client-visible local compatibility path:
 
 ### Responses stream and request contracts
 
+Responses replay treats a function call's `namespace: null` and a compaction
+item's `id: null` as omitted optional fields. Explicit namespaces, call IDs,
+arguments, encrypted compaction content, and validation of unsupported shapes
+remain intact. Input-item adapter errors identify the original input index and
+protocol type; additional-tools, function-call, and compaction checks also name
+the rejected field or requirement without including content values.
+
 Failed or cancelled turns retain complete measured usage, including an explicit
 provider cost without token counts. This includes collected JSON/SSE, initial
 SSE failures, raw streams, and public/native WebSocket turns. Failed attempts

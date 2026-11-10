@@ -1,0 +1,109 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
+import WebSocket, { WebSocketServer } from 'ws';
+import { Store } from '../src/store.js';
+import { createApp } from '../src/server.js';
+import { attachWebSocketProxy } from '../src/proxy.js';
+import { AdapterError, adaptResponsesRequest } from '../src/openai-adapters.js';
+
+const call = { type: 'function_call', call_id: 'call_replay', name: 'lookup', arguments: '{}', namespace: null, status: 'completed' };
+const compaction = { type: 'compaction', id: null, encrypted_content: 'synthetic-cipher', internal_chat_message_metadata_passthrough: { turn_id: 'synthetic-turn' } };
+const input = [compaction, call, { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result' }, { role: 'user', content: 'hi' }];
+const payload = { model: 'gpt-5.6-luna', input };
+const completed = { type: 'response.completed', response: { id: 'resp_replay', object: 'response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, price_cost_usd: 0.1 } } };
+
+// This file is also run through QuotaHub with candidate gateway resolution.
+test('normalizes nullable replay fields without mutating history or losing semantic fields', () => {
+  const original = structuredClone(payload);
+  const result = adaptResponsesRequest(payload);
+  assert.deepEqual(payload, original);
+  assert.deepEqual(result.input[0], { type: 'compaction', encrypted_content: compaction.encrypted_content });
+  assert.deepEqual(result.input[1], { type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments });
+  assert.deepEqual(result.input[2], input[2]);
+  const explicit = adaptResponsesRequest({ ...payload, input: [{ ...call, namespace: 'catalog' }, { ...compaction, id: 'cmp_1' }] }).input;
+  assert.equal(explicit[0].namespace, 'catalog');
+  assert.deepEqual(explicit[1], { ...compaction, id: 'cmp_1' });
+});
+
+test('input diagnostics retain original indices and never echo prompt, argument or cipher values', () => {
+  const secret = 'private-prompt-argument-cipher';
+  for (const [item, field] of [
+    [{ type: 'additional_tools', tools: [], content: secret }, 'content'],
+    [{ type: 'additional_tools', tools: [] }, 'role'],
+    [{ type: 'additional_tools', role: 'developer', tools: secret }, 'tools'],
+    [{ ...call, namespace: 42, arguments: secret }, 'namespace'],
+    [{ ...call, namespace: '', arguments: secret }, 'namespace'],
+    [{ ...call, caller: null, arguments: secret }, 'caller'],
+    [{ ...call, status: 'unknown', arguments: secret }, 'status'],
+    [{ ...compaction, id: 42, encrypted_content: secret }, 'id'],
+    [{ ...compaction, encrypted_content: '' }, 'encrypted_content'],
+    [{ ...compaction, encrypted_content: secret, status: 'completed' }, 'status'],
+    [{ ...compaction, encrypted_content: secret, internal_chat_message_metadata_passthrough: { turn_id: 'turn', extra: true } }, 'internal_chat_message_metadata_passthrough']
+  ]) {
+    assert.throws(() => adaptResponsesRequest({ ...payload, input: [{ type: 'reasoning', summary: [] }, { role: 'user', content: secret }, item] }), error => {
+      assert.ok(error instanceof AdapterError);
+      assert.equal(error.statusCode, 400);
+      assert.equal(error.param, 'input');
+      assert.ok(error.message.startsWith(`input[2] (${item.type}):`));
+      assert.ok(error.message.includes(field), error.message);
+      assert.ok(!error.message.includes(secret));
+      return true;
+    });
+  }
+  assert.throws(() => adaptResponsesRequest({ ...payload, input: [null] }), /input\[0\] \(item\).*expected an object/);
+  assert.throws(() => adaptResponsesRequest({ ...payload, input: [{ type: 'additional_tools', role: 'developer', tools: [{ type: 'mcp' }] }] }), /input\[0\] \(additional_tools\).*remote MCP/);
+});
+
+for (const mode of ['http', 'websocket']) for (const invalid of [false, true]) {
+  test(`public ${mode} replay normalizes nullable fields, invalid=${invalid}`, { timeout: 5000 }, async t => {
+    const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 8) });
+    const upstream = store.create({ type: 'codex', accessToken: 'synthetic' });
+    store.setCap(upstream.id, { capDollars: 100 });
+    let dispatched = 0;
+    const inspect = body => {
+      dispatched++;
+      assert.equal(body.input[0].encrypted_content, compaction.encrypted_content);
+      assert.equal(Object.hasOwn(body.input[0], 'id'), false);
+      assert.equal(Object.hasOwn(body.input[1], 'namespace'), false);
+    };
+    const fetchImpl = async (url, options) => {
+      if (new URL(url).pathname.endsWith('/models')) return Response.json({ models: [] });
+      inspect(JSON.parse(options.body));
+      return Response.json(completed.response);
+    };
+    const server = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+    const target = mode === 'websocket' ? new WebSocketServer({ port: 0, host: '127.0.0.1' }) : null;
+    if (target) await once(target, 'listening');
+    target?.on('connection', socket => socket.on('message', data => {
+      inspect(JSON.parse(data)); socket.send(JSON.stringify(completed));
+    }));
+    const relay = target ? attachWebSocketProxy(server, { store, apiKey: 'key', fetchImpl, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` }) : null;
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    let client;
+    t.after(async () => {
+      client?.terminate(); relay?.clients.forEach(socket => socket.terminate()); target?.clients.forEach(socket => socket.terminate());
+      if (relay) await new Promise(resolve => relay.close(resolve));
+      if (target) await new Promise(resolve => target.close(resolve));
+      server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); store.sqlite.close();
+    });
+    const body = invalid ? { ...payload, input: [{ type: 'additional_tools', tools: [] }] } : payload;
+    let error;
+    if (target) {
+      client = new WebSocket(`ws://127.0.0.1:${server.address().port}/v1/responses`, { headers: { authorization: 'Bearer key' } });
+      const result = new Promise((resolve, reject) => {
+        client.on('message', data => { const event = JSON.parse(data); if (event.type === 'response.completed') resolve(null); if (event.type === 'error') resolve(event.error || event); if (event.type === 'response.failed') resolve(event.response.error); });
+        client.on('error', reject);
+      });
+      await once(client, 'open'); client.send(JSON.stringify({ ...body, type: 'response.create' }));
+      error = await result;
+    } else {
+      const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/responses`, { method: 'POST', headers: { authorization: 'Bearer key', 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      assert.equal(response.status, invalid ? 400 : 200);
+      error = (await response.json()).error;
+    }
+    assert.equal(dispatched, invalid ? 0 : 1);
+    if (invalid) assert.match(error.message, /input\[0\] \(additional_tools\).*role must be developer/);
+  });
+}
