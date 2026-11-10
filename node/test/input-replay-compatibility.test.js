@@ -12,7 +12,8 @@ const call = { type: 'function_call', call_id: 'call_replay', name: 'lookup', ar
 const compaction = { type: 'compaction', id: null, encrypted_content: 'synthetic-cipher', internal_chat_message_metadata_passthrough: { turn_id: 'synthetic-turn' } };
 const toolOutput = { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result', name: 'lookup', namespace: 'catalog', id: null, caller: null, status: 'completed' };
 const normalizedToolOutput = { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result', name: 'lookup', namespace: 'catalog' };
-const input = [compaction, call, toolOutput, { role: 'user', content: 'hi' }];
+const desktopOutput = { type: 'function_call_output', name: 'create_thread', namespace: 'codex_app', output: 'synthetic-desktop-result' };
+const input = [compaction, call, toolOutput, { role: 'user', content: 'hi' }, desktopOutput, { ...desktopOutput, call_id: null }];
 const payload = { model: 'gpt-5.6-luna', input };
 const completed = { type: 'response.completed', response: { id: 'resp_replay', object: 'response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, price_cost_usd: 0.1 } } };
 
@@ -24,9 +25,32 @@ test('normalizes nullable replay fields without mutating history or losing seman
   assert.deepEqual(result.input[0], { type: 'compaction', encrypted_content: compaction.encrypted_content });
   assert.deepEqual(result.input[1], { type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments });
   assert.deepEqual(result.input[2], normalizedToolOutput);
+  assert.deepEqual(result.input[4], desktopOutput);
+  assert.deepEqual(result.input[5], desktopOutput);
   const explicit = adaptResponsesRequest({ ...payload, input: [{ ...call, namespace: 'catalog' }, { ...compaction, id: 'cmp_1' }] }).input;
   assert.equal(explicit[0].namespace, 'catalog');
   assert.deepEqual(explicit[1], { ...compaction, id: 'cmp_1' });
+});
+
+test('desktop named outputs without call IDs do not borrow an adjacent function call ID', () => {
+  for (const output of [desktopOutput, { ...desktopOutput, call_id: null }, { ...desktopOutput, name: call.name, namespace: null }]) {
+    const request = { ...payload, input: [call, output] };
+    const original = structuredClone(request);
+    const result = adaptResponsesRequest(request).input[1];
+    assert.equal(Object.hasOwn(result, 'call_id'), false);
+    assert.equal(result.name, output.name);
+    assert.equal(result.namespace, output.namespace ?? undefined);
+    assert.equal(result.output, output.output);
+    assert.deepEqual(request, original);
+  }
+});
+
+test('function output call ID is optional independently of its name or preceding input', () => {
+  for (const callId of [undefined, null, 'call_explicit']) {
+    const output = { type: 'function_call_output', output: 'synthetic-result', ...(callId !== undefined ? { call_id: callId } : {}) };
+    const expected = callId == null ? { type: 'function_call_output', output: output.output } : output;
+    assert.deepEqual(adaptResponsesRequest({ ...payload, input: [output] }).input, [expected]);
+  }
 });
 
 test('function output replay preserves names, namespaces, caller and structured results', () => {
@@ -41,7 +65,7 @@ test('function output replay preserves names, namespaces, caller and structured 
 
 test('function output diagnostics identify invalid fields without exposing result values', () => {
   const secret = 'private-tool-result';
-  for (const [changes, field] of [[{ call_id: '' }, 'call_id'], [{ name: 1 }, 'name'], [{ namespace: {} }, 'namespace'], [{ status: secret }, 'status'], [{ caller: { type: secret } }, 'caller'], [{ unsupported: secret }, 'unsupported']]) {
+  for (const [changes, field] of [[{ call_id: '' }, 'call_id'], [{ call_id: 42 }, 'call_id'], [{ name: 1 }, 'name'], [{ namespace: {} }, 'namespace'], [{ status: secret }, 'status'], [{ caller: { type: secret } }, 'caller'], [{ unsupported: secret }, 'unsupported']]) {
     assert.throws(() => adaptResponsesRequest({ ...payload, input: [{ ...toolOutput, output: secret, ...changes }] }), error => {
       assert.ok(error.message.startsWith('input[0] (function_call_output):'));
       assert.ok(error.message.includes(field));
@@ -92,6 +116,8 @@ for (const mode of ['http', 'websocket']) for (const invalid of [false, true]) {
       assert.equal(Object.hasOwn(body.input[0], 'id'), false);
       assert.equal(Object.hasOwn(body.input[1], 'namespace'), false);
       assert.deepEqual(body.input[2], normalizedToolOutput);
+      assert.deepEqual(body.input[4], desktopOutput);
+      assert.deepEqual(body.input[5], desktopOutput);
     };
     const fetchImpl = async (url, options) => {
       if (new URL(url).pathname.endsWith('/models')) return Response.json({ models: [] });

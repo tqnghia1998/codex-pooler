@@ -481,7 +481,7 @@ function normalizeInputItem(item) {
   }
   if (item.type === 'function_call_output') {
     inputKeys(item, ['type', 'call_id', 'output', 'result', 'id', 'name', 'namespace', 'status', 'caller', 'created_by', 'metadata', 'internal_chat_message_metadata_passthrough']);
-    if (!cleanString(item.call_id)) inputShape('call_id must be a non-empty string');
+    if (item.call_id != null && !cleanString(item.call_id)) inputShape('call_id must be a non-empty string or null when provided');
     if (!(Object.hasOwn(item, 'output') || Object.hasOwn(item, 'result'))) inputShape('output or result is required');
     for (const field of ['id', 'name', 'namespace', 'created_by']) {
       if (item[field] != null && !cleanString(item[field])) inputShape(`${field} must be a non-empty string or null`);
@@ -490,7 +490,7 @@ function normalizeInputItem(item) {
     if (item.caller != null && !validReplayCaller(item.caller)) inputShape('caller must be a direct or program caller or null');
     const result = { ...item };
     delete result.status;
-    for (const field of ['id', 'name', 'namespace', 'caller', 'created_by']) {
+    for (const field of ['call_id', 'id', 'name', 'namespace', 'caller', 'created_by']) {
       if (result[field] === null) delete result[field];
     }
     if (Array.isArray(result.output)) result.output = result.output.map(normalizeFunctionOutputPart);
@@ -634,7 +634,7 @@ function repairReplayCallIds(input) {
   for (let i = 0; i + 1 < result.length; i += 1) {
     const call = result[i];
     const output = result[i + 1];
-    if (call?.type === 'function_call' && output?.type === 'function_call_output' && !cleanString(output.call_id)) {
+    if (call?.type === 'function_call' && output?.type === 'function_call_output' && output.call_id == null && output.name == null && output.namespace == null) {
       const callId = cleanString(call.call_id) || cleanString(call.id);
       if (callId && cleanString(call.name) && typeof call.arguments === 'string' && (Object.hasOwn(output, 'output') || Object.hasOwn(output, 'result'))) {
         call.call_id = callId;
