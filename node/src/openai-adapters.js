@@ -480,9 +480,19 @@ function normalizeInputItem(item) {
     return [result];
   }
   if (item.type === 'function_call_output') {
-    if (!cleanString(item.call_id) || !(Object.hasOwn(item, 'output') || Object.hasOwn(item, 'result')) || Object.keys(item).some((key) => !['type', 'call_id', 'output', 'result', 'id', 'caller', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
-    if (!validReplayCaller(item.caller)) invalid('input item shape is not translatable', 'input');
+    inputKeys(item, ['type', 'call_id', 'output', 'result', 'id', 'name', 'namespace', 'status', 'caller', 'created_by', 'metadata', 'internal_chat_message_metadata_passthrough']);
+    if (!cleanString(item.call_id)) inputShape('call_id must be a non-empty string');
+    if (!(Object.hasOwn(item, 'output') || Object.hasOwn(item, 'result'))) inputShape('output or result is required');
+    for (const field of ['id', 'name', 'namespace', 'created_by']) {
+      if (item[field] != null && !cleanString(item[field])) inputShape(`${field} must be a non-empty string or null`);
+    }
+    if (item.status != null && !['in_progress', 'completed', 'incomplete'].includes(item.status)) inputShape('status must be in_progress, completed, incomplete or null');
+    if (item.caller != null && !validReplayCaller(item.caller)) inputShape('caller must be a direct or program caller or null');
     const result = { ...item };
+    delete result.status;
+    for (const field of ['id', 'name', 'namespace', 'caller', 'created_by']) {
+      if (result[field] === null) delete result[field];
+    }
     if (Array.isArray(result.output)) result.output = result.output.map(normalizeFunctionOutputPart);
     return [result];
   }

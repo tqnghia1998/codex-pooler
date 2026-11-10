@@ -605,6 +605,12 @@ npm test
 
 ### Recent compatibility updates
 
+Function-call output replay accepts tool names, namespaces and API-returned
+status/creator fields. Replay status is omitted before dispatch, nullable optional
+fields normalize to omission, and explicit tool identity, caller and output content
+are preserved. Invalid output-item fields receive content-free index/type/field
+diagnostics.
+
 Request body reads have a separate 60-second total budget (`bodyReadTimeoutMs`),
 including plain JSON and multipart uploads. Compressed bodies receive a fresh
 10-second decompression budget (`decompressionTimeoutMs`) after the read.
