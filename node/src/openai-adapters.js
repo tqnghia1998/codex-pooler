@@ -383,7 +383,19 @@ function normalizeInput(input, previousResponseId) {
   if (!input.length) invalid('input must be a non-empty string or array', 'input');
   const continuation = Boolean(cleanString(previousResponseId));
   const repaired = repairReplayCallIds(input);
-  const normalized = repaired.filter((item) => continuation || item?.type !== 'reasoning').flatMap(normalizeInputItem);
+  const normalized = repaired.flatMap((item, index) => {
+    if (!continuation && item?.type === 'reasoning') return [];
+    try {
+      return normalizeInputItem(item);
+    } catch (error) {
+      if (error instanceof AdapterError && error.param?.startsWith('input')) {
+        // Only a bounded protocol tag is included; never serialize item content.
+        const type = typeof item?.type === 'string' && /^[a-z_]{1,64}$/.test(item.type) ? item.type : 'item';
+        error.message = `input[${index}] (${type}): ${error.message}`;
+      }
+      throw error;
+    }
+  });
   const hasToolResult = normalized.some((item) => TOOL_RESULT_TYPES.has(item.type));
   if (previousResponseId !== undefined && (!continuation || !hasToolResult)) invalid('previous_response_id requires a tool-output continuation', 'previous_response_id');
   for (const item of normalized) {
@@ -393,10 +405,24 @@ function normalizeInput(input, previousResponseId) {
   return { input: lifted.input, instructions: lifted.texts };
 }
 
+function inputShape(reason) {
+  invalid(`input item shape is not translatable: ${reason}`, 'input');
+}
+
+function inputKeys(item, allowed) {
+  const field = Object.keys(item).find((key) => !allowed.includes(key));
+  if (field !== undefined) {
+    const name = /^[A-Za-z_][A-Za-z_0-9]{0,63}$/.test(field) ? `field ${field}` : 'field with an unsupported name';
+    inputShape(`${name} is not supported`);
+  }
+}
+
 function normalizeInputItem(item) {
-  if (!plainObject(item)) invalid('input item shape is not translatable', 'input');
+  if (!plainObject(item)) inputShape('expected an object');
   if (item.type === 'additional_tools') {
-    if (item.role !== 'developer' || !Array.isArray(item.tools) || Object.keys(item).some((key) => !['type', 'role', 'tools', 'id'].includes(key))) invalid('input item shape is not translatable', 'input');
+    inputKeys(item, ['type', 'role', 'tools', 'id']);
+    if (item.role !== 'developer') inputShape('role must be developer');
+    if (!Array.isArray(item.tools)) inputShape('tools must be an array');
     if (item.tools.some((tool) => tool?.type === 'mcp')) invalid('remote MCP tools are not supported', 'input');
     return [item];
   }
@@ -429,16 +455,28 @@ function normalizeInputItem(item) {
   }
   if (item.type === 'compaction') {
     const turn = item.internal_chat_message_metadata_passthrough;
-    if (!cleanString(item.encrypted_content) || Object.keys(item).some((key) => !['type', 'encrypted_content', 'id', 'internal_chat_message_metadata_passthrough'].includes(key)) || item.id !== undefined && !cleanString(item.id) || turn !== undefined && (!plainObject(turn) || !cleanString(turn.turn_id) || Object.keys(turn).some((key) => key !== 'turn_id'))) invalid('input item shape is not translatable', 'input');
-    return [item.id === undefined && turn !== undefined ? stripKey(item, 'internal_chat_message_metadata_passthrough') : item];
+    inputKeys(item, ['type', 'encrypted_content', 'id', 'internal_chat_message_metadata_passthrough']);
+    if (!cleanString(item.encrypted_content)) inputShape('encrypted_content must be a non-empty string');
+    if (item.id != null && !cleanString(item.id)) inputShape('id must be a non-empty string or null');
+    if (turn !== undefined && (!plainObject(turn) || !cleanString(turn.turn_id) || Object.keys(turn).some((key) => key !== 'turn_id'))) inputShape('internal_chat_message_metadata_passthrough requires only a non-empty turn_id');
+    // Native/SDK replay may serialize an absent optional id as null.
+    const result = item.id === null ? stripKey(item, 'id') : item;
+    return [result.id === undefined && turn !== undefined ? stripKey(result, 'internal_chat_message_metadata_passthrough') : result];
   }
   if (item.type === 'function_call') {
     const callId = cleanString(item.call_id) || cleanString(item.id);
-    if (!callId || !cleanString(item.name) || typeof item.arguments !== 'string' || item.status !== undefined && !['completed', 'incomplete'].includes(item.status)) invalid('input item shape is not translatable', 'input');
+    if (!callId) inputShape('call_id or id must be a non-empty string');
+    if (!cleanString(item.name)) inputShape('name must be a non-empty string');
+    if (typeof item.arguments !== 'string') inputShape('arguments must be a string');
+    if (item.status !== undefined && !['completed', 'incomplete'].includes(item.status)) inputShape('status must be completed or incomplete');
     const result = { ...item, call_id: callId };
     delete result.status;
-    if (Object.keys(result).some((key) => !['type', 'call_id', 'name', 'arguments', 'id', 'namespace', 'caller', 'async', 'metadata', 'internal_chat_message_metadata_passthrough'].includes(key))) invalid('input item shape is not translatable', 'input');
-    if (result.namespace !== undefined && !cleanString(result.namespace) || !validReplayCaller(result.caller)) invalid('input item shape is not translatable', 'input');
+    inputKeys(result, ['type', 'call_id', 'name', 'arguments', 'id', 'namespace', 'caller', 'async', 'metadata', 'internal_chat_message_metadata_passthrough']);
+    // A null namespace denotes an unnamespaced call, just like omission. This
+    // also handles older responses that cannot be repaired from declarations.
+    if (result.namespace === null) delete result.namespace;
+    if (result.namespace !== undefined && !cleanString(result.namespace)) inputShape('namespace must be a non-empty string or null');
+    if (!validReplayCaller(result.caller)) inputShape('caller must be a direct or program caller');
     return [result];
   }
   if (item.type === 'function_call_output') {
