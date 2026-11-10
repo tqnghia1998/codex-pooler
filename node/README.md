@@ -610,6 +610,8 @@ status/creator fields. Replay status is omitted before dispatch, nullable option
 fields normalize to omission, and explicit tool identity, caller and output content
 are preserved. Invalid output-item fields receive content-free index/type/field
 diagnostics.
+The output `call_id` is optional, including for desktop-injected named results;
+null normalizes to omission. Named results never borrow a neighboring call's ID.
 
 Request body reads have a separate 60-second total budget (`bodyReadTimeoutMs`),
 including plain JSON and multipart uploads. Compressed bodies receive a fresh
