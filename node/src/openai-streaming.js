@@ -344,20 +344,35 @@ function safeError(event) {
     : { type: 'server_error', code: 'server_error', message: 'upstream request failed', param: null };
 }
 function safeUsage(usage) { if (!plain(usage)) return null; const number = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0; const input = number(usage.input_tokens ?? usage.prompt_tokens); const output = number(usage.output_tokens ?? usage.completion_tokens); return { input_tokens: input, output_tokens: output, total_tokens: Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0 ? usage.total_tokens : input + output }; }
-function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; if (item.type === 'custom_tool_call' && (item.namespace === undefined || item.namespace === null) && namespaces[item.name]) item.namespace = namespaces[item.name]; if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
+function repairItem(event, namespaces = {}) { const item = event.item; if (!plain(item)) return; restoreToolNamespace(item, namespaces); if (string(item.id)) return; const index = integer(item.output_index) ?? integer(event.output_index); item.id = string(item.call_id) || string(event.item_id) || `${string(item.type) || 'item'}${index === null ? '' : `_${index}`}`; }
 
 // A present Chat details object wins even when empty, matching upstream.
 export function chatPromptTokenDetails(usage) { return chatTokenDetails(usage?.prompt_tokens_details, usage?.input_tokens_details, PROMPT_TOKEN_DETAIL_FIELDS); }
 export function chatCompletionTokenDetails(usage) { return chatTokenDetails(usage?.completion_tokens_details, usage?.output_tokens_details, COMPLETION_TOKEN_DETAIL_FIELDS); }
 function chatTokenDetails(details, fallback, fields) { const source = plain(details) ? details : plain(fallback) ? fallback : null; return source ? Object.fromEntries(fields.filter((field) => Number.isSafeInteger(source[field]) && source[field] >= 0).map((field) => [field, source[field]])) : undefined; }
-// Applies the same custom_tool_call namespace restoration to a fully-collected
-// non-streaming Responses body (the SSE path repairs items via repairItem/project).
-export function restoreCustomToolCallNamespaces(response, namespaces = {}) {
-  if (plain(response) && Array.isArray(response.output)) {
-    for (const item of response.output) repairItem({ item }, namespaces);
-  }
-  return response;
+function restoreToolNamespace(item, namespaces) {
+  if (['function_call', 'custom_tool_call'].includes(item.type) && typeof item.name === 'string'
+    && (item.namespace === undefined || item.namespace === null)
+    && Object.hasOwn(namespaces, item.name) && typeof namespaces[item.name] === 'string') item.namespace = namespaces[item.name];
 }
+
+// JSON bodies and event envelopes use the same restoration as streamed items.
+export function restoreToolCallNamespaces(value, namespaces = {}) {
+  if (!plain(value)) return value;
+  if (plain(value.response)) restoreToolCallNamespaces(value.response, namespaces);
+  if (plain(value.item)) restoreToolCallNamespaces(value.item, namespaces);
+  if (Array.isArray(value.output)) {
+    for (const item of value.output) {
+      restoreToolCallNamespaces(item, namespaces);
+      repairItem({ item }, namespaces);
+    }
+  }
+  restoreToolNamespace(value, namespaces);
+  return value;
+}
+
+// Retain the published export for existing gateway consumers.
+export const restoreCustomToolCallNamespaces = restoreToolCallNamespaces;
 // A terminal that closes a response the upstream never opened is preceded by
 // the grammar SDK stream helpers require: a response.created snapshot, then
 // every terminal output item announced in order with its content parts and

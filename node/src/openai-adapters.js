@@ -781,27 +781,25 @@ function toolNames(tools, type) {
   return tools.flatMap((tool) => tool?.type === type ? [tool.name] : tool?.type === 'namespace' ? toolNames(tool.tools, type) : []);
 }
 
-// Maps a custom tool's name to its declared namespace, so a public `custom_tool_call`
-// output missing that field can be restored. Skips ambiguous names (same name used
-// more than once, whether flat or inside another namespace).
-export function customToolNamespaces(tools) {
+// Only a unique function/custom declaration identifies an omitted namespace.
+// Top-level declarations and cross-type collisions are ambiguous too.
+export function toolNamespaces(tools) {
   if (!Array.isArray(tools)) return {};
-  const counts = new Map();
-  const namespaceOf = new Map();
-  const seen = (name) => counts.set(name, (counts.get(name) || 0) + 1);
+  const declarations = new Map();
+  const add = (tool, namespace) => {
+    if (!['function', 'custom'].includes(tool?.type) || typeof tool.name !== 'string') return;
+    declarations.set(tool.name, declarations.has(tool.name) ? null : namespace);
+  };
   for (const tool of tools) {
-    if (tool?.type === 'custom' && typeof tool.name === 'string') seen(tool.name);
-    if (tool?.type === 'namespace' && Array.isArray(tool.tools)) {
-      for (const child of tool.tools) {
-        if (child?.type === 'custom' && typeof child.name === 'string') {
-          seen(child.name);
-          namespaceOf.set(child.name, tool.name);
-        }
-      }
-    }
+    if (tool?.type === 'namespace' && typeof tool.name === 'string' && Array.isArray(tool.tools)) {
+      for (const child of tool.tools) add(child, tool.name);
+    } else add(tool, null);
   }
-  return Object.fromEntries([...namespaceOf].filter(([name]) => counts.get(name) === 1));
+  return Object.fromEntries([...declarations].filter(([, namespace]) => namespace !== null));
 }
+
+// Retain the published export for existing gateway consumers.
+export const customToolNamespaces = toolNamespaces;
 
 function validateText(text) {
   if (text === undefined) return;
