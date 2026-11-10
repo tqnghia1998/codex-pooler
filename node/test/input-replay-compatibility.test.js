@@ -10,7 +10,9 @@ import { AdapterError, adaptResponsesRequest } from '../src/openai-adapters.js';
 
 const call = { type: 'function_call', call_id: 'call_replay', name: 'lookup', arguments: '{}', namespace: null, status: 'completed' };
 const compaction = { type: 'compaction', id: null, encrypted_content: 'synthetic-cipher', internal_chat_message_metadata_passthrough: { turn_id: 'synthetic-turn' } };
-const input = [compaction, call, { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result' }, { role: 'user', content: 'hi' }];
+const toolOutput = { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result', name: 'lookup', namespace: 'catalog', id: null, caller: null, status: 'completed' };
+const normalizedToolOutput = { type: 'function_call_output', call_id: call.call_id, output: 'synthetic-result', name: 'lookup', namespace: 'catalog' };
+const input = [compaction, call, toolOutput, { role: 'user', content: 'hi' }];
 const payload = { model: 'gpt-5.6-luna', input };
 const completed = { type: 'response.completed', response: { id: 'resp_replay', object: 'response', status: 'completed', output: [], usage: { input_tokens: 1, output_tokens: 1, price_cost_usd: 0.1 } } };
 
@@ -21,10 +23,32 @@ test('normalizes nullable replay fields without mutating history or losing seman
   assert.deepEqual(payload, original);
   assert.deepEqual(result.input[0], { type: 'compaction', encrypted_content: compaction.encrypted_content });
   assert.deepEqual(result.input[1], { type: 'function_call', call_id: call.call_id, name: call.name, arguments: call.arguments });
-  assert.deepEqual(result.input[2], input[2]);
+  assert.deepEqual(result.input[2], normalizedToolOutput);
   const explicit = adaptResponsesRequest({ ...payload, input: [{ ...call, namespace: 'catalog' }, { ...compaction, id: 'cmp_1' }] }).input;
   assert.equal(explicit[0].namespace, 'catalog');
   assert.deepEqual(explicit[1], { ...compaction, id: 'cmp_1' });
+});
+
+test('function output replay preserves names, namespaces, caller and structured results', () => {
+  for (const status of ['in_progress', 'completed', 'incomplete', null]) {
+    const output = { ...toolOutput, status, id: 'out_1', caller: { type: 'program', caller_id: 'program_1' }, created_by: 'actor_1', output: [{ type: 'input_text', text: 'synthetic' }] };
+    const { status: ignored, ...expected } = output;
+    assert.deepEqual(adaptResponsesRequest({ ...payload, input: [output] }).input, [expected]);
+  }
+  const output = { ...toolOutput, namespace: null, name: null, created_by: null };
+  assert.deepEqual(adaptResponsesRequest({ ...payload, input: [output] }).input, [{ type: 'function_call_output', call_id: call.call_id, output: toolOutput.output }]);
+});
+
+test('function output diagnostics identify invalid fields without exposing result values', () => {
+  const secret = 'private-tool-result';
+  for (const [changes, field] of [[{ call_id: '' }, 'call_id'], [{ name: 1 }, 'name'], [{ namespace: {} }, 'namespace'], [{ status: secret }, 'status'], [{ caller: { type: secret } }, 'caller'], [{ unsupported: secret }, 'unsupported']]) {
+    assert.throws(() => adaptResponsesRequest({ ...payload, input: [{ ...toolOutput, output: secret, ...changes }] }), error => {
+      assert.ok(error.message.startsWith('input[0] (function_call_output):'));
+      assert.ok(error.message.includes(field));
+      assert.ok(!error.message.includes(secret));
+      return true;
+    });
+  }
 });
 
 test('input diagnostics retain original indices and never echo prompt, argument or cipher values', () => {
@@ -67,6 +91,7 @@ for (const mode of ['http', 'websocket']) for (const invalid of [false, true]) {
       assert.equal(body.input[0].encrypted_content, compaction.encrypted_content);
       assert.equal(Object.hasOwn(body.input[0], 'id'), false);
       assert.equal(Object.hasOwn(body.input[1], 'namespace'), false);
+      assert.deepEqual(body.input[2], normalizedToolOutput);
     };
     const fetchImpl = async (url, options) => {
       if (new URL(url).pathname.endsWith('/models')) return Response.json({ models: [] });
