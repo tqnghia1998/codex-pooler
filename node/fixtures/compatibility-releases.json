@@ -40,32 +40,32 @@
       "id": "claude-code",
       "family": "claude-code",
       "package": "@anthropic-ai/claude-code",
-      "version": "2.1.316",
-      "integrity": "sha512-i3BpzyDkcCPnsa0CSkWgxGPs7WMsyqDkxkqT0SDxyEC5XMIxEmcUmluWRHG9VSeBY8Vyv+l9X34JvJ/Bj54nBQ==",
+      "version": "2.1.322",
+      "integrity": "sha512-oP7oW4vM5DREWfL1jn4JSGlmLcrJ5QmppgADrVNJBUPiC1mQ5YvRrke0on+YZ/3QhKIaCJtdr6jPvehcAQIHLQ==",
       "profile": "compass-anthropic-messages",
       "platforms": {
         "darwin-arm64": {
           "package": "@anthropic-ai/claude-code-darwin-arm64",
-          "version": "2.1.316",
-          "integrity": "sha512-wJiLVMzg2atF7C/a+0wt+yQShWIePsMNL86gIoIJanURY2fxrwHIxrYuxoTW8sWqfj7ai+otV/ik2r7m5aPy1g==",
+          "version": "2.1.322",
+          "integrity": "sha512-OAx5Y7V7tGCi0tWuDV3lwcDWmIua512NgpClLbqvwC9m+mbLiaytgVLXf4unTXBjMf+QbQiIUO1Kus90PklDhA==",
           "executable": "claude"
         },
         "darwin-x64": {
           "package": "@anthropic-ai/claude-code-darwin-x64",
-          "version": "2.1.316",
-          "integrity": "sha512-UVb9M3ViDyLwPE4D5TQ0G/gFC3kWU6x/m6DbDg5OuAZZGpdwi7P2ajLusJGaNk1FSxTDj0SnzA6VCEiNEOI46w==",
+          "version": "2.1.322",
+          "integrity": "sha512-nGpWAtSEI1OMMVzlMGS4MuXZ6Op0kzXPnTzhbipgEA7Ym3LFHuCWE//9jB20xcy55zx9lagSe4tb9kRfvZ9Xdw==",
           "executable": "claude"
         },
         "linux-arm64": {
           "package": "@anthropic-ai/claude-code-linux-arm64",
-          "version": "2.1.316",
-          "integrity": "sha512-xqlAkhgSLCMdcaepQNIs1+ym5X9++apiEeOc0LHRVOHpfLlpYKAaAXBRccM6QVITN0T9sXLCIby7CO1Lczusgw==",
+          "version": "2.1.322",
+          "integrity": "sha512-YYNp1op87WWcBEE6jC1neOjMDPdn4Iy+kUHyFcI1GsLl4IwH7EjZlwVKcpsZqVbE0IXEFaOldmyOHC1y3j18Ag==",
           "executable": "claude"
         },
         "linux-x64": {
           "package": "@anthropic-ai/claude-code-linux-x64",
-          "version": "2.1.316",
-          "integrity": "sha512-RQDM6N285IjNKcmlPRriayNzpTkEJreAw5/vBU+V0R3qljkQ5z6/pSbzcVUAXvasoOlvub0RIma3NWvSuZA8Cg==",
+          "version": "2.1.322",
+          "integrity": "sha512-0DoaNAXLWCYYIGachWBCkTUsS8dOOgvk4R2fFKdrLejO9XlRTwaWUMD9ONdDmv0csdpwxj4qLUN6zWMaG2Sz6g==",
           "executable": "claude"
         }
       }
