@@ -15,13 +15,13 @@ import { projectCodexCatalog } from './codex-catalog-contract.js';
 import { codexHostHealthForStore, withCodexHostHealth } from './codex-host-health.js';
 import { captureCodexCookies, codexCookieHeaders } from './codex-cookies.js';
 import { ensureProviderCredentials, refreshProviderCredentials } from './providers.js';
-import { AdapterError, adaptChatRequest, adaptResponsesRequest, customToolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages, withoutUserIdentifier } from './openai-adapters.js';
+import { AdapterError, adaptChatRequest, adaptResponsesRequest, toolNamespaces, lowerNonStrictFunctionTools, validateToolOutputImages, withoutUserIdentifier } from './openai-adapters.js';
 import { codexHostUnavailable, pacingUnavailable, upstreamFailure } from './public-errors.js';
 import { DEFAULT_INGRESS_LIMITS, HttpError, hasDuplicateHost } from './http-ingress.js';
 import { responseValidationError } from './response-validation.js';
 import { admissionPolicy, firewallAllowed, hostAllowed } from './admission.js';
 import { cheapestPricedModel, hasMeasuredUsage, extractUsage, mergeUsage, priceUsage, requestCacheWriteTtl } from './pricing.js';
-import { chatUsage, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreCustomToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
+import { chatUsage, consumeSseChunk, createChatStreamState, createPublicResponsesState, createSseParserState, decodeSseBlock, failedIncompleteResponse, normalizeChatEvent, normalizePublicResponsesEvent, pendingSseBlock, quotaIncompleteReason, restoreToolCallNamespaces, retryableFirstSseEvent, splitSseBlocks } from './openai-streaming.js';
 import { fetchWithHeaderDeadline, readWithIdleDeadline } from './upstream-deadlines.js';
 import { codexProtocolHeaders, DEFAULT_ANTHROPIC_VERSION } from './protocol-compat.js';
 import { applyClaudeRequestScopedAction, claudeRequestRetryLimit, classifyHttpResponse, classifySseEvent, classifyTransportError } from './upstream-outcomes.js';
@@ -395,7 +395,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     settleUsage(store, upstream, attemptId, startedAt, collected, payload, accounting, lifecycle, response.status);
     if (path === '/v1/responses') learnResponsePin(store, collected, upstream.id, authScopeId, accounting.apiKeyId, req);
     const restored = restoreCodexMultiAgentResponse(collected, codexMultiAgentOptimized);
-    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(restored, payload) : restoreCustomToolCallNamespaces({ object: 'response', ...restored }, customToolNamespaces(codexPayload.tools));
+    const output = sourcePath === '/v1/chat/completions' ? responsesToChat(restored, payload) : restoreToolCallNamespaces({ object: 'response', ...restored }, toolNamespaces(codexPayload.tools));
     sendJson(res, 200, output);
     return;
   }
@@ -405,7 +405,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
       transformChat: upstream.type === 'codex' && sourcePath === '/v1/chat/completions',
       hideChatUsage: upstream.type === 'compass' && sourcePath === '/v1/chat/completions' && payload?.stream_options?.include_usage !== true,
       sanitizePublicResponses: upstream.type === 'codex' && path === '/v1/responses',
-      publicResponsesNamespaces: path === '/v1/responses' ? customToolNamespaces(codexPayload.tools) : undefined,
+      publicResponsesNamespaces: path === '/v1/responses' ? toolNamespaces(codexPayload.tools) : undefined,
       store, upstream, attemptId, startedAt, payload, accounting, lifecycle,
       responseStatusCode: response.status,
       responseOptions: { ...responseOptions, modelsEtag },
@@ -3791,7 +3791,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         publicGenerate = generate;
         publicPayload = payload;
         publicUsage = null;
-        publicState = createPublicResponsesState(customToolNamespaces(payload.tools), { websocket: true });
+        publicState = createPublicResponsesState(toolNamespaces(payload.tools), { websocket: true });
         retriedTurn = false;
         publicCompatibilityRetries = 0;
         activeFrame = { data: upstreamFrame, isBinary: false };
