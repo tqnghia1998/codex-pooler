@@ -88,7 +88,7 @@ export async function queryClaudeSpendAllowance(email, map, fetchPage) {
   throw new Error('Claude spend-allowance pagination limit exceeded');
 }
 
-export async function refreshClaudeSpendAllowance(upstream, { apiKey = '', mapFile = '', fetchImpl = globalThis.fetch } = {}) {
+export async function createClaudeSpendAllowanceReader(upstream, { apiKey = '', mapFile = '' } = {}) {
   if (!apiKey && !mapFile) return null;
   if (!apiKey || !mapFile) throw new Error('Claude spend limits require both an API key and an employee catalog path');
   let map;
@@ -98,8 +98,16 @@ export async function refreshClaudeSpendAllowance(upstream, { apiKey = '', mapFi
     throw new Error('Cannot read a valid Claude employee catalog');
   }
   const email = String(upstream.email || '').trim().toLowerCase();
-  // Non-enterprise/unmapped accounts retain the existing OAuth quota path.
-  if (!Object.hasOwn(map, email)) return null;
+  if (!Object.hasOwn(map, email)) throw new Error('Email not found in Claude employee catalog');
+  return (fetchImpl = globalThis.fetch) => fetchClaudeSpendAllowance(email, map, apiKey, fetchImpl);
+}
+
+export async function refreshClaudeSpendAllowance(upstream, { fetchImpl = globalThis.fetch, ...config } = {}) {
+  const readAllowance = await createClaudeSpendAllowanceReader(upstream, config);
+  return readAllowance ? readAllowance(fetchImpl) : null;
+}
+
+async function fetchClaudeSpendAllowance(email, map, apiKey, fetchImpl) {
   try {
     const signal = AbortSignal.timeout(45_000);
     return await queryClaudeSpendAllowance(email, map, async (page, userId) => {
