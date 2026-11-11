@@ -6,7 +6,7 @@ import { claudeRequestHeaders, prepareClaudeRequestBody } from './claude-protoco
 import { decodeClaudeResponse } from './upstream-response.js';
 import { claudeProxyDispatcher } from './claude-transport.js';
 import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
-import { claudeSpendLimitsConfigFromEnv, refreshClaudeSpendAllowance } from './claude-spend-limits.js';
+import { claudeSpendLimitsConfigFromEnv, createClaudeSpendAllowanceReader } from './claude-spend-limits.js';
 
 const CODEX_PATHS = ['/backend-api/wham/usage', '/backend-api/codex/usage', '/api/codex/usage'];
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
@@ -164,6 +164,7 @@ async function refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentia
 }
 
 async function refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force = false, retried = false, spendLimits = {}) {
+  const readAllowance = await createClaudeSpendAllowanceReader(upstream, spendLimits);
   const quotaBlockKey = upstream.id || credentials.accessToken;
   const quotaBlock = claudeQuotaBlocks.get(quotaBlockKey);
   if (quotaBlock?.blockedUntil > Date.now()) {
@@ -172,7 +173,7 @@ async function refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredenti
   }
   if (quotaBlock) claudeQuotaBlocks.delete(quotaBlockKey);
   try {
-    const allowance = await refreshClaudeSpendAllowance(upstream, { ...spendLimits, fetchImpl });
+    const allowance = readAllowance ? await readAllowance(fetchImpl) : null;
     if (allowance) return allowance;
   } catch (error) {
     if (isClaudeQuotaRateLimited(error)) {

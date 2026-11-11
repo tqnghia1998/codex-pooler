@@ -125,10 +125,28 @@ test('Enterprise quota uses only the scoped administrative GET, never OAuth cred
   assert.equal(calls, 2);
 });
 
-test('unmapped employees retain OAuth behavior; invalid or incomplete configuration fails before network access', async (t) => {
+test('unmapped or missing employee emails fail immediately without OAuth refresh, usage reads, or probes', async (t) => {
   const config = catalog(t);
-  const quota = await refreshQuota({ ...upstream, email: 'unmapped@example.com' }, credentials, {
-    claudeSpendLimits: config,
+  let calls = 0;
+  let saves = 0;
+  const options = {
+    claudeSpendLimits: config, saveCredentials: () => { saves++; },
+    fetchImpl: async () => { calls++; throw new Error('must not fetch'); }
+  };
+  for (const email of ['unmapped@example.com', '', undefined]) {
+    await assert.rejects(refreshQuota({ ...upstream, email, accessTokenExpiresAt: new Date(0).toISOString() }, {
+      ...credentials, refreshToken: 'oauth-refresh'
+    }, options), /Email not found in Claude employee catalog/);
+    await assert.rejects(refreshClaudeSpendAllowance({ ...upstream, email }, { ...config, fetchImpl: options.fetchImpl }), /Email not found in Claude employee catalog/);
+  }
+  assert.equal(calls, 0);
+  assert.equal(saves, 0);
+});
+
+test('disabled Enterprise lookup retains OAuth behavior; invalid or incomplete configuration fails before network access', async (t) => {
+  const config = catalog(t);
+  const quota = await refreshQuota(upstream, credentials, {
+    claudeSpendLimits: {},
     fetchImpl: async (url) => {
       assert.equal(url, CLAUDE_OAUTH_USAGE_URL);
       return json({ five_hour: { utilization: 25 } });
@@ -163,6 +181,7 @@ test('honors administrative rate-limit cooldowns while preserving the prior allo
   assert.equal(await refreshQuota(account, credentials, options), previous);
   assert.equal(await refreshQuota(account, credentials, options), previous);
   await assert.rejects(refreshQuota(account, credentials, { ...options, force: true }), (error) => error.statusCode === 429);
+  await assert.rejects(refreshQuota({ ...account, email: 'unmapped@example.com' }, credentials, options), /Email not found in Claude employee catalog/);
   assert.equal(calls, 1);
 });
 
