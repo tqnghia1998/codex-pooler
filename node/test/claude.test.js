@@ -1708,6 +1708,35 @@ test('forwards a Claude OAuth upstream directly to Anthropic Messages', async ()
   }
 });
 
+test('Messages quota headers cannot overwrite an Enterprise employee spend allowance', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'claude-enterprise-headers-'));
+  const store = new Store(dir);
+  const upstream = store.create({ type: 'claude', accessToken: 'sk-ant-oat-enterprise-header-test', email: 'employee@example.com' });
+  store.setCap(upstream.id, { capDollars: 100 });
+  const allowance = {
+    source: 'claude_enterprise_spend_limits', remainingDollars: 188.81627, limitDollars: 200,
+    remainingPercent: 94.408135, observedAt: new Date(0).toISOString(), resetAt: null,
+    windows: [{ key: 'spend_monthly', remainingPercent: 94.408135 }]
+  };
+  store.setQuota(upstream.id, allowance);
+  const { server, base } = await start(store, async () => new Response(JSON.stringify({
+    id: 'msg_enterprise', type: 'message', role: 'assistant', model: 'claude-sonnet-4-6',
+    content: [{ type: 'text', text: 'hello' }], usage: { input_tokens: 7, output_tokens: 3 }
+  }), { headers: { 'content-type': 'application/json', 'anthropic-ratelimit-unified-5h-utilization': '0.9' } }));
+  try {
+    const response = await request(base, '/v1/messages', {
+      method: 'POST', headers: { 'x-upstream-type': 'claude' },
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 32, messages: [{ role: 'user', content: 'hello' }] })
+    });
+    assert.equal(response.status, 200);
+    await response.json();
+    assert.deepEqual(store.get(upstream.id).quota, allowance);
+  } finally {
+    await close(server);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('drops Claude header quota observed with credentials replaced in flight', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-claude-quota-epoch-'));
   const store = new Store(dir);
