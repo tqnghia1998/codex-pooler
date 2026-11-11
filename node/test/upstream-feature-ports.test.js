@@ -97,12 +97,16 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.167.0']);
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.167.1']);
   for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0', '0.165.0', '0.166.0', '0.166.1', '0.167.0']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.167.1'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.167.1'), 'decode_checked');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.167.2'), 'instructions_template');
+  const malformed = { ...catalogRow, shell_type: 'unknown-shell' };
+  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.167.1').nativeModels.length, 1);
+  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.167.2').nativeModels.length, 2);
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);

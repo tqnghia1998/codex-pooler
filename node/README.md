@@ -265,9 +265,9 @@ gateway must call `hasDuplicateHost` from `http-ingress.js` before admission;
 `attachWebSocketProxy` applies the same check to upgrade requests.
 
 Native Codex HTTP/WebSocket routes forward validated client `version`, `originator`, and `openai-beta` negotiation headers. Public OpenAI routes use the proxy defaults. Operators can override the fallback fingerprint with `CODEX_POOLER_CODEX_CLIENT_VERSION` and `CODEX_POOLER_CODEX_ORIGINATOR`, add HTTP beta tokens with `CODEX_POOLER_CODEX_HTTP_BETA`, or replace the required WebSocket beta token with `CODEX_POOLER_CODEX_WEBSOCKET_BETA`. Invalid or control-character-bearing values are ignored.
-The fallback Codex wire identity is `0.167.0`; the separately reviewed,
-integrity-pinned release manifest now reviews Codex `0.167.0` and Claude Code
-`2.1.322`. The dashboard's bundled Codex login executable is also pinned to `0.167.0`.
+The fallback Codex wire identity is `0.167.1`; the separately reviewed,
+integrity-pinned release manifest now reviews Codex `0.167.1` and Claude Code
+`2.1.322`. The dashboard's bundled Codex login executable is also pinned to `0.167.1`.
 
 Codex Responses WebSockets send a ping every `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS` (30 seconds by default) and close an idle upstream after `CODEX_POOLER_CODEX_WEBSOCKET_IDLE_MS`. The upstream frame limit is independently configurable (16 MiB by default); the pending-turn queue remains 2 MiB and outbound backpressure remains 16 MiB. An upstream close with code `1009` is request-scoped and is returned as a 413-style `request_too_large` error without rotating credentials. An ordinary native `response.create` (generating, unanchored, not a compaction trigger) is measured after normalization against the 16,777,216-byte upstream message limit before any attempt starts. A larger frame never reaches an upstream and changes no usage or health. With exactly one non-blank `x-codex-window-id`, the client gets a `502 upstream_request_failed` error event and Close `1011`; for the next 60 seconds a native Responses WebSocket handshake for the same scope, credential and window answers `426` with an empty body, so the Codex client retries over HTTP. The marker is persisted, and a failed write answers `503 service_unavailable` without granting the fallback. Without a usable window id, the frame gets a local `413 websocket_message_too_large` error and the socket stays open. Other frames above the frame limit still close with `1009`. A `websocket_connection_limit_reached` terminal retires its upstream socket before the next turn. Set `CODEX_POOLER_CODEX_WEBSOCKET_KEEPALIVE_MS=0` to disable pings.
 
@@ -497,7 +497,7 @@ removal invalidate cached account metadata as before.
 
 Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
 Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
-template exists. Builds in the upstream-qualified `0.154.0` through `0.167.0`
+template exists. Builds in the upstream-qualified `0.154.0` through `0.167.1`
 window also omit entries that violate the mirrored decoder contract. Older
 or unknown clients keep the verbatim catalog; newer builds are not checked
 against an unqualified decoder. Static rows without the required native
