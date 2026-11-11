@@ -352,8 +352,11 @@ and `user_` IDs. Accounts whose saved email matches the catalog query
 with `user_ids[]` and `limit=1`, following validated pagination and matching
 both email and ID. The admin key is sent only to that fixed endpoint; the
 account's OAuth token and custom inference base URL are not used for this read.
-Unmapped accounts retain the OAuth usage/header path. Missing records or
-provider failures retain the previous quota rather than reporting zero.
+When Enterprise lookup is configured, missing or unmapped employee emails
+fail immediately with an employee-catalog error, before any network request
+or OAuth fallback. Without Enterprise configuration, the existing OAuth
+usage/header path remains available. Missing records or provider failures
+retain the previous quota rather than reporting zero.
 
 Every refresh reads fresh spend; amounts are decimal cents with up to three
 fractional digits, subtracted exactly before conversion to dashboard USD.
