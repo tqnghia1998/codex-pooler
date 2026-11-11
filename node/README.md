@@ -340,6 +340,42 @@ Shared Codex host health is enabled conservatively by default. Two proven pre-co
 Compass requests use HTTPS. Compass quota reads use the deployment-wide `CODEX_POOLER_COMPASS_GATEWAY_TOKEN`. Codex quota reads use the access token imported from `auth.json`; Claude Enterprise OAuth credentials use the Claude Code PKCE exchange and refresh endpoints, then call the configured Anthropic-compatible base URL (default `https://api.anthropic.com`) at `/v1/messages?beta=true`. Background quota refresh runs every 10 minutes; while the focused dashboard is open, it requests a non-forced refresh every 5 minutes for visible upstream cards. Claude OAuth quota/profile reads use Anthropic's read-only `/api/oauth/usage` and `/api/oauth/profile` control-plane endpoints; usage supports both the current structured `limits` response and the legacy flat windows. Gateway-generated Claude requests and quota reads identify as Claude Code `2.1.322` by default; set `CODEX_POOLER_CLAUDE_CODE_VERSION` to a newer numeric version when needed. Native Claude Code requests retain their actual client version and may still require `claude update`. When Anthropic reports enabled extra usage, its `monthly_limit` and `used_credits` are exposed as actual USD remaining alongside the percentage-only subscription windows. Successful Claude Messages responses also seed session, weekly, and overage windows from Anthropic's rate-limit headers when the usage endpoint is unavailable, and headers from a request whose credentials were replaced while it was in flight are discarded; when `/api/oauth/usage` specifically rejects `user:profile`, the dashboard performs a bounded one-token Messages probe to read those headers immediately. OAuth exchange performs a best-effort Claude profile lookup; upstream creation and credential replacement perform a best-effort profile lookup, and `POST /api/upstreams/:id/refresh-profile` refreshes identity metadata for manually imported credentials. If identity endpoints are unavailable, Relaydeck assigns a deterministic local UUID derived from the refresh token (or access token when no refresh token exists); it stores only the UUID, never the token-derived digest input. Quota refresh and profile refresh are separate management actions. Codex and Claude OAuth tokens are refreshed lazily before proxy requests and proactively once per hour when they expire within 12 hours. Transient refresh failures retry with bounded exponential backoff (eight total attempts), then re-enter recovery after six hours; missing or revoked refresh tokens require reauthentication. Claude usage reads are not success-cached: each scheduled or manual refresh queries the provider unless that credential is in a rate-limit cooldown. When Anthropic returns `429`, the provider's `Retry-After` value is used for the cooldown (bounded to one hour), with a 10-minute local fallback when none is supplied; provider failures do not roll back the saved upstream or erase the last known quota.
 Adding an upstream performs a best-effort quota refresh before the create response returns when the provider exposes quota data. Replacing Codex, Compass, or Claude OAuth quota credentials does the same, while provider failures do not roll back the saved upstream.
 
+For Enterprise employee spend allowances, optionally configure
+`CODEX_POOLER_CLAUDE_SPEND_LIMITS_API_KEY` with a separate organization key
+granting `read:spend_limits`, and `CODEX_POOLER_CLAUDE_SPEND_LIMITS_MAP_FILE`
+with an absolute path to a private JSON email-to-user-ID catalog, for example
+`{"employee@example.com":"user_example"}`. Keep both in ignored local state
+(`node/.env` and `node/.data/`); the key and employee catalog are not gateway
+assets and must not be published. The catalog contains lowercase email keys
+and `user_` IDs. Accounts whose saved email matches the catalog query
+`GET https://api.anthropic.com/v1/organizations/spend_limits/effective`
+with `user_ids[]` and `limit=1`, following validated pagination and matching
+both email and ID. The admin key is sent only to that fixed endpoint; the
+account's OAuth token and custom inference base URL are not used for this read.
+Unmapped accounts retain the OAuth usage/header path. Missing records or
+provider failures retain the previous quota rather than reporting zero.
+
+Every refresh reads fresh spend; amounts are decimal cents with up to three
+fractional digits, subtracted exactly before conversion to dashboard USD.
+Overspend is clamped to zero remaining; a null cap is displayed as unlimited.
+All returned periods are retained, and the most constrained finite period
+drives the displayed percentage and ordinary quota routing (monthly wins ties).
+No reset timestamp is inferred. Non-USD amounts stay in their reported minor
+units. These are employee spend allowances, which may lag and do not replace
+organization or model/session limits. Messages response headers cannot
+overwrite an Enterprise spend allowance. Background, create-time, manual,
+and bulk refreshes use the same shared provider implementation and existing
+credential-generation fencing and storage writes. AIS refresh is unchanged.
+Spend-reader success cannot clear OAuth reauthentication requirements, and
+employee identity changes invalidate stored and in-flight allowance results.
+
+The shared query module is reached by the gateway publisher's static import
+walk from `providers.js` and adds no npm dependencies or bundled private assets.
+QuotaHub currently uses its separate optional delayed Claude/AIS observation
+path; enabling direct employee allowance refresh there would require product
+configuration and scheduler/manual-route integration. This source feature
+does not publish or enable that integration.
+
 Codex monthly `spend_control.individual_limit` totals respect the provider's
 `unit`: `usd` amounts are already dollars; `credits` and legacy responses
 without a unit use 25 credits per dollar. Unknown units retain percentage
