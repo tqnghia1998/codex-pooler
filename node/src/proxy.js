@@ -1783,6 +1783,9 @@ function persistClaudeResponseQuota(response, pacing, issuedCredentialEpoch = nu
   try {
     const upstream = pacing.store.get(pacing.upstreamId);
     if (!upstream || !isClaudeOAuthUpstream(upstream)) return;
+    // Messages rate-limit headers describe a different quota from the
+    // Enterprise employee spend allowance; never replace its dollar balance.
+    if (upstream.quota?.source === 'claude_enterprise_spend_limits') return;
     const observedAt = Date.parse(upstream.quota?.observedAt);
     if (Number.isFinite(observedAt) && observedAt + CLAUDE_HEADER_QUOTA_PERSIST_INTERVAL_MS > Date.now()) return;
     const quota = parseClaudeQuotaHeaders(response.headers);

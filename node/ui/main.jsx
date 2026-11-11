@@ -1390,7 +1390,7 @@ function UpstreamCard({
   const coolingDown = hasActiveCooldown(upstream);
   const pacingEnabled = Boolean(upstream.pacing?.enabled);
   const queuedRequests = pacing?.queueDepth || 0;
-  const quotaVariant = !quota || upstream.quotaSource === 'ais' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
+  const quotaVariant = !quota || quota.unlimited || upstream.quotaSource === 'ais' ? 'neutral' : quotaRemaining <= 15 ? 'error' : quotaRemaining <= 30 ? 'warning' : 'success';
   const spendingVariant = spending.capCredits <= 0 ? 'neutral' : spendingRemaining <= 15 ? 'error' : spendingRemaining <= 30 ? 'warning' : 'success';
   const progressStyleMap = {
     success: { '--color-success': 'light-dark(#9fe59b, #0c5700)' },
@@ -1419,7 +1419,7 @@ function UpstreamCard({
           </HStack>
         </HStack>
         <VStack gap={1} height={56}>
-          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? t("{value0} left", { value0: formatPercent(quota.remainingPercent) }) : upstream.quotaSource === 'ais' ? 'ais' : upstream.type === 'claude' ? t("Quota unavailable") : t("Not refreshed")}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? t("reset {value0}", { value0: formatDate(quota.resetAt) }) : upstream.quotaSource === 'ais' ? t("Quota managed by AIS") : upstream.type === 'claude' ? t("Click refresh to read Claude usage") : t("Click refresh to read provider quota")}</Text></HStack>
+          <HStack justify="between" vAlign="center" gap={2} height={20}><Text type="label" weight="bold" maxLines={1}>{quota ? quota.unlimited ? t("No spend limit") : t("{value0} left", { value0: formatPercent(quota.remainingPercent) }) : upstream.quotaSource === 'ais' ? 'ais' : upstream.type === 'claude' ? t("Quota unavailable") : t("Not refreshed")}</Text><Text type="supporting" color="secondary" maxLines={1}>{quota ? quota.source === 'claude_enterprise_spend_limits' ? t("Spend allowance") : t("reset {value0}", { value0: formatDate(quota.resetAt) }) : upstream.quotaSource === 'ais' ? t("Quota managed by AIS") : upstream.type === 'claude' ? t("Click refresh to read Claude usage") : t("Click refresh to read provider quota")}</Text></HStack>
           <ProgressBar
             label={t("Quota remaining")}
             value={!quota ? 0 : quotaRemaining}
@@ -1790,14 +1790,16 @@ function quotaCount(quota, upstreamType = '') {
   const windows = Array.isArray(quota?.windows) && quota.windows.length
     ? quota.windows
       .slice(0, 4)
-      .map((window) => t("{value0} {value1} left", { value0: window.key === 'session' ? '5h' : window.key === '7d' ? '7d' : window.key.replace(/^7d_/, ''), value1: formatPercent(window.remainingPercent) }))
+      .map((window) => window.unlimited ? t("No spend limit") : t("{value0} {value1} left", { value0: window.key === 'session' ? '5h' : window.key === '7d' ? '7d' : window.key.replace(/^(7d_|spend_)/, ''), value1: formatPercent(window.remainingPercent) }))
       .join(' · ')
     : '';
   const dollars = quota && Number.isFinite(quota.remainingDollars) && Number.isFinite(quota.limitDollars)
     ? t("${value0} left of ${value1}", { value0: formatNumber(Math.max(0, quota.remainingDollars)), value1: formatNumber(quota.limitDollars) })
     : '';
-  const dollarStatus = upstreamType === 'claude' && !dollars ? t("USD unavailable from provider") : '';
-  return [dollars, windows, dollarStatus].filter(Boolean).join(' · ');
+  const otherCurrency = quota?.source === 'claude_enterprise_spend_limits' && quota.currency !== 'USD' && !quota.unlimited
+    ? t("{value0} minor units ({value1}) left of {value2}", { value0: formatNumber(quota.remainingUnits), value1: quota.currency, value2: formatNumber(quota.limitUnits) }) : '';
+  const dollarStatus = upstreamType === 'claude' && !dollars && !otherCurrency && !quota?.unlimited ? t("USD unavailable from provider") : '';
+  return [dollars, otherCurrency, windows, dollarStatus].filter(Boolean).join(' · ');
 }
 function formatDate(value) { return value ? new Date(value).toLocaleString(localeTag()) : t("Unknown"); }
 function formatShortTime(value) {

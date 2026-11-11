@@ -1,5 +1,8 @@
 // English source messages are the keys; protocol values stay outside this catalog.
 export const zhCN = Object.freeze({
+  "No spend limit": "无支出上限",
+  "Spend allowance": "支出额度",
+  "{value0} minor units ({value1}) left of {value2}": "剩余 {value0} 最小货币单位（{value1}），总额 {value2}",
   "Language": "语言",
   "Relaydeck — Upstream dashboard": "Relaydeck — 上游账户面板",
   "Small local upstream and quota dashboard. Credentials never leave this server.": "本地上游账户与配额面板。凭据始终保留在此服务器上。",
