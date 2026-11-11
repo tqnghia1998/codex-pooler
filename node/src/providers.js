@@ -6,7 +6,6 @@ import { claudeRequestHeaders, prepareClaudeRequestBody } from './claude-protoco
 import { decodeClaudeResponse } from './upstream-response.js';
 import { claudeProxyDispatcher } from './claude-transport.js';
 import { CLAUDE_CODE_VERSION } from './claude-client-version.js';
-import { claudeSpendLimitsConfigFromEnv, createClaudeSpendAllowanceReader } from './claude-spend-limits.js';
 
 const CODEX_PATHS = ['/backend-api/wham/usage', '/backend-api/codex/usage', '/api/codex/usage'];
 const CODEX_TOKEN_URL = 'https://auth.openai.com/oauth/token';
@@ -45,13 +44,13 @@ export async function refreshQuota(upstream, credentials, {
   compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN,
   fetchImpl = globalThis.fetch,
   saveCredentials = () => {},
-  claudeSpendLimits = claudeSpendLimitsConfigFromEnv(),
+  claudeQuotaReader = null,
   force = false
 } = {}) {
   if (isAisUpstream(upstream)) throw new Error('AIS quota requires a Compass SSO session');
   if (upstream.type === 'claude') {
     if (!isSupportedClaudeOAuthUpstream({ ...upstream, credentials })) return upstream.quota || null;
-    return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force, false, claudeSpendLimits);
+    return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force, false, claudeQuotaReader);
   }
   if (upstream.type === 'compass') return refreshCompassQuota(upstream, compassGatewayToken, fetchImpl);
   return refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentials);
@@ -163,8 +162,8 @@ async function refreshCodexQuota(upstream, credentials, fetchImpl, saveCredentia
   throw lastError || new Error('Codex quota endpoint was not found');
 }
 
-async function refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force = false, retried = false, spendLimits = {}) {
-  const readAllowance = await createClaudeSpendAllowanceReader(upstream, spendLimits);
+async function refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force = false, retried = false, quotaReader = null) {
+  const readAllowance = quotaReader ? await quotaReader(upstream) : null;
   const quotaBlockKey = upstream.id || credentials.accessToken;
   const quotaBlock = claudeQuotaBlocks.get(quotaBlockKey);
   if (quotaBlock?.blockedUntil > Date.now()) {
@@ -206,7 +205,7 @@ async function refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredenti
     }
     if (!retried && error.statusCode === 401 && credentials.refreshToken) {
       await refreshClaudeCredentials(upstream, credentials, fetchImpl, saveCredentials, true);
-      return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force, true, spendLimits);
+      return refreshClaudeQuota(upstream, credentials, fetchImpl, saveCredentials, force, true, quotaReader);
     }
     throw error;
   }
