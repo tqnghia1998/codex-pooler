@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { CLAUDE_SPEND_LIMITS_URL, claudeSpendLimitsConfigFromEnv, validateClaudeEmployeeMap, parseClaudeSpendAllowance, queryClaudeSpendAllowance, refreshClaudeSpendAllowance } from '../src/claude-spend-limits.js';
-import { refreshQuota, CLAUDE_OAUTH_USAGE_URL } from '../src/providers.js';
+import { CLAUDE_OAUTH_USAGE_URL } from '../src/providers.js';
 import { Store } from '../src/store.js';
 import { createApp, refreshAllQuotas } from '../src/server.js';
-import { refreshUpstreamQuota } from '../src/upstream-quota-refresh.js';
+import { refreshRelaydeckQuota as refreshQuota, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota } from '../src/relaydeck-quota.js';
 
 const map = { 'employee@example.com': 'user_test' };
 const row = (values = {}) => ({
@@ -70,12 +70,13 @@ test('rejects malformed money, currencies, periods, and unsafe precision instead
   assert.throws(() => parseClaudeSpendAllowance([]), /No Claude/);
 });
 
-test('validates the catalog and supports explicit configuration namespaces', () => {
+test('validates the catalog and reads only Relaydeck configuration', () => {
   assert.equal(validateClaudeEmployeeMap(map), map);
   for (const value of [null, [], { 'Employee@example.com': 'user_test' }, { 'employee@example.com': 'bad-id' }]) {
     assert.throws(() => validateClaudeEmployeeMap(value), /Invalid Claude/);
   }
-  assert.deepEqual(claudeSpendLimitsConfigFromEnv({ POOL_CLAUDE_SPEND_LIMITS_API_KEY: 'key', POOL_CLAUDE_SPEND_LIMITS_MAP_FILE: '/private/map' }, 'POOL_'), { apiKey: 'key', mapFile: '/private/map' });
+  assert.deepEqual(claudeSpendLimitsConfigFromEnv({ CODEX_POOLER_CLAUDE_SPEND_LIMITS_API_KEY: 'key', CODEX_POOLER_CLAUDE_SPEND_LIMITS_MAP_FILE: '/private/map' }), { apiKey: 'key', mapFile: '/private/map' });
+  assert.deepEqual(claudeSpendLimitsConfigFromEnv({ POOL_CLAUDE_SPEND_LIMITS_API_KEY: 'key', POOL_CLAUDE_SPEND_LIMITS_MAP_FILE: '/private/map' }), { apiKey: '', mapFile: '' });
 });
 
 test('uses filtered pagination, exact email plus ID matching, and fresh balances on every query', async () => {
