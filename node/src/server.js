@@ -12,7 +12,7 @@ import {
   refreshDueCodexTokens,
   TOKEN_REFRESH_INTERVAL_MS
 } from './codex-token-refresh.js';
-import { refreshAllUpstreamQuotas, refreshUpstreamQuota } from './upstream-quota-refresh.js';
+import { configureRelaydeckQuota, refreshAllRelaydeckUpstreamQuotas as refreshAllUpstreamQuotas, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota } from './relaydeck-quota.js';
 import { HttpError, hasDuplicateHost } from './http-ingress.js';
 import { dispatchGatewayRequest, gatewayRequestKind } from './gateway-dispatch.js';
 import { errorEnvelope } from './public-errors.js';
@@ -42,6 +42,7 @@ export { createTokenRefreshScheduler, refreshClaudeToken, refreshCodexToken, ref
 export function createApp({ store = new Store(), apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, compassGatewayToken = process.env.CODEX_POOLER_COMPASS_GATEWAY_TOKEN, onTokenRefreshFailure = () => {}, ingress = {}, upstreamDeadlines = {}, logger = console, codexHostHealth = codexHostHealthForStore(store), readiness = readyReadiness(), claudeConfig = claudeConfigFromEnv() } = {}) {
   claudeConfig = normalizeClaudeConfig(claudeConfig);
   store.configureClaudeRuntime?.(claudeConfig);
+  configureRelaydeckQuota(store);
   store.configureApiKey(apiKey);
   const admission = admissionPolicy(ingress);
   const codexOptions = codexGatewayOptions(ingress);

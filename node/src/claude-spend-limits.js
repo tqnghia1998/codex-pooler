@@ -3,10 +3,10 @@ import { decodeClaudeResponse } from './upstream-response.js';
 
 export const CLAUDE_SPEND_LIMITS_URL = 'https://api.anthropic.com/v1/organizations/spend_limits/effective';
 
-export function claudeSpendLimitsConfigFromEnv(env = process.env, prefix = 'CODEX_POOLER_') {
+export function claudeSpendLimitsConfigFromEnv(env = process.env) {
   return {
-    apiKey: env[`${prefix}CLAUDE_SPEND_LIMITS_API_KEY`] || '',
-    mapFile: env[`${prefix}CLAUDE_SPEND_LIMITS_MAP_FILE`] || ''
+    apiKey: env.CODEX_POOLER_CLAUDE_SPEND_LIMITS_API_KEY || '',
+    mapFile: env.CODEX_POOLER_CLAUDE_SPEND_LIMITS_MAP_FILE || ''
   };
 }
 
