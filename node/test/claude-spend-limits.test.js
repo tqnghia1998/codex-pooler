@@ -8,7 +8,7 @@ import { CLAUDE_SPEND_LIMITS_URL, claudeSpendLimitsConfigFromEnv, validateClaude
 import { CLAUDE_OAUTH_USAGE_URL } from '../src/providers.js';
 import { Store } from '../src/store.js';
 import { createApp, refreshAllQuotas } from '../src/server.js';
-import { refreshRelaydeckQuota as refreshQuota, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota } from '../src/relaydeck-quota.js';
+import { refreshRelaydeckQuota as refreshQuota, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota, updateRelaydeckUpstream } from '../src/relaydeck-quota.js';
 
 const map = { 'employee@example.com': 'user_test' };
 const row = (values = {}) => ({
@@ -142,6 +142,65 @@ test('unmapped or missing employee emails fail immediately without OAuth refresh
   }
   assert.equal(calls, 0);
   assert.equal(saves, 0);
+});
+
+test('resolves a missing employee email from the upstream name or local part without guessing catalog entries', async (t) => {
+  const config = catalog(t);
+  const email = 'employee.name@shopee.com';
+  writeFileSync(config.mapFile, JSON.stringify({ ...map, [email]: 'user_named' }));
+  for (const values of [
+    { email: '', name: 'employee.name' },
+    { email: undefined, name: '  EMPLOYEE.NAME  ' },
+    { email: '', name: email },
+    { email: 'employee.name', name: 'custom label' }
+  ]) {
+    let calls = 0;
+    const quota = await refreshQuota({ ...upstream, ...values }, credentials, { claudeSpendLimits: config, fetchImpl: async (url) => {
+      calls++;
+      assert.equal(new URL(url).searchParams.get('user_ids[]'), 'user_named');
+      return json({ data: [row({ actor: { email_address: email, user_id: 'user_named' } })] });
+    } });
+    assert.equal(quota.remainingDollars, 188.81627);
+    assert.equal(quota.employeeEmail, email);
+    assert.equal(calls, 1);
+  }
+  await refreshQuota({ ...upstream, name: 'employee.name' }, credentials, { claudeSpendLimits: config, fetchImpl: async (url) => {
+    assert.equal(new URL(url).searchParams.get('user_ids[]'), 'user_test');
+    return json({ data: [row()] });
+  } });
+  let calls = 0;
+  await assert.rejects(refreshQuota({ ...upstream, email: 'missing@example.com', name: 'employee.name' }, credentials, {
+    claudeSpendLimits: config, fetchImpl: async () => { calls++; }
+  }), /Email not found in Claude employee catalog/);
+  assert.equal(calls, 0);
+});
+
+test('quota refresh rejects an observation when its fallback name changes in flight', async (t) => {
+  const config = catalog(t);
+  writeFileSync(config.mapFile, JSON.stringify({ 'employee.name@shopee.com': 'user_named' }));
+  const store = new Store(config.dir);
+  const account = store.create({ type: 'claude', name: 'employee.name', accessToken: credentials.accessToken });
+  await refreshUpstreamQuota(store, account.id, { claudeSpendLimits: config, fetchImpl: async () => {
+    store.update(account.id, { name: 'different.employee' });
+    return json({ data: [row({ actor: { email_address: 'employee.name@shopee.com', user_id: 'user_named' } })] });
+  } });
+  assert.equal(store.get(account.id).quota, null);
+  assert.equal(store.get(account.id).name, 'different.employee');
+});
+
+test('renaming a quota subject clears its allowance without clearing OAuth reauthentication state', async (t) => {
+  const config = catalog(t);
+  const store = new Store(config.dir);
+  const account = store.create({ type: 'claude', name: 'employee.name', accessToken: credentials.accessToken });
+  store.setCap(account.id, { capDollars: 100 });
+  const allowance = { ...parseClaudeSpendAllowance([row()]), employeeEmail: 'employee.name@shopee.com' };
+  store.setQuota(account.id, allowance);
+  assert.deepEqual(updateRelaydeckUpstream(store, account.id, { name: 'employee.name@shopee.com' }).quota, allowance);
+  const attempt = store.beginUpstreamAttempt(account.id, { routeClass: 'proxy_http', model: '' });
+  store.settleUpstreamAttempt(account.id, attempt, { class: 'credential', retryable: true });
+  const changed = updateRelaydeckUpstream(store, account.id, { name: 'different.employee' });
+  assert.equal(changed.quota, null);
+  assert.equal(changed.health.status, 'reauth_required');
 });
 
 test('disabled Enterprise lookup retains OAuth behavior; invalid or incomplete configuration fails before network access', async (t) => {

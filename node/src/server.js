@@ -12,7 +12,7 @@ import {
   refreshDueCodexTokens,
   TOKEN_REFRESH_INTERVAL_MS
 } from './codex-token-refresh.js';
-import { configureRelaydeckQuota, refreshAllRelaydeckUpstreamQuotas as refreshAllUpstreamQuotas, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota } from './relaydeck-quota.js';
+import { configureRelaydeckQuota, updateRelaydeckUpstream, refreshAllRelaydeckUpstreamQuotas as refreshAllUpstreamQuotas, refreshRelaydeckUpstreamQuota as refreshUpstreamQuota } from './relaydeck-quota.js';
 import { HttpError, hasDuplicateHost } from './http-ingress.js';
 import { dispatchGatewayRequest, gatewayRequestKind } from './gateway-dispatch.js';
 import { errorEnvelope } from './public-errors.js';
@@ -386,7 +386,7 @@ async function apiRequest(req, res, url, store, { fetchImpl, compassGatewayToken
     const input = await body(req);
     const existing = store.get(id);
     if (existing?.type === 'claude') assertClaudeOAuthInput(input, false);
-    const upstream = store.update(id, input);
+    const upstream = updateRelaydeckUpstream(store, id, input);
     if (upstream.type === 'claude' && quotaCredentialsChanged(upstream, input)) {
       await refreshSavedClaudeIdentity(store, id, { fetchImpl, force: true });
     }
