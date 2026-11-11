@@ -27,19 +27,20 @@ export async function refreshUpstreamQuota(store, id, { notify = true, ...option
 }
 
 async function refreshUpstreamQuotaOnce(store, id, upstream, entry, options) {
+  const { quotaWriteOptions = () => ({}), ...providerOptions } = options;
   let credentialEpoch = upstream.credentialEpoch;
-  const quotaEmail = String(upstream.email || '').trim().toLowerCase();
+  const writeOptions = quotaWriteOptions(upstream);
   const quota = await refreshQuota(upstream, store.credentials(id), {
-    ...options,
+    ...providerOptions,
     saveCredentials: (updated, accessTokenExpiresAt) => {
       if (store.persistCredentials(id, updated, accessTokenExpiresAt)) credentialEpoch = store.get(id)?.credentialEpoch;
     }
   });
   if (quota === upstream.quota) return store.getPublic(id);
   return store.setQuota(id, quota, {
+    ...writeOptions,
     notify: entry.notify,
-    expectedCredentialEpoch: credentialEpoch,
-    ...(quota?.source === 'claude_enterprise_spend_limits' ? { expectedEmail: quotaEmail } : {})
+    expectedCredentialEpoch: credentialEpoch
   });
 }
 

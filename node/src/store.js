@@ -97,6 +97,10 @@ export class Store {
     return this.claudeRuntimeConfig;
   }
 
+  configureQuotaPolicy(policy = null) {
+    this.quotaPolicy = policy;
+  }
+
   setDurabilityBarrier(barrier) {
     this.durabilityBarrier = barrier;
   }
@@ -435,12 +439,11 @@ export class Store {
     const upstream = findOrThrow(db, id);
     if (expectedCredentialEpoch !== null && upstream.credentialEpoch !== expectedCredentialEpoch) return publicUpstream(upstream);
     if (expectedEmail !== null && String(upstream.email || '').trim().toLowerCase() !== expectedEmail) return publicUpstream(upstream);
+    if (this.quotaPolicy?.acceptUpdate?.(upstream, quota) === false) return publicUpstream(upstream);
     ensureSpending(upstream);
     upstream.quota = quota && { ...quota, ...(quota.capacity ? { capacity: { ...quota.capacity, credentialEpoch: upstream.credentialEpoch } } : {}) };
     if (!isAisUpstream(upstream)) upstream.quotaSource = quota?.source || null;
-    // An organization spend-reader key does not validate the employee's OAuth
-    // inference credential, so its success cannot recover credential health.
-    if (upstream.health?.status === 'reauth_required' && quota?.source !== 'claude_enterprise_spend_limits') {
+    if (upstream.health?.status === 'reauth_required' && this.quotaPolicy?.recoversCredentials?.(upstream, quota) !== false) {
       upstream.healthGeneration = Math.max(0, Number(upstream.health.generation ?? upstream.healthGeneration) || 0) + 1;
       delete upstream.health;
     }
@@ -514,8 +517,7 @@ export class Store {
       changed = true;
     }
     if (email && upstream.email !== String(email)) {
-      if (upstream.quota?.source === 'claude_enterprise_spend_limits'
-        && String(upstream.email || '').trim().toLowerCase() !== String(email).trim().toLowerCase()) upstream.quota = null;
+      if (this.quotaPolicy?.invalidateForEmailChange?.(upstream, email)) upstream.quota = null;
       upstream.email = String(email);
       changed = true;
     }

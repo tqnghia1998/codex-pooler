@@ -42,6 +42,11 @@ than assuming they are shared automatically.
 - Classify the change as shared gateway behavior, QuotaHub-only product
   behavior, or Relaydeck-only UI/admin/tooling. Base this on callers and
   contracts, not on whether local telemetry shows usage.
+- Claude Enterprise employee spend-allowance lookup is Relaydeck-only by
+  explicit product decision. Keep `node/src/relaydeck-quota.js` and
+  `node/src/claude-spend-limits.js`, their configuration, catalog, and read key
+  outside QuotaHub's gateway snapshot. QuotaHub retains its existing delayed
+  Claude/AIS observation integration; do not enable or port this lookup there.
 - Implement shared behavior once in `node/` gateway modules consumed by both
   apps. Do not leave a protocol fix or feature wired only into Relaydeck's
   server, or duplicate it in QuotaHub to avoid updating the shared gateway.
