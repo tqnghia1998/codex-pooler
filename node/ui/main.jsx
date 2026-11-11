@@ -38,6 +38,7 @@ import { restrictToParentElement, restrictToVerticalAxis } from '@dnd-kit/modifi
 import { arrayMove, SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { PlugZap } from 'lucide-react';
+import { DEFAULT_PACING, upstreamSavePayload } from './upstream-form.js';
 
 const DEFAULT_BULK_RULES = [
   { minQuotaLeft: 1000, capDollars: 100 },
@@ -79,13 +80,6 @@ const filterOptions = () => ({
   ]
 });
 
-const DEFAULT_PACING = {
-  enabled: false,
-  minStartIntervalMs: 0,
-  modelIntervals: [],
-  maxQueueDepth: 20,
-  maxQueueAgeMs: 30000
-};
 const FORM_DEFAULTS = { name: '', type: 'codex', authJson: '', projectId: '', projectKey: '', accessToken: '', refreshToken: '', email: '', accountId: '', quotaSource: 'compass', pacing: DEFAULT_PACING };
 
 function useStoredValue(key, fallback = '') {
@@ -523,19 +517,7 @@ function Dashboard({ themeMode, setThemeMode, locale, onLocaleChange }) {
   };
 
   const saveUpstream = async (values, mode, id) => {
-    const data = {
-      ...values,
-      pacing: {
-        ...DEFAULT_PACING,
-        ...(values.pacing || {}),
-        modelIntervals: (values.pacing?.modelIntervals || [])
-          .map((entry) => ({ model: String(entry.model || '').trim(), minStartIntervalMs: entry.minStartIntervalMs ?? 0 }))
-          .filter((entry) => entry.model)
-      }
-    };
-    if (!data.authJson) delete data.authJson;
-    if (!data.accessToken) delete data.accessToken;
-    if (!data.projectKey) delete data.projectKey;
+    const data = upstreamSavePayload(values);
     try {
       await api(mode === 'edit' ? `/api/upstreams/${id}` : '/api/upstreams', {
         method: mode === 'edit' ? 'PATCH' : 'POST',

@@ -19,6 +19,12 @@ export function validateClaudeEmployeeMap(map) {
   return map;
 }
 
+export function claudeSpendAllowanceEmail(upstream) {
+  const email = String(upstream?.email || '').trim();
+  const candidate = (email || String(upstream?.name || '').trim()).toLowerCase();
+  return /^[a-z0-9][a-z0-9._+-]*$/.test(candidate) ? `${candidate}@shopee.com` : candidate;
+}
+
 // Decimal cents with up to three fractional digits: keep arithmetic exact until
 // converting the result to the gateway's JSON numeric quota fields.
 function minorUnits(value) {
@@ -79,7 +85,7 @@ export async function queryClaudeSpendAllowance(email, map, fetchPage) {
     const body = await fetchPage(page, userId);
     if (!Array.isArray(body?.data)) throw new Error('Invalid spend response: data is not an array');
     const matches = body.data.filter((row) => row?.actor?.email_address?.toLowerCase() === email && row.actor.user_id === userId);
-    if (matches.length) return parseClaudeSpendAllowance(matches);
+    if (matches.length) return { ...parseClaudeSpendAllowance(matches), employeeEmail: email };
     page = body.next_page;
     if (page == null) throw new Error('No spend-allowance record found for catalogued user; this does not mean zero remaining');
     if (typeof page !== 'string' || !page || seen.has(page)) throw new Error('Invalid or repeated pagination cursor');
@@ -97,7 +103,7 @@ export async function createClaudeSpendAllowanceReader(upstream, { apiKey = '', 
   } catch {
     throw new Error('Cannot read a valid Claude employee catalog');
   }
-  const email = String(upstream.email || '').trim().toLowerCase();
+  const email = claudeSpendAllowanceEmail(upstream);
   if (!Object.hasOwn(map, email)) throw new Error('Email not found in Claude employee catalog');
   return (fetchImpl = globalThis.fetch) => fetchClaudeSpendAllowance(email, map, apiKey, fetchImpl);
 }

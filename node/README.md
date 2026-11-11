@@ -347,12 +347,16 @@ with an absolute path to a private JSON email-to-user-ID catalog, for example
 `{"employee@example.com":"user_example"}`. Keep both in ignored local state
 (`node/.env` and `node/.data/`); the key and employee catalog are not gateway
 assets and must not be published. The catalog contains lowercase email keys
-and `user_` IDs. Accounts whose saved email matches the catalog query
+and `user_` IDs. Lookup prefers the saved email; when it is blank, it uses the
+upstream name. A local part such as `employee.name` resolves to
+`employee.name@shopee.com`; a full email remains unchanged. The resolved address
+must match the catalog exactly, and an explicit saved email takes precedence
+over the display name. Matching accounts query
 `GET https://api.anthropic.com/v1/organizations/spend_limits/effective`
 with `user_ids[]` and `limit=1`, following validated pagination and matching
 both email and ID. The admin key is sent only to that fixed endpoint; the
 account's OAuth token and custom inference base URL are not used for this read.
-When Enterprise lookup is configured, missing or unmapped employee emails
+When Enterprise lookup is configured, missing or unmapped resolved employee emails
 fail immediately with an employee-catalog error, before any network request
 or OAuth fallback. Without Enterprise configuration, the existing OAuth
 usage/header path remains available. Missing records or provider failures
@@ -371,6 +375,11 @@ and bulk refreshes use the Relaydeck quota integration and existing
 credential-generation fencing and storage writes. AIS refresh is unchanged.
 Spend-reader success cannot clear OAuth reauthentication requirements, and
 employee identity changes invalidate stored and in-flight allowance results.
+Renaming a fallback name to its equivalent full email retains the allowance;
+changing the resolved employee clears it and rejects older in-flight readings.
+Inferred email addresses are used only for quota lookup, without changing the
+saved OAuth identity. Dashboard saves omit the Codex-only `allowProviderCredits`
+field for Claude and Compass/AIS upstreams; API validation remains strict.
 
 The employee query and its environment configuration belong only to Relaydeck.
 `relaydeck-quota.js` is loaded by the product server and is outside the gateway
