@@ -38,14 +38,14 @@ test('gateway-generated CLI fingerprints use reviewed versions', () => {
   const manifest = JSON.parse(readFileSync(new URL('../fixtures/compatibility-releases.json', import.meta.url), 'utf8'));
   const packageJson = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.deepEqual(codexProtocolHeaders(null, { env: {} }), {
-    'user-agent': 'codex_cli_rs/0.167.1',
+    'user-agent': 'codex_cli_rs/0.170.0',
     originator: 'codex_cli_rs',
-    version: '0.167.1'
+    version: '0.170.0'
   });
-  assert.equal(DEFAULT_CLAUDE_CODE_VERSION, '2.1.322');
+  assert.equal(DEFAULT_CLAUDE_CODE_VERSION, '2.1.327');
   assert.equal(manifest.clients.find(({ id }) => id === 'codex').version, codexProtocolHeaders(null, { env: {} }).version);
   assert.equal(manifest.clients.find(({ id }) => id === 'claude-code').version, DEFAULT_CLAUDE_CODE_VERSION);
-  assert.equal(packageJson.dependencies['@openai/codex'], '0.167.1');
+  assert.equal(packageJson.dependencies['@openai/codex'], '0.170.0');
   if (!process.env.CODEX_POOLER_CLAUDE_CODE_VERSION) {
     assert.equal(CLAUDE_CODE_VERSION, DEFAULT_CLAUDE_CODE_VERSION);
   }
