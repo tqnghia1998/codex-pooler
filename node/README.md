@@ -59,7 +59,7 @@ The Node proxy covers the client-visible local compatibility path:
 | Requests and headers | Responses aliases, reasoning/service-tier normalization, configurable and native-client Codex version/beta negotiation, Anthropic header defaults/forwarding, dynamic Codex model discovery, native Codex response-control projection, model ETags, unsupported-route envelopes | `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/codex-model-catalog.test.js`, `test/native-payload.test.js` |
 | OpenAI adapters | Validated Responses access programs and forward-compatible fields/tools, Responses and Chat message/content/tool conversion, Chat reasoning aliases and non-strict function defaults, oversized UTF-8 text and replay call-ID normalization, multimodal input, continuation/replay validation including URL citations and closed hosted-shell history, strict object-root schemas with nested recursion, function tool names limited to 1-128 ASCII letters, digits, `_` or `-` without trimming, content `prompt_cache_breakpoint` TTLs of `30m` or `12h`, non-stream Chat output and finish reasons | `test/openai-adapters.test.js`, `test/proxy.test.js` |
 | HTTP ingress and errors | Bounded JSON/compressed bodies (128 MiB compressed, 256 MiB decoded by default), gzip/deflate/zstd, timeouts, OpenAI-shaped errors, provider-detail redaction, bounded native-only misalignment guidance, allowlisted parameter-validation relay, sanitized upstream 429 with `Retry-After`, valid Anthropic 4xx passthrough | `test/http-ingress.test.js`, `test/http-errors.test.js`, `test/gateway-routes.test.js` |
-| Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, coherent per-tier context rules and rates, requested priority pricing when Codex echoes `default`, exact ultrafast-tier pricing without fallback, authoritative `price_cost_usd`, measured usage retained across interrupted turns, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js` |
+| Pricing and settlement | OpenAI/Anthropic JSON and streaming usage, cache fields, dated model suffix pricing, coherent per-tier context rules and rates, requested Priority or Ultrafast pricing when Codex echoes `default`, exact Ultrafast-tier pricing without fallback, authoritative `price_cost_usd`, measured usage retained across interrupted turns, idempotent replacement deltas | `test/pricing.test.js`, `test/domain.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js` |
 | Routing | Ordered spend-cap-eligible candidates, per-account discovered Codex model support and advertised ultrafast capability, an optional operator-managed priority list ahead of least-recent-success balancing, explicit/session pins, response-continuation pins with the 125% allowance, safe pre-output failover capped at eight attempts per request (per provider phase for automatic Anthropic routing), immediate account cooldown for quota responses, reauthentication blocking, health-neutral policy failures, shared Codex-origin reachability protection, and durable model/route circuit recovery | `test/routing.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/codex-model-catalog.test.js`, `test/codex-host-health.test.js`, `test/upstream-outcomes.test.js`, `test/store.test.js` |
 | Pacing | Optional per-account and per-model minimum start intervals, bounded abort-aware queues, local `429`/`Retry-After`, and sanitized runtime diagnostics | `test/upstream-pacer.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js`, `test/server.test.js` |
 | Compatibility learning | Passive structured evidence, versioned HTTP/WebSocket protocol fingerprints, route-scoped Compass sampling fallbacks, repeated-evidence promotion, sanitized status/reset APIs, and dashboard controls | `test/compatibility-learning.test.js`, `test/proxy.test.js`, `test/gateway-routes.test.js` |
@@ -628,6 +628,10 @@ and cache rates come from that model's reviewed feed entry. No maximum context
 window is inferred from a pricing threshold. Live account discovery remains
 authoritative for model availability and limits.
 
+The snapshot prices `gpt-6.2-sol` and `gpt-6.2-astra` at standard, priority,
+and Ultrafast rates. Ultrafast uses the promotional rate for requests started
+before March 1, 2027 at 08:00 UTC, and the list rate starting at that instant.
+
 OpenAI billing rows and the advertised Codex model IDs come from `src/openai-pricing-snapshot.js`. Refresh that reviewable generated file from the configured upstream pricing feed with:
 
 ```bash
@@ -635,6 +639,7 @@ npm run pricing:refresh
 ```
 
 Use `--source=<url-or-file-url>`, `--effective-at=<ISO-8601>`, or `--models=<comma-separated-ids>` when updating from a different vetted source or model selection.
+Use `--only-models=<comma-separated-ids>` to refresh selected models while retaining the other catalog rows.
 
 ## Check
 

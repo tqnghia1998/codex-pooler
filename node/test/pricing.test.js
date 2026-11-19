@@ -3,6 +3,21 @@ import assert from 'node:assert/strict';
 import { cheapestPricedModel, extractUsage, isPricedModel, mergeUsage, priceUsage, requestCacheWriteTtl, resolvePrice, upstreamCostMicros } from '../src/pricing.js';
 import { OPENAI_PRICING_VERSION } from '../src/openai-pricing-snapshot.js';
 
+test('prices GPT-6.2 dated models and switches Ultrafast at the exact cutoff', () => {
+  const usage = { inputTokens: 1_000, outputTokens: 100 };
+  for (const [model, standard] of [['gpt-6.2-sol', 3_000], ['gpt-6.2-astra', 12_000]]) {
+    const served = `${model}-2026-11-17`;
+    const before = '2027-03-01T07:59:59.999Z';
+    const cutoff = '2027-03-01T08:00:00.000Z';
+    assert.equal(isPricedModel(served, Date.parse(before)), true);
+    assert.equal(priceUsage(served, usage, before).settledCostMicros, standard);
+    assert.equal(priceUsage(served, usage, before, 'priority').settledCostMicros, standard * 2);
+    assert.equal(priceUsage(served, usage, before, 'ultrafast').settledCostMicros, standard * 3);
+    assert.equal(priceUsage(served, { ...usage, serviceTier: 'default' }, before, 'ultrafast').settledCostMicros, standard * 3);
+    assert.equal(priceUsage(served, usage, cutoff, 'ultrafast').settledCostMicros, standard * 6);
+  }
+});
+
 test('selects the cheapest priced model and preserves provider order as fallback', () => {
   assert.equal(cheapestPricedModel(['gpt-5.6-sol', 'gpt-5.6-luna', 'gpt-5.6-terra']), 'gpt-5.6-luna');
   assert.equal(cheapestPricedModel(['claude-fable-5-1', 'claude-opus-5-5', 'claude-opus-5', 'claude-sonnet-5']), 'claude-sonnet-5');

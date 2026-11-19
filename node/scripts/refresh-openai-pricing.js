@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_SOURCE_URL = 'https://icoretech.github.io/openai-json-pricing/pricing.json';
 const DEFAULT_EFFECTIVE_AT = '2026-01-01T00:00:00Z';
-const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra-law', 'gpt-6-rosalind', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+const DEFAULT_MODELS = ['gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6-astra-law', 'gpt-6-rosalind', 'gpt-6-sol', 'gpt-6-luna', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-6.2-astra', 'gpt-6.2-sol'];
 // These reviewed specialist models publish only standard-tier prices.
 const STANDARD_ONLY_MODELS = new Set(['gpt-6-astra-law', 'gpt-6-rosalind']);
 const REQUIRED_TIER_MAP = Object.freeze({ standard: 'standard', fast: 'priority' });
@@ -16,7 +16,8 @@ export function buildOpenAiPricingSnapshot(payload, {
   sourceUrl = DEFAULT_SOURCE_URL,
   effectiveAt = DEFAULT_EFFECTIVE_AT,
   models = DEFAULT_MODELS,
-  previousRows = []
+  previousRows = [],
+  onlyModels = null
 } = {}) {
   if (!plainObject(payload) || !plainObject(payload.models) || !validDate(payload.generated_at)) {
     throw new Error('Pricing feed must include generated_at and models');
@@ -26,8 +27,19 @@ export function buildOpenAiPricingSnapshot(payload, {
   if (!validDate(effectiveAt)) throw new Error('effectiveAt must be an ISO-8601 datetime');
   const modelIds = [...new Set(models.map(cleanString).filter(Boolean))];
   if (!modelIds.length) throw new Error('At least one model is required');
+  const selected = onlyModels === null ? null : new Set(onlyModels.map(cleanString));
+  if (selected && (!selected.size || [...selected].some((id) => !modelIds.includes(id)))) {
+    throw new Error('Only-models must name one or more models in the snapshot catalog');
+  }
+  const effectiveStart = new Date(effectiveAt).toISOString();
   const rows = [];
   for (const modelId of modelIds) {
+    if (selected && !selected.has(modelId)) {
+      const existing = previousRows.filter((row) => row.model === modelId);
+      if (!existing.length) throw new Error(`No existing pricing rows for ${modelId}`);
+      rows.push(...existing);
+      continue;
+    }
     const model = payload.models[modelId];
     if (!plainObject(model) || model.model !== modelId || model.pricing_type !== 'per_1m_tokens' || !plainObject(model.prices)) {
       throw new Error(`Pricing feed is missing a compatible ${modelId} entry`);
@@ -37,6 +49,10 @@ export function buildOpenAiPricingSnapshot(payload, {
       rows.push(...tierRows(model, modelId, sourceTier, tier, schemaVersion));
     }
     for (const [sourceTier, tier] of Object.entries(OPTIONAL_TIER_MAP)) {
+      if (sourceTier === 'ultrafast' && (model.prices.ultrafast_promotion !== undefined || model.prices.ultrafast_list !== undefined)) {
+        rows.push(...scheduledUltrafastRows(model, modelId, schemaVersion, effectiveStart));
+        continue;
+      }
       if (model.prices[sourceTier] === undefined) {
         // A feed that stops listing a tier must not reprice it at the
         // standard fallback: keep the last imported rows, as upstream keeps
@@ -49,7 +65,27 @@ export function buildOpenAiPricingSnapshot(payload, {
   }
   const generatedAt = new Date(payload.generated_at).toISOString();
   const version = `openai-${generatedAt.slice(0, 10)}`;
-  return renderSnapshot({ sourceUrl, generatedAt, effectiveAt: new Date(effectiveAt).toISOString(), version, modelIds, rows });
+  return renderSnapshot({ sourceUrl, generatedAt, effectiveAt: effectiveStart, version, modelIds, rows });
+}
+
+function scheduledUltrafastRows(model, modelId, schemaVersion, effectiveAt) {
+  const applicability = model.pricing_applicability;
+  const promotion = applicability?.tiers?.ultrafast_promotion;
+  const list = applicability?.tiers?.ultrafast_list;
+  if (schemaVersion !== 2 || model.prices.ultrafast !== undefined || applicability?.version !== 1
+    || ![promotion, list].every((rule) => rule?.status === 'supported' && rule.mode === 'effective')
+    || promotion.effective_at !== null || list.effective_until !== null
+    || !validDate(list.effective_at) || !validDate(promotion.effective_until)
+    || Date.parse(list.effective_at) !== Date.parse(promotion.effective_until)) {
+    throw new Error(`Pricing feed has invalid ${modelId} ultrafast pricing schedule`);
+  }
+  const cutoff = new Date(list.effective_at).toISOString();
+  return [
+    ...tierRows(model, modelId, 'ultrafast_promotion', 'ultrafast', schemaVersion).map((row) => ({ ...row, effectiveUntil: cutoff })),
+    ...tierRows(model, modelId, 'ultrafast_list', 'ultrafast', schemaVersion).map((row) => ({
+      ...row, effectiveAt: effectiveAt > cutoff ? effectiveAt : cutoff
+    }))
+  ];
 }
 
 function tierRows(model, modelId, sourceTier, tier, schemaVersion) {
@@ -194,7 +230,8 @@ async function main() {
     sourceUrl: sourceUrl.startsWith('file:') ? DEFAULT_SOURCE_URL : sourceUrl,
     effectiveAt,
     models,
-    previousRows
+    previousRows,
+    onlyModels: args.get('--only-models')?.split(',') ?? null
   }));
   process.stdout.write(`Updated ${TARGET}\n`);
 }
