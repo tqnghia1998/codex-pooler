@@ -1,6 +1,22 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { buildOpenAiPricingSnapshot } from '../scripts/refresh-openai-pricing.js';
+
+test('refreshes named models without replacing other pricing rows', () => {
+  const payload = JSON.parse(readFileSync(new URL('../../priv/pricing/openai/pricing.json', import.meta.url), 'utf8'));
+  const previousRows = [{ model: 'gpt-older', tier: 'standard', bucket: 'default', input: 1 }];
+  const options = { models: ['gpt-older', 'gpt-6.2-sol'], previousRows, onlyModels: [' gpt-6.2-sol '] };
+  const snapshot = buildOpenAiPricingSnapshot(payload, options);
+  assert.ok(snapshot.includes(JSON.stringify(previousRows[0])));
+  assert.match(snapshot, /"effectiveUntil":"2027-03-01T08:00:00.000Z"/);
+  assert.throws(() => buildOpenAiPricingSnapshot(payload, { ...options, onlyModels: ['gpt-6.2-typo'] }), /Only-models/);
+  assert.throws(() => buildOpenAiPricingSnapshot(payload, { ...options, onlyModels: [] }), /Only-models/);
+  const future = buildOpenAiPricingSnapshot(payload, { ...options, effectiveAt: '2027-04-01T00:00:00Z' });
+  assert.match(future, /"tier":"ultrafast"[^\n]*"effectiveAt":"2027-04-01T00:00:00.000Z"/);
+  payload.models['gpt-6.2-sol'].pricing_applicability.tiers.ultrafast_promotion.effective_until = '2027-02-01T00:00:00Z';
+  assert.throws(() => buildOpenAiPricingSnapshot(payload, options), /invalid .* ultrafast pricing schedule/);
+});
 
 test('builds a deterministic OpenAI pricing snapshot for selected models and tiers', () => {
   const payload = {

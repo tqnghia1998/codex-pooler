@@ -8,8 +8,9 @@ import {
 // OpenAI bills a separate long-context bucket once input exceeds this many tokens.
 const LONG_CONTEXT_INPUT_TOKEN_THRESHOLD = 272_000;
 
-const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket, contextRule, cacheWriteRates }) => ({
-  ...price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, OPENAI_PRICING_EFFECTIVE_AT, bucket, contextRule, OPENAI_PRICING_GENERATED_AT),
+const OPENAI_PRICES = OPENAI_PRICE_ROWS.map(({ model, input, cachedInput, cacheWrite, output, tier, bucket, contextRule, cacheWriteRates, effectiveAt, effectiveUntil }) => ({
+  ...price(model, [input, cachedInput, cacheWrite, output], OPENAI_PRICING_VERSION, tier, effectiveAt ?? OPENAI_PRICING_EFFECTIVE_AT, bucket, contextRule, OPENAI_PRICING_GENERATED_AT),
+  ...(effectiveUntil ? { effectiveUntil } : {}),
   ...(cacheWriteRates ? { cacheWriteRates } : {})
 }));
 
@@ -97,8 +98,9 @@ export function priceUsage(models, usage, startedAt = new Date().toISOString(), 
   const timestamp = Date.parse(startedAt);
   if (!Number.isFinite(timestamp)) return null;
   const reportedTier = string(usage.serviceTier)?.toLowerCase();
-  const tier = canonicalTier(requestedTier) === 'priority' && reportedTier === 'default'
-    ? 'priority'
+  const requested = canonicalTier(requestedTier);
+  const tier = reportedTier === 'default' && (requested === 'priority' || requested === 'ultrafast')
+    ? requested
     : canonicalTier(reportedTier || requestedTier);
   const snapshot = resolvePrice(models, tier, timestamp, usage.inputTokens);
   if (!snapshot) return null;
@@ -173,7 +175,9 @@ export function hasMeasuredUsage(usage) {
 export function resolvePrice(models, tier, timestamp, inputTokens, prices = PRICES) {
   const candidates = modelCandidates(Array.isArray(models) ? models : [models]);
   for (const candidate of candidates) {
-    const dated = prices.filter((snapshot) => snapshot.model === candidate && Date.parse(snapshot.effectiveAt) <= timestamp);
+    const dated = prices.filter((snapshot) => snapshot.model === candidate
+      && Date.parse(snapshot.effectiveAt) <= timestamp
+      && (snapshot.effectiveUntil === undefined || timestamp < Date.parse(snapshot.effectiveUntil)));
     const tierPrices = preferred(dated, 'tier', tier, tier === 'ultrafast' ? tier : 'standard');
     if (!tierPrices.length) continue;
     // Select one generation before selecting its physical bucket. A missing or

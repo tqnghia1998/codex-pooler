@@ -1190,6 +1190,35 @@ test('normalizes and collects non-streaming public Codex Responses and Chat SSE'
   }
 });
 
+for (const [model, spentDollars] of [['gpt-6.2-sol', 0.003], ['gpt-6.2-astra', 0.012]]) {
+  test(`settles streamed Codex usage for ${model} against the spending cap`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-gpt62-'));
+    const store = new Store(dir);
+    const upstream = store.create(codexInput());
+    store.setCap(upstream.id, { capDollars: 100 });
+    const completed = { type: 'response.completed', response: {
+      id: 'resp-gpt62', status: 'completed', model, output: [],
+      usage: { input_tokens: 1_000, output_tokens: 100 }
+    } };
+    const { server, base } = await runningServer(store, async () => new Response(
+      `data: ${JSON.stringify(completed)}\n\n`, { headers: { 'content-type': 'text/event-stream' } }
+    ));
+    try {
+      const response = await fetch(base + '/v1/responses', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ model, input: 'hello', stream: true })
+      });
+      assert.equal(response.status, 200);
+      await response.text();
+      assert.equal(store.load().gatewayUsage[0].totalTokens, 1_100);
+      assert.equal(store.getPublic(upstream.id).spending.spentDollars, spentDollars);
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('settles streamed Codex usage when the upstream omits its content type', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'codex-pooler-node-codex-headerless-sse-'));
   const store = new Store(dir);
