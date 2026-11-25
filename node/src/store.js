@@ -969,17 +969,18 @@ export class Store {
   }
 
   // A read never extends the marker: the HTTP fallback window is fixed at
-  // 60 seconds from the refused frame.
-  nativeWebsocketSizeRecovery(key, now = Date.now()) {
+  // 60 seconds from the refused frame. Markers also record the byte bound they
+  // were refused under so an earlier release's lower limit grants no recovery.
+  nativeWebsocketSizeRecovery(key, now = Date.now(), { limitBytes = 134_217_728 } = {}) {
     const marker = this.load().nativeWebsocketSizeRecoveries[key];
-    return Boolean(marker && Date.parse(marker.expiresAt) > now);
+    return Boolean(marker && Date.parse(marker.expiresAt) > now && marker.limitBytes === limitBytes);
   }
 
-  recordNativeWebsocketSizeRecovery(key, { messageBytes }, now = Date.now()) {
+  recordNativeWebsocketSizeRecovery(key, { messageBytes, limitBytes = 134_217_728 }, now = Date.now()) {
     const db = this.load();
     const markers = db.nativeWebsocketSizeRecoveries;
     for (const [id, marker] of Object.entries(markers)) if (Date.parse(marker.expiresAt) <= now) delete markers[id];
-    markers[key] = { messageBytes, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + NATIVE_WEBSOCKET_SIZE_RECOVERY_TTL_MS).toISOString() };
+    markers[key] = { messageBytes, limitBytes, createdAt: new Date(now).toISOString(), expiresAt: new Date(now + NATIVE_WEBSOCKET_SIZE_RECOVERY_TTL_MS).toISOString() };
     const overflow = Object.entries(markers).sort(([, left], [, right]) => Date.parse(left.createdAt) - Date.parse(right.createdAt))
       .slice(0, Math.max(0, Object.keys(markers).length - NATIVE_WEBSOCKET_SIZE_RECOVERY_LIMIT));
     for (const [id] of overflow) if (id !== key) delete markers[id];

@@ -6,7 +6,7 @@ const RESPONSES_FORWARDED_FIELDS = new Set([
   'prompt_cache_retention', 'reasoning', 'safety_identifier', 'service_tier', 'store', 'stream',
   'stream_options', 'temperature', 'text', 'tool_choice', 'tools', 'top_p'
 ]);
-const RESPONSES_LOCAL_FIELDS = new Set(['background', 'context_management', 'conversation', 'max_tool_calls', 'prompt', 'top_logprobs']);
+const RESPONSES_LOCAL_FIELDS = new Set(['background', 'background_options', 'context_management', 'conversation', 'image', 'max_tool_calls', 'prompt', 'top_logprobs']);
 const CHAT_FIELDS = new Set([
   'audio', 'frequency_penalty', 'function_call', 'functions', 'input', 'instructions', 'logit_bias',
   'logprobs', 'max_completion_tokens', 'max_tokens', 'messages', 'metadata', 'modalities', 'model',
@@ -516,9 +516,10 @@ function normalizeInputItem(item) {
     validateHostedShellItem(item);
     return [item];
   }
+  if (item.type === 'image_generation_call') return [normalizeImageGenerationCall(item)];
   // Known native Codex replay items with no locally-owned semantics (see codex-rs
   // protocol::models::ResponseItem for the source of truth). Forwarded as-is.
-  if (['tool_search_call', 'tool_search_output', 'local_shell_call', 'web_search_call', 'image_generation_call', 'context_compaction', 'agent_message', 'item_reference'].includes(item.type)) return [item];
+  if (['tool_search_call', 'tool_search_output', 'local_shell_call', 'web_search_call', 'context_compaction', 'agent_message', 'item_reference'].includes(item.type)) return [item];
   if (item.type === 'input_file') {
     if (!(cleanString(item.file_id) || typeof item.file_data === 'string')) invalid('input item shape is not translatable', 'input');
     return [item];
@@ -530,6 +531,27 @@ function normalizeInputItem(item) {
   // MCP tools) are already rejected above/in additional_tools before this fallback.
   if (cleanString(item.type)) return [item];
   invalid('input item shape is not translatable', 'input');
+}
+
+function normalizeImageGenerationCall(item) {
+  const normalized = typeof item.id === 'string' && /^image_generation_call(?:_\d+)?$/.test(item.id)
+    ? stripKey(item, 'id')
+    : item;
+  const nonblankKeys = ['id', 'status', 'encrypted_content'];
+  const stringKeys = ['action', 'background', 'output_format', 'quality', 'size', 'revised_prompt'];
+  const passthroughKey = 'internal_chat_message_metadata_passthrough';
+  const allowedKeys = new Set(['type', 'result', passthroughKey, ...nonblankKeys, ...stringKeys]);
+  const validOptionalNonblank = (key) => normalized[key] === undefined || normalized[key] === null || Boolean(cleanString(normalized[key]));
+  const validOptionalString = (key) => normalized[key] === undefined || normalized[key] === null || typeof normalized[key] === 'string';
+  const validPassthrough = normalized[passthroughKey] === undefined || normalized[passthroughKey] === null || plainObject(normalized[passthroughKey]);
+  if (
+    !cleanString(normalized.result)
+    || Object.keys(normalized).some((key) => !allowedKeys.has(key))
+    || !nonblankKeys.every(validOptionalNonblank)
+    || !stringKeys.every(validOptionalString)
+    || !validPassthrough
+  ) invalid('input item shape is not translatable', 'input');
+  return normalized;
 }
 
 function normalizeFunctionOutputPart(part) {

@@ -506,7 +506,7 @@ removal invalidate cached account metadata as before.
 
 Native catalogs vary by `User-Agent`, not the `client_version` query. Recognized
 Codex builds at `0.148.0` or later omit duplicate legacy instructions when a
-template exists. Builds in the upstream-qualified `0.154.0` through `0.167.1`
+template exists. Builds in the upstream-qualified `0.154.0` through `0.172.0`
 window also omit entries that violate the mirrored decoder contract. Older
 or unknown clients keep the verbatim catalog; newer builds are not checked
 against an unqualified decoder. Static rows without the required native
@@ -693,6 +693,20 @@ output. The process-local fence is isolated by store, scope, principal, native
 continuity identity (thread, then session, alias or window) and endpoint class; it retains only keyed digests, holds through
 response delivery and settlement, and releases on success, failure or cancellation.
 Changed full-history resamples and other principals remain independent. A bounded
-4096-request capacity fails closed without evicting live requests. This active
-HTTP fence is separate from durable metadata-based native turn recovery; it does
+4096-request capacity fails closed without evicting live requests. This active HTTP fence is separate from durable metadata-based native turn recovery; it does
 not provide cross-process deduplication or cache completed responses.
+
+Buffered Chat Completions replies build `choices[].message.content` strictly
+from `output_text` parts of `message` output items so reasoning items never leak
+into visible assistant text. Public Responses requests explicitly refuse
+`background_options` and `image` with `400 unsupported_parameter`, and
+strictly validate replayed `image_generation_call` items (requiring a nonblank
+inline `result` and dropping synthetic stream fallback IDs). Native Codex
+WebSocket upgrades advertise `x-codex-websocket-max-message-bytes` capped at
+the provider's 128 MiB limit (`134217728` bytes) or the inbound frame limit,
+and fence size-recovery markers to the bound they were refused under. Terminal
+API-key spend limits (`api_key_spend_limit_exceeded`) are classified as quota
+failures across streaming, turn recovery, compaction, and native HTTP 429
+relays (while public HTTP retains `upstream_rate_limited`), and statusless
+native capacity failure frames (`policy_capacity_unavailable`,
+`server_is_overloaded`) preserve validated `retry-after` headers.

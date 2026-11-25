@@ -1,6 +1,7 @@
 import { classifySseEvent } from './upstream-outcomes.js';
 
 const TERMINAL_ERRORS = new Set(['error', 'response.failed', 'response.incomplete']);
+const CAPACITY_RETRY_CODES = new Set(['policy_capacity_unavailable', 'server_is_overloaded']);
 const COLLABORATION_CALLS = new Set(['spawn_agent', 'send_message', 'followup_task']);
 const MAX_RETRY_SECONDS = (1n << 64n) - 1n;
 const object = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -19,7 +20,11 @@ export function normalizeNativeRetryAfter(value) {
 }
 
 export function nativeWebSocketRetryAfter(event) {
-  if (!TERMINAL_ERRORS.has(event?.type) || (event.status ?? event.status_code) !== 429) return null;
+  if (!TERMINAL_ERRORS.has(event?.type)) return null;
+  const status = event.status ?? event.status_code;
+  const code = event.response?.error?.code ?? event.error?.code;
+  const capacityRetry = status == null && ['error', 'response.failed'].includes(event.type) && CAPACITY_RETRY_CODES.has(code);
+  if (status !== 429 && !capacityRetry) return null;
   const nested = event.response?.error?.headers ?? event.error?.headers;
   for (const headers of [nested, event.headers]) {
     if (!object(headers)) continue;

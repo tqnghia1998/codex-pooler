@@ -357,8 +357,19 @@ function modelNotFound(error) {
 }
 
 function quotaCode(code, type) {
-  return ['rate_limit_exceeded', 'insufficient_quota', 'usage_limit_reached', 'quota_exceeded'].includes(code)
-    || ['rate_limit_error', 'insufficient_quota'].includes(type);
+  return [
+    'rate_limit_exceeded',
+    'insufficient_quota',
+    'credit_balance_exhausted',
+    'api_key_spend_limit_exceeded',
+    'organization_spend_limit_exceeded',
+    'project_spend_limit_exceeded',
+    'organization_usage_limit_exceeded',
+    'usage_limit_exceeded',
+    'usage_limit_reached',
+    'quota_exceeded'
+  ].includes(code)
+    || ['rate_limit_error', 'insufficient_quota', 'usage_limit_reached'].includes(type);
 }
 
 function credentialCode(code, type) {

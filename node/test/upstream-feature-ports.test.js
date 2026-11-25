@@ -5,7 +5,11 @@ import WebSocket, { WebSocketServer } from 'ws';
 import { createApp } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { adaptResponsesRequest, validateToolOutputImages } from '../src/openai-adapters.js';
-import { attachWebSocketProxy, projectProxyRequest, projectPublicWebSocketFrame } from '../src/proxy.js';
+import { attachWebSocketProxy, NATIVE_WEBSOCKET_MESSAGE_LIMIT, projectProxyRequest, projectPublicWebSocketFrame } from '../src/proxy.js';
+import { failedIncompleteResponse, quotaIncompleteReason } from '../src/openai-streaming.js';
+import { classifySseEvent } from '../src/upstream-outcomes.js';
+import { beginNativeTurn, nativeEventWritten, nativeTurnIdentity } from '../src/native-turn-recovery.js';
+import { nativeWebSocketRetryAfter } from '../src/native-websocket-policy.js';
 import { gatewayRequestKind } from '../src/gateway-dispatch.js';
 import { priceUsage } from '../src/pricing.js';
 import { CODEX_CATALOG_VERIFIED_RANGE, codexCatalogDecodable, codexCatalogRepresentation, projectCodexCatalog } from '../src/codex-catalog-contract.js';
@@ -97,16 +101,21 @@ export const catalogRow = {
 };
 
 test('mirrors the qualified Codex decoder window and tolerated blind spots', () => {
-  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.167.1']);
-  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0', '0.165.0', '0.166.0', '0.166.1', '0.167.0']) {
+  assert.deepEqual(CODEX_CATALOG_VERIFIED_RANGE, ['0.154.0', '0.172.0']);
+  for (const version of ['0.154.0-alpha.1', '0.160.1', '0.162.0', '0.162.0-alpha.1', '0.162.1', '0.162.2', '0.163.0', '0.163.1', '0.164.0', '0.165.0', '0.166.0', '0.166.1', '0.167.0', '0.167.1', '0.170.0', '0.171.0', '0.172.0-alpha.1', '0.172.0']) {
     assert.equal(codexCatalogRepresentation(`codex_cli_rs/${version}`), 'decode_checked');
   }
   assert.equal(codexCatalogRepresentation('My/host/0.162.0 (Linux; aarch64)'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.167.1'), 'decode_checked');
-  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.167.2'), 'instructions_template');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.172.0'), 'decode_checked');
+  assert.equal(codexCatalogRepresentation('codex_cli_rs/0.172.1'), 'instructions_template');
   const malformed = { ...catalogRow, shell_type: 'unknown-shell' };
-  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.167.1').nativeModels.length, 1);
-  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.167.2').nativeModels.length, 2);
+  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.172.0').nativeModels.length, 1);
+  assert.equal(projectCodexCatalog({ nativeModels: [catalogRow, malformed] }, 'codex_cli_rs/0.172.1').nativeModels.length, 2);
+  // Codex 0.171.0 and 0.172.0 add optional multi_agent_tools_in_code_mode and daybreak fields.
+  const withNewOptionalFields = { ...catalogRow, multi_agent_tools_in_code_mode: true, daybreak: { enabled: true } };
+  assert.equal(codexCatalogDecodable(withNewOptionalFields), true);
+  assert.deepEqual(projectCodexCatalog({ nativeModels: [withNewOptionalFields] }, 'codex_cli_rs/0.172.0').nativeModels[0].daybreak, { enabled: true });
+  assert.equal(projectCodexCatalog({ nativeModels: [withNewOptionalFields] }, 'codex_cli_rs/0.172.0').nativeModels[0].multi_agent_tools_in_code_mode, true);
   assert.equal(codexCatalogRepresentation('codex_cli_rs/0.147.0'), 'verbatim');
   assert.equal(codexCatalogRepresentation('other/0.162.0'), 'verbatim');
   assert.equal(codexCatalogDecodable(catalogRow), true);
@@ -291,4 +300,319 @@ test('public WebSocket settles terminals received immediately before provider cl
   });
   assert.ok(events.some(({ type }) => type === 'response.completed'));
   assert.equal(store.get(account.id).spending.spentCredits, 2.5);
+});
+
+test('buffered Chat builds assistant content strictly from message output_text parts', async (t) => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const account = store.create({ type: 'codex', accessToken: 'synthetic' });
+  store.setCap(account.id, { capDollars: 100 });
+  const output = [
+    {
+      type: 'reasoning',
+      id: 'rs_1',
+      summary: [{ type: 'summary_text', text: 'internal summary' }],
+      content: [{ type: 'reasoning_text', text: 'hidden chain of thought' }]
+    },
+    {
+      type: 'message',
+      id: 'msg_1',
+      role: 'assistant',
+      content: [
+        { type: 'refusal', text: 'should not leak' },
+        { type: 'output_text', text: 'Visible ' },
+        { type: 'output_text', text: 'answer.' }
+      ]
+    },
+    { type: 'function_call', call_id: 'call_1', name: 'lookup', arguments: '{"q":"ok"}' }
+  ];
+  let mode = 'json';
+  const fetchImpl = async (url) => {
+    if (new URL(url).pathname.endsWith('/models')) return new Response('{}');
+    if (mode === 'json') {
+      return new Response(JSON.stringify({ id: 'resp_json', model: 'gpt-5.6-sol', status: 'completed', output }), {
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    const sse = [
+      ...output.map((item) => `event: response.output_item.done\ndata: ${JSON.stringify({ type: 'response.output_item.done', item })}\n\n`),
+      `event: response.completed\ndata: ${JSON.stringify({ type: 'response.completed', response: { id: 'resp_sse', model: 'gpt-5.6-sol', status: 'completed', output } })}\n\n`
+    ].join('');
+    return new Response(sse, { headers: { 'content-type': 'text/event-stream' } });
+  };
+  const server = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}/v1/chat/completions`;
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); store.sqlite.close(); });
+  for (const nextMode of ['json', 'sse']) {
+    mode = nextMode;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { authorization: 'Bearer key', 'content-type': 'application/json' },
+      body: JSON.stringify({ model: 'gpt-5.6-sol', stream: false, messages: [{ role: 'user', content: 'hi' }] })
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json();
+    assert.equal(body.choices[0].message.content, 'Visible answer.');
+    assert.equal(body.choices[0].finish_reason, 'tool_calls');
+    assert.equal(body.choices[0].message.tool_calls[0].id, 'call_1');
+  }
+});
+
+test('refuses Responses background_options and image explicitly on HTTP and public WebSocket', async (t) => {
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const account = store.create({ type: 'codex', accessToken: 'synthetic' });
+  store.setCap(account.id, { capDollars: 100 });
+  let dispatched = 0;
+  const fetchImpl = async (url) => {
+    if (new URL(url).pathname.endsWith('/models')) return new Response('{}');
+    dispatched += 1;
+    return new Response('{}');
+  };
+  const server = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+  const relay = attachWebSocketProxy(server, { store, apiKey: 'key', fetchImpl, websocketUrl: () => 'ws://127.0.0.1:1' });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => { relay.close(); await new Promise((resolve) => server.close(resolve)); store.sqlite.close(); });
+  for (const [param, extra] of [
+    ['background_options', { background_options: { completion_window: '2h' } }],
+    ['image', { image: { context_compression: 'auto' } }]
+  ]) {
+    assert.throws(() => adaptResponsesRequest({ ...base, ...extra }), { code: 'unsupported_parameter', param });
+    for (const stream of [false, true]) {
+      const response = await fetch(`${url}/v1/responses`, {
+        method: 'POST',
+        headers: { authorization: 'Bearer key', 'content-type': 'application/json' },
+        body: JSON.stringify({ ...base, stream, ...extra })
+      });
+      assert.equal(response.status, 400);
+      const body = await response.json();
+      assert.equal(body.error.code, 'unsupported_parameter');
+      assert.equal(body.error.param, param);
+    }
+    const wsError = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`${url.replace('http:', 'ws:')}/v1/responses`, { headers: { authorization: 'Bearer key' } });
+      client.once('open', () => client.send(JSON.stringify({ type: 'response.create', ...base, ...extra })));
+      client.once('message', (bytes) => { client.close(); resolve(JSON.parse(bytes.toString())); });
+      client.once('error', reject);
+    });
+    assert.equal(wsError.status, 400);
+    assert.equal(wsError.error.code, 'unsupported_parameter');
+    assert.equal(wsError.error.param, param);
+  }
+  assert.equal(dispatched, 0);
+});
+
+test('validates replayed image_generation_call items and strips synthetic stream fallback IDs', () => {
+  const valid = {
+    type: 'image_generation_call',
+    id: 'ig_abc123',
+    status: 'completed',
+    action: 'generate',
+    background: 'transparent',
+    output_format: 'png',
+    quality: 'high',
+    size: '1024x1024',
+    revised_prompt: 'a canary prompt',
+    result: 'iVBORw0KGgo=',
+    encrypted_content: 'enc_blob',
+    internal_chat_message_metadata_passthrough: { source: 'provider' }
+  };
+  assert.deepEqual(adaptResponsesRequest({ ...base, input: [valid] }).input[0], valid);
+  const nullable = {
+    type: 'image_generation_call',
+    id: null,
+    status: null,
+    action: null,
+    background: null,
+    output_format: null,
+    quality: null,
+    size: null,
+    revised_prompt: '',
+    result: 'iVBORw0KGgo=',
+    encrypted_content: null,
+    internal_chat_message_metadata_passthrough: null
+  };
+  assert.deepEqual(adaptResponsesRequest({ ...base, input: [nullable] }).input[0], nullable);
+  for (const fallbackId of ['image_generation_call', 'image_generation_call_0', 'image_generation_call_12']) {
+    const adapted = adaptResponsesRequest({ ...base, input: [{ type: 'image_generation_call', id: fallbackId, result: 'iVBORw0KGgo=' }] });
+    assert.equal('id' in adapted.input[0], false);
+    assert.equal(adapted.input[0].result, 'iVBORw0KGgo=');
+  }
+  for (const invalidItem of [
+    { type: 'image_generation_call', id: 'ig_1' },
+    { type: 'image_generation_call', id: 'ig_1', result: '   ' },
+    { type: 'image_generation_call', id: '   ', result: 'iVBORw0KGgo=' },
+    { type: 'image_generation_call', status: '', result: 'iVBORw0KGgo=' },
+    { type: 'image_generation_call', encrypted_content: ' ', result: 'iVBORw0KGgo=' },
+    { type: 'image_generation_call', quality: 3, result: 'iVBORw0KGgo=' },
+    { type: 'image_generation_call', internal_chat_message_metadata_passthrough: 'bad', result: 'iVBORw0KGgo=' },
+    { type: 'image_generation_call', extra_field: true, result: 'iVBORw0KGgo=' }
+  ]) {
+    assert.throws(() => adaptResponsesRequest({ ...base, input: [invalidItem] }), { param: 'input' });
+  }
+});
+
+test('advertises the 128 MiB native WebSocket message limit and fences recovery markers by bound', async (t) => {
+  assert.equal(NATIVE_WEBSOCKET_MESSAGE_LIMIT, 134_217_728);
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const account = store.create({ type: 'codex', accessToken: 'synthetic' });
+  store.setCap(account.id, { capDollars: 100 });
+  const fetchImpl = async () => new Response('{}');
+  const server = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+  const relay = attachWebSocketProxy(server, { store, apiKey: 'key', fetchImpl, websocketUrl: () => 'ws://127.0.0.1:1' });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `ws://127.0.0.1:${server.address().port}`;
+  t.after(async () => { relay.close(); await new Promise((resolve) => server.close(resolve)); store.sqlite.close(); });
+  const readUpgradeHeaders = (path) => new Promise((resolve, reject) => {
+    const client = new WebSocket(`${url}${path}`, { headers: { authorization: 'Bearer key' } });
+    let headers;
+    client.once('upgrade', (reply) => { headers = reply.headers; });
+    client.once('open', () => client.close());
+    client.once('close', () => resolve(headers));
+    client.once('error', reject);
+  });
+  for (const path of ['/backend-api/codex/responses', '/backend-api/codex/v1/responses']) {
+    const headers = await readUpgradeHeaders(path);
+    assert.equal(headers['x-codex-websocket-max-message-bytes'], String(134_217_728));
+  }
+  const publicHeaders = await readUpgradeHeaders('/v1/responses');
+  assert.equal('x-codex-websocket-max-message-bytes' in publicHeaders, false);
+  // A marker recorded under the legacy 16 MiB bound does not grant recovery under 128 MiB.
+  store.recordNativeWebsocketSizeRecovery('legacy-key', { messageBytes: 16_777_217, limitBytes: 16_777_216 });
+  assert.equal(store.nativeWebsocketSizeRecovery('legacy-key'), false);
+  assert.equal(store.nativeWebsocketSizeRecovery('legacy-key', Date.now(), { limitBytes: 16_777_216 }), true);
+  // A lower ingress maxDecompressedBodyBytes caps the advertised header.
+  const cappedServer = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+  const cappedRelay = attachWebSocketProxy(cappedServer, {
+    store, apiKey: 'key', fetchImpl,
+    ingress: { maxDecompressedBodyBytes: 64 * 1024 * 1024 },
+    websocketUrl: () => 'ws://127.0.0.1:1'
+  });
+  await new Promise((resolve) => cappedServer.listen(0, '127.0.0.1', resolve));
+  t.after(async () => { cappedRelay.close(); await new Promise((resolve) => cappedServer.close(resolve)); });
+  const cappedHeaders = await new Promise((resolve, reject) => {
+    const client = new WebSocket(`ws://127.0.0.1:${cappedServer.address().port}/backend-api/codex/responses`, { headers: { authorization: 'Bearer key' } });
+    let headers;
+    client.once('upgrade', (reply) => { headers = reply.headers; });
+    client.once('open', () => client.close());
+    client.once('close', () => resolve(headers));
+    client.once('error', reject);
+  });
+  assert.equal(cappedHeaders['x-codex-websocket-max-message-bytes'], String(64 * 1024 * 1024));
+});
+
+test('classifies api_key_spend_limit_exceeded as terminal quota and relays scoped native 429 codes', async (t) => {
+  const incomplete = { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'api_key_spend_limit_exceeded' } } };
+  const failed = { type: 'response.failed', response: { status: 'failed', error: { code: 'api_key_spend_limit_exceeded', message: 'private' } } };
+  assert.equal(quotaIncompleteReason(incomplete), 'api_key_spend_limit_exceeded');
+  assert.equal(failedIncompleteResponse(incomplete), true);
+  assert.equal(classifySseEvent(incomplete).class, 'quota');
+  assert.equal(classifySseEvent(failed).class, 'quota');
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const account = store.create({ type: 'codex', accessToken: 'synthetic' });
+  store.setCap(account.id, { capDollars: 100 });
+  const req = { headers: { 'thread-id': 'thread-1', 'x-codex-turn-metadata': JSON.stringify({ turn_id: 'turn-1', request_kind: 'compaction' }) }, proxyAuth: { id: 'key-1', scopeId: 'default' } };
+  const payload = { model: 'gpt-5.6-sol', input: [{ type: 'message', role: 'user', content: [{ type: 'input_text', text: 'hi' }] }] };
+  const identity = nativeTurnIdentity(store, req, payload);
+  const lease = beginNativeTurn(store, identity, payload, store.get(account.id));
+  nativeEventWritten(lease, incomplete);
+  assert.equal(store.nativeTurnReceipt(identity.key).status, 'failed');
+  assert.throws(() => beginNativeTurn(store, identity, payload, store.get(account.id)), { code: 'duplicate_turn' });
+
+  const fetchImpl = async (url) => new URL(url).pathname.endsWith('/models')
+    ? new Response('{}')
+    : new Response(JSON.stringify({
+      error: { type: 'rate_limit_error', code: 'api_key_spend_limit_exceeded', message: 'secret provider detail', resets_in_seconds: 120 }
+    }), { status: 429, headers: { 'content-type': 'application/json', 'retry-after': '120' } });
+  const server = createServer(createApp({ store, apiKey: 'key', fetchImpl }));
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); store.sqlite.close(); });
+
+  const nativeResp = await fetch(`${url}/backend-api/codex/responses`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer key', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-5.6-sol', input: [] })
+  });
+  assert.equal(nativeResp.status, 429);
+  const nativeBody = await nativeResp.json();
+  assert.equal(nativeBody.error.code, 'api_key_spend_limit_exceeded');
+  assert.equal(nativeBody.error.resets_in_seconds, 120);
+  assert.doesNotMatch(JSON.stringify(nativeBody), /secret provider/);
+
+  store.clearUpstreamCooldown(account.id);
+  const publicResp = await fetch(`${url}/v1/responses`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer key', 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'gpt-5.6-sol', input: 'hi' })
+  });
+  assert.equal(publicResp.status, 429);
+  const publicBody = await publicResp.json();
+  assert.equal(publicBody.error.code, 'upstream_rate_limited');
+});
+
+test('carries validated Retry-After on statusless native capacity failure frames', async (t) => {
+  assert.equal(nativeWebSocketRetryAfter({
+    type: 'error',
+    headers: { 'Retry-After': '15' },
+    error: { code: 'policy_capacity_unavailable', message: 'busy' }
+  }), '15');
+  assert.equal(nativeWebSocketRetryAfter({
+    type: 'response.failed',
+    response: { error: { code: 'server_is_overloaded', headers: { 'retry-after': '45' } } }
+  }), '45');
+  assert.equal(nativeWebSocketRetryAfter({
+    type: 'error',
+    status: 503,
+    headers: { 'retry-after': '15' },
+    error: { code: 'server_is_overloaded' }
+  }), null);
+  assert.equal(nativeWebSocketRetryAfter({
+    type: 'error',
+    headers: { 'retry-after': '15' },
+    error: { code: 'server_error' }
+  }), null);
+
+  const store = new Store(undefined, { inMemory: true, encryptionKey: Buffer.alloc(32, 4) });
+  const account = store.create({ type: 'codex', accessToken: 'synthetic' });
+  store.setCap(account.id, { capDollars: 100 });
+  const target = new WebSocketServer({ port: 0, host: '127.0.0.1' });
+  await new Promise((resolve) => target.once('listening', resolve));
+  target.on('connection', (socket) => socket.on('message', () => {
+    socket.send(JSON.stringify({
+      type: 'response.failed',
+      headers: { 'retry-after': '23', 'x-secret': 'drop-me' },
+      response: {
+        id: 'resp_cap',
+        status: 'failed',
+        error: { code: 'policy_capacity_unavailable', message: 'overloaded', headers: { 'x-inner': 'drop-me' } }
+      }
+    }));
+  }));
+  const server = createServer(createApp({ store, apiKey: 'key' }));
+  const relay = attachWebSocketProxy(server, {
+    store, apiKey: 'key',
+    websocketUrl: () => `ws://127.0.0.1:${target.address().port}`,
+    fetchImpl: async () => new Response('{}')
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const client = new WebSocket(`ws://127.0.0.1:${server.address().port}/backend-api/codex/responses`, { headers: { authorization: 'Bearer key' } });
+  t.after(async () => {
+    client.terminate(); relay.close();
+    for (const socket of target.clients) socket.terminate();
+    await new Promise((resolve) => server.close(resolve));
+    await new Promise((resolve) => target.close(resolve));
+    store.sqlite.close();
+  });
+  const failedEvent = await new Promise((resolve, reject) => {
+    client.once('open', () => client.send(JSON.stringify({ type: 'response.create', model: 'gpt-5.6-sol', input: [] })));
+    client.on('message', (bytes) => {
+      const event = JSON.parse(bytes.toString());
+      if (event.type === 'response.failed') { client.close(); resolve(event); }
+    });
+    client.once('error', reject);
+  });
+  assert.equal(failedEvent.headers['retry-after'], '23');
+  assert.equal('x-secret' in failedEvent.headers, false);
+  assert.deepEqual(failedEvent.response.error.headers, { 'retry-after': '23' });
 });

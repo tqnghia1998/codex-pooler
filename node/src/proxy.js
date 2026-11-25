@@ -121,7 +121,27 @@ const COMPACT_PAYLOAD_FIELDS = new Set([
   'text'
 ]);
 const MAX_SESSION_ID_LENGTH = 200;
-const NATIVE_WEBSOCKET_MESSAGE_LIMIT = 16_777_216;
+export const NATIVE_WEBSOCKET_MESSAGE_LIMIT = 134_217_728;
+const NATIVE_RATE_LIMIT_TYPES = new Set(['usage_limit_reached', 'usage_not_included', 'insufficient_quota']);
+const NATIVE_RATE_LIMIT_CODES = new Set([
+  'insufficient_quota',
+  'credit_balance_exhausted',
+  'api_key_spend_limit_exceeded',
+  'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded',
+  'organization_usage_limit_exceeded',
+  'rate_limit_exceeded',
+  'usage_limit_reached',
+  'usage_limit_exceeded'
+]);
+const COMPACTION_QUOTA_CODES = new Set([
+  'insufficient_quota',
+  'credit_balance_exhausted',
+  'api_key_spend_limit_exceeded',
+  'organization_spend_limit_exceeded',
+  'project_spend_limit_exceeded'
+]);
+const MAX_NATIVE_RESET_SECONDS = 32 * 24 * 3_600;
 const MAX_GATEWAY_CANDIDATE_ATTEMPTS = 8;
 const STREAM_ID_PATTERN = /^[A-Za-z0-9_.-]{1,256}$/;
 // Keep Claude Code and CPA-compatible affinity signals ahead of generic
@@ -280,7 +300,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     finalizeGatewayFailure(store, lifecycle, null, { errorCode: 'upstream_request_failed', responseStatusCode: 502 });
     return sendFailure(res);
   }
-  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState, codexMultiAgentOptimized } = dispatched;
+  const { upstream, attemptId, startedAt, response, collected: dispatchedCollection, admission, hostBlocked, pacingError, failureCode, nativeRateLimit, claudeToolAliases: dispatchedToolAliases, claudeModelAlias: dispatchedModelAlias, claudeDiagnosticsState: dispatchedDiagnosticsState, codexMultiAgentOptimized } = dispatched;
   if (response.ok) bindNativeTurnUpstream(req.nativeTurnLease, store.get(upstream.id));
   if (pacingError) {
     finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: `local_pacing_${pacingError.code}`, responseStatusCode: 429 });
@@ -336,9 +356,7 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
     if (policyError) sendJson(res, response.status, { error: policyError });
     else if (validationError) sendJson(res, response.status, { error: validationError });
     else if (validAnthropic) writeResponse(res, response, errorBytes, responseOptions);
-    else if (response.status === 429) sendJson(res, 429, { error: {
-      type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null
-    } }, retryAfterHeader(response));
+    else if (response.status === 429) sendJson(res, 429, { error: nativeRateLimit || nativeRateLimitError(errorBytes, path) }, retryAfterHeader(response));
     else if (response.status === 403 && outcome.class === 'caller' && upstream.type === 'codex') {
       sendJson(res, 403, { error: {
         type: 'permission_error', code: 'upstream_permission_denied',
@@ -365,10 +383,13 @@ async function proxyRequestWithRecovery({ req, res, path, payload, store, apiKey
       ? collectV2CompactionResponse(response, upstreamDeadlines)
       : parseJson(await readResponseBytes(response, 16 * 1024 * 1024, upstreamDeadlines)));
     if (compactResult?.quotaFailure) {
-      if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: false, errorCode: 'insufficient_quota' });
-      settleFailedAttempt(req, store, upstream, attemptId, startedAt, compactResult, dispatchPayload, 'insufficient_quota', 429);
-      finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: 'insufficient_quota', responseStatusCode: 429 });
-      sendJson(res, 429, { error: { type: 'insufficient_quota', code: 'insufficient_quota', message: 'Upstream rejected the compact request', param: null } });
+      const quotaCode = typeof compactResult.quotaCode === 'string' && COMPACTION_QUOTA_CODES.has(compactResult.quotaCode)
+        ? compactResult.quotaCode : 'insufficient_quota';
+      const clientCode = path === '/v1/responses' ? 'insufficient_quota' : quotaCode;
+      if (admission) store.settleUpstreamAttempt(upstream.id, admission, { class: 'quota', retryable: false, errorCode: quotaCode });
+      settleFailedAttempt(req, store, upstream, attemptId, startedAt, compactResult, dispatchPayload, quotaCode, 429);
+      finalizeGatewayFailure(store, lifecycle, attemptId, { errorCode: quotaCode, responseStatusCode: 429 });
+      sendJson(res, 429, { error: { type: clientCode === 'insufficient_quota' ? 'insufficient_quota' : 'rate_limit_error', code: clientCode, message: 'Upstream rejected the compact request', param: null } });
       return;
     }
     const compact = compactionBridgeResult(compactResult, path === '/v1/responses');
@@ -768,8 +789,11 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
     if (namedEvent && namedEvent !== event.type) { invalid = true; return; }
     if (event.type === 'response.output_item.done' && plainObject(event.item) && ['compaction', 'compaction_summary'].includes(event.item.type) && !item) item = event.item;
     if (event.type === 'response.completed' && plainObject(event.response)) terminal = event.response;
-    else if (['response.failed', 'error'].includes(event.type) && (event.response?.error?.code || event.error?.code || event.code) === 'insufficient_quota') quotaFailure = true;
-    else if (['response.failed', 'response.incomplete', 'error'].includes(event.type)) invalid = true;
+    else if (['response.failed', 'error'].includes(event.type) && COMPACTION_QUOTA_CODES.has(event.response?.error?.code || event.error?.code || event.code)) {
+      quotaFailure = event.response?.error?.code || event.error?.code || event.code;
+    } else if (event.type === 'response.incomplete' && COMPACTION_QUOTA_CODES.has(event.response?.incomplete_details?.reason || event.incomplete_details?.reason)) {
+      quotaFailure = event.response?.incomplete_details?.reason || event.incomplete_details?.reason;
+    } else if (['response.failed', 'response.incomplete', 'error'].includes(event.type)) invalid = true;
   };
   try {
     while (true) {
@@ -789,7 +813,7 @@ async function collectV2CompactionResponse(response, upstreamDeadlines) {
     reader.releaseLock();
   }
   if (invalid) return failed();
-  if (quotaFailure) return { quotaFailure: true, [COLLECTED_USAGE]: usage };
+  if (quotaFailure) return { quotaFailure: true, quotaCode: quotaFailure, [COLLECTED_USAGE]: usage };
   if (!terminal) return failed();
   return { ...terminal, output: item ? [item] : terminal.output, [COLLECTED_USAGE]: usage };
 }
@@ -1355,7 +1379,7 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
     const retryable = sourcePath !== '/v1/responses/compact' && outcome.retryable;
     if (retryable) {
       if (outcome.modelNotFound && upstream.type === 'codex') modelCatalog.markUnsupported(upstream.id, payload?.model);
-      await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
+      const errorBytes = await readBoundedResponse(response, 1024 * 1024, upstreamDeadlines);
       store.settleUpstreamAttempt(upstream.id, admission, outcome);
       settleFailedAttempt(req, store, upstream, attemptId, startedAt, body, payload, gatewayOutcomeCode(outcome), response.status);
       const failureCode = gatewayOutcomeCode(outcome);
@@ -1366,7 +1390,8 @@ async function dispatchCandidates({ store, candidates, sourcePath, payload, req,
         startedAt,
         response: new Response(null, { status: response.status, headers: retryAfterHeader(response) }),
         admission: null,
-        failureCode
+        failureCode,
+        nativeRateLimit: response.status === 429 ? nativeRateLimitError(errorBytes, path) : null
       };
       continue;
     }
@@ -2183,11 +2208,39 @@ function rawHeader(req, name) {
   return typeof value === 'string' && !/[\x00-\x1f\x7f]/.test(value) ? value.trim() : '';
 }
 
+function nativeRateLimitError(errorBytes, path) {
+  const base = { type: 'rate_limit_error', code: 'upstream_rate_limited', message: 'Upstream rate limit exceeded', param: null };
+  const nativeCodexRoute = isBackendResponsesRoute(path)
+    || path === '/backend-api/codex/responses/compact'
+    || path === '/backend-api/codex/v1/responses/compact';
+  if (!nativeCodexRoute) return base;
+  if (!errorBytes || errorBytes.byteLength > 65_536) return base;
+  const parsed = parseJson(errorBytes);
+  const error = plainObject(parsed?.error) ? parsed.error : plainObject(parsed) ? parsed : null;
+  if (!error) return base;
+  const type = typeof error.type === 'string' && NATIVE_RATE_LIMIT_TYPES.has(error.type) ? error.type : 'rate_limit_error';
+  const code = typeof error.code === 'string' && NATIVE_RATE_LIMIT_CODES.has(error.code) ? error.code : 'upstream_rate_limited';
+  const result = { ...base, type, code };
+  const nowSeconds = Math.floor(Date.now() / 1_000);
+  if (Number.isInteger(error.resets_at) && error.resets_at >= nowSeconds - 300 && error.resets_at <= nowSeconds + MAX_NATIVE_RESET_SECONDS) {
+    result.resets_at = error.resets_at;
+  }
+  if (Number.isInteger(error.resets_in_seconds) && error.resets_in_seconds >= 0 && error.resets_in_seconds <= MAX_NATIVE_RESET_SECONDS) {
+    result.resets_in_seconds = error.resets_in_seconds;
+  }
+  return result;
+}
+
 function responsesToChat(response, chatPayload = {}) {
   const output = Array.isArray(response.output) ? response.output : [];
   const text = typeof response.output_text === 'string'
     ? response.output_text
-    : output.flatMap((item) => item?.content || (typeof item?.text === 'string' ? [{ text: item.text }] : [])).map((item) => typeof item?.text === 'string' ? item.text : '').join('');
+    : output
+      .filter((item) => item?.type === 'message' && Array.isArray(item.content))
+      .flatMap((item) => item.content)
+      .filter((part) => part?.type === 'output_text' && typeof part.text === 'string')
+      .map((part) => part.text)
+      .join('');
   const calls = output.filter((item) => ['function_call', 'custom_tool_call'].includes(item?.type)).map((item) => item.type === 'custom_tool_call'
     ? {
         id: item.call_id || item.id,
@@ -3215,6 +3268,8 @@ export function validProxyApiKey(req, expected) {
 export function attachWebSocketProxy(server, { store, sharingStore = null, shareKeysOnly = false, disablePacing = false, ignoreQuotaCooldown = false, apiKey = process.env.CODEX_POOLER_API_KEY, fetchImpl = globalThis.fetch, websocketUrl, ingress = {}, codexHostHealth = codexHostHealthForStore(store), beforeSend = null, codexOptions = codexGatewayOptions(ingress) } = {}) {
   const admission = admissionPolicy(ingress);
   const modelCatalog = modelCatalogForStore(store);
+  const nativeWebsocketMessageLimit = Number.isInteger(ingress.nativeWebsocketMessageLimitBytes) && ingress.nativeWebsocketMessageLimitBytes > 0
+    ? ingress.nativeWebsocketMessageLimitBytes : NATIVE_WEBSOCKET_MESSAGE_LIMIT;
   // Native frames are measured after normalization, so the socket admits
   // bodies up to the HTTP ingress limit; relayWebSocket enforces the frame
   // limit for everything that is not size-checked.
@@ -3225,6 +3280,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
     if (isBackendResponsesRoute(new URL(req.url, 'http://localhost').pathname)) {
       const turnState = header(req, 'x-codex-turn-state');
       if (turnState) headers.push(`x-codex-turn-state: ${turnState}`);
+      headers.push(`x-codex-websocket-max-message-bytes: ${Math.min(nativeWebsocketMessageLimit, maxPayload)}`);
     }
   });
   server.on('upgrade', (req, socket, head) => {
@@ -3263,7 +3319,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
         const recoveryKey = nativeWebsocketSizeRecoveryKey(req);
         let httpRequired = false;
         try {
-          httpRequired = Boolean(recoveryKey) && store.nativeWebsocketSizeRecovery(recoveryKey);
+          httpRequired = Boolean(recoveryKey) && store.nativeWebsocketSizeRecovery(recoveryKey, Date.now(), { limitBytes: nativeWebsocketMessageLimit });
         } catch {
           const body = JSON.stringify({ error: { type: 'server_error', code: 'service_unavailable', message: 'request admission is unavailable', param: null } });
           socket.end(`HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`, () => socket.destroy());
@@ -3290,7 +3346,7 @@ export function attachWebSocketProxy(server, { store, sharingStore = null, share
   });
   wss.on('connection', (client, req) => {
     if (beforeSend) deferWebSocketSends(client, beforeSend);
-    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing, ignoreQuotaCooldown, apiKey);
+    relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions, modelCatalog, codexHostHealth, disablePacing, ignoreQuotaCooldown, apiKey, nativeWebsocketMessageLimit);
   });
   return wss;
 }
@@ -3312,7 +3368,7 @@ function deferWebSocketSends(client, beforeSend) {
   };
 }
 
-async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false, ignoreQuotaCooldown = false, apiKey = null) {
+async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codexOptions = codexGatewayOptions(), modelCatalog = modelCatalogForStore(store), codexHostHealth = codexHostHealthForStore(store), disablePacing = false, ignoreQuotaCooldown = false, apiKey = null, nativeWebsocketMessageLimit = NATIVE_WEBSOCKET_MESSAGE_LIMIT) {
   const publicResponses = new URL(req.url, 'http://localhost').pathname === '/v1/responses';
   const sessionId = sessionAffinity(req);
   const scopeId = requestScopeId(req);
@@ -3392,7 +3448,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
     if (!key) return refuse(413, 'invalid_request_error', 'websocket_message_too_large', 'request exceeds the upstream websocket message limit');
     nativeSizeRecoveryStopping = true;
     try {
-      store.recordNativeWebsocketSizeRecovery(key, { messageBytes });
+      store.recordNativeWebsocketSizeRecovery(key, { messageBytes, limitBytes: nativeWebsocketMessageLimit });
       await store.flushDurability();
     } catch {
       try { store.discardNativeWebsocketSizeRecovery(key); } catch {}
@@ -3834,7 +3890,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
         releasePublicAttempt('invalid_request');
         return publicWebSocketFailure(
           client,
-          'invalid_request_error',
+          error instanceof AdapterError ? error.code : 'invalid_request_error',
           error instanceof AdapterError ? error.message : 'Invalid response.create frame',
           0,
           null,
@@ -3859,7 +3915,7 @@ async function relayWebSocket(client, req, store, fetchImpl, websocketUrl, codex
           data = Buffer.from(JSON.stringify(sanitized));
           if (nativeSizeCheckEligible(nativeFrame)) {
             sizeChecked = true;
-            if (data.byteLength > NATIVE_WEBSOCKET_MESSAGE_LIMIT) {
+            if (data.byteLength > nativeWebsocketMessageLimit) {
               void refuseOversizedNativeFrame(data.byteLength);
               return;
             }

@@ -2547,7 +2547,7 @@ test('refuses oversized native WebSocket frames before dispatch and sends the wi
   await new Promise((resolve) => target.once('listening', resolve));
   const fetchImpl = async () => new Response('{}');
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
-  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, ingress: { nativeWebsocketMessageLimitBytes: 16_777_216 }, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   const url = `ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`;
   const connect = (window) => new WebSocket(url, { headers: { authorization: `Bearer ${API_KEY}`, ...(window ? { 'x-codex-window-id': window } : {}) } });
@@ -2593,7 +2593,7 @@ test('refuses oversized native WebSocket frames before dispatch and sends the wi
       client.once('unexpected-response', (_request, response) => resolve(response.statusCode));
       client.once('error', () => {});
     }), 101);
-    assert.equal(store.nativeWebsocketSizeRecovery(Object.keys(store.load().nativeWebsocketSizeRecoveries)[0], Date.now() + 61_000), false);
+    assert.equal(store.nativeWebsocketSizeRecovery(Object.keys(store.load().nativeWebsocketSizeRecoveries)[0], Date.now() + 61_000, { limitBytes: 16_777_216 }), false);
 
     const withoutWindow = await new Promise((resolve, reject) => {
       const client = connect(null);
@@ -2659,7 +2659,7 @@ test('does not grant the native HTTP fallback when the size-recovery marker is n
   await new Promise((resolve) => target.once('listening', resolve));
   const fetchImpl = async () => new Response('{}');
   const gateway = createServer(createApp({ store, apiKey: API_KEY, fetchImpl }));
-  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
+  const relay = attachWebSocketProxy(gateway, { store, apiKey: API_KEY, fetchImpl, ingress: { nativeWebsocketMessageLimitBytes: 16_777_216 }, websocketUrl: () => `ws://127.0.0.1:${target.address().port}` });
   await new Promise((resolve) => gateway.listen(0, '127.0.0.1', resolve));
   const url = `ws://127.0.0.1:${gateway.address().port}/backend-api/codex/responses`;
   const headers = { authorization: `Bearer ${API_KEY}`, 'x-codex-window-id': 'window-1' };

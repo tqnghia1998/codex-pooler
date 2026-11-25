@@ -8,7 +8,7 @@ export const MAX_SSE_EVENT_BYTES = 8 * 1024 * 1024;
 const RETRY_CODES = new Set(['upstream_request_timeout', 'stream_incomplete', 'server_error', 'overloaded_error', 'server_is_overloaded', 'websocket_connection_limit_reached']);
 const PROMPT_TOKEN_DETAIL_FIELDS = ['audio_tokens', 'cache_write_tokens', 'cached_tokens', 'image_tokens', 'text_tokens'];
 const COMPLETION_TOKEN_DETAIL_FIELDS = ['accepted_prediction_tokens', 'audio_tokens', 'reasoning_tokens', 'rejected_prediction_tokens', 'text_tokens'];
-const QUOTA_INCOMPLETE_REASONS = new Set(['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']);
+const QUOTA_INCOMPLETE_REASONS = new Set(['insufficient_quota', 'credit_balance_exhausted', 'api_key_spend_limit_exceeded', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded']);
 const FAILURE_REASONS = new Set([...RETRY_CODES, ...QUOTA_INCOMPLETE_REASONS, 'invalid_api_key', 'invalid_authentication', 'context_length_exceeded', 'invalid_previous_response_id', 'invalid_request', 'invalid_request_error', 'previous_response_not_found', 'rate_limit_exceeded', 'unauthorized', 'usage_limit_exceeded', 'usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_owner_usage_limit_reached']);
 
 export function splitSseBlocks(value) { return value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n\n'); }

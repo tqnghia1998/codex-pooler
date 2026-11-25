@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-export const CODEX_CATALOG_VERIFIED_RANGE = Object.freeze(['0.154.0', '0.167.1']);
+export const CODEX_CATALOG_VERIFIED_RANGE = Object.freeze(['0.154.0', '0.172.0']);
 const string = (value) => typeof value === 'string';
 const bool = (value) => typeof value === 'boolean';
 const effort = (value) => string(value) && value.length > 0;
@@ -14,7 +14,8 @@ const i32 = (value) => Number.isInteger(value) && value >= -2147483648 && value 
 const enumeration = (...values) => (value) => values.includes(value)
   || object(value) && Object.keys(value).length === 1 && values.includes(Object.keys(value)[0]) && Object.values(value)[0] === null;
 const list = (check) => (value) => Array.isArray(value) && value.every((item) => item !== null && check(item));
-// Positional serde structs and fields added inside the window stay unjudged.
+// Positional serde structs and fields added inside the window (such as
+// multi_agent_tools_in_code_mode and daybreak) stay unjudged.
 const struct = (fields) => (value) => Array.isArray(value) || object(value) && validFields(value, fields);
 const required = (check) => ['required', check];
 const optional = (check) => ['optional', check];
@@ -58,7 +59,7 @@ export function codexCatalogRepresentation(userAgent) {
     : /^[^\x00-\x1f\x7f]{1,512}?\/(\d{1,9})\.(\d{1,9})\.(\d{1,9})(?:[-+][0-9A-Za-z.+-]{0,64})?\s\([^();]+;[^();]+\)/.exec(userAgent)?.slice(1, 4);
   if (!match) return 'verbatim';
   const version = match.map(Number);
-  if (compare(version, [0, 154, 0]) >= 0 && compare(version, [0, 167, 1]) <= 0) return 'decode_checked';
+  if (compare(version, [0, 154, 0]) >= 0 && compare(version, [0, 172, 0]) <= 0) return 'decode_checked';
   return compare(version, [0, 148, 0]) >= 0 ? 'instructions_template' : 'verbatim';
 }
 

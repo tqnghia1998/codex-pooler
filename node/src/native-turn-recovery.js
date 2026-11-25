@@ -103,7 +103,7 @@ export function nativeEventWritten(lease, event) {
   save(lease);
   if (['response.completed', 'response.incomplete', 'response.failed', 'error'].includes(event?.type)) {
     const success = ['response.completed', 'response.incomplete'].includes(event.type) && !event.response?.error
-      && !['insufficient_quota', 'credit_balance_exhausted', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded'].includes(event.response?.incomplete_details?.reason);
+      && !['insufficient_quota', 'credit_balance_exhausted', 'api_key_spend_limit_exceeded', 'organization_spend_limit_exceeded', 'project_spend_limit_exceeded'].includes(event.response?.incomplete_details?.reason);
     finishNativeTurn(lease, success ? 'succeeded' : 'failed');
   }
 }
